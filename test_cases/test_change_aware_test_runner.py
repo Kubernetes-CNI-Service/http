@@ -981,6 +981,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/project_image_owned_guard_outer.py",
                 "test_cases/run_monitor_authority_entrypoints.sh",
                 "test_cases/run_related_tests.py",
+                "test_cases/full_shard_plan.json",
                 "test_cases/run_vm_validation.py",
                 "test_cases/user_manual_contract.json",
                 "user-manual.html",
@@ -2648,6 +2649,530 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             self.assertIsNone(run.call_args_list[0].args[3])
             self.assertEqual(timing_path, run.call_args_list[1].args[3])
             self.assertFalse(timing_path.exists())
+
+
+# PROP-14 / G5Q-RA landing: the six load-sensitive cases moved to the quiet phase and the
+# twelve quiet modules, frozen here from the lab RA preregistration (v670/g5q-ra-src
+# expected/assignment.json wq), independent of the runner and of the plan file.
+FROZEN_QUIET_MODULES = tuple("test_cases.test_" + name for name in (
+    "collection_cycle_worker_contract", "docker_management_ssh_key", "issue_tracker_k_store",
+    "issue_tracker_k_store_workflow", "issue_tracker_local_commit_workflow",
+    "issue_tracker_state_owner", "issue_tracker_state_owner_workflow",
+    "monitor_authority_semantic_workflow", "monitor_stack_review", "req10c_auto_workflow",
+    "ztp_monitor_watch_resilience", "ztp_release_core_review",
+))
+FROZEN_QUIET_CASES = (
+    "test_cases.test_bootstrap_config_fetch_workflow::test_cases.test_bootstrap_config_fetch_workflow."
+    "RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated",
+    "test_cases.test_collection_cycle_handoff_workflow::test_cases.test_collection_cycle_handoff_workflow."
+    "CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed",
+    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
+    "GenerationInputBindingWorkflowTests.test_real_setup_a_archive_rename_death_cold_repeats_health_and_retains_inodes",
+    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
+    "GenerationInputBindingWorkflowTests."
+    "test_real_setup_q_commit_death_cold_a_dhcp_retirement_keeps_complete_original_transaction",
+    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
+    "GenerationInputBindingWorkflowTests.test_real_setup_q_commit_independent_infra_cold_a_restores_original_members",
+    "test_cases.test_public_publication_workflow::test_cases.test_public_publication_workflow."
+    "PublicPublicationWorkflowTests.test_formal_children_share_one_isolated_dependency_capsule",
+)
+P_SHARED_GROUP = (
+    "test_cases.test_public_project_fixture_workflow",
+    "test_cases.test_public_publication_contract",
+    "test_cases.test_public_publication_v3_overlap",
+    "test_cases.test_public_publication_workflow",
+)
+
+
+def shard_rows(spec):
+    """Canonical rows in loader order from {module: [(class, [methods], class_fixture)]}.
+
+    module keys may end with '!' to mark setUpModule/tearDownModule on that module.
+    """
+    rows = []
+    for raw_module, classes in spec:
+        module_fixture = raw_module.endswith("!")
+        module = raw_module.rstrip("!")
+        for class_name, methods, class_fixture in classes:
+            for method in methods:
+                rows.append({
+                    "id": f"{module}.{class_name}.{method}", "module": module,
+                    "class_module": module, "class": class_name,
+                    "class_fixture": class_fixture, "module_fixture": module_fixture,
+                })
+    return rows
+
+
+SHARD_ROWS_SPEC = (
+    ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+    ("test_cases.test_b", [("B", ["test_1", "test_2", "test_3", "test_4"], False)]),
+    ("test_cases.test_c", [("C", ["test_1"], True)]),
+    ("test_cases.test_d", [("D", ["test_1", "test_2"], False)]),
+)
+
+
+def shard_plan(**overrides):
+    plan = {
+        "schema_version": 1,
+        "description": "synthetic direct-test plan",
+        "derivation": {"status": "synthetic"},
+        "lane_deadline_seconds": 7800,
+        "phase_a": [
+            {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d"]},
+            {"lane": "w1", "units": ["test_cases.test_b#0/2"]},
+            {"lane": "w2", "units": ["test_cases.test_b#1/2"]},
+        ],
+        "phase_b": {"lane": "wq", "units": [
+            "test_cases.test_c", "test_cases.test_d::test_cases.test_d.D.test_2",
+        ]},
+        "slices": {"test_cases.test_b": ["test_cases.test_b.B.test_3"]},
+        "same_lane": [["test_cases.test_a", "test_cases.test_d"]],
+        "phase_b_reasons": {
+            "test_cases.test_c": "synthetic quiet module",
+            "test_cases.test_d::test_cases.test_d.D.test_2": "synthetic quiet case",
+        },
+    }
+    plan.update(overrides)
+    return plan
+
+
+class FullShardDirectTests(unittest.TestCase):
+    """PROP-14 D-series: the opt-in two-phase sharded full mode, argv, plan and merge.
+
+    Expectations come from PROP-14 (D1-D17, Q2(a), Q17-Q19, Q22) and the G5Q-RA
+    landing form, not from the runner implementation.
+    """
+
+    def parse_error(self, argv):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            RUNNER.main(argv)
+        self.assertEqual(2, raised.exception.code)
+        return stderr.getvalue()
+
+    def evidence_path(self):
+        directory = tempfile.TemporaryDirectory(prefix="shard-direct-")
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name).resolve() / "evidence"
+
+    def test_sharded_argv_is_opt_in_and_serial_default_is_unchanged(self):
+        default = RUNNER.parser().parse_args(["--all", "-v"])
+        self.assertIsNone(default.sharded)
+        destination = self.evidence_path()
+        args = RUNNER.parser().parse_args(["--all", "--sharded", str(destination), "-v"])
+        self.assertEqual(destination, args.sharded)
+        self.assertIn("--sharded requires --all", self.parse_error(["--sharded", str(destination)]))
+
+    def test_sharded_rejects_validation_only_and_every_non_full_mode(self):
+        destination = str(self.evidence_path())
+        self.assertIn(
+            "--sharded cannot be combined with --validation-only",
+            self.parse_error(["--all", "--validation-only", "--sharded", destination]),
+        )
+        for extra in (
+            ["--check", "--require-full"], ["--list"], ["--preflight"],
+            ["--changed", "DAY0-Prepare/11-load.py"], ["--git"], ["--suite", "repository-governance"],
+        ):
+            with self.subTest(extra=extra):
+                message = self.parse_error(["--all", "--sharded", destination, *extra])
+                self.assertTrue(
+                    "--sharded cannot be combined with" in message or "cannot be combined" in message,
+                    message,
+                )
+                self.assertNotIn("unrecognized arguments: --sharded", message)
+
+    def test_sharded_destination_is_absolute_new_and_outside_the_repository(self):
+        with tempfile.TemporaryDirectory(prefix="shard-destination-") as directory:
+            existing = Path(directory).resolve()
+            cases = (
+                ("relative/evidence", "--sharded requires an absolute path"),
+                (str(existing), "--sharded destination already exists"),
+                (str(ROOT / "outputs-shard-evidence"), "--sharded destination must be outside the repository"),
+                (str(existing / "missing-parent" / "evidence"), "--sharded parent directory is unavailable"),
+            )
+            for value, expected in cases:
+                with self.subTest(value=value):
+                    with self.assertRaisesRegex(RUNNER.ImpactError, re.escape(expected)):
+                        RUNNER.validate_full_shard_destination(ROOT, Path(value))
+            RUNNER.validate_full_shard_destination(ROOT, existing / "evidence")
+
+    def test_help_lists_sharded_and_still_offers_no_proof_skip(self):
+        help_text = RUNNER.parser().format_help()
+        self.assertIn("--sharded", help_text)
+        options = {
+            option for action in RUNNER.parser()._actions for option in action.option_strings
+        }
+        self.assertFalse({option for option in options if "skip" in option or "force" in option})
+
+    def test_managed_loopback_argv_allowlist_never_names_sharded_mode(self):
+        # D13: the formal-child loopback fixture is keyed to exactly three runner argv;
+        # the sharded argv exists in the runner but is never one of them.
+        self.assertIn("--sharded", {
+            option for action in RUNNER.parser()._actions for option in action.option_strings
+        })
+        text = (ROOT / "test_cases/test_public_publication_workflow.py").read_text(encoding="utf-8")
+        self.assertIn('("-B", "test_cases/run_related_tests.py", "--all", "-v"),', text)
+        self.assertNotIn("--sharded", text)
+
+    def test_real_plan_has_one_quiet_lane_with_the_frozen_g5_units(self):
+        plan = RUNNER.load_full_shard_plan(ROOT)
+        RUNNER.validate_full_shard_plan(plan)
+        self.assertIsInstance(plan["phase_b"], dict)  # N-c: phase B concurrency is one lane
+        units = plan["phase_b"]["units"]
+        self.assertEqual(set(FROZEN_QUIET_MODULES), {unit for unit in units if "::" not in unit})
+        self.assertEqual(set(FROZEN_QUIET_CASES), {unit for unit in units if "::" in unit})
+        self.assertEqual(len(units), len(set(units)))
+        self.assertEqual(set(units), set(plan["phase_b_reasons"]))
+        self.assertTrue(all(reason.strip() for reason in plan["phase_b_reasons"].values()))
+        self.assertGreaterEqual(plan["lane_deadline_seconds"], RUNNER.FULL_SHARD_MIN_LANE_DEADLINE_SECONDS)
+        self.assertGreaterEqual(RUNNER.FULL_SHARD_MIN_LANE_DEADLINE_SECONDS, 7800)
+
+    def test_real_plan_keeps_p_group_whole_and_splits_only_fixture_free_units(self):
+        import ast as ast_module
+        plan = RUNNER.load_full_shard_plan(ROOT)
+        self.assertIn(list(P_SHARED_GROUP), plan["same_lane"])
+        lanes = {
+            unit: lane["lane"]
+            for lane in [*plan["phase_a"], plan["phase_b"]] for unit in lane["units"]
+        }
+        self.assertEqual(1, len({lanes[module] for module in P_SHARED_GROUP}))
+        split_modules = set(plan["slices"]) | {unit.split("::", 1)[0] for unit in FROZEN_QUIET_CASES}
+        self.assertEqual(
+            {"test_cases.test_generation_input_binding_workflow"}, set(plan["slices"]),
+        )
+        for module in sorted(split_modules):
+            with self.subTest(module=module):
+                tree = ast_module.parse(
+                    (ROOT / (module.replace(".", "/") + ".py")).read_text(encoding="utf-8"),
+                )
+                names = {node.name for node in ast_module.walk(tree) if isinstance(node, ast_module.FunctionDef)}
+                self.assertFalse(names & {"setUpModule", "tearDownModule", "setUpClass", "tearDownClass"})
+
+    def test_plan_schema_rejects_concurrent_quiet_lanes_and_malformed_units(self):
+        RUNNER.validate_full_shard_plan(shard_plan())
+        bad = {
+            "phase B list": shard_plan(phase_b=[shard_plan()["phase_b"]]),
+            "unknown key": {**shard_plan(), "jobs": 2},
+            "short deadline": shard_plan(lane_deadline_seconds=RUNNER.FULL_SHARD_MIN_LANE_DEADLINE_SECONDS - 1),
+            "boolean deadline": shard_plan(lane_deadline_seconds=True),
+            "missing reason": shard_plan(phase_b_reasons={"test_cases.test_c": "x"}),
+            "blank reason": shard_plan(phase_b_reasons={
+                "test_cases.test_c": " ", "test_cases.test_d::test_cases.test_d.D.test_2": "x",
+            }),
+            "duplicate unit": shard_plan(phase_a=[
+                {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d", "test_cases.test_a"]},
+                {"lane": "w1", "units": ["test_cases.test_b#0/2"]},
+                {"lane": "w2", "units": ["test_cases.test_b#1/2"]},
+            ]),
+            "whole and sliced": shard_plan(phase_a=[
+                {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d", "test_cases.test_b"]},
+                {"lane": "w1", "units": ["test_cases.test_b#0/2"]},
+                {"lane": "w2", "units": ["test_cases.test_b#1/2"]},
+            ]),
+            "slice count": shard_plan(slices={"test_cases.test_b": ["test_cases.test_b.B.test_2",
+                                                                     "test_cases.test_b.B.test_3"]}),
+            "duplicate lane": shard_plan(phase_a=[
+                {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d"]},
+                {"lane": "w0", "units": ["test_cases.test_b#0/2"]},
+                {"lane": "w2", "units": ["test_cases.test_b#1/2"]},
+            ]),
+            "bad lane name": shard_plan(phase_b={"lane": "../wq", "units": shard_plan()["phase_b"]["units"]}),
+            "case outside module": shard_plan(phase_b={"lane": "wq", "units": [
+                "test_cases.test_c", "test_cases.test_d::test_cases.test_a.A.test_1",
+            ]}),
+        }
+        for label, plan in bad.items():
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(RUNNER.ImpactError, "full shard plan"):
+                    RUNNER.validate_full_shard_plan(plan)
+
+    def test_plan_application_is_an_exact_partition_in_canonical_order(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        applied = RUNNER.apply_full_shard_plan(shard_plan(), rows)
+        self.assertEqual(["w0", "w1", "w2"], applied["phase_a"])
+        self.assertEqual("wq", applied["phase_b"])
+        # rows: a.1=0 a.2=1 b.1=2 b.2=3 b.3=4 b.4=5 c.1=6 d.1=7 d.2=8
+        self.assertEqual(
+            {"w0": [0, 1, 7], "w1": [2, 3], "w2": [4, 5], "wq": [6, 8]},
+            applied["lanes"],
+        )
+        flat = sorted(index for indices in applied["lanes"].values() for index in indices)
+        self.assertEqual(list(range(len(rows))), flat)
+
+    def test_unassigned_or_stale_plan_modules_fail_closed(self):
+        rows = shard_rows(SHARD_ROWS_SPEC + (("test_cases.test_e", [("E", ["test_1"], False)]),))
+        with self.assertRaisesRegex(RUNNER.ImpactError, "unassigned canonical modules: test_cases.test_e"):
+            RUNNER.apply_full_shard_plan(shard_plan(), rows)
+        rows = shard_rows(SHARD_ROWS_SPEC[:2] + SHARD_ROWS_SPEC[3:])
+        with self.assertRaisesRegex(RUNNER.ImpactError, "names modules canonical discovery does not collect"):
+            RUNNER.apply_full_shard_plan(shard_plan(), rows)
+
+    def test_stale_slice_boundary_or_case_unit_fails_closed(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        for label, plan, pattern in (
+            ("missing boundary", shard_plan(slices={"test_cases.test_b": ["test_cases.test_b.B.test_9"]}),
+             "slice boundary"),
+            ("boundary at first row", shard_plan(slices={"test_cases.test_b": ["test_cases.test_b.B.test_1"]}),
+             "slice boundary"),
+            ("missing case", shard_plan(
+                phase_b={"lane": "wq", "units": ["test_cases.test_c", "test_cases.test_d::test_cases.test_d.D.test_9"]},
+                phase_b_reasons={"test_cases.test_c": "x", "test_cases.test_d::test_cases.test_d.D.test_9": "x"},
+            ), "case unit"),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(RUNNER.ImpactError, pattern):
+                    RUNNER.apply_full_shard_plan(plan, rows)
+        reversed_rows = shard_rows((
+            ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+            ("test_cases.test_b", [("B", ["test_1", "test_3", "test_2", "test_4"], False)]),
+            ("test_cases.test_c", [("C", ["test_1"], True)]),
+            ("test_cases.test_d", [("D", ["test_1", "test_2"], False)]),
+        ))
+        RUNNER.apply_full_shard_plan(shard_plan(), reversed_rows)
+        with self.assertRaisesRegex(RUNNER.ImpactError, "slice boundary"):
+            RUNNER.apply_full_shard_plan(shard_plan(slices={"test_cases.test_b": [
+                "test_cases.test_b.B.test_2", "test_cases.test_b.B.test_3",
+            ]}, phase_a=[
+                {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d"]},
+                {"lane": "w1", "units": ["test_cases.test_b#0/3", "test_cases.test_b#2/3"]},
+                {"lane": "w2", "units": ["test_cases.test_b#1/3"]},
+            ]), reversed_rows)
+
+    def test_units_split_across_processes_must_have_no_class_or_module_fixture(self):
+        with_class_fixture = shard_rows((
+            ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+            ("test_cases.test_b", [("B", ["test_1", "test_2", "test_3", "test_4"], True)]),
+            ("test_cases.test_c", [("C", ["test_1"], True)]),
+            ("test_cases.test_d", [("D", ["test_1", "test_2"], False)]),
+        ))
+        with self.assertRaisesRegex(RUNNER.ImpactError, "fixture"):
+            RUNNER.apply_full_shard_plan(shard_plan(), with_class_fixture)
+        with_module_fixture = shard_rows((
+            ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+            ("test_cases.test_b", [("B", ["test_1", "test_2", "test_3", "test_4"], False)]),
+            ("test_cases.test_c", [("C", ["test_1"], True)]),
+            ("test_cases.test_d!", [("D", ["test_1", "test_2"], False)]),
+        ))
+        with self.assertRaisesRegex(RUNNER.ImpactError, "fixture"):
+            RUNNER.apply_full_shard_plan(shard_plan(), with_module_fixture)
+        # A whole module with class fixtures (test_c) is not split and stays accepted.
+        RUNNER.apply_full_shard_plan(shard_plan(), shard_rows(SHARD_ROWS_SPEC))
+
+    def test_same_lane_declaration_is_enforced(self):
+        plan = shard_plan(phase_a=[
+            {"lane": "w0", "units": ["test_cases.test_a"]},
+            {"lane": "w1", "units": ["test_cases.test_b#0/2", "test_cases.test_d"]},
+            {"lane": "w2", "units": ["test_cases.test_b#1/2"]},
+        ])
+        with self.assertRaisesRegex(RUNNER.ImpactError, "same_lane"):
+            RUNNER.apply_full_shard_plan(plan, shard_rows(SHARD_ROWS_SPEC))
+
+    def test_rows_outside_their_defining_module_or_untagged_fail_closed(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        borrowed = [dict(row) for row in rows]
+        borrowed[0]["class_module"] = "test_cases.test_b"
+        with self.assertRaisesRegex(RUNNER.ImpactError, "outside its defining module"):
+            RUNNER.apply_full_shard_plan(shard_plan(), borrowed)
+        untagged = [dict(row) for row in rows]
+        untagged[3]["module"] = None
+        with self.assertRaisesRegex(RUNNER.ImpactError, "untagged"):
+            RUNNER.apply_full_shard_plan(shard_plan(), untagged)
+
+    def lane_records(self, rows, indices, *, outcome="success", digest="c" * 64, identity=None):
+        identity = identity or RUNNER.full_shard_lane_identity()
+        records = [{"event": "start", "canonical_sha256": digest, "count": len(rows), **identity}]
+        for index in indices:
+            records.append({"event": "test", "index": index, "id": rows[index]["id"],
+                            "outcome": outcome, "seconds": 0.01})
+        records.append({"event": "finished", "tests_run": len(indices), "successful": True})
+        return records
+
+    def merge(self, rows, assigned, records, exit_code=0, **extra):
+        return RUNNER.merge_full_shard_lane(
+            "w1", rows, assigned, records,
+            {"exit": exit_code, "seconds": 1.0, "deadline_exceeded": extra.pop("deadline", False)},
+            identity=RUNNER.full_shard_lane_identity(), canonical_sha256="c" * 64,
+        )
+
+    def test_merge_accepts_the_exact_lane_and_rejects_every_coverage_fault(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        assigned = [2, 3]
+        clean = self.merge(rows, assigned, self.lane_records(rows, assigned))
+        self.assertEqual([], clean["problems"])
+        self.assertEqual([2, 3], clean["executed"])
+        faults = {
+            "missing result file": (None, 0, "missing result file"),
+            "wrong lane": (self.lane_records(rows, [2, 3, 4]), 0, "outside its assigned lane"),
+            "duplicate": (self.lane_records(rows, [2, 3, 3]), 0, "executed more than once"),
+            "not executed": (self.lane_records(rows, [2]), 0, "assigned rows were not executed"),
+            "no finished": (self.lane_records(rows, assigned)[:-1], 0, "no finished record"),
+            "killed": (self.lane_records(rows, [2])[:-1], -9, "exit"),
+            "id mismatch": ([*self.lane_records(rows, [2])[:-1],
+                             {"event": "test", "index": 3, "id": "test_cases.test_b.B.other",
+                              "outcome": "success", "seconds": 0.1},
+                             {"event": "finished", "tests_run": 2, "successful": True}], 0, "id"),
+            "fatal": ([*self.lane_records(rows, assigned)[:1], {"event": "fatal", "reason": "x"}], 3, "fatal"),
+        }
+        for label, (records, exit_code, pattern) in faults.items():
+            with self.subTest(label=label):
+                merged = self.merge(rows, assigned, records, exit_code)
+                self.assertTrue(any(pattern in problem for problem in merged["problems"]), merged["problems"])
+        deadline = self.merge(rows, assigned, self.lane_records(rows, assigned), -15, deadline=True)
+        self.assertTrue(any("lane deadline" in problem for problem in deadline["problems"]))
+
+    def test_merge_suppresses_only_rows_of_a_recognised_holder_skip(self):
+        rows = shard_rows((
+            ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+            ("test_cases.test_b", [("B", ["test_1"], False), ("S", ["test_1", "test_2"], True)]),
+        ))
+        assigned = [2, 3, 4]
+        records = self.lane_records(rows, [2])
+        records.insert(-1, {"event": "holder", "kind": "skip",
+                            "description": "setUpClass (test_cases.test_b.S)"})
+        merged = self.merge(rows, assigned, records)
+        self.assertEqual([], merged["problems"])
+        self.assertEqual([3, 4], merged["suppressed"])
+        unknown = self.lane_records(rows, [2])
+        unknown.insert(-1, {"event": "holder", "kind": "skip", "description": "tearDownClass (x.Y)"})
+        merged = self.merge(rows, assigned, unknown)
+        self.assertTrue(any("unrecognised holder" in problem for problem in merged["problems"]))
+        error = self.lane_records(rows, [2])
+        error.insert(-1, {"event": "holder", "kind": "error",
+                          "description": "setUpClass (test_cases.test_b.S)"})
+        merged = self.merge(rows, assigned, error, 1)
+        self.assertTrue(any("fixture error" in problem for problem in merged["problems"]))
+
+    def test_merge_outcomes_follow_serial_was_successful(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        for outcome, accepted in (
+            ("success", True), ("skipped", True), ("expected_failure", True),
+            ("unexpected_success", False), ("failure", False), ("error", False),
+        ):
+            with self.subTest(outcome=outcome):
+                merged = self.merge(rows, [2, 3], self.lane_records(rows, [2, 3], outcome=outcome),
+                                    0 if accepted else 1)
+                self.assertEqual(accepted, merged["problems"] == [], merged["problems"])
+
+    def test_merge_rejects_foreign_interpreter_or_discovery(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        identity = dict(RUNNER.full_shard_lane_identity())
+        identity["executable"] = "/nonexistent/python"
+        merged = self.merge(rows, [2, 3], self.lane_records(rows, [2, 3], identity=identity))
+        self.assertTrue(any("interpreter identity" in problem for problem in merged["problems"]))
+        merged = self.merge(rows, [2, 3], self.lane_records(rows, [2, 3], digest="d" * 64))
+        self.assertTrue(any("canonical discovery differs" in problem for problem in merged["problems"]))
+
+    def test_coverage_requires_every_canonical_row_exactly_once(self):
+        complete = {"w0": {"executed": [0, 1], "suppressed": []}, "wq": {"executed": [2], "suppressed": [3]}}
+        self.assertEqual([], RUNNER.full_shard_coverage_problems(4, complete))
+        for label, merged in (
+            ("missing", {"w0": {"executed": [0, 1], "suppressed": []}, "wq": {"executed": [2], "suppressed": []}}),
+            ("twice", {"w0": {"executed": [0, 1, 2], "suppressed": []}, "wq": {"executed": [2], "suppressed": [3]}}),
+            ("extra", {"w0": {"executed": [0, 1, 4], "suppressed": []}, "wq": {"executed": [2], "suppressed": [3]}}),
+        ):
+            with self.subTest(label=label):
+                self.assertNotEqual([], RUNNER.full_shard_coverage_problems(4, merged))
+
+    def test_lane_deadline_terminates_the_whole_process_group(self):
+        import time as time_module
+        with tempfile.TemporaryDirectory(prefix="shard-deadline-") as directory:
+            marker = Path(directory) / "grandchild"
+            program = (
+                "import pathlib, subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                f"pathlib.Path({str(marker)!r}).write_text(str(child.pid))\n"
+                "time.sleep(60)\n"
+            )
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", program], start_new_session=True,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+            def reap_group():
+                try:
+                    os.killpg(process.pid, 9)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                process.wait(timeout=10)
+
+            self.addCleanup(reap_group)
+            log = open(os.devnull, "wb")
+            self.addCleanup(log.close)
+            started = time_module.monotonic()
+            while not marker.exists() and time_module.monotonic() - started < 10:
+                time_module.sleep(0.05)
+            finished = RUNNER._full_shard_wait_lanes(
+                {"w0": (process, log, time_module.monotonic(), time_module.time())},
+                deadline_seconds=0.5, poll=0.05,
+            )
+            self.assertTrue(finished["w0"]["deadline_exceeded"])
+            self.assertNotEqual(0, finished["w0"]["exit"])
+            grandchild = int(marker.read_text())
+            deadline = time_module.monotonic() + 10
+            while time_module.monotonic() < deadline:
+                try:
+                    os.kill(grandchild, 0)
+                except ProcessLookupError:
+                    break
+                time_module.sleep(0.05)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(grandchild, 0)
+
+    def test_lane_temporary_roots_must_carry_the_user_primary_gid(self):
+        with tempfile.TemporaryDirectory(prefix="shard-gid-") as directory:
+            path = Path(directory)
+            self.assertEqual([], RUNNER._full_shard_gid_problems([path]))
+            real_stat = os.stat
+
+            def foreign_group(target, *args, **kwargs):
+                info = real_stat(target, *args, **kwargs)
+                values = list(info)
+                values[stat.ST_GID] = os.getgid() + 1
+                return os.stat_result(values)
+
+            with mock.patch.object(RUNNER.os, "stat", side_effect=foreign_group):
+                problems = RUNNER._full_shard_gid_problems([path])
+            self.assertTrue(any("gid" in problem for problem in problems), problems)
+
+    def test_cleanup_failure_is_reported_and_keeps_the_tree(self):
+        with tempfile.TemporaryDirectory(prefix="shard-cleanup-") as directory:
+            tree = Path(directory) / "lane"
+            (tree / "inner").mkdir(parents=True)
+            (tree / "inner/file").write_text("x", encoding="utf-8")
+            with mock.patch.object(RUNNER.shutil, "rmtree", side_effect=OSError("denied")):
+                problem = RUNNER._full_shard_remove_tree(tree)
+            self.assertIn("cleanup", problem)
+            self.assertTrue(tree.exists())
+            self.assertIsNone(RUNNER._full_shard_remove_tree(tree))
+            self.assertFalse(tree.exists())
+
+    def test_sharded_success_records_the_serial_attestation_bytes(self):
+        # Q2(a): the attestation is byte-identical to the serial one; execution form is
+        # recorded only in the external audit. A failed sharded run writes nothing (D11).
+        with tempfile.TemporaryDirectory(prefix="shard-attestation-") as directory:
+            base = Path(directory).resolve()
+            serial_ledger = base / "serial.json"
+            sharded_ledger = base / "sharded.json"
+            serial = RUNNER.parser().parse_args(["--approvals", str(serial_ledger), "--all"])
+            sharded = RUNNER.parser().parse_args([
+                "--approvals", str(sharded_ledger), "--all", "--sharded", str(base / "evidence"),
+            ])
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                with mock.patch.object(RUNNER, "run_sharded_selection", return_value=1) as failed:
+                    self.assertEqual(1, RUNNER._one_cycle(sharded)[0])
+                self.assertFalse(sharded_ledger.exists())
+                self.assertEqual(base / "evidence", failed.call_args.args[3])
+                with mock.patch.object(RUNNER, "run_selection", return_value=0):
+                    self.assertEqual(0, RUNNER._one_cycle(serial)[0])
+                with mock.patch.object(RUNNER, "run_sharded_selection", return_value=0), \
+                        mock.patch.object(RUNNER, "run_selection", side_effect=AssertionError("serial path")):
+                    self.assertEqual(0, RUNNER._one_cycle(sharded)[0])
+            self.assertEqual(serial_ledger.read_bytes(), sharded_ledger.read_bytes())
+            check = RUNNER.parser().parse_args([
+                "--approvals", str(sharded_ledger), "--check", "--require-full",
+            ])
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, RUNNER._one_cycle(check)[0])
 
 
 if __name__ == "__main__":
