@@ -685,12 +685,16 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
             literal_blobs = {record[2]: record[3] for record in expected.values()}
             for (object_id, kind), (echoed, served_kind, size, payload) in served:
                 self.assertEqual((object_id, kind, len(payload)), (echoed, served_kind, size))
+                # Exactly the primitive's element types: equality alone accepts bytearray/memoryview.
+                self.assertIs(bytes, type(payload))
+                self.assertEqual((str, str, int), (type(echoed), type(served_kind), type(size)))
                 canonical = kind.encode("ascii") + b" %d\0" % len(payload) + payload
                 self.assertEqual(object_id, hashlib.sha1(canonical).hexdigest())
                 if kind == "blob":
                     self.assertEqual(literal_blobs[object_id], payload)
             # Outside a walk the name is the original one-OID read; the walk's tuples must match it.
             for (object_id, kind), result in served:
+                self.assertIs(tuple, type(result))
                 self.assertEqual(result, publication._read_raw_git_object(repository, object_id, kind))
             self.assertTrue(any(run["input"].count(b"\n") > 1 for run in runs))
 
@@ -812,3 +816,249 @@ class PublicPublicationV3OverlapWorkflowTests(unittest.TestCase):
                         # Output that is not strict ASCII (even with valid lines in it) is no hint at all.
                         self.assertEqual([1] * 10, [payload.count(b"\n") for payload in runs])
                     self.assertIsNone(publication._C09_SCOPE.get())
+
+    # ---- C09 fix round: regression guards for properties the C09 contract relies on (serve-time
+    # planning, kind check per frame, the raw chain under a planned hint, duplicate ids in a batch,
+    # adopted prefix frames).  Expected values come from literal objects and the 37d2b35 walk. ----
+    def _object_repository(self, directory):
+        repository = Path(directory) / "repository"
+        repository.mkdir()
+        self._git(repository, "init", "-q")
+        return repository
+
+    @staticmethod
+    def _write_object(repository, kind, payload):
+        object_id = hashlib.sha1(kind.encode("ascii") + b" %d\0" % len(payload) + payload).hexdigest()
+        publication._write_loose_object_fixture(repository, object_id, kind, payload)
+        return object_id
+
+    @staticmethod
+    def _tree_payload(*entries):
+        return b"".join(mode + b" " + name + b"\0" + bytes.fromhex(object_id) for mode, name, object_id in entries)
+
+    @staticmethod
+    def _recording_reader(requested):
+        reader = publication._read_raw_git_object
+
+        def recorded(repository, object_id, kind):
+            requested.append((object_id, kind))
+            return reader(repository, object_id, kind)
+
+        return recorded
+
+    def test_serve_planning_never_reads_below_a_sibling_tree_the_walk_rejects(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-serve-planning-") as directory:
+            repository = self._object_repository(directory)
+            blobs = [self._write_object(repository, "blob", b"A blob %02d\n" % index) for index in range(33)]
+            tree_a = self._write_object(repository, "tree", self._tree_payload(
+                *((b"100644", b"f%02d" % index, blob) for index, blob in enumerate(blobs))))
+            hidden = self._write_object(repository, "blob", b"object below the rejected sibling tree\n")
+            other = self._write_object(repository, "blob", b"entry with a noncanonical mode\n")
+            bad = self._write_object(repository, "tree", self._tree_payload(
+                (b"100644", b"x", hidden), (b"100664", b"y", other)))
+            root = self._write_object(repository, "tree", self._tree_payload(
+                (b"40000", b"A", tree_a), (b"40000", b"bad", bad)))
+            head = self._write_object(repository, "commit", b"tree %s\n\nserve planning witness\n" % root.encode())
+            requested = []
+            runs, observe = self._observed_cat_file_runs()
+            with mock.patch.object(
+                publication, "_read_raw_git_object", side_effect=self._recording_reader(requested),
+            ), mock.patch.object(subprocess, "run", side_effect=observe), self.assertRaisesRegex(
+                AssertionError, "noncanonical mode",
+            ):
+                publication._verified_commit_records(repository, head)
+            inputs = [run["input"] for run in runs]
+            # bad/ was really prefetched in a closed multi-key batch next to A/ (whose 33 blobs need two
+            # more runs), so a planner that plans children on frame arrival would send `hidden` with
+            # the last A/ blob.  Serve-time planning never does: bad/ is rejected when it is handed out.
+            self.assertTrue(any(bad.encode() in payload and payload.count(b"\n") > 1 for payload in inputs))
+            self.assertNotIn((hidden, "blob"), requested)
+            self.assertFalse(any(hidden.encode() in payload for payload in inputs))
+            self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_cross_kind_entry_inside_a_multi_key_batch_is_rejected_by_the_single_primitive(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-cross-kind-") as directory:
+            repository = self._object_repository(directory)
+            first = self._write_object(repository, "blob", b"first\n")
+            inner = self._write_object(repository, "blob", b"inside a real tree\n")
+            real_tree = self._write_object(repository, "tree", self._tree_payload((b"100644", b"t", inner)))
+            last = self._write_object(repository, "blob", b"last\n")
+            root = self._write_object(repository, "tree", self._tree_payload(
+                (b"100644", b"a.txt", first), (b"100644", b"b.txt", real_tree), (b"100644", b"c.txt", last)))
+            head = self._write_object(repository, "commit", b"tree %s\n\ncross-kind witness\n" % root.encode())
+            requested = []
+            runs, observe = self._observed_cat_file_runs()
+            with mock.patch.object(
+                publication, "_read_raw_git_object", side_effect=self._recording_reader(requested),
+            ), mock.patch.object(subprocess, "run", side_effect=observe), self.assertRaisesRegex(
+                AssertionError, "identity/type mismatch",
+            ):
+                publication._verified_commit_records(repository, head)
+            # The real tree object behind a blob-mode entry really went into a multi-key batch, and the
+            # walk still stops exactly where the 37d2b35 walk stops: at that entry, read as a blob.
+            multi = [run["input"] for run in runs if run["input"].count(b"\n") > 1]
+            self.assertTrue(any(real_tree.encode() in payload for payload in multi))
+            self.assertEqual(
+                [(head, "commit"), (root, "tree"), (first, "blob"), (real_tree, "blob")], requested,
+            )
+            self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_corrupt_middle_commit_under_a_good_hint_is_rejected_by_the_single_read(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-chain-corrupt-middle-") as directory:
+            repository, commits = self._literal_commit_chain(directory, 12)
+            listed = b"".join(commit.encode("ascii") + b"\n" for commit in reversed(commits))
+            corrupt = commits[6]
+            publication._write_loose_object_fixture(repository, corrupt, "commit", b"hostile middle commit\n")
+            hints, runs, requested = [], [], []
+            real_run = subprocess.run
+
+            def scripted(*args, **kwargs):
+                argv = tuple(os.fspath(value) for value in (args[0] if args else kwargs["args"]))
+                if "rev-list" in argv:
+                    hints.append(argv)
+                    return self._completed_like_subprocess(argv, kwargs, 0, listed, b"")
+                if argv[-2:] == ("cat-file", "--batch"):
+                    runs.append(kwargs.get("input"))
+                return real_run(*args, **kwargs)
+
+            with mock.patch.object(publication, "S_COMMIT", commits[0]), mock.patch.object(
+                subprocess, "run", side_effect=scripted,
+            ), mock.patch.object(
+                publication, "_read_raw_git_object", side_effect=self._recording_reader(requested),
+            ), self.assertRaisesRegex(AssertionError, "object id"):
+                publication._raw_v3_first_parent_chain(repository, commits[-1], commits[1])
+            # The raw walk asks for exactly the literal chain, in order, down to the corrupt commit.
+            self.assertEqual([(commit, "commit") for commit in reversed(commits[6:])], requested)
+            self.assertEqual(1, len(hints))
+            # The good hint put the corrupt commit into a closed multi-key batch, yet the verdict came
+            # from the unchanged one-OID read of that commit; anchor and S were never sent anywhere.
+            self.assertTrue(any(corrupt.encode() in payload and payload.count(b"\n") > 1 for payload in runs))
+            self.assertIn(corrupt.encode() + b"\n", runs)
+            sent = b"".join(runs)
+            self.assertNotIn(commits[1].encode(), sent)
+            self.assertNotIn(commits[0].encode(), sent)
+            # The chain scope is reset after a chain call that raised.
+            self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_lying_hint_that_enters_planning_cannot_change_the_raw_chain(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-chain-lying-hint-") as directory:
+            repository, c = self._literal_commit_chain(directory, 12)
+            literal_chain = tuple(reversed(c[2:]))
+            side_tree = self._git(repository, "rev-parse", f"{c[3]}^{{tree}}").decode().strip()
+            side = self._git(
+                repository, "-c", "commit.gpgsign=false", "commit-tree", side_tree, "-p", c[3], "-m", "off-chain",
+            ).decode().strip()
+            # Both lies start at the head (never at S or the anchor) and contain the anchor, so they are
+            # planned and prefetched; the second one also stops the batch at a missing foreign id.
+            lies = {
+                "interleaved-with-an-off-chain-commit":
+                    (c[11], side, c[9], c[10], c[7], c[8], c[5], c[6], c[3], c[4], c[2], c[1], c[0]),
+                "foreign-id-inside-the-prefix": (c[11], c[10], c[9], "f" * 40, *reversed(c[:9])),
+            }
+            real_run = subprocess.run
+            for name, lie in lies.items():
+                with self.subTest(hint=name):
+                    runs = []
+                    listed = "".join(f"{commit}\n" for commit in lie).encode("ascii")
+
+                    def scripted(*args, **kwargs):
+                        argv = tuple(os.fspath(value) for value in (args[0] if args else kwargs["args"]))
+                        if "rev-list" in argv:
+                            return self._completed_like_subprocess(argv, kwargs, 0, listed, b"")
+                        if argv[-2:] == ("cat-file", "--batch"):
+                            runs.append(kwargs.get("input"))
+                        return real_run(*args, **kwargs)
+
+                    with mock.patch.object(publication, "S_COMMIT", c[0]), mock.patch.object(
+                        subprocess, "run", side_effect=scripted,
+                    ):
+                        self.assertEqual(
+                            literal_chain, publication._raw_v3_first_parent_chain(repository, c[-1], c[1]),
+                        )
+                    self.assertTrue(any(payload.count(b"\n") > 1 for payload in runs))
+                    sent = b"".join(runs)
+                    self.assertNotIn(c[1].encode(), sent)
+                    self.assertNotIn(c[0].encode(), sent)
+                    self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_duplicate_object_ids_in_one_closed_batch_are_served_like_the_primitive(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-duplicates-") as directory:
+            repository = self._object_repository(directory)
+            payloads = {"d1.txt": b"same bytes\n", "d2.txt": b"same bytes\n"}
+            payloads.update({f"e/x{index}": f"e {index}\n".encode() for index in range(3)})
+            for relative, payload in payloads.items():
+                path = repository / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
+            self._git(repository, "add", "-A")
+            self._git(repository, "-c", "commit.gpgsign=false", "commit", "-qm", "duplicate ids witness")
+            head = self._git(repository, "rev-parse", "HEAD").decode().strip()
+            expected = {
+                relative: ("100644", "blob", hashlib.sha1(b"blob %d\0" % len(payload) + payload).hexdigest(), payload)
+                for relative, payload in payloads.items()
+            }
+            duplicate = expected["d1.txt"][2]
+            self.assertEqual(duplicate, expected["d2.txt"][2])
+            requested = []
+            served = []
+            recorded = self._recording_reader(requested)
+
+            def served_by(repo, object_id, kind):
+                result = recorded(repo, object_id, kind)
+                served.append(((object_id, kind), result))
+                return result
+
+            runs, observe = self._observed_cat_file_runs()
+            with mock.patch.object(publication, "_read_raw_git_object", side_effect=served_by), mock.patch.object(
+                subprocess, "run", side_effect=observe,
+            ):
+                self.assertEqual(expected, publication._verified_commit_records(repository, head))
+            inputs = [run["input"] for run in runs]
+            multi = [payload for payload in inputs if payload.count(b"\n") > 1]
+            # Literal shape under the serve rules: commit and root are one-key reads; the root's three
+            # entries [d1 d2 e/] share one closed batch that carries the duplicate id twice; e/'s three
+            # blobs share a second one.  Both duplicate frames are accepted and served, and the
+            # duplicate does not count as a failed batch (prefetch stays on for e/).
+            self.assertTrue(any(payload.split(b"\n").count(duplicate.encode()) == 2 for payload in multi))
+            self.assertEqual(2, len(inputs) - len(multi))
+            self.assertEqual(2, len(multi))
+            self.assertEqual(2, requested.count((duplicate, "blob")))
+            for (object_id, kind), result in served:
+                self.assertEqual(result, publication._read_raw_git_object(repository, object_id, kind))
+                self.assertEqual([str, str, int, bytes], [type(value) for value in result])
+            self.assertIsNone(publication._C09_SCOPE.get())
+
+    def test_verified_prefix_frames_are_still_served_after_a_bad_frame_disables_prefetch(self):
+        with tempfile.TemporaryDirectory(prefix="q01-v3-batch-prefix-") as directory:
+            repository, head, expected = self._literal_tree_repository(directory)
+            real_run = subprocess.run
+            multi, single = [], []
+
+            def break_second_frame(*args, **kwargs):
+                payload = kwargs.get("input") or b""
+                result = real_run(*args, **kwargs)
+                if payload.count(b"\n") > 1:
+                    multi.append(payload)
+                    stdout = result.stdout
+                    header_end = stdout.index(b"\n")
+                    second = header_end + 1 + int(stdout[:header_end].split(b" ")[2]) + 1
+                    stdout = stdout[:second] + b"0" * 40 + stdout[second + 40:]
+                    return subprocess.CompletedProcess(result.args, 0, stdout, b"")
+                if payload:
+                    single.append(payload)
+                return result
+
+            with mock.patch.object(subprocess, "run", side_effect=break_second_frame):
+                self.assertEqual(expected, publication._verified_commit_records(repository, head))
+            # The first multi-key batch ([a.txt bulk zz] in the literal shape) has a broken second frame,
+            # so prefetch stops there: one multi-key run in total ...
+            self.assertEqual(1, len(multi))
+            keys = multi[0].split(b"\n")[:-1]
+            self.assertGreater(len(keys), 1)
+            # ... but its verified first frame is still served: that object is never read again, while
+            # the broken frame and everything after it are read one by one (48 objects - 1 adopted).
+            self.assertNotIn(keys[0] + b"\n", single)
+            for key in keys[1:]:
+                self.assertIn(key + b"\n", single)
+            self.assertEqual(47, len(single))
+            self.assertIsNone(publication._C09_SCOPE.get())
