@@ -29,7 +29,7 @@ COPY_FILES = BASE_FILES + EXTRA_FILES
 # 7c44779 bytes). Both are compared whole only; no inverse layer covers them.
 PRODUCTION_PINS = {
     'tools/_package_common.py': 'a3c55bfe13a831d75e01516cbb238c44eb756166005a49c78adf76705b73e2ef',
-    'tools/project_contract.py': '6f7b2675d7c7cd3333ab31d43ac675a7be3fbf9c9c37bc847ad5d9c09859f771',
+    'tools/project_contract.py': 'cff03898c923d83989ebb3677b079392f68e1e7559b00afdbf79ea3f700febb6',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
     'tools/ibsw_upgrade_contract.py': 'e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',

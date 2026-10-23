@@ -1238,9 +1238,9 @@ MONITOR_RUNTIME_MAPPINGS = (
     # The UFM lane reads servers.ufm.vip and writes the IB link reports (UFM-MONITOR.md 14.3).
     ("infiniband/monitor/01-global.yaml", "01-global.yaml", "infiniband/01-global.yaml"),
     ("infiniband/monitor/99-output-p2p", "99-output-p2p", None),
-    # REQ7 (owner 2026-10-23): the online Issue Tracker sync keeps its prepared data and its log in
-    # the project's monitor output, through a link in its own directory.
-    ("monitor/issue-tracker/99-output-monitor", "99-output-monitor", None),
+    # REQ7 (owner 2026-10-23): monitor/issue-tracker/ keeps its prepared data and its log in the
+    # project's monitor output through this link beside it.
+    ("monitor/99-output-monitor", "99-output-monitor", None),
 )
 SETUP_COLLECTION_LINKS = {
     network + "/monitor/" + output: (network, output)

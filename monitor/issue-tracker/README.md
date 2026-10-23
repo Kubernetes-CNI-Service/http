@@ -62,7 +62,7 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --force          # 输入没
   - 设备状态数据会命名为 `<设备类型>-switch-status.json`，见下文。
   - `state.json` 记录上次成功同步的输入。
 - 脚本日志写在 `99-output-monitor/issue-tracker-sync.log`，用 `tools/log_rotation.py` 轮转。同一项目同一时间只允许一个同步，锁文件是 `99-output-monitor/.issue-tracker-sync.lock`。
-- 本目录下的 `99-output-monitor` 是 setup 建立的链接，指向 `DAY0-Prepare/<项目>/99-output-monitor`（登记在 `tools/project_contract.py` 的 `MONITOR_RUNTIME_MAPPINGS`）。同步脚本默认通过这个链接写数据和日志，并核对链接确实指向当前项目；用 `--project-dir` 指定项目时，直接写到该项目的 `99-output-monitor/`。
+- 与本目录同级的 `monitor/99-output-monitor` 是 setup 建立的链接，指向 `DAY0-Prepare/<项目>/99-output-monitor`（登记在 `tools/project_contract.py` 的 `MONITOR_RUNTIME_MAPPINGS`）。同步脚本默认通过这个链接写数据和日志，并核对链接确实指向当前项目；用 `--project-dir` 指定项目时，直接写到该项目的 `99-output-monitor/`。
 - 所有 Issue Tracker 相关脚本都在 `monitor/issue-tracker/`；CableTracker 原项目在 `tools/cabletracker/`，只作为 `update-engine.py` 的来源。
 - 退出码：
   - 0：成功、输入未变，或没有输入；

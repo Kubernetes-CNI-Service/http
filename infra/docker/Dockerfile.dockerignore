@@ -113,6 +113,8 @@ monitor/01-global.yaml
 monitor/01-global.yaml/**
 monitor/02-devices_config.csv
 monitor/02-devices_config.csv/**
+monitor/99-output-monitor
+monitor/99-output-monitor/**
 monitor/99-output-p2p
 monitor/99-output-p2p/**
 monitor/99-output-ufm
@@ -127,8 +129,6 @@ monitor/generate-monitor.log
 monitor/generate-monitor.log/**
 monitor/infiniband
 monitor/infiniband/**
-monitor/issue-tracker/99-output-monitor
-monitor/issue-tracker/99-output-monitor/**
 monitor/monitor.html
 monitor/monitor.html/**
 monitor/nvlink
