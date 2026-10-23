@@ -330,6 +330,58 @@ manifest 不变：两个模块已在 repository-governance suite 和相关 path 
 W1 本身会执行 `tools/update-user-manual.py --check`。本文件的改动在 runner 中属于未知路径，按规则
 要求 canonical full。以上都不签发批准、不改 ledger；正式状态只看集成后的 full/check。
 
+### 2026-10-23 opt-in 两阶段分片全量（PROP-14 G5Q-RA 落地形态，候选）
+
+依据：owner 2026-10-23 原话「你有http-test的所有权限，你可以按照你的想法落地优化方案，不用问我
+授权跑测试或者确认什么机制。」「任何性能优化方案验证测试通过了就可以落地」。本小节在下列门禁
+范围内修订下文 2026-10-09 判定表「并行 SHA、扩大有状态 suite 并发」一行，以及「十个逻辑 suite
+不是隔离证明」「并行 suite 仍未启用」「据此本轮不把 `--jobs` 接入治理 runner」三段的结论；
+这些段落的事实记录与其余条款不变。默认串行 `--all` 的 argv、discovery、环境、输出与证明完全不变。
+
+形态：`python3 -B test_cases/run_related_tests.py --all --sharded ABSOLUTE_NEW_DIR [-v]`，只在
+macOS（APFS clonefile）提供。它执行与串行相同的 canonical discovery，按受管计划
+`test_cases/full_shard_plan.json`（tracked_support，改动即要求 full 并使现有证明失效）分两阶段
+运行：阶段 A 各车道在各自的私有 clone 中并行；阶段 A 全部结束且残留门通过后，阶段 B 只有一条
+安静车道单独运行（计划结构上只能有一个阶段 B 车道，并发固定为 1）。计划单位只有三种：整模块、
+`MODULE#i/k` 连续用例切片（显式边界用例 id）、`MODULE::ID` 单个用例。被拆到多个进程的模块不得
+定义 setUpModule/tearDownModule，被拆的类不得定义 setUpClass/tearDownClass；`same_lane` 声明的
+模块组（P 共享 fixture/publication 四模块）必须是同一车道的整模块；每个阶段 B 单位必须写明入选
+理由。计划结构不合、单位指向不存在的模块/用例/边界、canonical 模块未分配、空车道、类在定义模块
+之外被收集（G1 不变量）或 discovery 有导入失败行时，都在任何车道运行前 fail closed。
+
+覆盖等价：协调器在一个私有 clone 中做 canonical 枚举（只导入，不运行），按计划把每个 canonical
+行索引分配给唯一车道；每个车道在自己的 clone 中重做 discovery，摘要与行数必须与枚举逐字节一致，
+否则 fatal。合并时逐车道核对：每条执行记录的索引属于该车道、id 与 canonical 一致、不重复；
+缺失的行只能由该车道记录的已识别 setUpClass/setUpModule SkipTest holder 精确抑制（与串行
+unittest 不运行它们相同）；随后全局核对每个 canonical 行恰好被执行或抑制一次。结果判定与串行
+`wasSuccessful()` 相同：expected failure 不算失败，unexpected success、failure、error 都算失败。
+
+门禁（任何一项都返回 1，批准 ledger 不变，证据全部保留在 ABSOLUTE_NEW_DIR）：主 checkout 必须是
+干净的已提交树（clone 的 index/worktree/untracked、.git 形态与 HEAD/refs 逐项核对）；车道
+clone、私有 TMPDIR 与私有 0700 pyc 前缀的 gid 等于用户主 gid；车道解释器身份与协调器一致；
+每车道挂死守卫期限 `lane_deadline_seconds`（不得小于 7800 秒，即不小于同版串行全量实测墙钟；它
+不是任何测试的时限，到期后整进程组 TERM→KILL）；车道崩溃、提前退出、无 finished 记录、结果文件
+缺失、fixture 错误、非成功结果；运行后 clone 的 tracked 字节变化、未跟踪遗留、新增被忽略遗留
+（只排除 `__pycache__/*.pyc`）与私有 TMPDIR 非空；以 lane 进程组、argv 中的 lane 路径、工作目录
+位于 lane 路径三种口径查到的残留进程（先在 20 秒内只观察不发信号，仍残留则记录后终止并判失败）；
+阶段 A 任一问题都不进入阶段 B。全部通过后先删除全部 clone、私有 TMPDIR 与 pyc 前缀并核实已删除，
+任一删除失败也返回 1；只有此后 runner 才按原流程复核 snapshot 与环境并原子写入批准。
+
+证明合同：分片成功写入的 `full_suite_attestation` 与串行 `--all` 逐字节相同，schema、
+`full_suite_attestation_is_current`、`--check --require-full`、11-load、sync、tar 与 pre-push
+都不改；执行方式、计划摘要、各车道读数、遗留/残留与清理结果只写在仓库外的
+`ABSOLUTE_NEW_DIR/audit.json`。`--sharded` 不能与 `--validation-only`、`--timings`、`--check`、
+`--require-full`、`--list`、`--preflight`、`--watch`、`--suite`、`--list-suites`、`--changed`、
+`--changed-file`、`--git`、`--git-base` 同用；REQ10C 例外的 validation-only 证明仍只能由串行
+`--all --validation-only` 取得。没有任何跳过证明检查的参数。
+
+启用顺序：消费者无法区分分片与串行证明，所以启用只靠落地顺序。引入本模式的提交、以及以后修改
+分片机制（runner 中本小节对应代码）的提交，其证明必须由串行 `--all` 产出；只改计划分配的提交
+不改变机制，覆盖等价仍由上述门禁逐次核对。在专用会话上完成预登记的「同版串行 `--all` 对分片」
+至少 3 对计时与覆盖对照、并登记 REAL_ENVIRONMENT `TC-REAL-FULL-SHARD-001` 之前，本模式只作候选，
+不用于正式 load、同步或发布证明。失败按本文件「全量失败」规则处理，不重跑、不放宽、不改时限。
+私有 TMPDIR 与 clone 目录只是隔离手段，不是隔离证明；隔离证据来自上述门禁与专用会话对照。
+
 ### 2026-10-09 再审与候选判定
 
 > 合入 DEV 注（2026-10-25）：本小节原文是 http-test 树（TEST）上的判定记录，表中读数、日志与 SHA256 都是 http-test 的历史证据，DEV 没有运行这些测试。表中「已落地」指 TEST 树：在 DEV，「精确 proof 复用」与 pre-push 门没有随本批合入（随 11-load 批另行裁定），macOS load 仍按 AGENTS.md 现行合同执行全量测试；本批合入 DEV 的是 invocation-local catalog（M04）、Git 不可变对象批量读取（M03）与 collection worker 早退出唤醒（M02）。表中「纯编译结果缓存」一行的 module_loader 部分（`_compile_source` 的 `lru_cache(maxsize=8)` 与 `_ExactSourceLoader`）随 initial-setup 批合入，本合并树已含（`test_cases/module_loader.py`）。TEST 的 validation-only 逐案例计时接口（9ef98fa）没有合入 DEV，本表不列。
@@ -352,7 +404,7 @@ W1 本身会执行 `tools/update-user-manual.py --check`。本文件的改动在
 | 纯编译结果缓存 | 五轮交替，每轮真实 LOAD/SETUP 共 12 次 fresh import；完整函数 code 字段相同；0.595356→0.123089 秒 | 每次重读源字节，最多 8 项、单源 2MiB；只缓存 code，每次重新执行新模块；不读取或写入磁盘 pyc |
 | 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
 | 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
-| 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格 |
+| 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格。2026-10-23 起唯一例外是上文「opt-in 两阶段分片全量」小节的 `--all --sharded`：受管计划、私有 clone、覆盖等价与全部门禁，候选状态，默认串行不变 |
 
 这不是对 full 总耗时的同比承诺。最近普通正式基线为 5,578 tests / 8,816.975 秒 /
 OK (skipped=5)，而新候选增加独立测试；整体比较须列出版本、工作量与运行条件变化，
@@ -455,7 +507,9 @@ RED 完整日志 `outputs/test-diagnostics/git-batch-red.log` 的 SHA256 为
 批量读取尚不授权 root 流程执行或部署：同版 Linux/root held-FD/namespace 场景仍需
 按 REAL_ENVIRONMENT 原卡代表性验证。并行 suite 仍未启用；必须先证明实际独立资源、
 完整出现次数/fixture 顺序与故障收敛，并在空闲同版环境测到收益，不能把逻辑 suite
-分类或临时目录名称当作隔离证明。
+分类或临时目录名称当作隔离证明。（2026-10-23 修订：opt-in `--all --sharded` 以覆盖等价、
+fixture 拆分门、阶段 A 失败不进阶段 B 与遗留/残留/清理门实现前三项，收益与原超时余量由
+`TC-REAL-FULL-SHARD-001` 的专用会话同版对照闭合；闭合前只作候选。）
 
 隔离并行的诊断试验仅选已读取的两个轻量模块（snippet 8 案例、normalizer 3 案例），
 独立保留全部 11 个字面 case ID、原断言、private cwd/TMPDIR；Python audit 拒绝文件
@@ -470,6 +524,8 @@ paths 后才比较同环境工作量，未更改测试预期或安装依赖。�
 据此本轮不把 `--jobs` 接入治理 runner；并行实现仍未落地，后续若识别可观的可隔离
 重型 workload，必须先闭合传递来源、资源/原超时、canonical 重复出现次数、fixture
 顺序及 worker 崩溃/报告缺失/清理失败门禁，再 tests-first 实现和同版 full/check。
+（2026-10-23 修订：`--jobs` 仍不接入；opt-in `--all --sharded` 已按上述门禁 tests-first 实现，
+见上文同名日期小节；引入它的提交由串行 `--all` 签发证明。）
 此诊断既不产生批准，也不改变既有串行套件、历史 P 或外部验收。
 
 ### 2026-09-29 第二轮：collection worker 的结束唤醒

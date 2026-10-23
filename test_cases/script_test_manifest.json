@@ -507,6 +507,7 @@
     "test_cases/project_image_owned_guard_outer.py",
     "test_cases/run_monitor_authority_entrypoints.sh",
     "test_cases/run_related_tests.py",
+    "test_cases/full_shard_plan.json",
     "test_cases/run_vm_validation.py",
     "test_cases/user_manual_contract.json",
     "user-manual.html",
@@ -3756,7 +3757,8 @@
     {
       "paths": [
         "test_cases/script_test_manifest.json",
-        "test_cases/run_related_tests.py"
+        "test_cases/run_related_tests.py",
+        "test_cases/full_shard_plan.json"
       ],
       "tests": [],
       "full_suite": true

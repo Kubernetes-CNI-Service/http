@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>779</strong> 个受维护文件</span>
+          <span><strong>780</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -704,7 +704,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 444 个文件</summary>
+          <summary><code>test_cases/</code> — 445 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -729,6 +729,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/fixtures/nvos-25.02.8008-system-version.txt"><td><code>test_cases/fixtures/nvos-25.02.8008-system-version.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：operational。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/fixtures/nvos-six-cpld-firmware.txt"><td><code>test_cases/fixtures/nvos-six-cpld-firmware.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：Name         Actual FW           Part Number                     FW Source。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/fixtures/nvos-system-health.txt"><td><code>test_cases/fixtures/nvos-system-health.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：operational  applied。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/full_shard_plan.json"><td><code>test_cases/full_shard_plan.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>direct、workflow、治理、真机计划与批准状态测试使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py"><td><code>test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Access preservation contract. No network, real passwords or device writes。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py"><td><code>test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Owner&#x27;s compact terminal contract; full JSON evidence remains unchanged。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py"><td><code>test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent human-summary contract; device IO is never real。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -3391,7 +3392,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。--validation-only 仅供 owner 授权的 AIR/prod 验证，非 dry-run，绝非最终生产发布许可。</dd>
             <dt>前置条件：</dt><dd>工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。AIR/prod 验证还须见证其他同 UID crontab 写者在安装、自动移除和 unsetup 各自整个读—改—写窗口保持静默。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B test_cases/run_related_tests.py [options]</dd>
-            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --validation-only, --timings, --check, --require-full, --list, --preflight, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
+            <dt>主要参数：</dt><dd>--manifest, --approvals, --changed, --changed-file, --git-base, --git, --all, --sharded, --validation-only, --timings, --check, --require-full, --list, --preflight, --suite, --list-suites, --no-approve, --watch, --interval, -v, --verbose</dd>
             <dt>输入：</dt><dd>当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。</dd>
             <dt>输出/状态：</dt><dd>选测清单、unittest 结果和退出码；普通 related/full 成功后可按合同原子更新批准状态。验证模式仍如实报告三项 FAIL，只签发与普通发布证明严格区分的验证证明。</dd>
             <dt>成功判据：</dt><dd>普通模式要求零 failure/error；正式发布还必须让 --all 成功，并让普通 --check --require-full 返回 0。--validation-only 只接受 ISSUE-0016 安装、自动移除、unsetup 的恰好三项原断言 FAIL，无其他 failure/error/新增 skip；普通发布证明检查必须拒绝该验证证明。</dd>

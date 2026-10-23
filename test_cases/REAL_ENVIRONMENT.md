@@ -2479,3 +2479,10 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [ ] 修复后通过：本卡不预填，定向运行结果以测试窗口的记录为准
 - [ ] 已纳入全量 discovery（需正式本机 load 的全量证明，未执行）
 - [ ] 逐台 Docker 主机重建与运行中容器复核（本卡，NOT RUN）
+
+## TC-REAL-FULL-SHARD-001 — 两阶段分片全量的专用会话同版对照、原超时余量与收益
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。自动化（`test_change_aware_test_runner.FullShardDirectTests`、`test_full_shard_workflow`）只证明计划、覆盖等价与门禁机制；收益、原超时余量与负载下稳定性只能在本卡的专用会话中测得。完成前 `--all --sharded` 只作候选，不用于正式 load、同步或发布证明。
+- 前置条件：macOS/APFS 本机，接电源、不合盖、无睡眠；没有不受信任的同 UID 进程，也没有其他全量、Docker 或计时作业；可用空间足够容纳 9 个 APFS clone 与证据目录；`--sharded` 目标目录位于仓库外、与仓库同卷、父目录 gid 等于用户主 gid；`TMPDIR` 指向用户自有目录（不是 `/private/tmp`）。所用候选树、计划 sha256、预登记文件 sha256 在第一次运行前冻结。
+- 步骤与预期：在同一候选树的克隆中，按预登记顺序交替运行至少 3 对「串行 `--all -v`」与「`--all --sharded DIR -v`」，覆盖早晨、夜间、下午三个时段；每对两臂都必须全绿，分片审计的执行集合与串行 `-v` 日志的用例集合逐项相等；分片的 `full_suite_attestation` 与串行逐字节相等。逐次记录 run_wall、total_wall、阶段 A/B、各车道秒数、胶囊用例秒数与 1500 秒回放余量、时限敏感用例（计划 `phase_b_reasons` 所列各项，以及阶段 A 中 handoff `test_all_scope_order_and_every_slot_echo_mutation_fail_closed` 等同族用例）的通过与可测余量、load1 与外部进程采样。判据（全绿、覆盖等价、墙钟门槛、最小余量）在运行前写定，不事后调整。
+- 清理与风险：成功运行由 runner 删除 clone、私有 TMPDIR 与 pyc 前缀；失败运行保留全部证据，审阅后由操作员删除。任何红按 `CHANGE_AWARE_TESTING.md` 全量失败规则处理，不重跑、不放宽、不改时限。风险：同 UID 进程干扰、端点安全软件对新 clone 的首次打开开销、共享机负载使时限敏感用例变红；本卡不证明任意负载下稳定，也不授予 AIR/prod 验证或最终发布资格。

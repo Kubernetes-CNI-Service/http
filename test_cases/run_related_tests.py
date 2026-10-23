@@ -21,6 +21,8 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -1704,6 +1706,1248 @@ def run_validation_selection(
         return 0
 
 
+# ---------------------------------------------------------------------------
+# Opt-in two-phase sharded full proof (PROP-14, G5Q-RA landing form).
+#
+# The serial --all path above is unchanged.  --all --sharded DIR runs the SAME
+# canonical discovery as lanes of a reviewed, tracked plan: phase A lanes run in
+# parallel in private APFS clones, then the single phase-B (quiet) lane runs
+# alone.  Every canonical row must be executed exactly once in its assigned
+# lane (or be suppressed by a recognised class/module SkipTest holder, exactly
+# as serial unittest would not run it); any failure, missing record, deadline,
+# leftover, residue, gate or cleanup problem returns 1 before any approval.  On
+# success the caller writes the same attestation bytes as the serial path; the
+# execution form is recorded only in the external audit file.
+# ---------------------------------------------------------------------------
+
+FULL_SHARD_PLAN_RELATIVE = "test_cases/full_shard_plan.json"
+FULL_SHARD_PLATFORMS = frozenset({"darwin"})
+FULL_SHARD_MIN_LANE_DEADLINE_SECONDS = 7800
+FULL_SHARD_RESIDUE_GRACE_SECONDS = 20.0
+FULL_SHARD_TERMINATE_GRACE_SECONDS = 10.0
+FULL_SHARD_LANE_RE = re.compile(r"^w[0-9a-z]{1,8}$")
+FULL_SHARD_SLICE_RE = re.compile(r"^(test_cases\.test_[A-Za-z0-9_]+)#([0-9]+)/([0-9]+)$")
+FULL_SHARD_HOLDER_RE = re.compile(r"^(setUpClass|setUpModule) \(([A-Za-z_][\w.]*)\)$")
+FULL_SHARD_PLAN_KEYS = frozenset({
+    "schema_version", "description", "derivation", "lane_deadline_seconds",
+    "phase_a", "phase_b", "slices", "same_lane", "phase_b_reasons",
+})
+FULL_SHARD_ACCEPTED_OUTCOMES = frozenset({"success", "skipped", "expected_failure"})
+FULL_SHARD_GIT_FORBIDDEN = (
+    "commondir", "shallow", "info/grafts", "objects/info/alternates",
+    "objects/info/http-alternates", "index.lock",
+)
+
+# Executed by `sys.executable -B -c` in a lane checkout.  It reproduces
+# `python -m unittest discover -b -s test_cases -t . -p test_*.py [-v]`:
+# the same sys.path[0], argv, loader, discovery (every module imported),
+# TextTestRunner(buffer, verbosity, warnings) and exit status, and only runs the
+# canonical rows whose indices the coordinator assigned to this lane.
+FULL_SHARD_LANE_SOURCE = r'''
+import hashlib
+import json
+import os
+import sys
+import time
+import unittest
+
+_mode, _spec_path, _out_path = sys.argv[1:4]
+if not getattr(sys.flags, "safe_path", False):
+    sys.path[0] = os.getcwd()
+with open(_spec_path, encoding="utf-8") as _handle:
+    _spec = json.load(_handle)
+_verbose = bool(_spec["verbose"])
+sys.argv = ["python -m unittest", "discover", "-b", "-s", "test_cases", "-t", ".",
+            "-p", "test_*.py"] + (["-v"] if _verbose else [])
+_out = os.open(_out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+
+
+def _emit(record):
+    _view = memoryview((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+    while _view:
+        _view = _view[os.write(_out, _view):]
+
+
+class _FullShardLoader(unittest.TestLoader):
+    def loadTestsFromModule(self, module, *args, **kwargs):
+        suite = super().loadTestsFromModule(module, *args, **kwargs)
+        suite._full_shard_loader_module = module.__name__
+        return suite
+
+
+def _walk(node, tag, out):
+    tag = getattr(node, "_full_shard_loader_module", tag)
+    for item in node:
+        if isinstance(item, unittest.TestSuite):
+            _walk(item, tag, out)
+        else:
+            out.append((item, tag))
+
+
+_BASE_SETUP = unittest.TestCase.__dict__["setUpClass"].__func__
+_BASE_TEARDOWN = unittest.TestCase.__dict__["tearDownClass"].__func__
+
+
+def _class_fixture(cls):
+    try:
+        return (getattr(cls.setUpClass, "__func__", None) is not _BASE_SETUP
+                or getattr(cls.tearDownClass, "__func__", None) is not _BASE_TEARDOWN)
+    except Exception:
+        return True
+
+
+def _module_fixture(name):
+    module = sys.modules.get(name)
+    return module is None or hasattr(module, "setUpModule") or hasattr(module, "tearDownModule")
+
+
+_suite = _FullShardLoader().discover("test_cases", pattern="test_*.py", top_level_dir=".")
+_pairs = []
+_walk(_suite, None, _pairs)
+_rows = []
+for _test, _tag in _pairs:
+    _cls = type(_test)
+    _rows.append({
+        "id": _test.id(), "module": _tag, "class_module": _cls.__module__,
+        "class": _cls.__qualname__, "class_fixture": _class_fixture(_cls),
+        "module_fixture": _module_fixture(_cls.__module__),
+    })
+_digest = hashlib.sha256(json.dumps(
+    _rows, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+).encode("utf-8")).hexdigest()
+_emit({"event": "start", "canonical_sha256": _digest, "count": len(_rows),
+       "executable": os.path.realpath(sys.executable), "version": list(sys.version_info[:3]),
+       "cache_tag": sys.implementation.cache_tag, "platform": sys.platform,
+       "machine": os.uname().machine, "cwd": os.getcwd(),
+       "tmpdir": os.environ.get("TMPDIR", "")})
+_module_cleanups = len(getattr(unittest.case, "_module_cleanups", []))
+if _mode == "enumerate":
+    _emit({"event": "rows", "rows": _rows, "module_cleanups": _module_cleanups})
+    _emit({"event": "finished", "tests_run": 0, "successful": True})
+    os.close(_out)
+    sys.exit(0)
+if _spec.get("canonical_sha256") != _digest or _spec.get("count") != len(_rows):
+    _emit({"event": "fatal", "reason": "lane discovery differs from the canonical enumeration"})
+    os.close(_out)
+    sys.exit(3)
+if _module_cleanups:
+    _emit({"event": "fatal", "reason": "module cleanups were registered during discovery"})
+    os.close(_out)
+    sys.exit(3)
+_selected = sorted(set(int(_index) for _index in _spec["indices"]))
+_index_of = {id(_pairs[_index][0]): _index for _index in _selected}
+_run_suite = unittest.TestSuite([_pairs[_index][0] for _index in _selected])
+_ORDER = ("success", "skipped", "expected_failure", "unexpected_success", "failure", "error")
+
+
+class _FullShardResult(unittest.TextTestResult):
+    def startTest(self, test):
+        self._full_shard_started = time.perf_counter()
+        self._full_shard_outcome = "success"
+        super().startTest(test)
+
+    def _full_shard_mark(self, outcome):
+        current = getattr(self, "_full_shard_outcome", "success")
+        if _ORDER.index(outcome) > _ORDER.index(current):
+            self._full_shard_outcome = outcome
+
+    def addError(self, test, err):
+        if isinstance(test, unittest.TestCase):
+            self._full_shard_mark("error")
+        else:
+            _emit({"event": "holder", "kind": "error", "description": str(test)})
+        super().addError(test, err)
+
+    def addFailure(self, test, err):
+        self._full_shard_mark("failure")
+        super().addFailure(test, err)
+
+    def addSkip(self, test, reason):
+        if isinstance(test, unittest.TestCase):
+            self._full_shard_mark("skipped")
+        else:
+            _emit({"event": "holder", "kind": "skip", "description": str(test)})
+        super().addSkip(test, reason)
+
+    def addExpectedFailure(self, test, err):
+        self._full_shard_mark("expected_failure")
+        super().addExpectedFailure(test, err)
+
+    def addUnexpectedSuccess(self, test):
+        self._full_shard_mark("unexpected_success")
+        super().addUnexpectedSuccess(test)
+
+    def addSubTest(self, test, subtest, err):
+        if err is not None:
+            self._full_shard_mark("failure" if issubclass(err[0], test.failureException) else "error")
+        super().addSubTest(test, subtest, err)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        _emit({"event": "test", "index": _index_of.get(id(test), -1), "id": test.id(),
+               "outcome": getattr(self, "_full_shard_outcome", "error"),
+               "seconds": round(time.perf_counter() - getattr(self, "_full_shard_started", 0.0), 4)})
+
+
+_runner = unittest.TextTestRunner(
+    verbosity=2 if _verbose else 1, buffer=True, resultclass=_FullShardResult,
+    warnings=None if sys.warnoptions else "default",
+)
+_result = _runner.run(_run_suite)
+_emit({"event": "finished", "tests_run": _result.testsRun, "successful": _result.wasSuccessful()})
+os.close(_out)
+sys.exit(0 if _result.wasSuccessful() else 1)
+'''
+
+
+def _full_shard_platform_message() -> str:
+    return (
+        "--sharded is supported only on " + ", ".join(sorted(FULL_SHARD_PLATFORMS))
+        + " (APFS clonefile lane checkouts); use the serial --all elsewhere"
+    )
+
+
+def full_shard_lane_identity() -> dict:
+    """Interpreter identity every lane must report; the same interpreter as the proof."""
+    machine = os.uname().machine if hasattr(os, "uname") else platform.machine()
+    return {
+        "executable": os.path.realpath(sys.executable),
+        "version": list(sys.version_info[:3]),
+        "cache_tag": sys.implementation.cache_tag,
+        "platform": sys.platform,
+        "machine": machine,
+    }
+
+
+def validate_full_shard_destination(root: Path, destination: Path) -> None:
+    """Require a new evidence directory outside the governed checkout."""
+    destination = Path(destination)
+    if not destination.is_absolute():
+        raise ImpactError("--sharded requires an absolute path for its new evidence directory")
+    if os.path.lexists(destination):
+        raise ImpactError("--sharded destination already exists")
+    try:
+        repository = Path(root).resolve(strict=True)
+        parent = destination.parent.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ImpactError("--sharded parent directory is unavailable") from exc
+    if not parent.is_dir():
+        raise ImpactError("--sharded parent directory is unavailable")
+    if parent == repository or repository in parent.parents:
+        raise ImpactError("--sharded destination must be outside the repository")
+
+
+def _full_shard_plan_error(message: str) -> ImpactError:
+    return ImpactError(f"full shard plan: {message}")
+
+
+def _parse_full_shard_unit(unit: object) -> tuple[str, str, object]:
+    """('module', M, None) | ('slice', M, (index, count)) | ('case', M, case_id)."""
+    if not isinstance(unit, str) or not unit:
+        raise _full_shard_plan_error(f"unit must be a non-empty string: {unit!r}")
+    if "::" in unit:
+        module, case_id = unit.split("::", 1)
+        if (
+            not TEST_ID_RE.fullmatch(module)
+            or not case_id.startswith(module + ".")
+            or len(case_id.split(".")) < 4
+        ):
+            raise _full_shard_plan_error(f"case unit must be MODULE::MODULE.Class.test: {unit}")
+        return "case", module, case_id
+    match = FULL_SHARD_SLICE_RE.fullmatch(unit)
+    if match:
+        index, count = int(match.group(2)), int(match.group(3))
+        if count < 2 or index >= count:
+            raise _full_shard_plan_error(f"slice unit index out of range: {unit}")
+        return "slice", match.group(1), (index, count)
+    if TEST_ID_RE.fullmatch(unit):
+        return "module", unit, None
+    raise _full_shard_plan_error(f"unsupported unit: {unit}")
+
+
+def validate_full_shard_plan(plan: object) -> None:
+    """Structural plan contract, independent of the current canonical discovery."""
+    if not isinstance(plan, dict):
+        raise _full_shard_plan_error("root must be an object")
+    keys = set(plan)
+    if keys != FULL_SHARD_PLAN_KEYS:
+        raise _full_shard_plan_error(
+            "unknown keys: " + ", ".join(sorted(keys - FULL_SHARD_PLAN_KEYS))
+            + "; missing keys: " + ", ".join(sorted(FULL_SHARD_PLAN_KEYS - keys))
+        )
+    if type(plan["schema_version"]) is not int or plan["schema_version"] != 1:
+        raise _full_shard_plan_error("schema_version must be 1")
+    if not isinstance(plan["description"], str) or not plan["description"].strip():
+        raise _full_shard_plan_error("description must be non-empty")
+    if not isinstance(plan["derivation"], dict):
+        raise _full_shard_plan_error("derivation must be an object")
+    deadline = plan["lane_deadline_seconds"]
+    if type(deadline) is not int or deadline < FULL_SHARD_MIN_LANE_DEADLINE_SECONDS:
+        raise _full_shard_plan_error(
+            "lane_deadline_seconds must be an integer >= "
+            f"{FULL_SHARD_MIN_LANE_DEADLINE_SECONDS} (a hang guard, never a test time limit)"
+        )
+    phase_a = plan["phase_a"]
+    if not isinstance(phase_a, list) or not phase_a:
+        raise _full_shard_plan_error("phase_a must be a non-empty list of lane objects")
+    phase_b = plan["phase_b"]
+    if not isinstance(phase_b, dict):
+        raise _full_shard_plan_error(
+            "phase_b must be exactly one lane object (quiet phase concurrency is 1)"
+        )
+    names: list[str] = []
+    whole: dict[str, str] = {}
+    sliced: dict[str, dict[int, tuple[int, str]]] = {}
+    cases: set[str] = set()
+    for lane in [*phase_a, phase_b]:
+        if not isinstance(lane, dict) or set(lane) != {"lane", "units"}:
+            raise _full_shard_plan_error("every lane object has exactly 'lane' and 'units'")
+        name = lane["lane"]
+        if not isinstance(name, str) or not FULL_SHARD_LANE_RE.fullmatch(name):
+            raise _full_shard_plan_error(f"invalid lane name: {name!r}")
+        names.append(name)
+        units = lane["units"]
+        if not isinstance(units, list) or not units:
+            raise _full_shard_plan_error(f"lane {name} needs a non-empty unit list")
+        for unit in units:
+            kind, module, extra = _parse_full_shard_unit(unit)
+            if kind == "module":
+                if module in whole:
+                    raise _full_shard_plan_error(f"module named more than once: {module}")
+                whole[module] = name
+            elif kind == "slice":
+                index, count = extra
+                bucket = sliced.setdefault(module, {})
+                if index in bucket:
+                    raise _full_shard_plan_error(f"slice named more than once: {unit}")
+                bucket[index] = (count, name)
+            else:
+                if unit in cases:
+                    raise _full_shard_plan_error(f"case unit named more than once: {unit}")
+                cases.add(unit)
+    if len(names) != len(set(names)):
+        raise _full_shard_plan_error("lane names must be unique")
+    both = sorted(set(whole) & set(sliced))
+    if both:
+        raise _full_shard_plan_error("module is both whole and sliced: " + ", ".join(both))
+    slices = plan["slices"]
+    if not isinstance(slices, dict) or set(slices) != set(sliced):
+        raise _full_shard_plan_error("slices must name exactly the sliced modules")
+    for module, boundaries in slices.items():
+        if (
+            not isinstance(boundaries, list) or not boundaries
+            or len(boundaries) != len(set(boundaries))
+            or not all(isinstance(value, str) and value.startswith(module + ".") for value in boundaries)
+        ):
+            raise _full_shard_plan_error(f"slices.{module} must list distinct case ids of that module")
+        count = len(boundaries) + 1
+        present = sliced[module]
+        if set(present) != set(range(count)) or {value[0] for value in present.values()} != {count}:
+            raise _full_shard_plan_error(
+                f"slices.{module} declares {count} slices but the lanes name "
+                + ", ".join(f"#{index}/{value[0]}" for index, value in sorted(present.items()))
+            )
+    same_lane = plan["same_lane"]
+    if not isinstance(same_lane, list):
+        raise _full_shard_plan_error("same_lane must be a list of module groups")
+    for group in same_lane:
+        if (
+            not isinstance(group, list) or len(group) < 2 or len(group) != len(set(group))
+            or not all(isinstance(value, str) and TEST_ID_RE.fullmatch(value) for value in group)
+        ):
+            raise _full_shard_plan_error("each same_lane group lists at least two distinct modules")
+    reasons = plan["phase_b_reasons"]
+    if not isinstance(reasons, dict) or set(reasons) != set(phase_b["units"]):
+        raise _full_shard_plan_error("phase_b_reasons must give exactly one reason per phase_b unit")
+    if not all(isinstance(value, str) and value.strip() for value in reasons.values()):
+        raise _full_shard_plan_error("phase_b_reasons must be non-empty strings")
+
+
+def load_full_shard_plan(root: Path) -> dict:
+    plan = read_json_regular(Path(root) / FULL_SHARD_PLAN_RELATIVE)
+    validate_full_shard_plan(plan)
+    return plan
+
+
+def apply_full_shard_plan(plan: Mapping, rows: Sequence[Mapping]) -> dict:
+    """Assign every canonical row index to exactly one lane, or fail closed."""
+    validate_full_shard_plan(plan)
+    untagged = [str(row.get("id")) for row in rows if not row.get("module")]
+    if untagged:
+        raise ImpactError(
+            "full shard plan cannot apply: canonical discovery has untagged rows "
+            "(import failures run only in serial --all): " + ", ".join(untagged[:10])
+        )
+    borrowed = [row["id"] for row in rows if row["class_module"] != row["module"]]
+    if borrowed:
+        raise ImpactError(
+            "full shard plan cannot apply: a test class is collected outside its defining "
+            "module (G1 single-collection invariant): " + ", ".join(borrowed[:10])
+        )
+    module_rows: dict[str, list[int]] = {}
+    for index, row in enumerate(rows):
+        module_rows.setdefault(row["module"], []).append(index)
+    lane_objects = [*plan["phase_a"], plan["phase_b"]]
+    whole: dict[str, str] = {}
+    slice_lanes: dict[str, dict[int, str]] = {}
+    case_units: list[tuple[str, str, str, str]] = []
+    for lane in lane_objects:
+        for unit in lane["units"]:
+            kind, module, extra = _parse_full_shard_unit(unit)
+            if kind == "module":
+                whole[module] = lane["lane"]
+            elif kind == "slice":
+                slice_lanes.setdefault(module, {})[extra[0]] = lane["lane"]
+            else:
+                case_units.append((unit, module, extra, lane["lane"]))
+    named = set(whole) | set(slice_lanes) | {module for _unit, module, _case, _lane in case_units}
+    for group in plan["same_lane"]:
+        named.update(group)
+    stale = sorted(module for module in named if module not in module_rows)
+    if stale:
+        raise ImpactError(
+            "full shard plan is stale: it names modules canonical discovery does not collect: "
+            + ", ".join(stale)
+        )
+    unassigned = [module for module in module_rows if module not in whole and module not in slice_lanes]
+    if unassigned:
+        raise ImpactError(
+            "full shard plan is stale: unassigned canonical modules: " + ", ".join(unassigned)
+        )
+    lane_of: dict[int, str] = {}
+    for unit, module, case_id, lane in case_units:
+        matches = [index for index in module_rows[module] if rows[index]["id"] == case_id]
+        if len(matches) != 1:
+            raise ImpactError(
+                f"full shard plan is stale: case unit {unit} matches {len(matches)} canonical rows"
+            )
+        lane_of[matches[0]] = lane
+    claimed = set(lane_of)
+    for module, lane in whole.items():
+        for index in module_rows[module]:
+            if index not in claimed:
+                lane_of[index] = lane
+    for module, lanes in slice_lanes.items():
+        indices = module_rows[module]
+        ids = [rows[index]["id"] for index in indices]
+        positions = []
+        for boundary in plan["slices"][module]:
+            found = [position for position, value in enumerate(ids) if value == boundary]
+            if len(found) != 1 or found[0] == 0:
+                raise ImpactError(
+                    f"full shard plan is stale: slice boundary {boundary} is not a unique "
+                    f"non-first case of {module}"
+                )
+            positions.append(found[0])
+        if positions != sorted(set(positions)):
+            raise ImpactError(
+                f"full shard plan is stale: slice boundary order of {module} is not canonical"
+            )
+        edges = [0, *positions, len(indices)]
+        for slice_index, (low, high) in enumerate(zip(edges, edges[1:])):
+            for index in indices[low:high]:
+                if index not in claimed:
+                    lane_of[index] = lanes[slice_index]
+    for group in plan["same_lane"]:
+        group_lanes = {whole.get(module) for module in group}
+        if None in group_lanes or len(group_lanes) != 1:
+            raise ImpactError(
+                "full shard plan violates same_lane: " + ", ".join(group)
+                + " must be whole modules in one lane"
+            )
+    lanes_by_module: dict[str, set[str]] = {}
+    lanes_by_class: dict[tuple[str, str], set[str]] = {}
+    for index, row in enumerate(rows):
+        lanes_by_module.setdefault(row["module"], set()).add(lane_of[index])
+        lanes_by_class.setdefault((row["class_module"], row["class"]), set()).add(lane_of[index])
+    for module, used in lanes_by_module.items():
+        if len(used) > 1 and any(rows[index]["module_fixture"] for index in module_rows[module]):
+            raise ImpactError(
+                f"full shard plan splits {module} across processes but it defines a "
+                "setUpModule/tearDownModule fixture"
+            )
+    for (class_module, class_name), used in lanes_by_class.items():
+        if len(used) > 1 and any(
+            row["class_fixture"] for row in rows
+            if (row["class_module"], row["class"]) == (class_module, class_name)
+        ):
+            raise ImpactError(
+                f"full shard plan splits {class_module}.{class_name} across processes but it "
+                "defines a setUpClass/tearDownClass fixture"
+            )
+    lanes: dict[str, list[int]] = {lane["lane"]: [] for lane in lane_objects}
+    for index in range(len(rows)):
+        lanes[lane_of[index]].append(index)
+    empty = [name for name, indices in lanes.items() if not indices]
+    if empty:
+        raise ImpactError("full shard plan is stale: lanes without canonical rows: " + ", ".join(empty))
+    return {
+        "lanes": lanes,
+        "phase_a": [lane["lane"] for lane in plan["phase_a"]],
+        "phase_b": plan["phase_b"]["lane"],
+    }
+
+
+def merge_full_shard_lane(
+    lane: str, rows: Sequence[Mapping], assigned: Sequence[int],
+    records: Sequence[Mapping] | None, exit_info: Mapping,
+    *, identity: Mapping, canonical_sha256: str,
+) -> dict:
+    """Check one lane's records against its assignment; never trust the lane's own verdict."""
+    problems: list[str] = []
+    assigned_set = set(assigned)
+    executed: list[int] = []
+    seen: set[int] = set()
+    non_success: list[dict] = []
+    holders: list[Mapping] = []
+    finished = None
+    if records is None:
+        problems.append(f"lane {lane}: missing result file")
+        records = []
+    starts = [record for record in records if record.get("event") == "start"]
+    if len(starts) != 1:
+        problems.append(f"lane {lane}: expected exactly one start record, found {len(starts)}")
+    else:
+        reported = {key: starts[0].get(key) for key in identity}
+        if reported != dict(identity):
+            problems.append(f"lane {lane}: interpreter identity differs from the coordinator: {reported}")
+        if (
+            starts[0].get("canonical_sha256") != canonical_sha256
+            or starts[0].get("count") != len(rows)
+        ):
+            problems.append(f"lane {lane}: canonical discovery differs from the coordinator's enumeration")
+    for record in records:
+        event = record.get("event")
+        if event == "test":
+            index = record.get("index")
+            if type(index) is not int or not 0 <= index < len(rows):
+                problems.append(f"lane {lane}: reported an unknown canonical index {index!r}")
+                continue
+            if record.get("id") != rows[index]["id"]:
+                problems.append(
+                    f"lane {lane}: index {index} reported id {record.get('id')!r} but the canonical "
+                    f"id is {rows[index]['id']!r}"
+                )
+            if index not in assigned_set:
+                problems.append(f"lane {lane}: executed {rows[index]['id']} outside its assigned lane")
+            if index in seen:
+                problems.append(f"lane {lane}: {rows[index]['id']} executed more than once")
+            seen.add(index)
+            executed.append(index)
+            if record.get("outcome") not in FULL_SHARD_ACCEPTED_OUTCOMES:
+                non_success.append({"id": rows[index]["id"], "outcome": record.get("outcome"), "lane": lane})
+        elif event == "holder":
+            holders.append(record)
+        elif event == "fatal":
+            problems.append(f"lane {lane}: fatal: {record.get('reason')}")
+        elif event == "finished":
+            finished = record
+        elif event != "start":
+            problems.append(f"lane {lane}: unknown or corrupt record {event!r}")
+    suppressed: set[int] = set()
+    for holder in holders:
+        description = str(holder.get("description", ""))
+        if holder.get("kind") == "error":
+            problems.append(f"lane {lane}: class/module fixture error: {description}")
+            continue
+        match = FULL_SHARD_HOLDER_RE.fullmatch(description)
+        if holder.get("kind") != "skip" or match is None:
+            problems.append(f"lane {lane}: unrecognised holder record: {description!r}")
+            continue
+        kind, target = match.groups()
+        for index in assigned:
+            row = rows[index]
+            owner = f"{row['class_module']}.{row['class']}" if kind == "setUpClass" else row["module"]
+            if owner == target and index not in seen:
+                suppressed.add(index)
+    missing = sorted(assigned_set - seen - suppressed)
+    if missing:
+        problems.append(
+            f"lane {lane}: {len(missing)} assigned rows were not executed: "
+            + ", ".join(rows[index]["id"] for index in missing[:5])
+        )
+    tests_run = None
+    if finished is None:
+        problems.append(f"lane {lane}: no finished record (crash, kill or early exit)")
+    else:
+        tests_run = finished.get("tests_run")
+        if tests_run != len(executed):
+            problems.append(
+                f"lane {lane}: finished record counts {tests_run!r} tests but {len(executed)} were reported"
+            )
+    if exit_info.get("deadline_exceeded"):
+        problems.append(f"lane {lane}: lane deadline exceeded; its process group was terminated")
+    if exit_info.get("exit") != 0:
+        problems.append(f"lane {lane}: exit {exit_info.get('exit')}")
+    if non_success:
+        problems.append(
+            f"lane {lane}: {len(non_success)} non-success outcomes: "
+            + ", ".join(f"{item['id']} ({item['outcome']})" for item in non_success[:5])
+        )
+    return {
+        "problems": problems, "executed": sorted(executed), "suppressed": sorted(suppressed),
+        "non_success": non_success, "tests_run": tests_run,
+    }
+
+
+def full_shard_coverage_problems(count: int, merged: Mapping[str, Mapping]) -> list[str]:
+    """Every canonical row executed or recognisably suppressed exactly once, nothing else."""
+    problems: list[str] = []
+    owner: dict[int, str] = {}
+    for lane, result in merged.items():
+        for index in [*result["executed"], *result["suppressed"]]:
+            if type(index) is not int or not 0 <= index < count:
+                problems.append(f"lane {lane}: index {index!r} is outside canonical discovery")
+            elif index in owner:
+                problems.append(f"canonical row {index} is accounted for by {owner[index]} and {lane}")
+            else:
+                owner[index] = lane
+    missing = sorted(set(range(count)) - set(owner))
+    if missing:
+        problems.append(
+            f"{len(missing)} canonical rows were neither executed nor suppressed by a recognised holder"
+        )
+    return problems
+
+
+def _full_shard_kill_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    try:
+        process.wait(timeout=FULL_SHARD_TERMINATE_GRACE_SECONDS)
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    process.wait()
+
+
+def _full_shard_wait_lanes(
+    launched: Mapping[str, tuple], deadline_seconds: float, *, poll: float = 1.0,
+) -> dict:
+    """Wait for (process, log, started_monotonic, started_epoch) lanes; a hang guard per lane."""
+    finished: dict[str, dict] = {}
+    try:
+        while len(finished) < len(launched):
+            for lane, (process, log, started, started_epoch) in launched.items():
+                if lane in finished:
+                    continue
+                code = process.poll()
+                exceeded = False
+                if code is None and time.monotonic() - started >= deadline_seconds:
+                    exceeded = True
+                    _full_shard_kill_group(process)
+                    code = process.returncode
+                if code is None:
+                    continue
+                finished[lane] = {
+                    "exit": code, "seconds": round(time.monotonic() - started, 3),
+                    "started_epoch": started_epoch, "ended_epoch": round(time.time(), 3),
+                    "deadline_exceeded": exceeded,
+                }
+                log.close()
+            if len(finished) < len(launched):
+                time.sleep(poll)
+    except BaseException:
+        for lane, (process, log, _started, _epoch) in launched.items():
+            if lane not in finished:
+                _full_shard_kill_group(process)
+                log.close()
+        raise
+    return finished
+
+
+def _full_shard_gid_problems(paths: Iterable[Path]) -> list[str]:
+    expected = os.getgid()
+    problems = []
+    for path in paths:
+        try:
+            info = os.stat(path)
+        except OSError as exc:
+            problems.append(f"{path}: cannot stat for the gid gate ({exc})")
+            continue
+        if info.st_gid != expected:
+            problems.append(f"{path}: gid {info.st_gid} differs from the user's primary gid {expected}")
+    return problems
+
+
+def _full_shard_remove_tree(path: Path) -> str | None:
+    """Remove one lane tree; return a problem instead of raising."""
+    path = Path(path)
+
+    def retry(function, target, _error):
+        try:
+            os.chmod(os.path.dirname(target) or ".", stat.S_IRWXU)
+            if not os.path.islink(target):
+                os.chmod(target, stat.S_IRWXU)
+        except OSError:
+            pass
+        function(target)
+
+    try:
+        if not os.path.lexists(path):
+            return None
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=retry)
+        else:
+            shutil.rmtree(path, onerror=retry)
+    except OSError as exc:
+        return f"cleanup of {path} failed: {exc}"
+    if os.path.lexists(path):
+        return f"cleanup of {path} left the path in place"
+    return None
+
+
+def _full_shard_git(checkout: Path, *arguments: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(checkout), *arguments], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+
+
+def _full_shard_paths(completed: subprocess.CompletedProcess, label: str) -> list[str]:
+    if completed.returncode != 0:
+        raise ImpactError(f"git {label} failed: {completed.stderr.decode('utf-8', 'replace').strip()}")
+    return [os.fsdecode(raw) for raw in completed.stdout.split(b"\0") if raw]
+
+
+def _full_shard_tracked_digest(checkout: Path) -> dict[str, str]:
+    digests: dict[str, str] = {}
+    for relative in _full_shard_paths(_full_shard_git(checkout, "ls-files", "-z"), "ls-files"):
+        path = Path(checkout) / relative
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            digests[relative] = "missing"
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            digests[relative] = "link:" + os.readlink(path)
+        elif stat.S_ISREG(info.st_mode):
+            digests[relative] = ("x:" if info.st_mode & 0o111 else "-:") + sha256_file(path)
+        else:
+            digests[relative] = "other"
+    return digests
+
+
+def _full_shard_untracked(checkout: Path) -> list[str]:
+    return _full_shard_paths(
+        _full_shard_git(checkout, "ls-files", "-z", "--others", "--exclude-standard"),
+        "ls-files --others",
+    )
+
+
+def _full_shard_ignored(checkout: Path) -> set[str]:
+    """Ignored untracked files, minus interpreter bytecode caches (__pycache__/*.pyc)."""
+    paths = _full_shard_paths(
+        _full_shard_git(checkout, "ls-files", "-z", "--others", "--ignored", "--exclude-standard"),
+        "ls-files --ignored",
+    )
+    return {
+        path for path in paths
+        if not ("__pycache__" in path.split("/") and path.endswith(".pyc"))
+    }
+
+
+def _full_shard_refs(checkout: Path) -> str:
+    head = _full_shard_git(checkout, "rev-parse", "--verify", "HEAD")
+    refs = _full_shard_git(checkout, "for-each-ref", "--format=%(objectname) %(refname)")
+    if head.returncode or refs.returncode:
+        raise ImpactError(f"cannot read HEAD/refs of {checkout}")
+    return head.stdout.decode("utf-8", "replace") + refs.stdout.decode("utf-8", "replace")
+
+
+def _full_shard_clone(source: Path, destination: Path) -> None:
+    completed = subprocess.run(
+        ["/bin/cp", "-c", "-R", str(source), str(destination)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    if completed.returncode != 0:
+        raise ImpactError(
+            "clonefile copy of the checkout failed: "
+            + completed.stderr.decode("utf-8", "replace").strip()
+        )
+
+
+def _full_shard_clone_gate(main_refs: str, clone: Path) -> list[str]:
+    """A lane checkout must be an exact, clean, plain copy of the committed main checkout."""
+    problems = []
+    _full_shard_git(clone, "update-index", "-q", "--refresh")
+    if _full_shard_git(clone, "diff-index", "--quiet", "HEAD", "--").returncode != 0:
+        problems.append("index differs from HEAD (the main checkout is not a clean committed tree)")
+    if _full_shard_git(clone, "diff-files", "--quiet").returncode != 0:
+        problems.append("worktree differs from index (uncommitted change in the main checkout)")
+    try:
+        if _full_shard_untracked(clone):
+            problems.append("untracked non-ignored files are present in the main checkout")
+    except ImpactError as exc:
+        problems.append(str(exc))
+    gitdir = clone / ".git"
+    if not gitdir.is_dir() or gitdir.is_symlink():
+        problems.append(".git is not a real directory")
+    for relative in FULL_SHARD_GIT_FORBIDDEN:
+        if os.path.lexists(gitdir / relative):
+            problems.append(f".git/{relative} is present")
+    try:
+        if _full_shard_refs(clone) != main_refs:
+            problems.append("HEAD or refs differ from the main checkout")
+    except ImpactError as exc:
+        problems.append(str(exc))
+    return [f"{clone.name} checkout gate: {problem}" for problem in problems]
+
+
+def _full_shard_markers(paths: Iterable[Path]) -> list[str]:
+    markers: list[str] = []
+    for path in paths:
+        for value in {os.fspath(path), os.path.realpath(path)}:
+            markers.append(value.rstrip("/"))
+    return sorted(set(markers))
+
+
+def _full_shard_names_marker(text: str, markers: Sequence[str]) -> bool:
+    return any(
+        re.search(re.escape(marker) + r"(?:/|\s|$)", text) for marker in markers
+    )
+
+
+def _full_shard_residue(markers: Sequence[str], pgids: Iterable[int]) -> list[dict]:
+    """Processes still tied to lane paths or lane process groups (three calibers)."""
+    me = os.getpid()
+    groups = set(pgids)
+    found: dict[int, dict] = {}
+    listing = subprocess.run(
+        ["ps", "-axww", "-o", "pid=,pgid=,command="], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False, timeout=120,
+    )
+    if listing.returncode != 0:
+        raise ImpactError("residue gate cannot list processes")
+    for line in listing.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, pgid = int(parts[0]), int(parts[1])
+        command = parts[2] if len(parts) > 2 else ""
+        if pid == me:
+            continue
+        reasons = []
+        if pgid in groups:
+            reasons.append("lane process group")
+        if _full_shard_names_marker(command, markers):
+            reasons.append("argv names a lane path")
+        if reasons:
+            found[pid] = {"pid": pid, "pgid": pgid, "command": command[:200], "reasons": reasons}
+    cwd = subprocess.run(
+        ["lsof", "-nP", "-w", "-a", "-d", "cwd", "-u", str(os.getuid()), "-Fpn"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, check=False, timeout=120,
+    )
+    if cwd.returncode not in (0, 1) or f"p{me}" not in cwd.stdout.splitlines():
+        raise ImpactError("residue gate cannot read process working directories (lsof)")
+    current = None
+    for line in cwd.stdout.splitlines():
+        if line.startswith("p"):
+            current = int(line[1:]) if line[1:].isdigit() else None
+        elif line.startswith("n") and current is not None and current != me:
+            if _full_shard_names_marker(line[1:], markers):
+                entry = found.setdefault(current, {
+                    "pid": current, "pgid": None, "command": "", "reasons": [],
+                })
+                entry["reasons"].append("working directory inside a lane path")
+    return sorted(found.values(), key=lambda item: item["pid"])
+
+
+def _full_shard_residue_gate(markers: Sequence[str], pgids: Iterable[int]) -> tuple[list[dict], float]:
+    """Wait a bounded grace for stragglers (never signalling), then terminate what remains."""
+    started = time.monotonic()
+    groups = list(pgids)
+    while True:
+        residue = _full_shard_residue(markers, groups)
+        waited = time.monotonic() - started
+        if not residue or waited >= FULL_SHARD_RESIDUE_GRACE_SECONDS:
+            break
+        time.sleep(2.0)
+    if residue:
+        for item in residue:
+            try:
+                os.kill(item["pid"], signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+        deadline = time.monotonic() + 5.0
+        remaining = [item["pid"] for item in residue]
+        while remaining and time.monotonic() < deadline:
+            alive = []
+            for pid in remaining:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            remaining = alive
+            if remaining:
+                time.sleep(0.2)
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+    return residue, round(time.monotonic() - started, 1)
+
+
+def _full_shard_read_records(path: Path) -> list[dict] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    records: list[dict] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            value = None
+        records.append(value if isinstance(value, dict) else {"event": "corrupt"})
+    return records
+
+
+def _full_shard_write_json(path: Path, value: object) -> None:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(value, handle, ensure_ascii=False, indent=1, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+class _FullShardLane:
+    """One lane: clone, private TMPDIR/pyc namespace, spec, log and result paths."""
+
+    def __init__(self, name: str, phase: str, work: Path, lanes_dir: Path, temp_parent: Path):
+        self.name = name
+        self.phase = phase
+        self.clone = work / name
+        self.spec = lanes_dir / f"{name}.spec.json"
+        self.result = lanes_dir / f"{name}.jsonl"
+        self.log = lanes_dir / f"{name}.log"
+        self.temp_parent = temp_parent
+        self.tmpdir: Path | None = None
+        self.pycache: Path | None = None
+        self.ignored_before: set[str] = set()
+
+    def prepare(self, root: Path, main_refs: str) -> list[str]:
+        _full_shard_clone(root, self.clone)
+        problems = _full_shard_clone_gate(main_refs, self.clone)
+        self.tmpdir = Path(tempfile.mkdtemp(prefix=f"hs{self.name}-", dir=self.temp_parent))
+        self.pycache = Path(tempfile.mkdtemp(prefix=f"hp{self.name}-", dir=self.temp_parent))
+        problems += _full_shard_gid_problems([self.clone, self.tmpdir, self.pycache])
+        self.ignored_before = _full_shard_ignored(self.clone)
+        return problems
+
+    def launch(self, mode: str, spec: Mapping) -> tuple:
+        _full_shard_write_json(self.spec, spec)
+        environment = os.environ.copy()
+        environment["TMPDIR"] = str(self.tmpdir)
+        environment["PYTHONPYCACHEPREFIX"] = str(self.pycache)
+        log = open(self.log, "xb")
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-B", "-c", FULL_SHARD_LANE_SOURCE, mode,
+                 str(self.spec), str(self.result)],
+                cwd=self.clone, env=environment, stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        except BaseException:
+            log.close()
+            raise
+        return process, log, time.monotonic(), round(time.time(), 3)
+
+    def leftover_problems(self, main_digest: Mapping[str, str]) -> list[str]:
+        problems = []
+        try:
+            digest = _full_shard_tracked_digest(self.clone)
+            changed = sorted(path for path in set(digest) | set(main_digest)
+                             if digest.get(path) != main_digest.get(path))
+            if changed:
+                problems.append(
+                    f"lane {self.name}: tracked bytes changed in the lane checkout: "
+                    + ", ".join(changed[:10])
+                )
+            untracked = _full_shard_untracked(self.clone)
+            if untracked:
+                problems.append(f"lane {self.name}: untracked leftovers in the lane checkout: "
+                                + ", ".join(untracked[:10]))
+            ignored = sorted(_full_shard_ignored(self.clone) - self.ignored_before)
+            if ignored:
+                problems.append(f"lane {self.name}: new ignored leftovers in the lane checkout: "
+                                + ", ".join(ignored[:10]))
+        except ImpactError as exc:
+            problems.append(f"lane {self.name}: leftover gate failed: {exc}")
+        try:
+            left = sorted(os.listdir(self.tmpdir))
+        except OSError as exc:
+            left = [f"<unreadable: {exc}>"]
+        if left:
+            problems.append(f"lane {self.name}: lane TMPDIR is not empty after the lane: "
+                            + ", ".join(left[:10]))
+        return problems
+
+    def record(self) -> dict:
+        return {
+            "phase": self.phase, "clone": str(self.clone), "tmpdir": str(self.tmpdir),
+            "pycache": str(self.pycache), "log": str(self.log), "result": str(self.result),
+        }
+
+
+def _full_shard_run_phase(
+    lanes: Sequence[_FullShardLane], specs: Mapping[str, Mapping], deadline: int,
+    rows: Sequence[Mapping], assignment: Mapping[str, Sequence[int]], canonical_sha256: str,
+    main_digest: Mapping[str, str], audit: dict, label: str,
+) -> dict:
+    """Launch lanes together, wait (hang guard), then merge records and run lane gates."""
+    started = time.monotonic()
+    launched: dict[str, tuple] = {}
+    try:
+        for lane in lanes:
+            launched[lane.name] = lane.launch("run", specs[lane.name])
+    except BaseException:
+        for process, log, _started, _epoch in launched.values():
+            _full_shard_kill_group(process)
+            log.close()
+        raise
+    print(f"sharded full: phase {label} started: " + ", ".join(
+        f"{lane.name} ({len(assignment[lane.name])} cases)" for lane in lanes))
+    finished = _full_shard_wait_lanes(launched, deadline)
+    audit[f"phase_{label.lower()}_seconds"] = round(time.monotonic() - started, 1)
+    merged = {}
+    identity = full_shard_lane_identity()
+    for lane in lanes:
+        info = finished[lane.name]
+        result = merge_full_shard_lane(
+            lane.name, rows, assignment[lane.name], _full_shard_read_records(lane.result), info,
+            identity=identity, canonical_sha256=canonical_sha256,
+        )
+        merged[lane.name] = result
+        audit["lanes"][lane.name].update(info)
+        audit["lanes"][lane.name]["rows"] = len(assignment[lane.name])
+        audit["lanes"][lane.name]["suppressed"] = len(result["suppressed"])
+        audit["problems"].extend(result["problems"])
+        audit["non_success"].extend(result["non_success"])
+        audit["problems"].extend(lane.leftover_problems(main_digest))
+        print(f"sharded full: lane {lane.name} exit {info['exit']} in {info['seconds']} s")
+    markers = _full_shard_markers(
+        path for lane in lanes for path in (lane.clone, lane.tmpdir, lane.pycache)
+    )
+    try:
+        residue, waited = _full_shard_residue_gate(
+            markers, [launched[lane.name][0].pid for lane in lanes],
+        )
+    except (ImpactError, OSError, subprocess.SubprocessError) as exc:
+        audit["problems"].append(f"phase {label}: residue gate failed: {exc}")
+        residue, waited = [], None
+    audit[f"phase_{label.lower()}_residue_wait_seconds"] = waited
+    if residue:
+        audit["residue"].extend(residue)
+        audit["problems"].append(
+            f"phase {label}: {len(residue)} residual processes outlived their lane "
+            "(recorded, then terminated)"
+        )
+    return merged
+
+
+def _full_shard_execute(
+    root: Path, plan: Mapping, verbose: bool, work: Path, lanes_dir: Path,
+    temp_parent: Path, audit: dict,
+) -> None:
+    deadline = plan["lane_deadline_seconds"]
+    main_refs = _full_shard_refs(root)
+    audit["head"] = main_refs.splitlines()[0] if main_refs else None
+    main_digest = _full_shard_tracked_digest(root)
+    ignored = sorted(_full_shard_ignored(root))
+    audit["ignored_inventory"] = {
+        "count": len(ignored),
+        "sha256": hashlib.sha256("\0".join(ignored).encode("utf-8")).hexdigest(),
+    }
+    enumeration = _FullShardLane("enum", "enumeration", work, lanes_dir, temp_parent)
+    audit["enumeration"] = enumeration.record()
+    audit["lanes_prepared"] = ["enum"]
+    problems = enumeration.prepare(root, main_refs)
+    audit["enumeration"] = enumeration.record()
+    if problems:
+        audit["problems"].extend(problems)
+        return
+    launched = {"enum": enumeration.launch("enumerate", {
+        "verbose": False, "canonical_sha256": None, "count": None, "indices": [],
+    })}
+    info = _full_shard_wait_lanes(launched, deadline)["enum"]
+    audit["enumeration"].update(info)
+    try:
+        residue, _waited = _full_shard_residue_gate(
+            _full_shard_markers([enumeration.clone, enumeration.tmpdir, enumeration.pycache]),
+            [launched["enum"][0].pid],
+        )
+    except (ImpactError, OSError, subprocess.SubprocessError) as exc:
+        audit["problems"].append(f"enumeration: residue gate failed: {exc}")
+        residue = []
+    if residue:
+        audit["residue"].extend(residue)
+        audit["problems"].append(
+            f"enumeration: {len(residue)} residual processes outlived discovery "
+            "(recorded, then terminated)"
+        )
+    records = _full_shard_read_records(enumeration.result) or []
+    starts = [record for record in records if record.get("event") == "start"]
+    row_records = [record for record in records if record.get("event") == "rows"]
+    audit["problems"].extend(enumeration.leftover_problems(main_digest))
+    if info["exit"] != 0 or len(starts) != 1 or len(row_records) != 1:
+        audit["problems"].append(
+            f"canonical enumeration failed (exit {info['exit']}); see {enumeration.log}"
+        )
+        return
+    reported = {key: starts[0].get(key) for key in full_shard_lane_identity()}
+    if reported != full_shard_lane_identity():
+        audit["problems"].append(f"enumeration interpreter identity differs: {reported}")
+    if row_records[0].get("module_cleanups"):
+        audit["problems"].append("module cleanups were registered during discovery")
+    rows = row_records[0]["rows"]
+    canonical_sha256 = starts[0]["canonical_sha256"]
+    audit["canonical_sha256"] = canonical_sha256
+    audit["canonical_count"] = len(rows)
+    if audit["problems"]:
+        return
+    try:
+        applied = apply_full_shard_plan(plan, rows)
+    except ImpactError as exc:
+        audit["problems"].append(str(exc))
+        return
+    assignment = applied["lanes"]
+    phase_a = [_FullShardLane(name, "A", work, lanes_dir, temp_parent) for name in applied["phase_a"]]
+    phase_b = _FullShardLane(applied["phase_b"], "B", work, lanes_dir, temp_parent)
+    specs = {}
+    for lane in [*phase_a, phase_b]:
+        audit["lanes_prepared"].append(lane.name)
+        audit["lanes"][lane.name] = lane.record()
+        problems = lane.prepare(root, main_refs)
+        audit["lanes"][lane.name] = lane.record()
+        audit["lanes"][lane.name]["rows"] = len(assignment[lane.name])
+        audit["problems"].extend(problems)
+        specs[lane.name] = {
+            "verbose": verbose, "canonical_sha256": canonical_sha256,
+            "count": len(rows), "indices": assignment[lane.name],
+        }
+    if audit["problems"]:
+        return
+    run_started = time.monotonic()
+    merged = _full_shard_run_phase(
+        phase_a, specs, deadline, rows, assignment, canonical_sha256, main_digest, audit, "A",
+    )
+    if audit["problems"]:
+        audit["phase_b_skipped"] = True
+        audit["run_wall_seconds"] = round(time.monotonic() - run_started, 1)
+        return
+    merged.update(_full_shard_run_phase(
+        [phase_b], specs, deadline, rows, assignment, canonical_sha256, main_digest, audit, "B",
+    ))
+    audit["run_wall_seconds"] = round(time.monotonic() - run_started, 1)
+    audit["problems"].extend(full_shard_coverage_problems(len(rows), merged))
+    audit["executed"] = sum(len(result["executed"]) for result in merged.values())
+    audit["suppressed"] = sum(len(result["suppressed"]) for result in merged.values())
+
+
+def _full_shard_cleanup(work: Path, audit: dict) -> None:
+    """Remove every clone and private namespace, then verify; only then may a proof follow."""
+    targets = [work]
+    for record in [audit.get("enumeration", {}), *audit["lanes"].values()]:
+        for key in ("tmpdir", "pycache"):
+            value = record.get(key)
+            if value and value != "None":
+                targets.append(Path(value))
+    for target in targets:
+        problem = _full_shard_remove_tree(target)
+        if problem:
+            audit["cleanup"]["problems"].append(problem)
+        else:
+            audit["cleanup"]["removed"].append(str(target))
+    audit["problems"].extend(audit["cleanup"]["problems"])
+
+
+def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evidence_dir: Path) -> int:
+    """Canonical full discovery as the reviewed two-phase plan; 0 only when every gate holds."""
+    if sys.platform not in FULL_SHARD_PLATFORMS:
+        raise ImpactError(_full_shard_platform_message())
+    if not selection.full_suite:
+        raise ImpactError("--sharded requires canonical full discovery")
+    root = Path(root).resolve(strict=True)
+    evidence_dir = Path(evidence_dir)
+    validate_full_shard_destination(root, evidence_dir)
+    if evidence_dir.parent.resolve(strict=True).stat().st_dev != root.stat().st_dev:
+        raise ImpactError("--sharded destination must be on the repository's volume (clonefile)")
+    plan = load_full_shard_plan(root)
+    plan_sha256 = sha256_file(root / FULL_SHARD_PLAN_RELATIVE)
+    temp_parent = Path(tempfile.gettempdir())
+    preflight_selection(root, selection)
+    evidence_dir.mkdir(mode=0o700)
+    work = evidence_dir / "work"
+    lanes_dir = evidence_dir / "lanes"
+    work.mkdir(mode=0o700)
+    lanes_dir.mkdir(mode=0o700)
+    audit: dict = {
+        "schema": "http-full-shard-audit/1", "status": None, "argv": list(sys.argv),
+        "root": str(root), "head": None, "plan_path": FULL_SHARD_PLAN_RELATIVE,
+        "plan_sha256": plan_sha256, "plan_derivation": plan["derivation"],
+        "lane_deadline_seconds": plan["lane_deadline_seconds"],
+        "identity": full_shard_lane_identity(), "evidence": str(evidence_dir),
+        "temp_parent": str(temp_parent), "canonical_sha256": None, "canonical_count": None,
+        "enumeration": {}, "lanes": {}, "lanes_prepared": [], "phase_a_seconds": None,
+        "phase_b_seconds": None, "run_wall_seconds": None, "phase_b_skipped": False,
+        "problems": [], "non_success": [], "residue": [], "ignored_inventory": None,
+        "cleanup": {"removed": [], "problems": []}, "started_epoch": round(time.time(), 3),
+    }
+    started = time.monotonic()
+    print(f"sharded full: evidence {evidence_dir}; plan sha256 {plan_sha256}")
+    interrupted = None
+    try:
+        audit["problems"].extend(
+            problem for problem in _full_shard_gid_problems([evidence_dir, work, lanes_dir, temp_parent])
+        )
+        if not audit["problems"]:
+            _full_shard_execute(root, plan, verbose, work, lanes_dir, temp_parent, audit)
+    except (ImpactError, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
+        audit["problems"].append(f"coordinator error: {type(exc).__name__}: {exc}")
+    except BaseException as exc:
+        interrupted = exc
+        audit["problems"].append(f"interrupted: {type(exc).__name__}")
+    if not audit["problems"]:
+        _full_shard_cleanup(work, audit)
+    audit["status"] = "passed" if not audit["problems"] else "failed"
+    audit["total_wall_seconds"] = round(time.monotonic() - started, 1)
+    audit["ended_epoch"] = round(time.time(), 3)
+    _full_shard_write_json(evidence_dir / "audit.json", audit)
+    if interrupted is not None:
+        raise interrupted
+    if audit["status"] == "passed":
+        print(
+            f"sharded full passed: {audit.get('executed')} executed, {audit.get('suppressed')} "
+            f"suppressed by holders, {audit['canonical_count']} canonical; run_wall "
+            f"{audit['run_wall_seconds']} s; audit {evidence_dir / 'audit.json'}"
+        )
+        return 0
+    print(
+        f"sharded full FAILED with {len(audit['problems'])} problems; evidence kept at "
+        f"{evidence_dir} (remove it after review); audit {evidence_dir / 'audit.json'}",
+        file=sys.stderr,
+    )
+    for problem in audit["problems"][:40]:
+        print(f"  - {problem}", file=sys.stderr)
+    if verbose:
+        for name, record in audit["lanes"].items():
+            print(f"  lane {name} log: {record.get('log')}", file=sys.stderr)
+    return 1
+
+
 def print_selection(selection: Selection) -> None:
     print("mode:", "full-suite" if selection.full_suite else "related-tests")
     if selection.changed_paths:
@@ -1745,6 +2989,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--git-base", metavar="REF")
     result.add_argument("--git", action="store_true", help="include staged, unstaged, and untracked Git paths")
     result.add_argument("--all", action="store_true", help="run canonical full unittest discovery")
+    result.add_argument(
+        "--sharded", type=Path, metavar="ABSOLUTE_NEW_DIR",
+        help=("with --all: run the same canonical full discovery as the reviewed two-phase "
+              "shard plan (test_cases/full_shard_plan.json) and keep lane evidence in a new "
+              "directory outside the repository; issues the same proof as serial --all; macOS only"),
+    )
     result.add_argument(
         "--validation-only", action="store_true",
         help=("AIR/prod validation only: require exactly the three real ISSUE-0016 "
@@ -1859,6 +3109,8 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
             result = run_validation_selection(
                 root, selection, args.verbose, args.timings,
             )
+        elif getattr(args, "sharded", None) is not None:
+            result = run_sharded_selection(root, selection, args.verbose, args.sharded)
         else:
             result = run_selection(root, selection, args.verbose)
     except ImpactError as exc:
@@ -1932,6 +3184,27 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.sharded is not None:
+        if not args.all:
+            parser().error("--sharded requires --all")
+        conflicts = [name for name, present in (
+            ("--validation-only", args.validation_only),
+            ("--timings", args.timings is not None),
+            ("--check", args.check), ("--require-full", args.require_full),
+            ("--list", args.list), ("--preflight", args.preflight),
+            ("--watch", args.watch), ("--suite", bool(args.suite)),
+            ("--list-suites", args.list_suites), ("--changed", bool(args.changed)),
+            ("--changed-file", bool(args.changed_file)), ("--git", args.git),
+            ("--git-base", bool(args.git_base)),
+        ) if present]
+        if conflicts:
+            parser().error("--sharded cannot be combined with " + ", ".join(conflicts))
+        if sys.platform not in FULL_SHARD_PLATFORMS:
+            parser().error(_full_shard_platform_message())
+        try:
+            validate_full_shard_destination(ROOT, args.sharded)
+        except ImpactError as exc:
+            parser().error(str(exc))
     if args.timings is not None:
         if not args.all or not args.validation_only or any((
             args.check, args.require_full, args.list, args.preflight,

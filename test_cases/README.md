@@ -119,6 +119,14 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --check --require-full
 ```
 
+macOS 上另有 opt-in 的两阶段分片全量（候选，见 `CHANGE_AWARE_TESTING.md` 2026-10-23
+「opt-in 两阶段分片全量」小节）：`--all --sharded ABSOLUTE_NEW_DIR [-v]` 按受管计划
+`test_cases/full_shard_plan.json` 在私有 APFS clone 中并行运行阶段 A 车道，再单独运行唯一的
+阶段 B 安静车道；每个 canonical 用例必须恰好执行一次，任何失败、遗留、残留、期限或清理问题都
+返回 1 并把证据留在仓库外的 `ABSOLUTE_NEW_DIR`。成功时写入与串行 `--all` 逐字节相同的证明，
+执行形态只记在 `ABSOLUTE_NEW_DIR/audit.json`。它不能与 `--validation-only` 等其他模式同用；
+在 `TC-REAL-FULL-SHARD-001` 的专用会话同版对照完成前，不用于正式 load、同步或发布证明。
+
 发布前合同是：生产行为变更必须先或同时更新独立测试预期；确认
 `script_test_manifest.json` 的 direct 与 workflow 映射；执行 `--all` 并全部通过；随后执行
 `--check --require-full`，确认源码、测试、manifest、执行环境和批准状态仍是同一组精确身份。
