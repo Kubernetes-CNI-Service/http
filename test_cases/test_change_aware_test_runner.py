@@ -2716,7 +2716,7 @@ def shard_plan(**overrides):
         "schema_version": 1,
         "description": "synthetic direct-test plan",
         "derivation": {"status": "synthetic"},
-        "lane_deadline_seconds": 7800,
+        "lane_deadline_seconds": 9000,
         "phase_a": [
             {"lane": "w0", "units": ["test_cases.test_a", "test_cases.test_d"]},
             {"lane": "w1", "units": ["test_cases.test_b#0/2"]},
@@ -3121,6 +3121,9 @@ class FullShardDirectTests(unittest.TestCase):
     def test_lane_temporary_roots_must_carry_the_user_primary_gid(self):
         with tempfile.TemporaryDirectory(prefix="shard-gid-") as directory:
             path = Path(directory)
+            # M1 (REVIEW-1): on BSD a new directory inherits its parent's group, so the
+            # positive case must not depend on the group that owns TMPDIR's parent.
+            os.chown(path, -1, os.getgid())
             self.assertEqual([], RUNNER._full_shard_gid_problems([path]))
             real_stat = os.stat
 
@@ -3173,6 +3176,348 @@ class FullShardDirectTests(unittest.TestCase):
             ])
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(0, RUNNER._one_cycle(check)[0])
+
+
+class FullShardReviewFixTests(unittest.TestCase):
+    """REVIEW-1 M2, L1-L3, L5 and L6 of the opt-in sharded full mode.
+
+    Expectations come from the review findings and the serial unittest contract
+    (what `python -m unittest discover` reports as skipped), not from the runner.
+    """
+
+    SKIP_ROWS_SPEC = (
+        ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+        ("test_cases.test_b", [("B", ["test_1"], False), ("S", ["test_1", "test_2"], True)]),
+    )
+    HOLDER = "setUpClass (test_cases.test_b.S)"
+
+    def test_lane_deadline_floor_is_not_below_the_recorded_serial_wall_clock(self):
+        # L3: the hang guard must never stop a lane that legitimately runs as long as the
+        # whole serial suite.  CHANGE_AWARE_TESTING.md records 8,816.975 s for the most
+        # recent formal serial --all baseline; the floor may not be lower than that.
+        recorded_serial_wall_seconds = 8816.975
+        self.assertGreaterEqual(RUNNER.FULL_SHARD_MIN_LANE_DEADLINE_SECONDS, recorded_serial_wall_seconds)
+        with self.assertRaisesRegex(RUNNER.ImpactError, "lane_deadline_seconds"):
+            RUNNER.validate_full_shard_plan(shard_plan(lane_deadline_seconds=8816))
+        RUNNER.validate_full_shard_plan(
+            shard_plan(lane_deadline_seconds=RUNNER.FULL_SHARD_MIN_LANE_DEADLINE_SECONDS),
+        )
+
+    def test_plan_runtime_skips_are_exact_reasons_for_serial_skip_entries(self):
+        # M2: skips that only arise at run time (skipTest, SkipTest in setUp/setUpClass/
+        # setUpModule) cannot be known before the run; the plan may allow them only by
+        # their serial skip entry id with the exact reason.  The key is optional and its
+        # absence allows no runtime skip at all.
+        RUNNER.validate_full_shard_plan(shard_plan())
+        RUNNER.validate_full_shard_plan(shard_plan(runtime_skips={
+            "test_cases.test_b.B.test_2": "requires a private tier",
+            "test_cases.test_b.B.test_3 (case=1)": "sub-test skip",
+            "setUpClass (test_cases.test_c.C)": "fixture holder skip",
+            "setUpModule (test_cases.test_d)": "fixture module skip",
+        }))
+        for label, value in (
+            ("list", ["test_cases.test_b.B.test_2"]),
+            ("module id", {"test_cases.test_b": "x"}),
+            ("class id", {"test_cases.test_b.B": "x"}),
+            ("teardown holder", {"tearDownClass (test_cases.test_c.C)": "x"}),
+            ("blank reason", {"test_cases.test_b.B.test_2": " "}),
+            ("non-string reason", {"test_cases.test_b.B.test_2": 1}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(RUNNER.ImpactError, "full shard plan: runtime_skips"):
+                    RUNNER.validate_full_shard_plan(shard_plan(runtime_skips=value))
+
+    def test_real_plan_allows_only_the_private_documentation_tier_holder_skip(self):
+        # M2: the only runtime skip site of the suite is the private documentation tier
+        # gate in PrivateDocumentationContractTests.setUpClass (test_public_clean_clone_contract
+        # pins it as the unique class-level gate); it skips in checkouts without the ignored
+        # private tier and runs where the tier is present.  The reason is read from that
+        # module's source, never from the runner.
+        import ast as ast_module
+        source = (ROOT / "test_cases/test_private_documentation_contract.py").read_text(encoding="utf-8")
+        reasons = [
+            ast_module.literal_eval(node.value) for node in ast_module.parse(source).body
+            if isinstance(node, ast_module.Assign)
+            and [getattr(target, "id", None) for target in node.targets] == ["PRIVATE_TIER_SKIP_REASON"]
+        ]
+        self.assertEqual(1, len(reasons))
+        plan = RUNNER.load_full_shard_plan(ROOT)
+        self.assertEqual(
+            {
+                "setUpClass (test_cases.test_private_documentation_contract."
+                "PrivateDocumentationContractTests)": reasons[0],
+            },
+            plan.get("runtime_skips"),
+        )
+
+    def test_runtime_skip_entries_must_name_canonical_tests_classes_or_modules(self):
+        rows = shard_rows(SHARD_ROWS_SPEC)
+        self.assertEqual([], RUNNER.full_shard_runtime_skip_problems({
+            "test_cases.test_b.B.test_2": "r",
+            "test_cases.test_b.B.test_3 (case=1)": "r",
+            "setUpClass (test_cases.test_c.C)": "r",
+            "setUpModule (test_cases.test_d)": "r",
+        }, rows))
+        for entry in (
+            "test_cases.test_b.B.test_9",
+            "test_cases.test_b.B.test_9 (case=1)",
+            "setUpClass (test_cases.test_c.Missing)",
+            "setUpClass (test_cases.test_d)",
+            "setUpModule (test_cases.test_e)",
+        ):
+            with self.subTest(entry=entry):
+                problems = RUNNER.full_shard_runtime_skip_problems({entry: "r"}, rows)
+                self.assertTrue(any("stale" in problem and entry in problem for problem in problems), problems)
+
+    def lane_records(self, rows, indices):
+        records = [{"event": "start", "canonical_sha256": "c" * 64, "count": len(rows),
+                    **RUNNER.full_shard_lane_identity()}]
+        for index in indices:
+            records.append({"event": "test", "index": index, "id": rows[index]["id"],
+                            "outcome": "success", "seconds": 0.01})
+        records.append({"event": "finished", "tests_run": len(indices), "successful": True})
+        return records
+
+    def merge(self, rows, assigned, records):
+        return RUNNER.merge_full_shard_lane(
+            "w1", rows, assigned, records, {"exit": 0, "seconds": 1.0, "deadline_exceeded": False},
+            identity=RUNNER.full_shard_lane_identity(), canonical_sha256="c" * 64,
+        )
+
+    def test_merge_records_every_skip_entry_with_its_reason(self):
+        # M2: the audit must name every skip entry (as serial unittest reports them:
+        # the test id, or the class/module fixture holder) together with its reason.
+        rows = shard_rows(self.SKIP_ROWS_SPEC)
+        assigned = [1, 2, 3, 4]
+        records = self.lane_records(rows, [1, 2])
+        records[1]["outcome"] = "skipped"
+        records.insert(1, {"event": "skip", "index": 1, "id": rows[1]["id"], "reason": "platform"})
+        records.insert(-1, {"event": "holder", "kind": "skip", "description": self.HOLDER,
+                            "reason": "holder reason"})
+        merged = self.merge(rows, assigned, records)
+        self.assertEqual([], merged["problems"])
+        self.assertEqual([3, 4], merged["suppressed"])
+        self.assertEqual(
+            sorted([(rows[1]["id"], "platform"), (self.HOLDER, "holder reason")]),
+            sorted((entry["id"], entry["reason"]) for entry in merged["skips"]),
+        )
+        outside = self.lane_records(rows, [1, 2])
+        outside.insert(1, {"event": "skip", "index": 0, "id": rows[0]["id"], "reason": "x"})
+        merged = self.merge(rows, assigned, outside)
+        self.assertTrue(
+            any("skip entry" in problem and "outside" in problem for problem in merged["problems"]),
+            merged["problems"],
+        )
+        # A skip entry is the running test's id or one of its sub-test ids, never another row's.
+        foreign = self.lane_records(rows, [1, 2])
+        foreign[1]["outcome"] = "skipped"
+        foreign.insert(1, {"event": "skip", "index": 1, "id": rows[2]["id"], "reason": "platform"})
+        merged = self.merge(rows, assigned, foreign)
+        self.assertTrue(
+            any("skip entry" in problem and "does not belong" in problem for problem in merged["problems"]),
+            merged["problems"],
+        )
+        subtest = self.lane_records(rows, [1, 2])
+        subtest.insert(1, {"event": "skip", "index": 1, "id": rows[1]["id"] + " (case=1)", "reason": "sub"})
+        merged = self.merge(rows, [1, 2], subtest)
+        self.assertEqual([], merged["problems"])
+        self.assertEqual(
+            [(rows[1]["id"] + " (case=1)", "sub")],
+            [(entry["id"], entry["reason"]) for entry in merged["skips"]],
+        )
+
+    def test_skip_entries_must_match_enumeration_decorators_and_plan_runtime_skips(self):
+        # M2: decorator skips are known at canonical enumeration (evaluated in the
+        # coordinator's environment) and must be reported, with the same reason, by their
+        # lane; every other skip entry must be an allowed runtime skip with the exact
+        # reason.  Anything else is a skip the serial run would not have made.
+        rows = shard_rows(self.SKIP_ROWS_SPEC)
+        a1, a2, b1 = rows[0]["id"], rows[1]["id"], rows[2]["id"]
+        decorated = [{"index": 1, "reason": "platform"}]
+        runtime = {b1: "runtime reason", self.HOLDER: "holder reason"}
+
+        def merged(*lanes):
+            return {
+                name: {"skips": [{"id": entry_id, "reason": reason} for entry_id, reason in entries],
+                       "suppressed": list(suppressed)}
+                for name, entries, suppressed in lanes
+            }
+
+        clean = merged(("w0", [(a2, "platform")], []),
+                       ("wq", [(b1, "runtime reason"), (self.HOLDER, "holder reason")], [3, 4]))
+        self.assertEqual([], RUNNER.full_shard_skip_problems(rows, decorated, runtime, clean))
+        # An allowed runtime skip that does not happen in this checkout is not a problem.
+        self.assertEqual([], RUNNER.full_shard_skip_problems(
+            rows, decorated, runtime, merged(("w0", [(a2, "platform")], []), ("wq", [], [])),
+        ))
+        # A decorated test of a class whose setUpClass skipped is reported by the holder
+        # only, exactly as in serial unittest.
+        self.assertEqual([], RUNNER.full_shard_skip_problems(
+            rows, [{"index": 3, "reason": "platform"}], runtime,
+            merged(("wq", [(self.HOLDER, "holder reason")], [3, 4])),
+        ))
+        faults = {
+            "decorator skip ran": (decorated, runtime, merged(("w0", [], [])), a2),
+            "decorator reason": (decorated, runtime, merged(("w0", [(a2, "other")], [])), "reason"),
+            "lane-only skip": (decorated, runtime,
+                               merged(("w0", [(a2, "platform"), (a1, "lane only")], [])), "unexpected skip"),
+            "runtime reason": (decorated, runtime,
+                               merged(("w0", [(a2, "platform")], []), ("wq", [(b1, "other")], [])), "reason"),
+            "holder not allowed": (decorated, {}, clean, "unexpected skip"),
+            "duplicate": (decorated, runtime,
+                          merged(("w0", [(a2, "platform")], []), ("w1", [(a2, "platform")], [])),
+                          "more than once"),
+        }
+        for label, (decorator_skips, runtime_skips, result, keyword) in faults.items():
+            with self.subTest(label=label):
+                problems = RUNNER.full_shard_skip_problems(rows, decorator_skips, runtime_skips, result)
+                self.assertTrue(any(keyword in problem for problem in problems), problems)
+
+    def test_cleanup_retry_reraises_the_original_error_for_non_unlink_functions(self):
+        # L1: Python 3.12's fd-based rmtree reports os.open/os.scandir failures through
+        # onexc; re-calling os.open(path) raised TypeError and escaped the problem path.
+        with tempfile.TemporaryDirectory(prefix="shard-onexc-") as directory:
+            tree = Path(directory) / "lane"
+            tree.mkdir()
+            original = PermissionError(13, "fixture refusal", str(tree))
+            raised = []
+
+            def fake_rmtree(path, **kwargs):
+                callback = kwargs.get("onexc") or kwargs.get("onerror")
+                argument = original if "onexc" in kwargs else (PermissionError, original, None)
+                try:
+                    callback(os.open, os.fspath(path), argument)
+                except BaseException as exc:
+                    raised.append(exc)
+                    raise
+
+            with mock.patch.object(RUNNER.shutil, "rmtree", side_effect=fake_rmtree):
+                problem = RUNNER._full_shard_remove_tree(tree)
+            self.assertEqual([original], raised)
+            self.assertIn("fixture refusal", problem)
+            self.assertTrue(tree.exists())
+
+    def test_cleanup_retry_still_removes_entries_of_read_only_directories(self):
+        with tempfile.TemporaryDirectory(prefix="shard-readonly-") as directory:
+            tree = Path(directory) / "lane"
+            inner = tree / "inner"
+            inner.mkdir(parents=True)
+            (inner / "file").write_text("x", encoding="utf-8")
+            inner.chmod(0o500)
+            self.assertIsNone(RUNNER._full_shard_remove_tree(tree))
+            self.assertFalse(tree.exists())
+
+    def test_cleanup_exception_is_a_problem_and_the_audit_is_still_written(self):
+        # L1: an unexpected exception during cleanup must not skip the audit; the run
+        # fails closed with a recorded problem.
+        with tempfile.TemporaryDirectory(prefix="shard-cleanup-audit-") as directory:
+            base = Path(directory).resolve()
+            root = base / "repository"
+            (root / "test_cases").mkdir(parents=True)
+            (root / "test_cases/full_shard_plan.json").write_text("{}\n", encoding="utf-8")
+            evidence = base / "evidence"
+            with mock.patch.object(RUNNER, "FULL_SHARD_PLATFORMS", frozenset({sys.platform})), \
+                    mock.patch.object(RUNNER, "load_full_shard_plan", return_value=shard_plan()), \
+                    mock.patch.object(RUNNER, "preflight_selection"), \
+                    mock.patch.object(RUNNER, "_full_shard_gid_problems", return_value=[]), \
+                    mock.patch.object(RUNNER, "_full_shard_execute"), \
+                    mock.patch.object(RUNNER, "_full_shard_cleanup", side_effect=TypeError("cleanup callback")), \
+                    redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                code = RUNNER.run_sharded_selection(root, RUNNER.Selection(full_suite=True), False, evidence)
+            self.assertEqual(1, code)
+            audit = json.loads((evidence / "audit.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", audit["status"])
+            self.assertTrue(
+                any("cleanup" in problem and "TypeError" in problem for problem in audit["problems"]),
+                audit["problems"],
+            )
+
+    def test_audit_json_is_ascii_and_keeps_undecodable_path_text(self):
+        # L2: problem text carries os.fsdecode() output; a non-UTF-8 file name decodes to
+        # a lone surrogate, which a UTF-8 writer cannot encode.
+        with tempfile.TemporaryDirectory(prefix="shard-ascii-") as directory:
+            path = Path(directory) / "audit.json"
+            value = {"problems": ["lane w0: untracked leftovers in the lane checkout: bad-\udcff-name"]}
+            RUNNER._full_shard_write_json(path, value)
+            text = path.read_bytes().decode("ascii")
+            self.assertEqual(value, json.loads(text))
+
+    def test_coordinator_git_ignores_inherited_git_environment(self):
+        # L5: in a hook context GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would redirect
+        # `git -C <lane clone>` to another repository.
+        with tempfile.TemporaryDirectory(prefix="shard-git-env-") as directory:
+            base = Path(directory).resolve()
+            lane, foreign = base / "lane", base / "foreign"
+            clean = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+            for repository in (lane, foreign):
+                repository.mkdir()
+                subprocess.run(
+                    ["git", "init", "--quiet", str(repository)], env=clean, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
+                )
+            hostile = {
+                "GIT_DIR": str(foreign / ".git"), "GIT_WORK_TREE": str(foreign),
+                "GIT_INDEX_FILE": str(foreign / ".git/index"),
+            }
+            with mock.patch.dict(os.environ, hostile):
+                completed = RUNNER._full_shard_git(lane, "rev-parse", "--absolute-git-dir")
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            self.assertEqual(
+                os.path.realpath(lane / ".git"),
+                os.path.realpath(completed.stdout.decode("utf-8").strip()),
+            )
+
+    def test_lane_environment_drops_inherited_git_variables(self):
+        # L5: a lane runs in its own clone; inherited repository-location variables
+        # would point its tests at the main checkout.  The three config-source selectors
+        # name no repository, index or work tree and keep hermetic callers (this suite's
+        # own fixtures set GIT_CONFIG_NOSYSTEM/GIT_CONFIG_GLOBAL) independent of the
+        # user's global excludes or fsmonitor settings.
+        config_selectors = {"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"}
+        with tempfile.TemporaryDirectory(prefix="shard-lane-env-") as directory:
+            base = Path(directory).resolve()
+            lanes_dir = base / "lanes"
+            lanes_dir.mkdir()
+            lane = RUNNER._FullShardLane("w0", "A", base / "work", lanes_dir, base)
+            lane.tmpdir = base / "lane-tmp"
+            lane.pycache = base / "lane-pyc"
+            captured = {}
+
+            def fake_popen(argv, **kwargs):
+                captured.update(kwargs)
+                return mock.Mock(pid=0)
+
+            hostile = {
+                "GIT_DIR": "/nonexistent/foreign/.git", "GIT_INDEX_FILE": "/nonexistent/foreign/index",
+                "GIT_WORK_TREE": "/nonexistent/foreign", "GIT_CONFIG_GLOBAL": os.devnull,
+                "SHARD_ENV_SENTINEL": "kept",
+            }
+            with mock.patch.dict(os.environ, hostile), \
+                    mock.patch.object(RUNNER.subprocess, "Popen", side_effect=fake_popen):
+                launched = lane.launch("run", {"verbose": False, "indices": []})
+            launched[1].close()
+            environment = captured["env"]
+            self.assertEqual(
+                [], sorted(key for key in environment if key.startswith("GIT_") and key not in config_selectors),
+            )
+            self.assertEqual(os.devnull, environment["GIT_CONFIG_GLOBAL"])
+            self.assertEqual("kept", environment["SHARD_ENV_SENTINEL"])
+            self.assertEqual(str(lane.tmpdir), environment["TMPDIR"])
+            self.assertEqual(str(lane.pycache), environment["PYTHONPYCACHEPREFIX"])
+
+    def test_residue_gate_runs_ps_and_lsof_by_absolute_path(self):
+        # L6: lsof lives in /usr/sbin, which an operator PATH may omit; a PATH lookup
+        # failure made every sharded run fail closed.
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            stdout = "" if len(calls) == 1 else f"p{os.getpid()}\nn/\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(RUNNER.subprocess, "run", side_effect=fake_run):
+            self.assertEqual([], RUNNER._full_shard_residue(["/nonexistent/shard-lane"], []))
+        self.assertEqual(["/bin/ps", "/usr/sbin/lsof"], [argv[0] for argv in calls])
 
 
 if __name__ == "__main__":

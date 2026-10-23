@@ -67,19 +67,27 @@ def mode():
     return os.environ.get("SHARD_FIXTURE_MODE", "")
 
 
-@contextlib.contextmanager
-def record(case):
-    started = time.time()
-    yield
+def _append(value):
     path = os.environ.get("SHARD_FIXTURE_MARKERS")
     if path:
-        line = json.dumps({"id": case.id(), "cwd": os.getcwd(), "pid": os.getpid(),
-                           "start": started, "end": time.time()}) + "\\n"
+        line = json.dumps(value) + "\\n"
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
             os.write(descriptor, line.encode("utf-8"))
         finally:
             os.close(descriptor)
+
+
+@contextlib.contextmanager
+def record(case):
+    started = time.time()
+    yield
+    _append({"id": case.id(), "cwd": os.getcwd(), "pid": os.getpid(),
+             "start": started, "end": time.time()})
+
+
+def note(case, data):
+    _append(dict(data, note=case.id(), cwd=os.getcwd(), pid=os.getpid()))
 '''
 
 ALPHA_SOURCE = '''"""Fixture alpha: phase A, declared same lane as delta."""
@@ -122,6 +130,7 @@ class AlphaTests(unittest.TestCase):
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
 
+    @unittest.skipIf(probe.mode() == "skip", "fixture decorator skip")
     def test_a2(self):
         with probe.record(self):
             if probe.mode() == "fail":
@@ -129,12 +138,24 @@ class AlphaTests(unittest.TestCase):
 '''
 
 BETA_SOURCE = '''"""Fixture beta: split into two contiguous case slices."""
+import gc
+from pathlib import Path
+import tempfile
 import unittest
+import weakref
 
 from test_cases import fixture_probe as probe
 
+RELEASED = {}
+
 
 class BetaTests(unittest.TestCase):
+    # True only where TMPDIR is a lane's private directory below the fixture's lane-tmp
+    # parent: a skip that the lane environment creates and the serial run would not.
+    @unittest.skipIf(
+        probe.mode() == "lane-skip" and Path(tempfile.gettempdir()).parent.name == "lane-tmp",
+        "fixture skip that only a lane TMPDIR triggers",
+    )
     def test_b1(self):
         with probe.record(self):
             pass
@@ -145,11 +166,26 @@ class BetaTests(unittest.TestCase):
 
     def test_b3(self):
         with probe.record(self):
-            pass
+            if probe.mode() == "release":
+                RELEASED["b3"] = weakref.ref(self)
 
     def test_b4(self):
+        if probe.mode() == "skip":
+            self.skipTest("fixture runtime skip")
         with probe.record(self):
-            pass
+            if probe.mode() == "release":
+                gc.collect()
+                reference = RELEASED.get("b3")
+                alive = sorted(
+                    item.id() for item in gc.get_objects()
+                    if isinstance(item, unittest.TestCase)
+                    and type(item).__module__.startswith("test_cases.test_")
+                )
+                probe.note(self, {
+                    "b3_recorded": reference is not None,
+                    "b3_alive": reference is not None and reference() is not None,
+                    "alive": alive,
+                })
 '''
 
 DELTA_SOURCE = '''"""Fixture delta: one case runs in phase A, one case is a quiet-phase unit."""
@@ -177,6 +213,12 @@ from test_cases import fixture_probe as probe
 
 
 class GammaTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        if probe.mode() == "skip":
+            raise unittest.SkipTest("fixture holder skip")
+
     def test_g1(self):
         with probe.record(self):
             pass
@@ -196,23 +238,26 @@ class EpsilonTests(unittest.TestCase):
 '''
 
 
-def fixture_plan(*, delta_lane="w0", same_lane=True):
+def fixture_plan(*, delta_lane="w0", same_lane=True, runtime_skips=None):
     phase_a = [
         {"lane": "w0", "units": [ALPHA] + ([DELTA] if delta_lane == "w0" else [])},
         {"lane": "w1", "units": [f"{BETA}#0/2"] + ([DELTA] if delta_lane == "w1" else [])},
         {"lane": "w2", "units": [f"{BETA}#1/2"]},
     ]
-    return {
+    plan = {
         "schema_version": 1,
         "description": "fixture plan for the sharded full workflow",
         "derivation": {"status": "fixture"},
-        "lane_deadline_seconds": 7800,
+        "lane_deadline_seconds": 9000,
         "phase_a": phase_a,
         "phase_b": {"lane": "wq", "units": [D2_UNIT, GAMMA]},
         "slices": {BETA: [f"{BETA}.BetaTests.test_b3"]},
         "same_lane": [[ALPHA, DELTA]] if same_lane else [],
         "phase_b_reasons": {GAMMA: "fixture quiet module", D2_UNIT: "fixture quiet case"},
     }
+    if runtime_skips is not None:
+        plan["runtime_skips"] = runtime_skips
+    return plan
 
 
 class ShardFixture(unittest.TestCase):
@@ -220,6 +265,10 @@ class ShardFixture(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="shard-wf-")
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
+        # M1 (REVIEW-1): on BSD every directory created below inherits this group; give
+        # the fixture root the user's primary gid so the runner's gid gate sees the same
+        # state whatever group owns TMPDIR's parent (for example /private/tmp).
+        os.chown(self.base, -1, os.getgid())
         self.root = self.base / "repository"
         self.root.mkdir()
         self.lane_tmp_parent = self.base / "lane-tmp"
@@ -521,6 +570,75 @@ class FullShardWorkflowTests(ShardFixture):
         self.assertEqual(1, code, output)
         self.assertEqual([], markers)
         self.assertTrue(any("same_lane" in problem for problem in audit["problems"]), audit["problems"])
+
+    def test_m3_lane_releases_each_test_after_it_runs_and_keeps_no_unselected_test(self):
+        # M3 (REVIEW-1): serial TestSuite.run drops each test once it has run; a lane
+        # must do the same and must not keep the instances of the tests it does not run.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        code, _evidence, markers, _audit, output = self.run_in_process("release")
+        self.assertEqual(0, code, output)
+        b4 = f"{BETA}.BetaTests.test_b4"
+        notes = [item for item in markers if item.get("note") == b4]
+        self.assertEqual(1, len(notes), markers)
+        self.assertEqual("w2", Path(notes[0]["cwd"]).name)
+        self.assertTrue(notes[0]["b3_recorded"], notes[0])
+        self.assertFalse(notes[0]["b3_alive"], notes[0])
+        self.assertEqual([b4], notes[0]["alive"])
+
+    def test_m2_skip_entries_are_audited_per_lane_and_bounded_by_the_plan(self):
+        # M2: decorator skips are expected from the enumeration; the runtime skip and the
+        # class fixture holder skip are allowed by the plan with their exact reasons.
+        a2 = f"{ALPHA}.AlphaTests.test_a2"
+        b4 = f"{BETA}.BetaTests.test_b4"
+        holder = f"setUpClass ({GAMMA}.GammaTests)"
+        self.build(plan=fixture_plan(runtime_skips={
+            b4: "fixture runtime skip", holder: "fixture holder skip",
+        }))
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        code, _evidence, _markers, audit, output = self.run_in_process("skip")
+        self.assertEqual(0, code, output)
+        self.assertEqual([], audit["problems"])
+        self.assertEqual([{"id": a2, "reason": "fixture decorator skip"}], audit["decorator_skips"])
+        self.assertEqual([{"id": a2, "reason": "fixture decorator skip"}], audit["lanes"]["w0"]["skips"])
+        self.assertEqual([], audit["lanes"]["w1"]["skips"])
+        self.assertEqual([{"id": b4, "reason": "fixture runtime skip"}], audit["lanes"]["w2"]["skips"])
+        self.assertEqual([{"id": holder, "reason": "fixture holder skip"}], audit["lanes"]["wq"]["skips"])
+        self.assertEqual(
+            [f"{GAMMA}.GammaTests.test_g1", f"{GAMMA}.GammaTests.test_g2"],
+            audit["lanes"]["wq"]["suppressed_ids"],
+        )
+
+    def test_m2_runtime_or_holder_skip_outside_the_plan_fails_closed(self):
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("skip")
+        self.assert_failed(result, "unexpected skip")
+        problems = "\n".join(result[3]["problems"])
+        self.assertIn(f"{BETA}.BetaTests.test_b4", problems)
+        self.assertIn(f"setUpClass ({GAMMA}.GammaTests)", problems)
+        self.assertNotIn(f"{ALPHA}.AlphaTests.test_a2", problems)
+
+    def test_m2_skip_that_only_the_lane_environment_triggers_fails_closed(self):
+        # M2: lanes run with a private TMPDIR; a skip that depends on it is not a skip
+        # the serial run would make and must not be accepted as coverage.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("lane-skip")
+        self.assert_failed(result, "unexpected skip")
+        self.assertTrue(
+            any(f"{BETA}.BetaTests.test_b1" in problem for problem in result[3]["problems"]),
+            result[3]["problems"],
+        )
+        self.assertEqual([], result[3]["decorator_skips"])
 
 
 if __name__ == "__main__":
