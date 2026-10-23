@@ -375,6 +375,14 @@ clone、私有 TMPDIR 与私有 0700 pyc 前缀的 gid 等于用户主 gid；车
 `--changed-file`、`--git`、`--git-base` 同用；REQ10C 例外的 validation-only 证明仍只能由串行
 `--all --validation-only` 取得。没有任何跳过证明检查的参数。
 
+前置条件（与串行 `--all` 相同，分片不放宽也不另加判定）：主 checkout 必须带有已 fetch 的
+`refs/remotes/origin/v2`（历史 P 锚点），且 HEAD 到该锚点的第一父链无 merge、在既有上限之内；
+这两项由历史 P 测试自身的 `_resolve_published_v2_anchor` 与 `_raw_v3_first_parent_chain` 判定，
+缺任一项时 P 族测试在每个车道与串行中同样失败。车道 clone 由 clonefile 逐字节复制整个 `.git`
+（refs、packed-refs 与对象），从不 fetch；clone 门逐项核对 HEAD 与全部 refs 与主 checkout 相同，
+并拒绝 alternates/commondir/shallow/grafts，所以每个车道的 P 回放读到的是同一个本地 origin/v2。
+没有 origin/v2 时 P 回放不会执行，此时的车道或全量时长不能当作分片或串行的计时读数。
+
 启用顺序：消费者无法区分分片与串行证明，所以启用只靠落地顺序。引入本模式的提交、以及以后修改
 分片机制（runner 中本小节对应代码）的提交，其证明必须由串行 `--all` 产出；只改计划分配的提交
 不改变机制，覆盖等价仍由上述门禁逐次核对。在专用会话上完成预登记的「同版串行 `--all` 对分片」
