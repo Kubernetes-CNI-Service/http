@@ -143,6 +143,93 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
 
 > 合入 http dev 主树时的说明（2026-10-25）：本节只收录随性能单元合入 DEV 的条目；条目内的测量和运行证据都来自 http-test 树（TEST），不是在 DEV 上测得的；DEV 合入后的验证见合并窗口记录。
 
+### 2026-10-23 P 族原始对象按调用作用域闭合批量读取（C09）
+
+> 合入 DEV 注（2026-10-25）：本小节原文是 http-test 树（TEST）上的记录，文中「本树」指 TEST 树；所列 RED/GREEN、计数、余量与收益都是 http-test 的历史证据或推断，DEV 没有运行这些测试。DEV 上 W1 的请求数、cat-file 次数与 ×4 余量须在合并窗口实测。
+
+依据：owner 2026-10-23 聊天原话「采用C09，这么节省时间」（撤销 10-22「暂不采用」的选择），以及
+「任何性能优化方案验证测试通过了就可以落地」。这是一份新合同；下文 2026-10-09 判定表、
+2026-10-08 source guard 批量读取小节和其他条款的文字都不变。
+
+范围：只改测试侧 harness `test_cases/test_public_publication_workflow.py`，在最后一个测试之后、
+`if __name__` 之前纯插入一个区块：`_RawObjectPrefetchScope`、`_C09_SCOPE`（ContextVar）、
+`_C09_BATCH_LIMIT = 32`、`_c09_first_parent_hint`，并把 `_read_raw_git_object`、
+`_verified_commit_records`、`_raw_v3_first_parent_chain` 三个模块名重新绑定为分派器。原定义逐字
+不变，并以 `_read_raw_git_object_single`、`_verified_commit_records_unscoped`、
+`_raw_v3_first_parent_chain_unscoped` 保留。生产脚本、runner、manifest、批准 ledger、
+`RAW_OBJECT_TIMEOUT_SECONDS = 1`、`P_V3_FIRST_PARENT_LIMIT` 和历史 P 回放都不变。
+
+机制（落地的是 serve 形态 = lab `d31a2a0` + fix2 serve；区块字节与 lab pin 相同，见下方证据）：
+1. 作用域：每次 `_verified_commit_records` 或 `_raw_v3_first_parent_chain` 调用 set 一个作用域，
+   finally 中 reset。作用域之外（包括其他线程和后续调用）`_read_raw_git_object` 就是原单对象读取；
+   请求的仓库与作用域仓库不同时也走原读取。
+2. 批读：作用域内某次请求没有已复核的帧时，从计划中该对象的位置起取至多 32 个未尝试的
+   (OID, kind)，用与原语相同的命令、环境和 `timeout=RAW_OBJECT_TIMEOUT_SECONDS` 运行一次闭合 stdin
+   的 `cat-file --batch`。只含 1 个键的批次不运行（R3），该对象直接由原读取给出。
+3. 逐帧复核：回显 OID、kind、规范 size、分隔符和 SHA-1，与原语逐项相同；复核通过的帧按请求逐个
+   交出，只存在于本次遍历。
+4. 失败即回退：子进程异常/超时、非 0、stderr 非空、缺头或尾部多余字节时整批不用；某帧不符时该帧
+   及其后不用。作用域内第一次批次失败后不再批读（R2）。回退一律走原单对象读取，判定（异常或 1 秒
+   超时）只由原语产生，批次本身从不抛出判定。
+5. 计划（serve，R4）：只在帧交给消费者时才从该 commit/tree 计划子对象；不会读取消费者尚未接受的
+   对象之下的对象，因此不需要 arrival 形态的额外裁定。
+6. 链提示（R1）：链遍历前运行一次有界 `rev-list --first-parent --max-count=P_V3_FIRST_PARENT_LIMIT+1`
+   （环境与原语相同、stdin 为 DEVNULL、超时 1 秒），在 anchor 或 S 处截断；异常、超时或非 0 都视为
+   没有提示。提示只决定预取顺序，链的每一步仍由原逐提交读取和原断言判定。
+
+与既有条款的关系：
+- 「固定历史 P 回放保持原 SHA 和安全合同不变」：`_run_historical_p_test`、历史 SHA pin、回放
+  超时 1500 秒与私有历史 checkout 都不变；回放子进程执行的是 V2 历史字节，不含本区块。C09 只改变
+  当前 V3 侧（`_assert_v3_child_authority` 及直接调用这三个名字的当前测试）读取原始对象的方式。
+- 「不能把同一次读取跨测试或提交边界复用」：作用域只活在一次遍历调用内；验证结束后再改写对象的
+  postverification 测试仍由新的遍历重新读取并拒绝。
+- 「不能用 metadata 替代原字节检查」：每帧都按原字节重算 SHA-1。不缓存模块或 namespace，不引入
+  线程或进程池。
+- 与 2026-10-08 source guard 批量读取的两处差异：(a) 坏帧之前已复核的前缀帧仍被采用（先例整批
+  拒绝），每个被采用的帧都单独通过与原语相同的复核，给出的字节与单读相同；(b) 只复核 SHA-1：原语
+  本身只接受 40 位 OID、只算 SHA-1，SHA-256 仓库中 C09 全部回退到原语，不引入新行为。32 上限、
+  闭合 stdin、有限超时与先例一致。
+- 读取时机：一次遍历内对象可能先于请求被读取（预取），交出的仍是按 OID 复核过的同一字节。
+
+tests-first：`test_public_publication_v3_overlap` 新增 14 个用例。前 12 个（批量上限与闭合 stdin、
+失败批次只回退原读取、作用域只在调用内、提示不能改变原链、原语在遍历外仍是一次闭合读取、真实 ROOT
+的权威校验经原语读取全部对象且子进程少、11 种畸形批输出回退后结果相同、FIFO 提交有界、第一次失败
+批次关闭预取、单键对象只来自原读取、正确提示不读 anchor/S、V2 原语语料在批次中回退相同）的字节
+等于 lab serve pin；后 2 个是落地时补充的守卫：链提示失败、外来或以 anchor 开头时完全不预取且原链
+不变，以及遍历内交出的每个元组与遍历外原读取逐字节相同。预期值来自字面夹具与 hashlib，计数由
+字面形状手推（48 个对象；42 提交链 40 次读取；12 提交链 10 次读取）。在只含测试的提交上预登记的
+RED 为 Ran 18、failures=12、errors=18（逐项见对应提交信息）；运行后须把 RED/GREEN 日志及其
+SHA256 追加到本小节，本小节写入时尚未运行任何测试。
+
+W1 的前提与余量：W1 对真实 ROOT 执行 `_assert_v3_child_authority`，需要 `refs/remotes/origin/v2`
+指向 V2 anchor、HEAD 到 anchor 的 first-parent 链没有 merge、工作树干净且手册当前。first-parent
+链上有 merge 提交的检出（例如 2026-10-23 的 G1 合并提交）中，W1 与既有 historical P 方法一样以
+「V3 history must remain merge-free」失败，与 C09 无关；W1 要在无 merge 的链上判定。余量按静态
+模型推断（该模型在 lab 树上复现 E1 读数：旧实现 1743 次 cat-file，arrival/serve 子进程 90/231）：
+本树一次权威校验约 1935 次请求、serve 约 236 次 cat-file，×4 断言约有 2.0 倍余量【推断】。
+
+负载敏感性：T1、T4、T10、W1 的子进程计数断言只在批次真实超过 1 秒时失败（R2 随即关闭预取，结果
+仍正确但计数变多）；这类失败先查负载，不放宽阈值、不改超时。
+
+证据位置（仓库外）：lab 链 `/Users/joeyyang/Desktop/claude-merge-test/lab-trees/http-perf-670-c09fix`
+（f0570a3→874f3f5→d2fb233→d31a2a0）；提案 `http-perf-runs/proposals/PROP-02-c09.md`；serve 字节
+重建与移植脚本、W1 模型在 `/Users/joeyyang/Desktop/claude-merge-test/step1.noindex/devC09-work/`。
+重建用两个独立口径（钉住的生成脚本在内存中重放；独立重写同一组替换），两者逐字节一致，输入与
+输出都等于 PREP pin（serve_e_ov `859f601d0e598d7b01b20ae84bc31da7b14f9c0ba83a06a0d15a2fe2324b5951`，
+serve_f_wf `6cc7f664cf000fd0a4cd9c7d1017eed14592e2764907eebc7640c7b209420de4`）。本树的 workflow
+文件去掉 d13c6a9 相对 670acfa 多出的两行后等于 serve_f_wf。收益量值只有 lab 读数：ABA-T 测的是
+`d31a2a0`，每次串行 full 约 434 秒；serve 形态没有串行全量实测，按 ABA-T 口径推断约 377–390 秒。
+这些不是本树的 full 证明。
+
+注记：T6b 注释中的 `test_public_publication_workflow.py:5433-5442` 是 670acfa 行号，本树同一元组在
+:5435-5444；注释说它「expected GREEN before and after」是相对 lab 的 `d31a2a0` 实现而言，在本树的
+测试先行提交上它因检查 `_C09_SCOPE` 而 ERROR。为保持字节等于 pin，没有改这条注释。
+
+manifest 不变：两个模块已在 repository-governance suite 和相关 path rule 中，没有新增生产脚本或
+测试模块。`user-manual.html` 按模块 docstring 编目，两个模块的 docstring 不变，无需重新生成；
+W1 本身会执行 `tools/update-user-manual.py --check`。本文件的改动在 runner 中属于未知路径，按规则
+要求 canonical full。以上都不签发批准、不改 ledger；正式状态只看集成后的 full/check。
+
 ### 2026-09-29 第二轮：collection worker 的结束唤醒
 
 完整计时文件 `/tmp/http-full-timings-20260929-codex-test-dba95de.jsonl` 中，
