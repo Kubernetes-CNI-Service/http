@@ -57,7 +57,7 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
                os_branch_case=None,os_branch_hook=None,skip_canary=False,os_branch_drift=None,
                os_branch_fail_target=None,health_payloads=None,pre_boot_exit=None,download_telemetry=False,
                jitter_window=0,preboot_uid_timeout_once=False,password_prompt_attempts=1,pre_boot_log=None,
-               download_ack_disappears=False,remote_hook=None,prewrite_query_timeout=None):
+               download_ack_disappears=False,remote_hook=None,prewrite_query_timeout=None,entry_args=None):
         project,home,known=fixtures.WorkflowTests().fixture(root)
         from test_access_recovery import install_pair
         install_pair(home)
@@ -444,7 +444,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             code=app.main(['--project',str(project),'--devices','ew-spine*' if two or parallel_barrier or different_canaries or (os_branch_case and count>1) else HOST,
                 '--method','http','--package-dir',str(package_root),
                 *([] if jitter_window is None else ['--os-download-jitter',str(jitter_window)]),*selection,
-                *(['--inspect-only'] if inspect else ['--upgrade','--yes']),
+                *((['--inspect-only'] if inspect else ['--upgrade','--yes']) if entry_args is None
+                  else list(entry_args)),
                 *(['--skip-canary'] if skip_canary else [])])
         self.assertEqual(password_prompt.call_count,0 if inspect else password_prompt_attempts)
         self._last_access_snapshot=remote.files.get('/home/admin/.ssh/authorized_keys',b'')

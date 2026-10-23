@@ -51,6 +51,41 @@
   SDK/设备 FD 回收、断电或现场恢复。原期限、失败记录、重试及上述全部场景不变；没有省略
   场景、新增风险接受确认人或现场操作授权。
 
+## TC-REAL-IBSW-UPGRADE-USABILITY-001 — 固定 venv 切换、进程内 FD 软限制与检查后升级
+
+- Case ID：`TC-REAL-IBSW-UPGRADE-USABILITY-001`；类型：direct / workflow / real-environment。
+  对应 owner 2026-10-23 现场可用性三项；状态 **NOT RUN / REAL_ENV REQUIRED**。适用 Ubuntu 24.04
+  管理服务器及 NVOS。
+- 风险与目标：防止系统 Python 误跑、切换到不可信解释器、口令进入 argv/环境、FD 预算误拒或
+  误放、并发提高后健康查询未完成被当作健康通过，以及把检查结论当成升级授权。
+- 本地证据：`test_ibsw_upgrade_usability.py`（direct）与 `test_ibsw_upgrade_usability_workflow.py`
+  （真实 entry/driver/observer/executor/pipeline，设备 IO 为合成替身；rlimit 为内存模拟；venv 为只含
+  dist-info 的合成目录与记录脚本）。不证明真实 Ubuntu venv、真实 RLIMIT、真实 TTY 或设备行为。
+  full 未执行。
+- 前置：另行取得维护窗口与升级授权；记录入口/模块 SHA、`python3 --version`、`ulimit -Sn`、
+  `ulimit -Hn`、`~/.venvs/http/ibsw-upgrade` 与 `~/.venv-upgrade` 的 `pyvenv.cfg`、`pip freeze`
+  及目录属主/权限。不从本卡推定任何设备写入授权。
+- 步骤：
+  1. 不激活 venv，执行 `python3 upgrade.py --devices '<单台测试交换机>' --inspect-only`：应先出现一行
+     `[RUNTIME] … Re-running once with fixed venv …`，随后检查正常；新进程 argv 与原参数一致，
+     `/proc/<pid>/environ` 只多 `IBSW_UPGRADE_VENV_REEXEC=1`。
+  2. 在临时 `HOME` 下放置不合格候选（其他用户可写、缺 paramiko 元数据、`pyvenv.cfg` 缺失）：应不切换并
+     `HOLD [SSH_RUNTIME]`，列出两个候选、拒绝原因和创建命令；不得修改真实 venv 的权限。
+  3. shell 中 `ulimit -Sn 1024` 后做小批次检查：应出现 `[FD] Raised … 1024 -> N`，同一 shell 的
+     `ulimit -Sn` 仍为 1024。在硬限制较低的子 shell 中应出现 `[FD] Open-file hard limit … below` 及
+     原有 `HOLD [FD_BUDGET_INSUFFICIENT]`。
+  4. 交互终端默认检查（不带模式参数）：在提示处回车、输入 no 或等待 300 秒，均不升级且不问口令；
+     再次运行并输入 yes：只问一次交换机口令，新 run 只含确认设备，`inspection_handoff` 指向检查 run。
+  5. 大批量分别以默认并发和 `--parallel-limit 8`、`--parallel-limit 16` 做默认检查，对比
+     `HEALTH_QUERY_FAILED` 数量及其 `query_diagnostic`（elapsed、budget、stream-complete、exit）。
+- 预期与证据：保存脱敏完整终端输出、两个 run 目录、`run-report.json`（`readiness_scheduler.soft_limit`、
+  `inspection_handoff`）、去除秘密后的进程 argv/环境快照和 `ulimit` 前后值。夹具结果不得回填为现场 PASS。
+- 风险：提高软限制后预检并发回到设计值，可能增加 `HEALTH_QUERY_FAILED`（2026-10-23 现场并发 32 时多出
+  7 台）；健康门不放宽、不自动重试，大批量需显式 `--parallel-limit`。venv 审核只覆盖有界目录，不是
+  逐文件审计。
+- 清理/回滚：删除临时 `HOME` 与测试副本；不删除原 run 证据；设备回滚按 TC-REAL-IBSW225-INTEGRATION-001
+  的已授权方案执行。
+
 ## TC-REAL-BACKUP-BOUNDED-ANCHOR-001 — 固定辅助脚本与原进程组监督
 
 - 类型：direct / integration / scenario / real-environment；对应 backup bounded-process

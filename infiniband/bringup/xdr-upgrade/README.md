@@ -52,6 +52,7 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
 `upgrade.sh` 已是兼容入口；必须与 Python 入口、`tools/ibsw_upgrade_*.py`、
 共同运行锁模块及三个 shell 文件成套使用，不可只复制一个 shell。
 依赖见本目录 `requirements.txt`，在独立 Python 环境安装，不自动修改系统 Python。
+直接 `python3 upgrade.py` 时会自动切换到固定 venv（不创建、不安装），见下文“SSH 运行环境”。
 
 当前默认 **HTTP**，可显式选择 **SCP** 由交换机通过 OpenSSH `scp -O` 拉包，
 不是 SFTP 传包。交互终端未指定方式时，回车或等待 15 秒均选 HTTP；非交互、
@@ -99,15 +100,85 @@ OS 下载的真实管理端记录须完成 file/dir fsync、关键 finish/close 
 预检查。坏 peer 内容使本台 HOLD；原件、共享来源或可靠记录失败按共享停止处理。
 失败安装或 UNKNOWN 不自动重试、不释放未知槽以补派，不重放请求或 reset/adopt。
 
+### SSH 运行环境（自动切换固定 venv）
+
+SSH 依赖仍只装在独立 venv 里；`upgrade.py` 不创建 venv、不联网、不安装任何包。
+直接运行 `python3 upgrade.py …` 或 `bash upgrade.sh …` 时：
+
+1. 当前解释器已满足本目录 `requirements.txt`（8 个 `==` 钉值，且 PyYAML 已安装）时直接运行，不切换。
+2. 否则按固定顺序查找候选（owner 2026-10-23 裁定；集中在 `upgrade.py` 的
+   `_RUNTIME_VENV_PATHS` / `_runtime_venv_candidates()`，用 `os.path.expanduser` 展开；
+   项目级依赖表确定后只替换这一处）：
+   1. `~/.venvs/http/ibsw-upgrade`：指定位置，也是找不到时提示创建的位置；
+   2. `~/.venv-upgrade`：兼容现场已有环境。
+   脚本目录下的 `.venv` 不是候选。不要在源码树内建 venv：传输合同不排除 `.venv`，
+   会被 sync/打包带走，开发树中还会被治理发现当作未登记脚本。
+3. 候选须通过有界审核：家目录内的上级目录、venv 根、`bin`、`lib`、唯一的
+   `lib/python3.*/site-packages`、`pyvenv.cfg` 和 `bin/python3`（跟随链接）都是真实目录/文件，
+   属主为当前账户或 root，其他用户不可写（组可写仅限私有用户组）；site-packages 元数据须满足
+   `requirements.txt` 全部条目。这不是对整个 venv 树逐文件审计。
+4. 第一个通过的候选用 `os.execve` 以原参数重新执行一次，只透传 `-B`；环境只增加循环保护标记
+   `IBSW_UPGRADE_VENV_REEXEC=1`（不含秘密），新进程读到后立即移除且不再切换。切换发生在运行锁、
+   传输方式菜单和任何密码提示之前，密码不可能进入 argv 或环境。stderr 打印一行
+   `[RUNTIME] … Re-running once with fixed venv …`。
+5. 都不可用时照旧 `HOLD [SSH_RUNTIME]`，并列出两个候选及拒绝原因，给出创建命令：
+
+```bash
+python3 -m venv ~/.venvs/http/ibsw-upgrade
+~/.venvs/http/ibsw-upgrade/bin/python -m pip install -r /absolute/http/infiniband/bringup/xdr-upgrade/requirements.txt
+```
+
+Ubuntu 需要 `python3-venv`；pip 需要可达的包源，离线包方案待项目依赖表确定。
+`--help`、`--version`、`--scripts-only`、`--diagnose-inputs` 及参数错误不切换。
+
+### 打开文件数（FD）软限制
+
+预检和升级的 FD 预算是软限制的一半。`_collect_readiness` 判断预算之前，`upgrade.py` 把本进程的
+`RLIMIT_NOFILE` 软限制提高到 min(硬限制, 估算需求)，估算需求 = 2 ×（当前已占用 + 64 预留 +
+每台设备 16 个保留证据 FD + max(每个预检 64, 升级时每台在途 128 + 64 × OS 跳数)）。
+stderr 打印 `[FD] Raised this process's open-file soft limit 1024 -> N …`，运行报告的
+`readiness_scheduler.soft_limit` 记录原值、新值、硬限制和估算需求。
+
+rlimit 属于进程：只影响本进程及之后启动的子进程，调用它的 shell 保持原值，所以不需要“恢复”。
+硬限制从不修改；硬限制低于估算时打印 `[FD] Open-file hard limit … is below the estimated need …`，
+预算仍不够则照旧 `HOLD [FD_BUDGET_INSUFFICIENT]`：缩小 `--devices` 批次或由管理员提高硬限制。
+
+提高软限制后，预检并发回到设计值 min(32, ceil(N/2))；现场观察到此前 1024 软限制把 192 台的预检
+并发压到约 5。按代码，`FD_BUDGET_INSUFFICIENT` 在已无进行中的预检、而已保留的证据 FD 仍占满半个
+软限制时触发。2026-10-23 现场在并发 32 时多出 7 台
+`HEALTH_QUERY_FAILED`（健康查询未完成）。大批量建议显式加 `--parallel-limit 8`（或 12、16），
+它同时降低预检和升级并发；健康门本身不变，`HEALTH_QUERY_FAILED` 不自动重试。
+
+### 默认检查后直接升级
+
+只有默认检查（未带 `--inspect-only`、`--dry-run`、`--verify-only`、`--scripts-only`、`--upgrade`、
+`--diagnose-inputs`），stdin、stdout、stderr 都是终端，且没有 `--json` 时，才会在检查报告保存后提示：
+
+- 提示对象：本次检查中 READY、所选组件至少一项 `UPGRADE_REQUIRED`、启动健康检查 PASS 且无需复核的设备。
+  健康非 PASS、需复核和预检跳过的设备单独列出，不进入本次升级。
+- 必须精确输入 `yes`；回车、其他内容、EOF 或 300 秒无应答都按否处理。提示前会丢弃已键入的预输入。
+- 确认后在同一进程（运行锁一直持有）按 `--upgrade --yes` 新建一个 run，只升级确认的设备；
+  交换机密码只问一次。
+- 复用：进程、运行锁、venv、已选传输方式（不再弹菜单）、命令行参数、确认的设备集合
+  （不可达、健康异常、已在目标版本的设备不再重新探测）。
+- 重做：输入与计划重新绑定；每台的升级预检（host key、身份、版本、OS 路由、启动健康门、
+  key 与 password 双登录、authorized_keys 备份）；每个组件派发前的版本、访问、密码复核、配置备份、
+  健康与挂起检查、金丝雀和重启后验证。升级证据链绑定在它自己的 run 目录，检查阶段不做访问准备也
+  不执行健康门，且检查与确认之间存在时间差，所以这些不复用。
+- 确认后当前输入不再选中全部确认设备时，`HOLD [INSPECTION_HANDOFF]`，不问密码、不升级。
+- 升级报告新增 `inspection_handoff`（检查 run 目录、确认设备、各组件设备、排除名单）。
+- 非交互、`--json` 及显式只读模式行为不变。
+
 ### 当前操作顺序（以下示例不自动执行）
 
 先完整保留本仓库布局，再用独立 Python 3.12 环境安装本目录依赖；不要只复制
-`upgrade.sh`，也不要安装到系统 Python。以下路径均须替换为操作者自己的绝对路径：
+`upgrade.sh`，也不要安装到系统 Python。推荐使用上文固定位置，此后可直接 `python3 upgrade.py`；
+`/absolute/http` 须替换为操作者自己的绝对路径：
 
 ```bash
-python3.12 -m venv /absolute/ibsw-venv
-/absolute/ibsw-venv/bin/python -m pip install -r /absolute/http/infiniband/bringup/xdr-upgrade/requirements.txt
-/absolute/ibsw-venv/bin/python -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --help
+python3.12 -m venv ~/.venvs/http/ibsw-upgrade
+~/.venvs/http/ibsw-upgrade/bin/python -m pip install -r /absolute/http/infiniband/bringup/xdr-upgrade/requirements.txt
+python3 -B /absolute/http/infiniband/bringup/xdr-upgrade/upgrade.py --help
 ```
 
 requirements 固定八个 SSH 依赖版本；其中 PyYAML 原文未锁版本，不能称九包完整锁定。

@@ -151,11 +151,15 @@ def _parse_cli(argv):
                 "Do not use another server or configuration writer against these switches at the same time. "
                 "Alternatively use --project /var/www/html/DAY0-Prepare/PROJECT. "
                 "Upgrade workers U=min(32,ceil(ready_devices/2)); verification workers V=min(8,ceil(U/4)). "
-                "Startup preflight is also parallel: min(32,ceil(candidate_devices/2)), limited by half-soft FD headroom. "
+                "Startup preflight is also parallel: min(32,ceil(candidate_devices/2)), limited by half-soft FD headroom; "
+                "the process first raises only its own open-file soft limit toward the hard limit. "
+                "--parallel-limit lowers both preflight and upgrade concurrency. "
                 "Each component's upgrade canary must pass; after reboot require nvued running AND a usable version query, at most 5 rounds 60 seconds apart. "
                 "--devices is a case-insensitive full-hostname glob selector, not a regex. "
                 "Quote patterns such as 'ew-spine00[1-9]*' or 'ib-pod[a-d]-leaf*'. "
-                "Real upgrades still require --upgrade --yes; inspection never upgrades devices."),
+                "Without an active venv, ~/.venvs/http/ibsw-upgrade (then ~/.venv-upgrade) is used once if it carries requirements.txt. "
+                "Real upgrades require --upgrade --yes, or typing yes when an interactive default inspection "
+                "offers its READY/UPGRADE_REQUIRED devices; the inspection never upgrades devices."),
         allow_abbrev=False,
     )
     parser.add_argument("--inspect-only", action="store_true",
@@ -462,7 +466,205 @@ def _check_runtime():
             problems.append(f"{name} expected={expected} installed={visible}")
     if problems:
         raise _InspectionHold("SSH runtime mismatch: " + "; ".join(problems)
-                              + ". Use the matching virtual environment or install requirements.txt there; nothing was installed automatically")
+                              + ". Use the matching virtual environment or install requirements.txt there; nothing was installed automatically. "
+                              + _runtime_venv_hint())
+
+
+# SSH runtime environment switch. This block is the single replaceable place
+# for the candidate paths and their acceptance rules (README: "SSH runtime
+# environment"); a project dependency table may later supply the fixed path.
+# Owner ruling 2026-10-23: the first path is the designated environment and
+# the creation target; ~/.venv-upgrade is accepted for compatibility only.
+_RUNTIME_VENV_PATHS = ('~/.venvs/http/ibsw-upgrade', '~/.venv-upgrade')
+_RUNTIME_VENV_MARKER = 'IBSW_UPGRADE_VENV_REEXEC'  # loop guard only; never a secret
+_REQUIREMENT_LINE = re.compile(r'([A-Za-z0-9][A-Za-z0-9._-]{0,79})(?:==([A-Za-z0-9][A-Za-z0-9.+!_-]{0,79}))?')
+
+
+def _runtime_venv_candidates():
+    """Fixed ordered venvs from _RUNTIME_VENV_PATHS, expanded with os.path.expanduser.
+
+    Never derived from argv, input files or the entry directory.
+    """
+    return tuple(Path(os.path.expanduser(path)) for path in _RUNTIME_VENV_PATHS)
+
+
+def _runtime_requirements():
+    """Sibling requirements.txt as ((name, exact-version-or-None), ...); None if unusable."""
+    try:
+        with open(_ENTRY_DIRECTORY / 'requirements.txt', encoding='utf-8') as handle:
+            text = handle.read(65536)
+    except (OSError, UnicodeDecodeError):
+        return None
+    entries = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        match = _REQUIREMENT_LINE.fullmatch(line)
+        if match is None:
+            return None
+        entries.append((match.group(1), match.group(2)))
+    return tuple(entries) or None
+
+
+def _requirement_problems(requirements, version):
+    problems = []
+    for name, expected in requirements:
+        try:
+            installed = version(name)
+        except metadata.PackageNotFoundError:
+            installed = None
+        if installed is None or (expected is not None and installed != expected):
+            visible = ('missing' if installed is None else installed
+                       if re.fullmatch(r'[A-Za-z0-9.+_-]{1,80}', str(installed)) else 'unsupported')
+            problems.append(name + ' expected=' + (expected or 'present') + ' installed=' + visible)
+    return problems
+
+
+def _audited_runtime_venv(venv):
+    """(python, reason). Bounded audit, not a whole-tree audit.
+
+    The venv's parents inside the home directory, the venv root, bin, lib, its
+    single lib/python3.*/site-packages, pyvenv.cfg and bin/python3 (followed)
+    must be real, owned by this account or root and not writable by others
+    (group only for a private user group); the site-packages metadata must
+    satisfy every requirements.txt entry.
+    """
+    import grp
+    import pwd
+    euid = os.geteuid()
+    account = pwd.getpwuid(euid)
+
+    def unsafe(info):
+        if info.st_uid not in (0, euid):
+            return 'owned by another account'
+        if info.st_mode & stat.S_IWOTH:
+            return 'writable by others'
+        if info.st_mode & stat.S_IWGRP:
+            try:
+                group = grp.getgrgid(info.st_gid)
+            except KeyError:
+                return 'group-writable'
+            if not (info.st_gid == account.pw_gid and group.gr_name == account.pw_name
+                    and all(member == account.pw_name for member in group.gr_mem)):
+                return 'group-writable'
+        return None
+    requirements = _runtime_requirements()
+    if requirements is None:
+        return None, 'requirements.txt unreadable'
+    venv = Path(venv)
+    try:
+        if not venv.is_absolute():
+            return None, 'not absolute'
+        home = Path(os.path.expanduser('~'))
+        parents = [parent for parent in venv.parents if parent != home and parent.is_relative_to(home)]
+        for parent in parents:
+            info = os.lstat(parent)
+            if not stat.S_ISDIR(info.st_mode):
+                return None, str(parent) + ' is not a real directory'
+            problem = unsafe(info)
+            if problem:
+                return None, str(parent) + ' ' + problem
+        for path, label in ((venv, 'directory'), (venv / 'bin', 'bin'), (venv / 'lib', 'lib'),
+                            (venv / 'pyvenv.cfg', 'pyvenv.cfg')):
+            info = os.lstat(path)
+            if not (stat.S_ISREG(info.st_mode) if label == 'pyvenv.cfg' else stat.S_ISDIR(info.st_mode)):
+                return None, label + ' is not a real ' + ('file' if label == 'pyvenv.cfg' else 'directory')
+            problem = unsafe(info)
+            if problem:
+                return None, label + ' ' + problem
+        sites = sorted((venv / 'lib').glob('python3.*/site-packages'))
+        if len(sites) != 1:
+            return None, 'needs exactly one lib/python3.*/site-packages'
+        for path in (sites[0].parent, sites[0]):
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode):
+                return None, 'site-packages is not a real directory'
+            problem = unsafe(info)
+            if problem:
+                return None, 'site-packages ' + problem
+        python = venv / 'bin' / 'python3'
+        info = os.stat(python)
+        if not stat.S_ISREG(info.st_mode) or not os.access(python, os.X_OK):
+            return None, 'bin/python3 is not executable'
+        problem = unsafe(info)
+        if problem:
+            return None, 'bin/python3 ' + problem
+    except FileNotFoundError:
+        return None, 'missing'
+    except OSError as error:
+        return None, 'unreadable (' + errno.errorcode.get(error.errno, 'OSError') + ')'
+
+    def installed(name):
+        found = [item.version for item in metadata.distributions(name=name, path=[str(sites[0])])]
+        if len(found) != 1:
+            raise metadata.PackageNotFoundError(name)
+        return found[0]
+    try:
+        problems = _requirement_problems(requirements, installed)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None, 'site-packages metadata unreadable'
+    if problems:
+        return None, 'requirements not met: ' + '; '.join(problems)
+    return str(python), 'usable'
+
+
+def _runtime_venv_hint():
+    """Fixed guidance naming both candidates; the owner-designated first one is created."""
+    candidates = _runtime_venv_candidates()
+    checked = ', '.join(str(venv) + ' (' + _audited_runtime_venv(venv)[1] + ')' for venv in candidates)
+    target = candidates[0]  # under the home directory, outside any deployed or packaged tree
+    current = (' This interpreter already runs from ' + sys.prefix + '; it was not switched again.'
+               if any(Path(sys.prefix) == venv for venv in candidates) else '')
+    return ('Fixed venv candidates: ' + checked + '.' + current
+            + ' Create the fixed environment once, then rerun: python3 -m venv ' + str(target)
+            + ' && ' + str(target / 'bin' / 'python') + ' -m pip install -r '
+            + str(_ENTRY_DIRECTORY / 'requirements.txt'))
+
+
+def _reexec_in_runtime_venv(argv=None):
+    """Switch once to the first audited fixed venv before the guard or any prompt.
+
+    Runs only from the script entry. Arguments are passed unchanged; the
+    environment gains only the loop marker. No password or other secret has
+    been read at this point. Otherwise returns and the SSH_RUNTIME hold applies.
+    """
+    if os.environ.pop(_RUNTIME_VENV_MARKER, None) is not None:
+        return 'ALREADY_SWITCHED'
+    args = tuple(sys.argv[1:] if argv is None else argv)
+    if any(arg in ('-h', '--help', '--version') for arg in args):
+        return 'NOT_NEEDED'
+    try:
+        parsed = _parse_cli(args)
+    except Exception:
+        return 'NOT_NEEDED'  # main() reports the argument error unchanged
+    if parsed.scripts_only or parsed.diagnose_inputs:
+        return 'NOT_NEEDED'
+    try:
+        requirements = _runtime_requirements()
+        problems = _requirement_problems(requirements, metadata.version) if requirements else ()
+        candidates = [(venv, _audited_runtime_venv(venv)[0]) for venv in _runtime_venv_candidates()] if problems else ()
+    except Exception:
+        return 'NOT_NEEDED'  # never fail before the guard; the SSH_RUNTIME hold reports it
+    if not problems:
+        return 'NOT_NEEDED'
+    for venv, python in candidates:
+        if python is None:
+            continue
+        # Forward -B only: -I/-E/-S/-s would hide the venv's own site-packages.
+        options = ['-B'] if sys.flags.dont_write_bytecode else []
+        environment = dict(os.environ)
+        environment[_RUNTIME_VENV_MARKER] = '1'
+        sys.stderr.write('[RUNTIME] ' + sys.executable + ' lacks the pinned SSH runtime ('
+                         + '; '.join(problems) + '). Re-running once with fixed venv ' + str(venv)
+                         + ' (' + python + '); arguments unchanged, no secret has been read.\n')
+        sys.stderr.flush()
+        try:
+            os.execve(python, [python, *options, sys.argv[0], *args], environment)
+        except OSError as error:
+            sys.stderr.write('[RUNTIME] Could not start ' + python + ' ('
+                             + errno.errorcode.get(error.errno, 'OSError') + '); trying the next fixed candidate.\n')
+    return 'NO_CANDIDATE'
 
 
 def _resolve_auth(parsed):
@@ -620,6 +822,65 @@ def _selection_summary(selected, blocked):
 def _upgrade_worker_count(ready_count,cap=None):
     workers=min(32,(ready_count+1)//2)
     return min(workers,cap) if cap is not None else workers
+
+
+_FD_RETAINED_PER_DEVICE = 16  # conservative startup evidence kept open per adopted device
+
+
+def _descriptor_soft_target(candidates, startup_workers, *, upgrade, os_hops=1):
+    """Soft RLIMIT_NOFILE whose half (the pipeline budget) admits full concurrency.
+
+    Current use + 64 reserve + retained startup evidence per device + the larger
+    of 64 per startup scope and, for upgrades, (128 + 64 x OS hops) per
+    in-flight device: the pipeline's own preflight/upgrade reservations.
+    """
+    from ibsw_upgrade_pipeline import _open_descriptor_count
+    in_flight = 64 * startup_workers
+    if upgrade:
+        in_flight = max(in_flight, _upgrade_worker_count(candidates) * (128 + 64 * max(1, os_hops)))
+    return 2 * (_open_descriptor_count() + 64 + _FD_RETAINED_PER_DEVICE * candidates + in_flight)
+
+
+def _planned_os_hops(scope):
+    """Upper bound before routes are frozen: the declared OS stages."""
+    if 'os' not in scope.parsed.selected:
+        return 1
+    policy = scope.policy
+    return max(1, len(getattr(policy, 'os_stages', ()) or getattr(policy, 'os', ())))
+
+
+def _raise_descriptor_soft_limit(required):
+    """Raise only this process's open-file soft limit toward min(hard, required).
+
+    rlimits belong to a process: the invoking shell keeps its own values and
+    only children started later inherit this one, so nothing is restored. The
+    hard limit is never changed; when it is too low the original FD_BUDGET
+    refusal still applies.
+    """
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    record = dict(soft_before=soft, soft_after=soft, hard=hard, required=required)
+    if soft == resource.RLIM_INFINITY or soft >= required:
+        return record
+    target = required if hard == resource.RLIM_INFINITY else min(hard, required)
+
+    def shown(value):
+        return 'unlimited' if value == resource.RLIM_INFINITY else str(value)
+    if target > soft:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        except (ValueError, OSError):
+            sys.stderr.write(f"[FD] Could not raise this process's open-file soft limit {soft} -> {target} "
+                             f"(hard={shown(hard)}); keeping {soft}.\n")
+            return record
+        record['soft_after'] = target
+        sys.stderr.write(f"[FD] Raised this process's open-file soft limit {soft} -> {target} "
+                         f"(hard={shown(hard)}, estimated need={required}); the invoking shell is unchanged.\n")
+    if target < required:
+        sys.stderr.write(f"[FD] Open-file hard limit {shown(hard)} is below the estimated need {required}; "
+                         "if startup still reports FD_BUDGET_INSUFFICIENT, select a smaller --devices batch "
+                         "or have the administrator raise the hard limit.\n")
+    return record
 
 
 def _print_ready_device(index, total, hostname, rows):
@@ -857,8 +1118,10 @@ def _collect_readiness(scope, nodes, parsed, password):
     completed, pending = {}, {}
     cursor = publish = 0
     nominal = _upgrade_worker_count(len(nodes),getattr(parsed,'parallel_limit',None))
+    soft_limit = _raise_descriptor_soft_limit(_descriptor_soft_target(
+        len(nodes), nominal, upgrade=scope._access_required, os_hops=_planned_os_hops(scope)))
     scope._readiness_scheduler = dict(workers=nominal, max_pending=0, completed=0,
-        descriptor_budget=_soft_descriptor_limit()//2, per_pending_reserved=64)
+        descriptor_budget=_soft_descriptor_limit()//2, per_pending_reserved=64, soft_limit=soft_limit)
     if not nodes: return (), []
     sys.stderr.write(f'[PREFLIGHT] candidates={len(nodes)} workers={nominal} '
                      f'fd-budget={scope._readiness_scheduler["descriptor_budget"]} rule=min(32,ceil(N/2))\n')
@@ -1748,6 +2011,126 @@ def _print_upgrade_summary(summary):
     sys.stderr.flush()
 
 
+# Post-inspection offer: default interactive inspection only. The confirmed
+# set is DATA that can only narrow the following upgrade run; every device
+# still passes that run's own fresh preflight and per-component gates.
+_UPGRADE_CONFIRMATION_SECONDS = 300
+_EXPLICIT_MODE_OPTIONS = frozenset(('--inspect-only', '--dry-run', '--verify-only',
+                                    '--scripts-only', '--upgrade', '--diagnose-inputs'))
+
+
+def _upgrade_handoff_plan(summary):
+    """READY devices with a selected UPGRADE_REQUIRED component, startup health
+    PASS and no review item, in inspection order. Display/selection DATA only."""
+    skipped = {row['hostname'] for row in summary.get('skipped_devices', [])}
+    selected = set(summary.get('selected_components') or ())
+    review = {row['hostname'] for row in summary.get('component_precheck_issues', [])}
+    health = _health_check_summary(summary)
+    healthy = set(health['groups']['PASS']) - set(health['abnormal_devices'])
+    rows = {}
+    for row in summary.get('version_plan', []):
+        if row['component'] in selected:
+            rows.setdefault(row['hostname'], []).append(row)
+    devices, components = [], {component: [] for component in ('os', 'bios', 'cpld')}
+    excluded = dict(health_not_pass=[], review_required=[])
+    for target in summary.get('targets', []):
+        host = target['hostname']
+        actions = rows.get(host, [])
+        if host in skipped or not any(row['action'] == 'UPGRADE_REQUIRED' for row in actions):
+            continue
+        if host in review or any(row['action'] not in ('UPGRADE_REQUIRED', 'AT_TARGET_NO_FLASH') for row in actions):
+            excluded['review_required'].append(host)
+        elif host not in healthy:
+            excluded['health_not_pass'].append(host)
+        else:
+            devices.append(host)
+            for row in actions:
+                if row['action'] == 'UPGRADE_REQUIRED':
+                    components[row['component']].append(host)
+    return dict(inspection_run_directory=summary.get('run_directory'), devices=tuple(devices),
+                components={name: tuple(hosts) for name, hosts in components.items()},
+                excluded={name: tuple(hosts) for name, hosts in excluded.items()},
+                preflight_skipped=len(skipped))
+
+
+def _upgrade_handoff_terminal():
+    try:
+        return all(stream is not None and stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr))
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _read_upgrade_confirmation(timeout):
+    """One answer line after discarding type-ahead; None on EOF or timeout."""
+    try:
+        termios.tcflush(sys.stdin.fileno(), termios.TCIFLUSH)
+    except (OSError, ValueError, AttributeError, termios.error):
+        pass
+    readable, _, _ = select.select([sys.stdin], [], [], timeout)
+    if not readable:
+        sys.stderr.write('\n[UPGRADE OFFER] No answer within ' + str(timeout) + ' seconds.\n')
+        return None
+    line = sys.stdin.readline(64)
+    return line.strip() if line else None
+
+
+def _offer_upgrade_handoff(argv, parsed, summary):
+    """Ask once after the saved default inspection; return the confirmed plan or None."""
+    if (_EXPLICIT_MODE_OPTIONS.intersection(argv) or not parsed.inspect_only or parsed.verify_only
+            or parsed.output_json or not _upgrade_handoff_terminal()):
+        return None
+    plan = _upgrade_handoff_plan(summary)
+    if not plan['devices']:
+        return None
+    count = len(plan['devices'])
+
+    def names(hosts):
+        for start in range(0, len(hosts), 4):
+            sys.stderr.write(re.sub(r'[\x00-\x1f\x7f]', '?', '    - ' + ', '.join(hosts[start:start + 4])) + '\n')
+    sys.stderr.write(f'\n[UPGRADE OFFER] {count} device(s) are READY with UPGRADE_REQUIRED and passed the startup health check:\n')
+    for component in ('os', 'bios', 'cpld'):
+        if plan['components'][component]:
+            sys.stderr.write(f"  {component.upper()}: {len(plan['components'][component])} device(s)\n")
+    names(plan['devices'])
+    for key, label in (('health_not_pass', 'startup health not PASS'), ('review_required', 'observation requires review')):
+        if plan['excluded'][key]:
+            sys.stderr.write(f"  Not offered, {label}: {len(plan['excluded'][key])} device(s)\n")
+            names(plan['excluded'][key])
+    if plan['preflight_skipped']:
+        sys.stderr.write(f"  Not offered, preflight-skipped: {plan['preflight_skipped']} device(s)\n")
+    sys.stderr.write('  yes = real upgrade now, in this process and a new run, of exactly these device(s); '
+                     'equivalent to --upgrade --yes limited to them'
+                     + (' with --skip-canary.\n' if parsed.skip_canary else '; component canaries apply.\n'))
+    sys.stderr.write('  The switch password is then requested once. The upgrade repeats its own fresh preflight '
+                     'on each device (host key, identity, versions, startup health gate, key AND password login, '
+                     'authorized_keys backup) and keeps configuration backup and post-reboot verification.\n')
+    sys.stderr.write(f'Type yes to upgrade these {count} device(s) now; anything else keeps the inspection only '
+                     f'[{_UPGRADE_CONFIRMATION_SECONDS}s = no]: ')
+    sys.stderr.flush()
+    if _read_upgrade_confirmation(_UPGRADE_CONFIRMATION_SECONDS) != 'yes':
+        sys.stderr.write('[UPGRADE OFFER] Not confirmed; inspection only, no upgrade was started.\n')
+        return None
+    sys.stderr.write(f"[UPGRADE OFFER] Confirmed for {count} device(s); inspection evidence retained at "
+                     f"{plan['inspection_run_directory']}.\n")
+    return plan
+
+
+def _upgrade_handoff_argv(argv):
+    """Original public arguments (including a frozen --method) plus explicit confirmation."""
+    argv = tuple(argv)
+    return argv + ('--upgrade',) + (() if ('--yes' in argv or '-y' in argv) else ('--yes',))
+
+
+def _restrict_to_handoff(devices, blocked, handoff):
+    """Narrow, never widen: every confirmed device must still be selected."""
+    confirmed = tuple(handoff['devices'])
+    kept = tuple(node for node in devices if node.hostname in confirmed)
+    if len(kept) != len(confirmed) or {node.hostname for node in kept} != set(confirmed):
+        raise _InspectionHold('INSPECTION_HANDOFF: the current inputs no longer select every device confirmed '
+                              'after the inspection; no upgrade was started. Run the inspection again')
+    return kept, tuple(item for item in blocked if item.hostname in confirmed)
+
+
 def _input_diagnostic_document(parsed, prepare, entry, cwd, stage, error=None, selected=(), blocked=()):
     document = {"revision": _DESKTOP_REVISION, "state": "INPUT_PREFLIGHT_FAILED" if error else "INPUT_PREFLIGHT_PASSED",
         "diagnostic_data_only": True, "execution_state": "NOT_EXECUTED", "ssh_attempted": False,
@@ -1852,7 +2235,7 @@ def _failure_detail(error, stage):
     return stage, ("Validation refused (" + type(error).__name__ + "). See Location below or run --diagnose-inputs for source/path diagnostics; raw exception text is withheld to protect credentials")
 
 
-def main(argv=None,*,_password_attempt=1,_password_history=()):
+def main(argv=None,*,_password_attempt=1,_password_history=(),_handoff=None):
     is_upgrade = False
     stage = "ARGUMENTS"
     parsed, prepare_arguments, entry, cwd = None, None, None, None
@@ -1882,6 +2265,9 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
         # and verifies the full CSV; this snapshot never becomes permission.
         selection = driver.preflight_inventory_selection(entry, cwd, parsed.prepare_args)
         selected, blocked = selection.devices, selection.blocked_devices
+        if _handoff is not None:
+            stage = "INSPECTION_HANDOFF"
+            selected, blocked = _restrict_to_handoff(selected, blocked, _handoff)
         if parsed.diagnose_inputs:
             document = _input_diagnostic_document(parsed, prepare_arguments, entry, cwd, stage, selected=selected, blocked=blocked)
             sys.stdout.write(json.dumps(document, sort_keys=True, indent=2) + "\n")
@@ -1927,6 +2313,9 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
                                       prepared["run_directory"]) as scope:
             live_selection = driver.select_inventory_devices(scope.session.inventory(), parsed.devices)
             nodes, blocked = live_selection.devices, live_selection.blocked_devices
+            if _handoff is not None:
+                stage = "INSPECTION_HANDOFF"
+                nodes, blocked = _restrict_to_handoff(nodes, blocked, _handoff)
             ready = nodes
             if not parsed.scripts_only:
                 stage = "TARGET_READINESS"
@@ -1990,6 +2379,11 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
         if parsed.upgrade:
             summary['password_attempt']=_password_attempt
             summary['previous_password_attempt_runs']=list(_password_history)
+        if _handoff is not None:
+            summary['inspection_handoff']=dict(inspection_run_directory=_handoff['inspection_run_directory'],
+                devices=list(_handoff['devices']),
+                components={name: list(hosts) for name, hosts in _handoff['components'].items()},
+                excluded={name: list(hosts) for name, hosts in _handoff['excluded'].items()})
         summary.update(input_eligible_ib_count=len(nodes), ready_ib_count=len(ready), eligible_ib_count=len(ready))
         summary["run_directory"] = prepared["run_directory"]
         summary['version_plan'] = getattr(scope,'_version_plan',[])
@@ -2064,12 +2458,18 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
             final_scope.write_run_report(summary)
         _emit_report_json(summary,force=parsed.output_json)
         _print_upgrade_summary(summary)
+        if _handoff is None and not parsed.upgrade:
+            # The inspection run is saved and closed; the runtime guard stays held.
+            stage = "UPGRADE_OFFER"
+            handoff = _offer_upgrade_handoff(argv, parsed, summary)
+            if handoff is not None:
+                return main(_upgrade_handoff_argv(argv), _handoff=handoff)
         return 3 if incomplete else 0
     except _PasswordReentry as retry:
         sys.stderr.write(f'[AUTH] Existing password was explicitly rejected before any key or installer write. '
             f'Attempt {_password_attempt+1}/3; previous evidence retained at {retry.directory}\n')
         return main(argv,_password_attempt=_password_attempt+1,
-                    _password_history=(*_password_history,retry.directory))
+                    _password_history=(*_password_history,retry.directory),_handoff=_handoff)
     except _InvalidParallelLimit:
         sys.stderr.write("HOLD: Invalid --parallel-limit: expected a non-negative integer.\n")
         return 1
@@ -2091,6 +2491,7 @@ def main(argv=None,*,_password_attempt=1,_password_history=()):
 
 if __name__ == "__main__":
     try:
+        _reexec_in_runtime_venv()
         raise SystemExit(_guarded_main())
     except KeyboardInterrupt:
         sys.stderr.write("HOLD: inspection interrupted\n")
