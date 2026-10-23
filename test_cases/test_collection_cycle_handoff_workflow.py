@@ -8,6 +8,7 @@ witness behaviour have separate tests and are not assumed here.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import fcntl
 from contextlib import redirect_stderr
@@ -716,6 +717,145 @@ def ho7_tree_digest(prefix: Path) -> dict[str, str]:
     return inventory
 
 
+# HO-7: one private, stdlib-only, CHECKED_HASH pyc namespace per run_workflow
+# call.  The fixture env has no HOME, so without it every Python process of the
+# chain compiles the same stdlib from source.  Top-level stdlib modules the
+# chain imports; literal on purpose (reviewable, never derived from the code
+# under test).  A module missing here only falls back to source compilation.
+HANDOFF_STDLIB_PYC_MODULES = (
+    "argparse", "collections", "contextlib", "copy", "csv", "ctypes", "dataclasses",
+    "datetime", "fcntl", "fnmatch", "grp", "hashlib", "io", "ipaddress", "json", "math",
+    "os", "pathlib", "posixpath", "re", "runpy", "secrets", "signal", "socket", "stat",
+    "struct", "subprocess", "sys", "tempfile", "threading", "time", "traceback", "types",
+    "typing", "uuid",
+)
+# Runs as: sys.executable -I -B -c HANDOFF_STDLIB_PYC_WARM PREFIX NAME...
+# -I: no PYTHON* env, no user site, no cwd on sys.path; env is PATH only, so no
+# HOME and no pyc namespace is read either.  -B: the imports write nothing.  It
+# then compiles, from the current source bytes, CHECKED_HASH pycs ONLY for
+# already-imported modules whose source lives in the stdlib directory (never
+# site-packages or a project file).
+HANDOFF_STDLIB_PYC_WARM = r'''
+import importlib, importlib.util, os, py_compile, sys, sysconfig
+prefix = sys.argv[1]
+for name in sys.argv[2:]:
+    importlib.import_module(name)
+stdlib = os.path.realpath(sysconfig.get_paths()["stdlib"])
+sys.pycache_prefix = prefix
+written = 0
+skipped = []
+for module in list(sys.modules.values()):
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None) if spec is not None else None
+    if not isinstance(origin, str) or not origin.endswith(".py"):
+        continue
+    real = os.path.realpath(origin)
+    if os.path.commonpath([real, stdlib]) != stdlib or (os.sep + "site-packages" + os.sep) in real:
+        skipped.append(origin)
+        continue
+    py_compile.compile(
+        origin, cfile=importlib.util.cache_from_source(origin), doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+    )
+    written += 1
+print(written, len(skipped))
+'''
+
+
+def validated_stdlib_pyc_manifest(prefix: Path) -> dict[str, str]:
+    """Check a prefix holds only current-stdlib CHECKED_HASH pycs; return its inventory.
+
+    Nothing in the prefix is trusted because of where it came from: every entry
+    must be a real directory or a regular unoptimised ``.pyc`` whose mapped
+    source is a regular file in this interpreter's stdlib (outside
+    site-packages), with this interpreter's magic, flags 0b11 (hash based,
+    checked on every import) and the source hash of the source bytes as they
+    are now.  The inventory (``ho7_tree_digest``) is what the run is bound to.
+    """
+    stdlib = os.path.realpath(sysconfig.get_paths()["stdlib"])
+    inventory = ho7_tree_digest(prefix)
+    pycs = 0
+    for relative, kind in sorted(inventory.items()):
+        if kind == "directory":
+            continue
+        if kind.startswith("other:"):
+            raise AssertionError(f"non-regular entry in the private pyc prefix: {relative}")
+        path = prefix / relative
+        source = ho7_pyc_source(prefix, path)
+        real_source = os.path.realpath(source)
+        try:
+            source_bytes = Path(real_source).read_bytes()
+            regular = stat.S_ISREG(os.stat(real_source).st_mode)
+        except OSError:
+            regular = False
+        if (
+            os.path.commonpath([stdlib, real_source]) != stdlib
+            or "site-packages" in Path(real_source).parts
+            or not regular
+        ):
+            raise AssertionError(f"pyc outside the interpreter stdlib: {relative}")
+        data = path.read_bytes()
+        if (
+            data[:4] != importlib.util.MAGIC_NUMBER
+            or int.from_bytes(data[4:8], "little") != 0b11
+            or data[8:16] != importlib.util.source_hash(source_bytes)
+        ):
+            raise AssertionError(
+                f"not a checked-hash pyc of the current stdlib source: {relative}"
+            )
+        pycs += 1
+    if not pycs:
+        raise AssertionError("the private pyc prefix holds no stdlib pyc")
+    return inventory
+
+
+@contextmanager
+def private_stdlib_pycache():
+    """Yield a new owned 0700 prefix of validated current-stdlib CHECKED_HASH pycs.
+
+    The prefix is a TemporaryDirectory under TMPDIR (never inside a fixture
+    root, the repository or the runner's private cache) and is removed when
+    the run returns or raises.  Chain children keep PYTHONDONTWRITEBYTECODE=1:
+    they only read it, and each import re-checks the pyc against the current
+    source bytes (PEP 552), not mtimes.  If the run returns normally, any
+    change to the prefix inventory during the run fails the run closed.
+    """
+    with tempfile.TemporaryDirectory(prefix="handoff-stdlib-pyc-") as directory:
+        prefix = Path(directory)
+        metadata = prefix.lstat()
+        if (
+            not stat.S_ISDIR(metadata.st_mode) or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700 or any(prefix.iterdir())
+        ):
+            raise AssertionError("private pyc prefix is not a new owned empty 0700 directory")
+        warm = subprocess.run(
+            [
+                sys.executable, "-I", "-B", "-c", HANDOFF_STDLIB_PYC_WARM,
+                directory, *HANDOFF_STDLIB_PYC_MODULES,
+            ],
+            cwd=directory,
+            env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if warm.returncode != 0:
+            raise AssertionError("stdlib pyc warm failed: " + warm.stderr[-2000:])
+        before = validated_stdlib_pyc_manifest(prefix)
+        yield directory
+        after = ho7_tree_digest(prefix)
+        if after != before:
+            changed = sorted(
+                key for key in set(before) | set(after) if before.get(key) != after.get(key)
+            )
+            raise AssertionError(
+                "private stdlib pyc prefix changed during the run: " + ", ".join(changed[:10])
+            )
+
+
 class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
     def test_boundary_fixture_preserves_large_context_before_starting_reader(self):
         """Fixture handoff must not fill a pipe before any reader can run."""
@@ -935,6 +1075,9 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
 
     def make_layout(self, directory: str) -> Path:
         root = Path(directory)
+        private_tmp = root / "fixture-tmp"
+        private_tmp.mkdir(mode=0o700)
+        private_tmp.chmod(0o700)
         tools = root / "tools"
         monitor = root / "monitor"
         ethernet = root / "ethernet/monitor"
@@ -1025,23 +1168,26 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
     ) -> tuple[subprocess.CompletedProcess[str], dict | None, list[dict]]:
         trace = root / "fixture-trace.jsonl"
         trace.unlink(missing_ok=True)
-        completed = run_workflow_process(
-            [
-                sys.executable, "-B", "-c", BOOTSTRAP,
-                str(root), scope, mode, target, action,
-            ],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=30,
-            check=False,
-            env={
-                **self._fixture_environment(root),
-                "FIXTURE_TAR_MODE": "fail" if mode == "archive_failure" else "",
-                "DHCP_LEASES_FILE": str(root / "dhcpd.leases"),
-                "DHCP_RUNTIME_LOG_FILE": str(root / "dhcp-runtime.log"),
-            },
-        )
+        with private_stdlib_pycache() as stdlib_pycache:
+            completed = run_workflow_process(
+                [
+                    sys.executable, "-B", "-c", BOOTSTRAP,
+                    str(root), scope, mode, target, action,
+                ],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=30,
+                check=False,
+                env={
+                    **self._temporary_environment(root),
+                    **self._fixture_environment(root),
+                    "PYTHONPYCACHEPREFIX": stdlib_pycache,
+                    "FIXTURE_TAR_MODE": "fail" if mode == "archive_failure" else "",
+                    "DHCP_LEASES_FILE": str(root / "dhcpd.leases"),
+                    "DHCP_RUNTIME_LOG_FILE": str(root / "dhcp-runtime.log"),
+                },
+            )
         payload = None
         for line in completed.stdout.splitlines():
             if line.startswith("__WORKFLOW_RESULT__"):
@@ -1626,6 +1772,19 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
                 and item["child_result"]["state"] == "failed"
                 for item in result["outcomes"]
             ))
+
+    def _temporary_environment(self, root: Path) -> dict[str, str]:
+        private_tmp = root / "fixture-tmp"
+        metadata = private_tmp.lstat()
+        if (private_tmp.is_symlink() or not private_tmp.is_dir()
+                or metadata.st_uid != os.geteuid()
+                or metadata.st_mode & 0o7777 != 0o700):
+            raise ValueError("fixture temporary directory is not owned 0700")
+        canonical_tmp = str(private_tmp.resolve(strict=True))
+        return {
+            "TMPDIR": canonical_tmp, "TMP": canonical_tmp,
+            "TEMP": canonical_tmp, "FIXTURE_PRIVATE_TMP": canonical_tmp,
+        }
 
     def _fixture_environment(self, root: Path) -> dict[str, str]:
         environment = {
