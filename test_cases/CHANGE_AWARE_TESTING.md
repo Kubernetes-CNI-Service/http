@@ -406,3 +406,69 @@ macOS/Python 3.9 环境独立重跑两次，分别为 135.575 秒和 135.096 秒
 此处使用的是 Python 标准库跨 POSIX 平台支持的 `Popen.wait(timeout)`；上述
 运行证据来自 macOS，Linux 真机/容器还需单独验证。首次相关测试尝试在受限沙箱
 因 AF_INET loopback preflight 返回 2，不能算测试失败或证明。
+
+## 2026-10-23 HO-7：handoff run_workflow 每次 run 私有的 stdlib pyc 命名空间
+
+> 合入 DEV 注（2026-10-25）：本节原文是 http-test 树（TEST）上的记录；所列 RED/GREEN、计时与收益都是 http-test 的历史证据，DEV 没有运行这些测试。DEV 合入时 run_workflow 保留 DEV 的 `run_workflow_process` 抽取与 `_fixture_environment`（darwin 上另含 `PYTHONEXECUTABLE`），外层套 `private_stdlib_pycache()`，并带入 cb40cfa 的 `_temporary_environment` 与 fixture-tmp；DEV 上的验证见合并窗口记录。
+
+范围只在 `test_collection_cycle_handoff_workflow.run_workflow` 启动 BOOTSTRAP 时传入的
+fixture env；`test_eth_activity_cycle_handoff_workflow` 经同一 helper 同样使用。生产脚本、
+runner、`module_loader`、manifest 与任何既有断言都不变。fixture env 没有 HOME，macOS CLT
+Python 因而没有可读的 pyc namespace，链路里每个 Python 进程都会把同一批 stdlib 从源码重新
+编译一遍；HO-7 只消除这部分重复编译。
+
+每次 `run_workflow` 调用新建一个 `tempfile.TemporaryDirectory(prefix="handoff-stdlib-pyc-")`：
+属主为当前用户、0700、新建时为空，位于 TMPDIR，不在 fixture root、仓库或 runner 私有缓存之内。
+随后由一个 `sys.executable -I -B` warm 子进程（env 只有 PATH：不读 PYTHON* 环境、没有 HOME、
+不读取任何既有 pyc namespace）导入 35 个字面 stdlib 顶层模块，并且只为源码位于本解释器 stdlib
+目录、不在 site-packages 下的已导入模块，从当前源字节编译 CHECKED_HASH pyc。父进程再逐项
+校验：每一项必须是真实目录，或常规、无优化标记的 `.pyc`；映射回的源必须是 stdlib 内的常规
+文件；magic 等于本解释器；flags 恰为 0b11（基于哈希、每次导入都校验）；头部源哈希等于当前源
+字节的 `importlib.util.source_hash`。校验通过的清单（目录及每个文件的 SHA-256）绑定本次 run。
+BOOTSTRAP env 只多 `PYTHONPYCACHEPREFIX` 一个键；`PYTHONDONTWRITEBYTECODE=1` 保留，HOME 仍不提供。
+
+失效方式不依赖 mtime/size：链路子进程导入时，CPython 按 PEP 552 读取当前源字节重算源哈希并
+与 pyc 头比较，不一致即从源码编译且不写回。仓库与 fixture 副本从不进入前缀（子进程只读不写，
+任何新增文件都会使本次 run 失败），所以始终按当前字节编译。正常返回后重算清单，与运行前不同
+（新增、删除或改写任一文件）即 AssertionError，fail closed；返回或抛出（含超时）时都删除前缀。
+run 之间不共享、不复用、不持久化。
+
+与既有条款的关系：上文「纯编译结果缓存……不读取或写入磁盘 pyc」约束的是共享 loader 与 runner
+selector/clean authority 的进程内 code 缓存，HO-7 不改动它们；runner 给测试进程的「唯一、空、
+0700」私有缓存也不变，HO-7 不写入它（新测试断言前缀在其外）。与已否决的「共享 checked-hash
+stdlib pyc 预热（可伪造缓存 code）」及「磁盘 pyc 预热暂不采用」的区别：不共享、不跨 run 持久化，
+没有可预埋的长期位置；pyc 只来自本 run 刚从当前源编译的字节，warm 不读取任何既有 pyc；父进程
+逐项校验并绑定清单，run 中的任何改动都会让该 run 失败；只覆盖解释器 stdlib，不缓存任何仓库
+代码。残余风险如实记录：CHECKED_HASH 只绑定源字节、不绑定 code 本体（新测试的已知为真对照
+显示，哈希匹配的 pyc 会按原样执行）；同 UID 写者若在 run 期间改写 pyc 并在结束前恢复，事后
+检测不到。这与上文「不承诺任意同 UID 恶意写者隔离」是同一威胁模型。
+
+tests-first：同一模块新增 7 个 direct 用例（共享前缀且 stdlib 源码编译为 0、指向空私有前缀的
+已知为真对照会编译；超时时删除前缀；每次 run 一个新前缀且不跨 run 存活；run 中新增文件或改写 pyc 时
+fail closed；fixture 源同尺寸改写并恢复 mtime 后仍读到新值，可写 timestamp namespace 对照读到
+旧值；stdlib 旧哈希 pyc 被忽略，哈希匹配的伪造 code 会被执行（对照）；前缀校验器拒绝空前缀、
+timestamp、unchecked、旧哈希、非 stdlib、非 pyc 与 symlink）。
+RED 在只含测试的提交 `9c7fd30` 上运行：7 个新用例单独运行 Ran 7、`FAILED (failures=8)`（其中
+一个用例有 2 个子测试）、0 ERROR，8 个 FAIL 块都含 `HO7-RED-MARKER`；日志
+`p1c-red-green/00-red-new7-treeR.log`，SHA256 `61a8b6c8d9b404e7d149c8697dc9111d829fd5b84de5dfc8dcc593301e2e913f`。
+同一提交的整模块 Ran 35，原 28 个用例 ok，非成功的恰为这 8 个 FAIL；日志
+`p1c-red-green/01-kbase-handoff-module-treeR.log`，SHA256
+`d13c6e6ec6a6ca625da36b07fbf632bd9400d59e4f30990e6298d341a4fba59f`。GREEN 在实现提交 `dde76f7` 上运行：
+整模块 Ran 35 / OK，日志 `p1d-green/00-green-handoff-module-treeB.log`，SHA256
+`dacaff478500bf25aa385f0b79364ecb117e73adac07be74ee64835b8978ba78`；`test_eth_activity_cycle_handoff_workflow`
+Ran 1 / OK，日志 `p1d-green/01-green-eth-activity-treeB.log`，SHA256
+`34c462953f466637f0378e8651e861224498bb85b53f7deb88d3525baca4c918`。日志位于 `/Users/joeyyang/Desktop/claude-merge-test/step1.noindex/devHO7-evidence`（仓库外）。这些运行使用
+CLT Python 3.9.6、`-B -m unittest -b -v`、私有 TMPDIR 和每步新建的空 0700 `PYTHONPYCACHEPREFIX`；
+运行期间另一个 full 在跑（load 6–16），所以只作正确性证据，不作计时。收益量值目前只有 lab 读数
+（PROP-04：确认复跑 E2 = 1.032 s/run，n=24，已扣 warm；原读数 0.819 s/run，n=12；按每次 full
+约 47 次 run 推算约 48.5 s/full），这不是本树的 full 证明。本树在 lab 版之上新增的父进程逐项
+校验与结束复核未计入该推算；在负载下单独测得校验约 0.02–0.2 s/run，取决于新写的 pyc 是否
+已被打开过（本机首次打开新写文件明显更慢，校验把这部分成本从链路子进程移到了父进程）。
+收益还要求 `sys.executable` 与链路经 PATH 找到的 `python3` 是同一个解释器（本机 CLT 3.9 满足）；
+如果测试解释器换成自带 stdlib `__pycache__` 的其他 Python（例如 3.12 venv），链路子进程不会
+受益，而 warm 与前缀会使 BOOTSTRAP 变慢，正确性不受影响。
+
+runner 选测：只改该测试模块时，runner 选 baseline 4 个模块加本模块；runner 不追踪测试模块之间
+的 import，所以 `test_eth_activity_cycle_handoff_workflow` 要另行加跑。本文件的改动在 runner 中
+属于未知路径，按规则要求 canonical full。以上运行都是诊断，不签发批准、不改 ledger；正式状态
+只看集成后的 full/check。
