@@ -46,7 +46,7 @@ def parser():
     mode.add_argument("--plan", action="store_true", help="precheck and print the plan; never writes a switch (default)")
     mode.add_argument("--upgrade", action="store_true", help="upgrade the selected components")
     mode.add_argument("-y", "--yes", action="store_true", help="confirm --upgrade")
-    mode.add_argument("--version", action="version", version=VERSION)
+    mode.add_argument("--version", action="version", version=VERSION, help="print the version and exit")
     parts = p.add_argument_group("components (default: all three, in the order os -> bios -> cpld)")
     for name in COMPONENTS:
         parts.add_argument("--" + name, action="store_true", help=f"select {name.upper()}")
@@ -62,27 +62,33 @@ def parser():
     inputs.add_argument("--package-dir", help="override upgrade.package_dir")
     inputs.add_argument("--local-dir", default="/home/admin", help="package/step directory on the switch")
     auth = p.add_argument_group("credentials (the switch password is always typed, never an argument)")
-    auth.add_argument("--known-hosts", default=str(Path.home() / ".ssh/known_hosts"))
-    auth.add_argument("--user", default="admin")
+    auth.add_argument("--known-hosts", default=str(Path.home() / ".ssh/known_hosts"),
+                      help="known_hosts that pins the switch host keys (default: ~/.ssh/known_hosts)")
+    auth.add_argument("--user", default="admin", help="switch account (default: admin)")
     auth.add_argument("--identity", help="management private key (with --management-public-key)")
     auth.add_argument("--management-public-key", help="management public key")
     auth.add_argument("--password", action="store_true", help="--plan: also ask for the switch password")
     pull = p.add_argument_group("how switches pull packages from the ztp-server")
-    pull.add_argument("--method", choices=("http", "scp"), default="http")
+    pull.add_argument("--method", choices=("http", "scp"), default="http",
+                      help="how a switch fetches its packages from the ztp-server (default: http)")
     pull.add_argument("--mgmt-server", help="scp: ztp-server address")
     pull.add_argument("--mgmt-user", help="scp: ztp-server account")
-    pull.add_argument("--mgmt-port", type=int, default=22)
+    pull.add_argument("--mgmt-port", type=int, default=22, help="scp: ztp-server SSH port (default: 22)")
     pull.add_argument("--scp-known-hosts", help="scp: known_hosts that pins the ztp-server host key")
     tune = p.add_argument_group("link and concurrency")
     tune.add_argument("--server-link", choices=("1G", "2G", "10G", "20G", "25G", "40G", "50G", "100G", "200G", "400G"),
                       help="override the detected ztp-server link speed")
     tune.add_argument("--in-flight", type=int, default=32, help="switches between dispatch and verification (1-64)")
-    tune.add_argument("--check-workers", type=int, default=8)
-    tune.add_argument("--upgrade-workers", type=int, default=8)
-    tune.add_argument("--probe-workers", type=int, default=16)
+    tune.add_argument("--check-workers", type=int, default=8,
+                      help="parallel prechecks and post-upgrade verifications (default: 8)")
+    tune.add_argument("--upgrade-workers", type=int, default=8,
+                      help="parallel upgrade dispatches, per component (default: 8)")
+    tune.add_argument("--probe-workers", type=int, default=16,
+                      help="parallel reboot probes: ping, TCP/22 and SSH status reads (default: 16)")
     tune.add_argument("--relay-fanout", type=int, default=4, help="switches one holder serves at a time")
     tune.add_argument("--relay-transfers", type=int, default=32, help="relay transfers at a time")
-    tune.add_argument("--progress-seconds", type=float, default=30.0)
+    tune.add_argument("--progress-seconds", type=float, default=30.0,
+                      help="seconds between progress lines (default: 30)")
     return p
 
 

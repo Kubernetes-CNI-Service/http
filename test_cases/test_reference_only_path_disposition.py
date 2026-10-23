@@ -110,7 +110,8 @@ class ReferenceOnlyPathDispositionTests(unittest.TestCase):
             "monitor/cabletracker-mainline/runtime.py": "production",
             "monitor/cabletracker-main-sibling/runtime.py": "production",
             "tools/cabletracker-lldpq-sync/runtime.py": "production",
-            "tools/cabletracker/runtime.py": "production",
+            # a sibling sharing the reference root's name prefix (tools/cabletracker, owner 2026-10-23)
+            "tools/cabletrackers/runtime.py": "production",
         }
         self.assertEqual(
             expected,

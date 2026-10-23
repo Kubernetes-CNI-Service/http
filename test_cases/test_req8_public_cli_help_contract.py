@@ -43,6 +43,12 @@ class PublicCliHelpContractTests(unittest.TestCase):
             help_value = next((item.value for item in node.keywords if item.arg == "help"), None)
             if isinstance(help_value, ast.Attribute) and help_value.attr == "SUPPRESS":
                 continue
+            action = next((item.value for item in node.keywords if item.arg == "action"), None)
+            if (help_value is None and isinstance(action, ast.Constant)
+                    and action.value == "version"):
+                # argparse's version action carries its own help line,
+                # "show program's version number and exit".
+                continue
             if isinstance(help_value, ast.Constant):
                 described = isinstance(help_value.value, str) and bool(help_value.value.strip())
             elif isinstance(help_value, ast.JoinedStr):
@@ -76,6 +82,21 @@ class PublicCliHelpContractTests(unittest.TestCase):
                 "import argparse\np = argparse.ArgumentParser(); p.add_argument('--sample')\n"
             ),
         )
+        # only argparse's own version action is described without help=
+        self.assertEqual(
+            [(3, "--flag")],
+            self._missing_public_help(
+                "import argparse\np = argparse.ArgumentParser()\n"
+                "p.add_argument('--flag', action='store_true')\n"
+                "p.add_argument('--version', action='version', version='1')\n"
+            ),
+        )
+
+    def test_argparse_version_action_prints_its_own_help_line(self):
+        import argparse
+        parser = argparse.ArgumentParser(prog="sample")
+        parser.add_argument("--version", action="version", version="1")
+        self.assertRegex(parser.format_help(), r"(?m)^\s+--version\s{2,}\S")
 
     def assert_described_options(self, script, args, options):
         result = subprocess.run(
