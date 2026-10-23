@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -16,6 +17,10 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# tools/deployment_lock.py imports its sibling finished_project_state; set the path here so this
+# module also runs on its own, not only after another test module has done it.
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
 
 
 def load_module(name: str, path: Path):
