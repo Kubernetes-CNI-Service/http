@@ -12,16 +12,21 @@ import hashlib
 import fcntl
 from contextlib import redirect_stderr
 import io
+import importlib.util
 import json
 import errno
+import marshal
 import os
 from pathlib import Path
 import pty
+import py_compile
 import select
 import signal
 import shutil
+import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import termios
 import time
@@ -670,6 +675,45 @@ else:
         "persisted": persisted if action in ("persisted", "sigkill") else None,
     }, ensure_ascii=False, sort_keys=True))
 '''
+
+
+# HO-7 expectations (written before the fixture change).  Every new HO-7 test
+# fails with this marker while run_workflow still hands BOOTSTRAP no private
+# stdlib pyc prefix.
+HO7_PREFIX_MISSING = "HO7-RED-MARKER: BOOTSTRAP env has no private stdlib pyc prefix"
+
+
+def ho7_pyc_source(prefix: Path, pyc: Path) -> Path:
+    """Map ``<prefix>/<abs source dir>/<stem>.<cache_tag>.pyc`` back to its source."""
+    suffix = "." + sys.implementation.cache_tag + ".pyc"
+    if not pyc.name.endswith(suffix):
+        raise AssertionError(f"not an unoptimised {suffix} file: {pyc}")
+    return Path("/", pyc.parent.relative_to(prefix), pyc.name[:-len(suffix)] + ".py")
+
+
+def ho7_prefix_pyc_path(prefix: Path, source: str) -> Path:
+    """Where an interpreter given PYTHONPYCACHEPREFIX=prefix looks for ``source``."""
+    origin = Path(source)
+    return prefix / origin.parent.relative_to("/") / (
+        origin.stem + "." + sys.implementation.cache_tag + ".pyc"
+    )
+
+
+def ho7_tree_digest(prefix: Path) -> dict[str, str]:
+    """Literal inventory of a prefix: directories, regular-file SHA-256, others."""
+    inventory = {}
+    for directory, names, files in os.walk(prefix):
+        for name in names + files:
+            path = Path(directory, name)
+            relative = path.relative_to(prefix).as_posix()
+            metadata = path.lstat()
+            if stat.S_ISREG(metadata.st_mode):
+                inventory[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+            elif stat.S_ISDIR(metadata.st_mode):
+                inventory[relative] = "directory"
+            else:
+                inventory[relative] = "other:" + oct(stat.S_IFMT(metadata.st_mode))
+    return inventory
 
 
 class CollectionCycleHandoffWorkflowTests(unittest.TestCase):
@@ -1813,6 +1857,360 @@ print(json.dumps(outcomes, sort_keys=True))
         combined = b"\n".join(transcripts)
         for password in passwords:
             self.assertNotIn(password.encode("utf-8"), combined)
+
+    # ---- HO-7: one private, stdlib-only, CHECKED_HASH pyc namespace per run ----
+
+    def _ho7_intercept_bootstrap(self, root: Path, inspect, scope: str = "prod"):
+        """run_workflow with only its BOOTSTRAP launch replaced by ``inspect``."""
+        real_run = subprocess.run
+
+        def fake_run(command, *args, **kwargs):
+            if (
+                isinstance(command, list) and len(command) > 3
+                and command[1:3] == ["-B", "-c"] and command[3] == BOOTSTRAP
+            ):
+                return inspect(dict(kwargs["env"]), real_run, command)
+            return real_run(command, *args, **kwargs)
+
+        with mock.patch.object(subprocess, "run", fake_run):
+            return self.run_workflow(root, scope)
+
+    @staticmethod
+    def _ho7_child(real_run, code: str, env: dict, cwd: Path, *flags: str):
+        return real_run(
+            [sys.executable, *flags, "-c", code],
+            env=env, cwd=cwd, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, timeout=60, check=False,
+        )
+
+    def _ho7_assert_outside(self, prefix: Path, forbidden: Path) -> None:
+        resolved = prefix.resolve()
+        forbidden = forbidden.resolve()
+        self.assertNotEqual(forbidden, resolved)
+        self.assertNotIn(forbidden, resolved.parents)
+        self.assertNotIn(resolved, forbidden.parents)
+
+    def test_ho7_bootstrap_shares_one_private_checked_hash_stdlib_prefix(self):
+        """Children of one run read one owned 0700 prefix of current-stdlib pycs only."""
+        observed = {}
+        stdlib = os.path.realpath(sysconfig.get_paths()["stdlib"])
+
+        def compiled_stdlib_sources(stderr: str) -> list[str]:
+            return [
+                line for line in stderr.splitlines()
+                if line.startswith("# code object from /")
+                and os.path.commonpath([
+                    stdlib, os.path.realpath(line[len("# code object from "):]),
+                ]) == stdlib
+            ]
+
+        def inspect(env, real_run, command):
+            self.assertIn("PYTHONPYCACHEPREFIX", env, HO7_PREFIX_MISSING)
+            prefix = Path(env["PYTHONPYCACHEPREFIX"])
+            observed["prefix"] = prefix
+            # Exactly the original fixture env plus the prefix: still no HOME,
+            # and chain children still never write bytecode.
+            self.assertEqual(
+                {
+                    "TMPDIR", "TMP", "TEMP", "FIXTURE_PRIVATE_TMP", "BASH_ENV", "PATH",
+                    "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "FIXTURE_TAR_MODE",
+                    "DHCP_LEASES_FILE", "DHCP_RUNTIME_LOG_FILE",
+                },
+                set(env),
+            )
+            self.assertEqual("1", env.get("PYTHONDONTWRITEBYTECODE"))
+            self.assertNotIn("HOME", env)
+            self.assertTrue(prefix.is_absolute(), prefix)
+            metadata = prefix.lstat()
+            self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+            self.assertEqual(os.geteuid(), metadata.st_uid)
+            self.assertEqual(0o700, stat.S_IMODE(metadata.st_mode))
+            self._ho7_assert_outside(prefix, root)
+            self._ho7_assert_outside(prefix, ROOT)
+            for runner_cache in {os.environ.get("PYTHONPYCACHEPREFIX"), sys.pycache_prefix}:
+                if runner_cache:
+                    self._ho7_assert_outside(prefix, Path(runner_cache))
+            pycs = []
+            for relative, kind in sorted(ho7_tree_digest(prefix).items()):
+                path = prefix / relative
+                if kind == "directory":
+                    continue
+                self.assertFalse(kind.startswith("other:"), relative)
+                source = ho7_pyc_source(prefix, path)
+                real_source = os.path.realpath(source)
+                self.assertEqual(stdlib, os.path.commonpath([stdlib, real_source]), relative)
+                self.assertNotIn("site-packages", Path(real_source).parts, relative)
+                data = path.read_bytes()
+                self.assertEqual(importlib.util.MAGIC_NUMBER, data[:4], relative)
+                self.assertEqual(0b11, int.from_bytes(data[4:8], "little"), relative)
+                self.assertEqual(
+                    importlib.util.source_hash(source.read_bytes()), data[8:16], relative,
+                )
+                pycs.append(relative)
+            self.assertTrue(pycs, "no stdlib pyc in the private prefix")
+            before = ho7_tree_digest(prefix)
+            for code in (
+                "import fcntl, hashlib, json, os, pathlib, subprocess, sys",
+                "import csv, json, tempfile, uuid",
+            ):
+                child = self._ho7_child(real_run, code, env, root, "-v")
+                self.assertEqual(0, child.returncode, child.stderr[-2000:])
+                self.assertEqual([], compiled_stdlib_sources(child.stderr), code)
+                self.assertTrue(
+                    any(" matches " in line and str(prefix) in line
+                        for line in child.stderr.splitlines()),
+                    "no stdlib import was served from the private prefix",
+                )
+            # Known-true control: the same child pointed at an empty private
+            # prefix (no pyc anywhere, whatever the interpreter ships) compiles
+            # stdlib from source and, with PYTHONDONTWRITEBYTECODE=1, writes nothing.
+            empty = root / "ho7-empty-pyc-prefix"
+            empty.mkdir(mode=0o700)
+            cold_env = dict(env, PYTHONPYCACHEPREFIX=str(empty))
+            cold = self._ho7_child(real_run, "import json", cold_env, root, "-v")
+            self.assertEqual(0, cold.returncode, cold.stderr[-2000:])
+            self.assertTrue(compiled_stdlib_sources(cold.stderr), "control saw no stdlib compile")
+            self.assertEqual([], list(empty.iterdir()))
+            # Modules outside the warmed set are compiled, never written back.
+            extra = self._ho7_child(
+                real_run, "import email.parser, json, xml.dom.minidom", env, root,
+            )
+            self.assertEqual(0, extra.returncode, extra.stderr[-2000:])
+            self.assertEqual(before, ho7_tree_digest(prefix))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, traces = self._ho7_intercept_bootstrap(root, inspect)
+        self.assertIn("prefix", observed)
+        self.assertFalse(observed["prefix"].exists(), "prefix must not outlive the run")
+        self.assertEqual(0, completed.returncode)
+        self.assertIsNone(payload)
+        self.assertEqual([], traces)
+
+    def test_ho7_private_prefix_removed_when_bootstrap_times_out(self):
+        observed = {}
+
+        def inspect(env, real_run, command):
+            self.assertIn("PYTHONPYCACHEPREFIX", env, HO7_PREFIX_MISSING)
+            observed["prefix"] = Path(env["PYTHONPYCACHEPREFIX"])
+            self.assertTrue(observed["prefix"].is_dir())
+            raise subprocess.TimeoutExpired(command, 30)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self._ho7_intercept_bootstrap(root, inspect)
+        self.assertIn("prefix", observed)
+        self.assertFalse(observed["prefix"].exists(), "prefix must be removed on error")
+
+    def test_ho7_each_run_gets_a_new_prefix_that_never_outlives_it(self):
+        seen = []
+
+        def inspect(env, real_run, command):
+            self.assertIn("PYTHONPYCACHEPREFIX", env, HO7_PREFIX_MISSING)
+            prefix = Path(env["PYTHONPYCACHEPREFIX"])
+            self.assertTrue(prefix.is_dir())
+            for earlier in seen:
+                self.assertFalse(earlier.exists(), "an earlier run's prefix is still present")
+                self.assertNotEqual(earlier, prefix)
+            seen.append(prefix)
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            self._ho7_intercept_bootstrap(root, inspect)
+            self._ho7_intercept_bootstrap(root, inspect)
+        self.assertEqual(2, len(seen))
+        self.assertEqual(2, len(set(seen)))
+        self.assertFalse(any(prefix.exists() for prefix in seen))
+
+    def test_ho7_prefix_change_during_run_fails_closed(self):
+        """A file added to, or a pyc rewritten in, the prefix fails the run."""
+
+        def add_file(prefix: Path) -> None:
+            (prefix / "planted.txt").write_bytes(b"literal foreign bytes")
+
+        def rewrite_pyc(prefix: Path) -> None:
+            target = next(path for path in sorted(prefix.rglob("*.pyc")) if path.is_file())
+            data = bytearray(target.read_bytes())
+            data[-1] ^= 0xFF
+            target.write_bytes(bytes(data))
+
+        for name, tamper in (("added file", add_file), ("rewritten pyc", rewrite_pyc)):
+            with self.subTest(name):
+                captured = {}
+
+                def inspect(env, real_run, command):
+                    captured["prefix"] = env.get("PYTHONPYCACHEPREFIX")
+                    if captured["prefix"]:
+                        tamper(Path(captured["prefix"]))
+                    return subprocess.CompletedProcess(command, 0, "", "")
+
+                raised = None
+                with tempfile.TemporaryDirectory() as directory:
+                    root = self.make_layout(directory)
+                    try:
+                        self._ho7_intercept_bootstrap(root, inspect)
+                    except AssertionError as exc:
+                        raised = exc
+                self.assertTrue(captured.get("prefix"), HO7_PREFIX_MISSING)
+                self.assertIsNotNone(raised, "prefix tampering went undetected")
+                self.assertIn("changed during the run", str(raised))
+                self.assertFalse(Path(captured["prefix"]).exists())
+
+    def test_ho7_prefix_never_serves_stale_fixture_source(self):
+        """Fixture/production copies are always compiled from their current bytes."""
+        observed = {}
+
+        def inspect(env, real_run, command):
+            self.assertIn("PYTHONPYCACHEPREFIX", env, HO7_PREFIX_MISSING)
+            module = root / "ho7_probe_source.py"
+            code = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import ho7_probe_source as m; print(m.VALUE)"
+            )
+
+            def value(child_env) -> str:
+                child = real_run(
+                    [sys.executable, "-c", code, str(root)], env=child_env, cwd=root,
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True, timeout=60, check=False,
+                )
+                self.assertEqual(0, child.returncode, child.stderr[-2000:])
+                return child.stdout.strip()
+
+            def same_size_rewrite(content: bytes) -> None:
+                original = module.stat()
+                self.assertEqual(original.st_size, len(content))
+                module.write_bytes(content)
+                os.utime(module, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+            module.write_bytes(b"VALUE = 1\n")
+            first = value(env)
+            same_size_rewrite(b"VALUE = 2\n")
+            observed["fixture"] = (first, value(env))
+            # Known-true control: a writable timestamp namespace runs the old bytes.
+            control_prefix = root / "ho7-control-timestamp-pyc"
+            control_prefix.mkdir(mode=0o700)
+            control_env = {
+                key: item for key, item in env.items() if key != "PYTHONDONTWRITEBYTECODE"
+            }
+            control_env["PYTHONPYCACHEPREFIX"] = str(control_prefix)
+            module.write_bytes(b"VALUE = 3\n")
+            first = value(control_env)
+            same_size_rewrite(b"VALUE = 4\n")
+            observed["control"] = (first, value(control_env))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            self._ho7_intercept_bootstrap(root, inspect)
+        self.assertEqual(("1", "2"), observed.get("fixture"), HO7_PREFIX_MISSING)
+        self.assertEqual(("3", "3"), observed["control"])
+
+    def test_ho7_checked_hash_binds_current_stdlib_source_bytes(self):
+        """A pyc from older source bytes is ignored; the hash binds source, not code."""
+        observed = {}
+        source = importlib.util.find_spec("fnmatch").origin
+        code = "import fnmatch; print(callable(getattr(fnmatch, 'fnmatch', None)))"
+
+        def inspect(env, real_run, command):
+            self.assertIn("PYTHONPYCACHEPREFIX", env, HO7_PREFIX_MISSING)
+            prefix = Path(env["PYTHONPYCACHEPREFIX"])
+            self.assertTrue(ho7_prefix_pyc_path(prefix, source).is_file())
+            copy = root / "ho7-prefix-copy"
+            shutil.copytree(prefix, copy)
+            target = ho7_prefix_pyc_path(copy, source)
+            forged = compile("print('HO7-FORGED-CODE')", source, "exec")
+            current = Path(source).read_bytes()
+            child_env = dict(env, PYTHONPYCACHEPREFIX=str(copy))
+            runs = {}
+            for label, digest in (
+                ("stale", importlib.util.source_hash(current + b"\n# older bytes\n")),
+                ("current", importlib.util.source_hash(current)),
+            ):
+                target.write_bytes(
+                    importlib.util.MAGIC_NUMBER + (0b11).to_bytes(4, "little")
+                    + digest + marshal.dumps(forged)
+                )
+                child = self._ho7_child(real_run, code, child_env, root)
+                runs[label] = child.stdout
+            observed["runs"] = runs
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            self._ho7_intercept_bootstrap(root, inspect)
+        self.assertIn("runs", observed, HO7_PREFIX_MISSING)
+        self.assertEqual("True\n", observed["runs"]["stale"])
+        # Control: a hash-matching pyc is executed as stored, so the prefix
+        # contents themselves must be validated and integrity-checked per run.
+        self.assertIn("HO7-FORGED-CODE", observed["runs"]["current"])
+
+    def test_ho7_prefix_validator_rejects_anything_but_current_stdlib_checked_pycs(self):
+        validator = getattr(sys.modules[__name__], "validated_stdlib_pyc_manifest", None)
+        self.assertIsNotNone(validator, HO7_PREFIX_MISSING)
+        source = importlib.util.find_spec("fnmatch").origin
+
+        def compiled(prefix: Path, path: str, mode) -> Path:
+            target = ho7_prefix_pyc_path(prefix, path)
+            py_compile.compile(path, cfile=str(target), doraise=True, invalidation_mode=mode)
+            return target
+
+        def good(prefix: Path) -> Path:
+            return compiled(prefix, source, py_compile.PycInvalidationMode.CHECKED_HASH)
+
+        def wrong_hash(prefix: Path) -> None:
+            target = good(prefix)
+            data = bytearray(target.read_bytes())
+            data[8] ^= 0xFF
+            target.write_bytes(bytes(data))
+
+        def outside_stdlib(prefix: Path) -> None:
+            good(prefix)
+            foreign = prefix.parent / "foreign_module.py"
+            foreign.write_text("VALUE = 1\n", encoding="utf-8")
+            compiled(prefix, str(foreign), py_compile.PycInvalidationMode.CHECKED_HASH)
+
+        def non_pyc_file(prefix: Path) -> None:
+            good(prefix)
+            (prefix / "notes.txt").write_text("literal\n", encoding="utf-8")
+
+        def symlink(prefix: Path) -> None:
+            target = good(prefix)
+            (prefix / ("link." + sys.implementation.cache_tag + ".pyc")).symlink_to(target)
+
+        cases = {
+            "empty prefix": lambda prefix: None,
+            "timestamp pyc": lambda prefix: compiled(
+                prefix, source, py_compile.PycInvalidationMode.TIMESTAMP),
+            "unchecked hash pyc": lambda prefix: compiled(
+                prefix, source, py_compile.PycInvalidationMode.UNCHECKED_HASH),
+            "stale source hash": wrong_hash,
+            "pyc of a non-stdlib source": outside_stdlib,
+            "non-pyc file": non_pyc_file,
+            "symlink entry": symlink,
+        }
+        for name, build in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                prefix = Path(directory) / "prefix"
+                prefix.mkdir(mode=0o700)
+                build(prefix)
+                with self.assertRaises(AssertionError):
+                    validator(prefix)
+        # Positive control: one current checked-hash stdlib pyc is accepted and
+        # the returned manifest is the literal inventory of the prefix.
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory) / "prefix"
+            prefix.mkdir(mode=0o700)
+            target = good(prefix)
+            relative = target.relative_to(prefix).as_posix()
+            parts = Path(relative).parts
+            expected = {Path(*parts[:index]).as_posix(): "directory" for index in range(1, len(parts))}
+            expected[relative] = hashlib.sha256(target.read_bytes()).hexdigest()
+            self.assertEqual(expected, validator(prefix))
 
 
 if __name__ == "__main__":
