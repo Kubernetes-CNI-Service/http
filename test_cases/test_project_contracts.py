@@ -5309,6 +5309,9 @@ class MonitorContractTests(unittest.TestCase):
             unsafe_link.symlink_to(outside, target_is_directory=True)
             (data / f"{old_day}-1200-air.tar.gz").write_bytes(b"old archive")
             (data / f"{old_day}-1200-air.csv").write_text("old\n", encoding="utf-8")
+            # owner 2026-10-23: the newest file of each kind always stays loose; today's are the newest
+            (data / f"{today}-1100-air.tar.gz").write_bytes(b"current archive")
+            (data / f"{today}-1100-air.csv").write_text("current\n", encoding="utf-8")
 
             result = subprocess.run(
                 [sys.executable, "-B", str(ROOT / "tools/collection_archive.py"), "--retain-days", "7", str(data)],

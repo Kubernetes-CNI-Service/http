@@ -2502,8 +2502,9 @@ cleanup_shared_reports() {   # cleanup_shared_reports <99-output-p2p path>
 # cleanup_data_dirs <dir> [<dir> ...]: every file named YYYYMMDD-... follows one rule (RETAIN_DAYS):
 # today's stay, the previous days are bundled per day into YYYYMMDD-daily.tar.gz with an index (CSVs
 # stay loose for the page), older days are deleted; a file arriving after its day was bundled stays
-# beside the bundle; failed collector batch directories past the window are removed. The module prints
-# one line per action and they go to this run's log.
+# beside the bundle; failed collector batch directories past the window are removed; the newest file of
+# each kind always stays loose (owner 2026-10-23). The module prints one line per action and they go to
+# this run's log.
 COLLECTION_ARCHIVE="${BASE}/../../tools/collection_archive.py"
 
 cleanup_data_dirs() {

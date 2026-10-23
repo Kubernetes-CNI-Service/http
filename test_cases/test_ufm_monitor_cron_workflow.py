@@ -597,6 +597,9 @@ class UfmCronFabricModeAndRetentionTest(UfmCronCase):
         for day in (yesterday, old):
             for suffix in ("_ufm01_ibdiagnet2.tgz", "_ufm01_ibdiagnet2.done", "_ufm02_iblinkinfo.log"):
                 (self.ibdiag_output / f"{day}-0100-prod-0000000000000001{suffix}").write_text("x")
+        # owner 2026-10-23: the newest file of each kind always stays loose; here today's are the newest
+        for suffix in ("_ufm01_ibdiagnet2.tgz", "_ufm01_ibdiagnet2.done", "_ufm02_iblinkinfo.log"):
+            (self.ibdiag_output / f"{today.strftime('%Y%m%d')}-0000-prod-0000000000000002{suffix}").write_text("x")
         link = self.mkdir("infiniband/monitor/ib-link")
         for day in (yesterday, old):
             (link / f"{day}-0100.csv").write_text("csv")
@@ -651,11 +654,16 @@ class UfmCronFabricModeAndRetentionTest(UfmCronCase):
         for day in (yesterday, old):
             for name in names:
                 (self.p2p_output / f"{day}{name}").write_text("x")
+        # owner 2026-10-23: the newest file of each kind always stays loose; here today's are the newest
+        today_name = today.strftime("%Y%m%d")
+        for name in names:
+            (self.p2p_output / f"{today_name}{name.replace('-0100-', '-0000-').replace('0001_', '0002_')}").write_text("x")
         result = self.run_cron()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         # the hidden report lock lives in the directory (codex review 2026-10-22) and is not data
         self.assertTrue((self.p2p_output / ".report-writer.lock").is_file())
-        self.assertEqual(sorted(path.name for path in self.p2p_output.iterdir() if not path.name.startswith(".")),
+        self.assertEqual(sorted(path.name for path in self.p2p_output.iterdir()
+                                if not path.name.startswith((".", today_name))),
                          sorted(["site-cvt.xlsx", f"{yesterday}-daily.tar.gz"]))
         with tarfile.open(self.p2p_output / f"{yesterday}-daily.tar.gz") as bundle:
             self.assertEqual(sorted(bundle.getnames()),
@@ -734,9 +742,11 @@ class UfmSharedReportCleanupTest(UfmCronCase):
 
     def test_the_cleanup_leaves_reports_alone_while_a_report_is_being_written(self):
         import fcntl
-        [yesterday] = self.days(1)
+        [yesterday, today] = self.days(1, 0)
         report = self.p2p_output / f"{yesterday}-2358-prod-0000000000000009_ufm01-ibdiagnet-topology-validation.xlsx"
         report.write_text("half written")
+        # owner 2026-10-23: the newest file of each kind always stays loose; today's is the newest here
+        (self.p2p_output / f"{today}-0000-prod-000000000000000a_ufm01-ibdiagnet-topology-validation.xlsx").write_text("x")
         with open(self.p2p_output / ".report-writer.lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_SH)   # another lane's post-collect is writing
             result = self.run_cron()
@@ -774,11 +784,32 @@ class UfmSharedReportCleanupTest(UfmCronCase):
             (directory / f"{old}-daily.tar.gz").write_bytes(b"bundle")
         late = self.p2p_output / f"{old}-2358-prod-0000000000000009_ufm01-ibdiagnet-topology-validation.xlsx"
         late.write_text("late")
+        # owner 2026-10-23: the newest file of each kind always stays loose; today's is the newest here
+        [today] = self.days(0)
+        (self.p2p_output / f"{today}-0000-prod-000000000000000a_ufm01-ibdiagnet-topology-validation.xlsx").write_text("x")
         result = self.run_cron()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for directory in (self.p2p_output, self.ibdiag_output):
             self.assertEqual([path.name for path in directory.iterdir() if path.name.startswith(old)], [], directory)
         self.assertTrue((self.p2p_output / "site-cvt.xlsx").is_file(), "the CVT has no date and stays")
+
+    def test_the_newest_switch_archive_stays_loose_for_the_page_after_a_ufm_only_run(self):
+        # Owner 2026-10-23 (lab): a cron.sh run that collected only the UFMs bundled the IB switch archive of
+        # the day before, the only one there, and the page lost every IB switch. 所有采集信息一定要留一份最新
+        # 的散放；可以打包，但是不要删除掉最新的一份.
+        yesterday, old = self.days(1, 4)
+        info = self.mkdir("infiniband/monitor/ib-info")
+        newest = info / f"{yesterday}-0659.tar.gz"
+        for path in (info / f"{old}-0100.tar.gz", info / f"{yesterday}-0100.tar.gz", newest):
+            path.write_text(path.name)
+        result = self.run_cron()   # the fixture project has UFMs and no switch: a UFM-only run
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(sorted(path.name for path in info.iterdir()),
+                         sorted([newest.name, f"{yesterday}-daily.tar.gz"]))
+        self.assertEqual(newest.read_text(), newest.name)
+        with tarfile.open(info / f"{yesterday}-daily.tar.gz") as bundle:
+            self.assertEqual(bundle.getnames()[1:], [f"{yesterday}-0100.tar.gz", newest.name])
+        self.assertIn(f"newest of its kind kept loose: {newest.name}", result.stdout)
 
 
 if __name__ == "__main__":

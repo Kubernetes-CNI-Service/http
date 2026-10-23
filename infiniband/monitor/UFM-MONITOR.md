@@ -168,6 +168,7 @@ docker exec ufm /opt/ufm/opensm/sbin/iblinkinfo > /root/monitor/iblinkinfo/iblin
 - **部署服务器**（owner 2026-10-22）：所有采集到的信息统一由 `cron.sh::cleanup_data_dirs` 保留 3 天：当天原样，前两天按天合并成 `YYYYMMDD-daily.tar.gz`，更早的删除。凡是以日期开头的文件都按这条规则处理，包括交换机归档、UFM 的 `.tgz`、`.log`、`.done`。CSV 不打包，方便页面直接读，只按 3 天删除。配置备份（`ztp/backup`）沿用它自己的版本数规则。
   - 删除超期文件原来用的是 `find "$dir"`，数据目录是指向 99-output-monitor 的链接，find 不会进入，所以超期文件从来没被删过（http `HEAD` 第 1800 行相同）。已改为 `find -H`。
   - `cronjob.log`：到 10 MB 就压缩成 `cronjob.log.1.gz`，最多保留 7 个；先复制再原地清空，crontab 的 `>>` 重定向继续写同一个文件。
+  - **每类采集信息始终保留最新一份散放**（owner 2026-10-23）：只采 UFM 的一轮 cron 把前一天唯一的 IB 交换机归档打进了每日包，页面因此看不到任何 IB 交换机。现在每类文件里最新的一份照常打进当天的每日包，但散放的原件不删除，也不随过期删除，直到同类出现更新的一份。之后若散放文件与包内 index 记录的 sha256 和大小一致，就删除散放件；不一致的按迟到文件留在包旁边。「同类」指文件名去掉日期、分钟和 run-id 随机串（`YYYYMMDD-HHMM-(prod|air)-<16 位十六进制>`）后剩下的部分：`20261022-0659.tar.gz` 与 `20261023-0100.tar.gz` 同类；ufm01 与 ufm02 的报告、`.xlsx` 与 `.receipt.json` 各是一类。失败批次目录的处理不变。
   - `cleanup_data_dirs` 靠文件名开头的 `YYYYMMDD-HHMM` 识别日期，所以本地以 run-id 开头命名（owner 2026-10-22 定）：`<run-id>_<节点短名>_ibdiagnet2.tgz`、`<run-id>_<节点短名>_iblinkinfo.log`，UFM 的完成标记存为同名 `.done`。例如 `20261022-0644-prod-3f9c0a1b2c3d4e5f_ufm01_ibdiagnet2.tgz`。文件名中带执行节点，满足「按真实节点保存」的要求。UFM 上是 `ibdiagnet2_<run-id>.tgz`、`iblinkinfo_<run-id>.log`（owner 的前缀加 run-id）。
 - 输出不得含有任何密码：UFM 和 BMC 的密码都不进脚本和输出，ipmitool 只用主机侧接口。注意 `99-output-monitor` 位于 Apache 目录树下。
 - `monitor.html` 的 Switch Status 展示已接入（第 12 节）；issue tracker 的接入由 REQ7 负责（见第 5 节第 7 条）。
@@ -232,7 +233,7 @@ docker exec ufm /opt/ufm/opensm/sbin/iblinkinfo > /root/monitor/iblinkinfo/iblin
 | BIOS 版本 | `dmidecode -s bios-version` | `2.8.2` |
 | SSD 版本 | `lsblk -d -o NAME,MODEL,SERIAL,REV,SIZE,TYPE` | 2 块 Dell Ent NVMe CM7 3.2TB，REV（固件）`3.0.1` |
 | ASIC 版本 | `ibstat` | CA type `MT4131`，Firmware `40.50.1002` |
-| ASIC 温度 | 每个 `mlx5_*` 设备一条 `mget_temp -d <设备>`；设备从 `/sys/class/infiniband/` 动态列出，不含 `smi*` | `mlx5_0` 为 64、`mlx5_1` 为 70（°C） |
+| ASIC 温度 | 每个 `mlx5_*` 设备一条 `mget_temp -d <设备>`；设备从 `/sys/class/infiniband/` 动态列出，不含 `smi*`。`mst status -v` 里没有 `/dev/mst/` 设备时，先执行一次 `mst start`（记录在快照里）再读温度（owner 2026-10-23：备机上 MST 未加载，`mget_temp` 报 `mopen: No such file or directory`） | `mlx5_0` 为 64、`mlx5_1` 为 70（°C） |
 | PSU 温度 | — | Dell 的传感器里没有 PSU 温度，这一列对 UFM 显示 `-` |
 | （温度补充） | `ipmitool sdr type Temperature` | 两颗 CPU 的 `Temp`、`Inlet Temp`、`Exhaust Temp`；`Temp 1~3` 为 Disabled |
 | PSU | `ipmitool sdr type 'Power Supply'` | `PS Redundancy: Fully Redundant`，两个 `Status: Presence detected` |
@@ -581,6 +582,12 @@ docker exec ufm ls /var/tmp/ibdiagnet2/
 | `monitor/generate-monitor-html.py`（第三轮） | 修改 | `rotate_own_log()`：每次生成前、写第一行日志前，轮转自己的 `generate-monitor.log` | `test_log_rotation.py::test_the_page_generator_rotates_its_log_before_its_first_line` | **是** |
 | `monitor/switch-collection-worker.py`（第三轮） | 修改 | `rotate_own_log()`：主循环每一轮检查一次，只有 stdout 就是 `monitor/status/switch-collection.log` 时（11-load.py 以追加方式打开）才轮转；Docker 下 stdout 是通向 supervisord 的管道，不动 | `test_log_rotation.py::test_the_worker_rotates_its_log_only_when_its_stdout_is_that_file` | **是** |
 | `infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py`（第三轮） | 修改 | owner 2026-10-22：生成的脚本在发送前先在本地做 `bash -n` 语法检查（`bash_syntax_problem`），不通过就不发送，本地留下 not-run 副本（REQ-F01 10-12 合并需求第 3 条）。出厂默认密码保留字面量（owner 2026-10-22，取代 D-66 §二） | `test_ufm_setup_upgrade.py::ScriptLoaderTest::test_a_script_that_bash_cannot_parse_is_never_sent` | 批次 A 的目录 |
+| `tools/collection_archive.py`（2026-10-23） | 修改 | owner 2026-10-23：「所有采集信息一定要留一份最新的散放；可以打包，但是不要删除掉最新的一份」。起因是现场只采 UFM 的一轮 cron 把前一天唯一的 IB 交换机归档打了包，页面只读散放的归档，于是看不到 IB 交换机。新增 `kind_of`、`newest_of_each_kind`、`bundled_index`：每类最新的一份照常进包但不删除、不过期；有了更新的一份后，与包内 index 一致的散放件删除，不一致的按迟到文件保留（见 4.4） | `test_collection_archive.py::test_the_newest_file_of_each_kind_always_stays_loose`（改前失败；7 个变异全部被杀）；`test_ufm_monitor_cron_workflow.py::UfmSharedReportCleanupTest::test_the_newest_switch_archive_stays_loose_for_the_page_after_a_ufm_only_run`（复现现场：只采 UFM 的 cron 之后，昨天的 IB 交换机归档仍散放） | 否 |
+
+**最新一份散放（owner 2026-10-23）的测试预期变化**：以下 7 个用例里，被过期或打包的文件恰好是同类中唯一、也就是最新的一份。每个用例在夹具中补一份今天的同类文件，使被测文件不再是最新的。其余断言不变，只有两处目录清单随补的文件调整：`test_today_stays_previous_days_are_bundled_with_an_index_and_older_days_leave` 的预期清单加入今天的 `.done`；`test_dated_reports_in_99_output_p2p_follow_the_same_rule_and_the_cvt_stays` 像同组另一个用例一样，比较时排除今天的文件：
+- `test_collection_archive.py`：`test_today_stays_previous_days_are_bundled_with_an_index_and_older_days_leave`、`test_a_late_file_stays_beside_the_bundle_and_a_day_kept_only_as_a_bundle_leaves`；
+- `test_ufm_monitor_cron_workflow.py`：`test_everything_collected_is_kept_three_days_and_the_two_days_before_today_are_bundled`、`test_dated_reports_in_99_output_p2p_follow_the_same_rule_and_the_cvt_stays`、`test_the_cleanup_leaves_reports_alone_while_a_report_is_being_written`、`test_an_old_day_kept_only_as_a_bundle_is_deleted_with_its_late_files`；
+- `test_project_contracts.py::MonitorContractTests::test_collection_retention_removes_only_expired_batch_directories`。
 
 **codex 评审轮的测试预期变化**（需求变化：codex 2026-10-22 要求每轮留运行记录、每日包带 index）：
 - 跳过用例：数据目录里除运行记录外不应有其它文件（原来是目录为空）。

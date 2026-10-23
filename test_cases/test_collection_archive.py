@@ -2,8 +2,8 @@
 YYYYMMDD-... follows one rule: today's stay as they are, the previous days are bundled per day into
 YYYYMMDD-daily.tar.gz (an index of sha256, size and name first, members flat; CSVs stay loose for the
 page), older days are deleted; a file of a day that is already bundled stays beside the bundle; failed
-collector batch directories past the window are removed. cron.sh and the shared 99-output-p2p cleanup
-call it."""
+collector batch directories past the window are removed; the newest file of each kind always stays loose
+(owner 2026-10-23). cron.sh and the shared 99-output-p2p cleanup call it."""
 
 import gzip
 import hashlib
@@ -43,6 +43,7 @@ class CollectionArchiveTest(unittest.TestCase):
     def test_today_stays_previous_days_are_bundled_with_an_index_and_older_days_leave(self):
         today, yesterday, two, old = day(0), day(1), day(2), day(4)
         self.write(f"{today}-0100.tar.gz")
+        self.write(f"{today}-0100_u_ibdiagnet2.done")   # a newer file of each kind (see the newest-kind test)
         members = [self.write(f"{yesterday}-0100.tar.gz", b"archive"), self.write(f"{yesterday}-0100_u_ibdiagnet2.done")]
         self.write(f"{yesterday}-0100.csv")              # the page reads CSVs directly: never bundled
         self.write(f"{yesterday}-0200.tar.gz.part")      # still being written
@@ -53,8 +54,8 @@ class CollectionArchiveTest(unittest.TestCase):
         lines = self.archive.archive_directory(self.dir, retain_days=3)
         names = sorted(path.name for path in self.dir.iterdir())
         self.assertEqual(names, sorted([
-            f"{today}-0100.tar.gz", f"{yesterday}-0100.csv", f"{yesterday}-0200.tar.gz.part",
-            f"{yesterday}-daily.tar.gz", f"{two}-daily.tar.gz", "site-cvt.xlsx"]))
+            f"{today}-0100.tar.gz", f"{today}-0100_u_ibdiagnet2.done", f"{yesterday}-0100.csv",
+            f"{yesterday}-0200.tar.gz.part", f"{yesterday}-daily.tar.gz", f"{two}-daily.tar.gz", "site-cvt.xlsx"]))
         with tarfile.open(self.dir / f"{yesterday}-daily.tar.gz") as bundle:
             self.assertEqual(bundle.getnames()[0], f"{yesterday}-daily.index", "the index comes first")
             self.assertEqual(sorted(bundle.getnames()[1:]), sorted(path.name for path in members))
@@ -68,6 +69,7 @@ class CollectionArchiveTest(unittest.TestCase):
     def test_a_late_file_stays_beside_the_bundle_and_a_day_kept_only_as_a_bundle_leaves(self):
         yesterday, old = day(1), day(4)
         self.write(f"{yesterday}-0100.tar.gz")
+        self.write(f"{day(0)}-0100.tar.gz")   # a newer collection, so yesterday's is no longer the newest
         self.archive.archive_directory(self.dir, retain_days=3)
         bundle = self.dir / f"{yesterday}-daily.tar.gz"
         before = bundle.read_bytes()
@@ -77,6 +79,56 @@ class CollectionArchiveTest(unittest.TestCase):
         self.assertEqual((late.read_bytes(), bundle.read_bytes()), (b"late", before), "neither is rewritten")
         self.assertTrue(any("1 个迟到文件" in line for line in lines), lines)
         self.assertFalse((self.dir / f"{old}-daily.tar.gz").exists())
+
+    def test_the_newest_file_of_each_kind_always_stays_loose(self):
+        # Owner 2026-10-23 (lab): yesterday's IB switch archive was the newest one, was bundled at the end of
+        # a UFM-only run, and the page lost every IB switch. Owner: 所有采集信息一定要留一份最新的散放；可以打包，
+        # 但是不要删除掉最新的一份. The newest file of each kind goes into its day's bundle like the others,
+        # but its loose copy stays until a newer file of that kind arrives.
+        yesterday, old = day(1), day(5)
+        older = self.write(f"{yesterday}-0100.tar.gz", b"older")
+        newest = self.write(f"{yesterday}-0659.tar.gz", b"newest")
+        lines = self.archive.archive_directory(self.dir, retain_days=3)
+        bundle = self.dir / f"{yesterday}-daily.tar.gz"
+        self.assertEqual(newest.read_bytes(), b"newest", "the newest switch archive stays for the page")
+        self.assertFalse(older.exists())
+        with tarfile.open(bundle) as archive:
+            self.assertEqual(archive.getnames()[1:], [older.name, newest.name], "both are in the day's bundle")
+        self.assertTrue(any("newest" in line and newest.name in line for line in lines), lines)
+
+        # later runs: it stays while it is the newest and leaves once a newer one is in (the bundle holds it);
+        # a loose file that differs from its bundled copy is a late file and stays beside the bundle
+        before = bundle.read_bytes()
+        self.archive.archive_directory(self.dir, retain_days=3)
+        self.assertTrue(newest.is_file())
+        rewritten = self.write(older.name, b"rewritten")
+        current = self.write(f"{day(0)}-0100.tar.gz")
+        lines = self.archive.archive_directory(self.dir, retain_days=3)
+        self.assertFalse(newest.exists(), "a newer archive arrived and the bundle already holds this one")
+        self.assertTrue(current.is_file() and rewritten.is_file())
+        self.assertEqual(bundle.read_bytes(), before, "the bundle is never rewritten")
+        self.assertTrue(any("1 file(s) already in the daily bundle" in line for line in lines), lines)
+        self.assertTrue(any("1 个迟到文件" in line for line in lines), lines)
+
+        # a shared report directory: each kind (the name without its date, minute and run nonce) keeps its own
+        reports = Path(self.tmp.name) / "reports"
+        reports.mkdir()
+        ib = reports / f"{yesterday}-0355-prod-4aa1a9de3b44a5e3_ufm02-ibdiagnet-topology-validation.xlsx"
+        receipt = reports / f"{yesterday}-0355-prod-4aa1a9de3b44a5e3_ufm02-ibdiagnet-topology-validation.receipt.json"
+        eth = reports / f"{day(0)}-0400-prod-ethernet-topology-validation.xlsx"
+        stale = reports / f"{old}-0300-prod-ethernet-topology-validation.xlsx"
+        stale_ib = reports / f"{old}-0300-prod-0123456789abcdef_ufm02-ibdiagnet-topology-validation.xlsx"
+        lonely = reports / f"{old}-0300-prod-0000000000000001_ufm01-iblinkinfo-topology-validation.xlsx"
+        for path in (ib, receipt, eth, stale, stale_ib, lonely):
+            path.write_bytes(b"r")
+        (reports / f"{old}-daily.tar.gz").write_bytes(b"x")
+        self.archive.archive_directory(reports, retain_days=3)
+        self.assertTrue(ib.is_file() and receipt.is_file() and eth.is_file(),
+                        "the newest IB report and its receipt stay beside today's Ethernet report")
+        self.assertFalse(stale.exists() or stale_ib.exists(),
+                         "an older file of a kind with a newer one still expires, whatever its run nonce")
+        self.assertTrue(lonely.is_file(), "the only (so the newest) file of its kind never expires")
+        self.assertFalse((reports / f"{old}-daily.tar.gz").exists(), "the expired day's bundle still leaves")
 
     def test_expired_collector_batch_directories_leave_and_nothing_else_is_followed(self):
         outside = Path(self.tmp.name) / "outside"

@@ -128,6 +128,30 @@ class UfmInfoTest(unittest.TestCase):
         self.run_info()
         self.assertNotIn("mget_temp -d smi", self.snapshot())
 
+    def test_missing_mst_devices_are_loaded_once_before_the_hca_temperature(self):
+        # Owner 2026-10-23 (lab): on the standby UFM `mst status -v` listed no /dev/mst device until
+        # `mst start` ran, and every mget_temp failed with "mopen: No such file or directory".
+        marker = self.base / "mst-started"
+        self.fake("mst", f'case "$1" in status) echo "MST PCI module is not loaded";; '
+                         f'start) echo started >> "{marker}"; echo "Loading MST PCI module - Success";; esac')
+        result = self.run_info()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = re.findall(r"^# Execute Command: (.*)$", self.snapshot(), re.M)
+        first_temp = EXPECTED_COMMANDS.index("mget_temp -d mlx5_0")
+        self.assertEqual(EXPECTED_COMMANDS[:first_temp] + ["mst start"] + EXPECTED_COMMANDS[first_temp:], commands)
+        self.assertEqual("started\n", marker.read_text(), "loaded exactly once")
+        self.assertIn("Loading MST PCI module - Success", self.snapshot())
+        self.assertIn("temp-of-mlx5_0", self.snapshot())
+
+    def test_loaded_mst_devices_are_left_alone(self):
+        marker = self.base / "mst-started"
+        self.fake("mst", f'case "$1" in status) echo "ConnectX8(rev:0)  /dev/mst/mt4131_pciconf0  0d:00.0";; '
+                         f'start) echo started >> "{marker}";; esac')
+        result = self.run_info()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(EXPECTED_COMMANDS, re.findall(r"^# Execute Command: (.*)$", self.snapshot(), re.M))
+        self.assertFalse(marker.exists())
+
     def test_a_failing_command_is_recorded_and_the_snapshot_still_completes(self):
         self.fake("ipmitool", 'echo "Could not open device at /dev/ipmi0" >&2; exit 1')
         result = self.run_info()

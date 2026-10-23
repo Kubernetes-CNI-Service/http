@@ -1,7 +1,9 @@
 #!/bin/bash
 # UFM appliance info collector. cron.sh copies it to the UFM and runs it there as root,
 # exactly like sw-info.sh on a switch (infiniband/monitor/UFM-MONITOR.md).
-# Read-only. Output: ./monitor/<hostname>.info, in the same sectioned layout as sw-info.sh.
+# Read-only, except that it loads the MST driver (`mst start`) when its /dev/mst devices are missing, so
+# the HCA temperatures can be read (owner 2026-10-23). Output: ./monitor/<hostname>.info, in the same
+# sectioned layout as sw-info.sh.
 #   ufm-info.sh        this node's Switch Status snapshot (run on every UFM)
 #   ufm-info.sh --ha   the HA state, run only on the primary through the VIP (owner 2026-10-21):
 #                      ./monitor/<hostname>.ha; it runs beside the node snapshot, with its own lock
@@ -80,6 +82,15 @@ for device in "$IB_SYSFS"/mlx5_*; do
     [[ "$name" =~ ^mlx5_[0-9]+$ ]] || continue
     HCA_TEMP_CMDS+=("mget_temp -d ${name}")
 done
+# mget_temp needs the MST devices (owner 2026-10-23): on the standby UFM `mst status -v` listed no
+# /dev/mst device until `mst start` ran on that boot, and every mget_temp failed with "mopen: No such
+# file or directory". When they are missing, `mst start` runs once, recorded in the snapshot, right
+# before the temperatures.
+MST_CMDS=()
+if (( ${#HCA_TEMP_CMDS[@]} )) && command -v mst >/dev/null 2>&1 \
+        && ! LC_ALL=C mst status -v 2>/dev/null | grep -q '/dev/mst/'; then
+    MST_CMDS=("mst start")
+fi
 
 # ── Command list: the Switch Status columns (verified on a UFM, 2026-10-21) ──
 CMD_LIST=(
@@ -93,6 +104,7 @@ CMD_LIST=(
     "uname -r"
     "lsblk -d -o NAME,MODEL,SERIAL,REV,SIZE,TYPE"
     "ibstat"
+    "${MST_CMDS[@]}"
     "${HCA_TEMP_CMDS[@]}"
     "ipmitool sdr type Temperature"
     "ipmitool sdr type 'Power Supply'"

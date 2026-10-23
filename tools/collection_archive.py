@@ -15,7 +15,14 @@ type (switch and UFM archives, ibdiagnet/iblinkinfo inputs and their .done, run 
   - a file of a day that is already bundled (a run that started before midnight) stays beside the
     bundle and leaves with it;
   - days older than RETAIN_DAYS are deleted, bundles included; collector batch directories
-    (YYYYMMDD-HHMM[-air|-prod]) past that window are removed. Links are never followed into.
+    (YYYYMMDD-HHMM[-air|-prod]) past that window are removed. Links are never followed into;
+  - owner 2026-10-23: the newest file of each kind always stays loose (the page and the analyzers read
+    the newest loose file; a UFM-only run had bundled the only IB switch archive and the page lost every
+    IB switch). A kind is the name without its date, minute and run nonce (YYYYMMDD-HHMM-(prod|air)-
+    <16 hex>), so 20261022-0659.tar.gz and 20261023-0100.tar.gz are one kind and a ufm01 report another
+    than a ufm02 one. The newest goes into its day's bundle like the others, but its loose copy is
+    neither removed nor expired; once a newer file of its kind is in, a loose copy that the bundle's
+    index lists with the same sha256 and size is removed, and one that differs stays as a late file.
 
     python3 tools/collection_archive.py [--retain-days N] <directory or link> [...]
 
@@ -40,6 +47,47 @@ RETAIN_DAYS = 3
 DATED = re.compile(r"^([0-9]{8})-")
 BATCH_PREFIX = re.compile(r"^[0-9]{8}-[0-9]{4}")
 BATCH = re.compile(r"^([0-9]{8})-[0-9]{4}(-(air|prod))?$")
+STAMP = re.compile(r"^[0-9]{8}-[0-9]*")
+RUN_NONCE = re.compile(r"^(-(?:prod|air))-[0-9a-f]{16}(?=[_.]|$)")
+
+
+def kind_of(name: str) -> str:
+    """What a dated file is a copy of: its name without the date, the minute and the run nonce."""
+    return RUN_NONCE.sub(r"\1-<run>", STAMP.sub("", name), count=1)
+
+
+def newest_of_each_kind(files: Iterable[Path]) -> set:
+    """The newest dated file of every kind (daily bundles and *.part are no kind)."""
+    newest = {}
+    for path in files:
+        if not DATED.match(path.name) or path.name.endswith(("-daily.tar.gz", ".part")):
+            continue
+        kind = kind_of(path.name)
+        if kind not in newest or path.name > newest[kind].name:
+            newest[kind] = path
+    return set(newest.values())
+
+
+def bundled_index(bundle: Path, date_text: str) -> Optional[dict]:
+    """name -> (sha256, size) from a daily bundle's index; None when it cannot be read."""
+    try:
+        with tarfile.open(bundle) as archive:
+            first = archive.next()
+            if first is None or first.name != f"{date_text}-daily.index" or not first.isfile():
+                return None
+            text = archive.extractfile(first).read().decode("utf-8")
+        listed = {}
+        for line in text.splitlines():
+            digest, size, name = line.split("  ", 2)
+            listed[name] = (digest, int(size))
+        return listed
+    except (OSError, tarfile.TarError, UnicodeDecodeError, ValueError, AttributeError):
+        return None
+
+
+def _same_as_bundled(path: Path, listed: dict) -> bool:
+    entry = listed.get(path.name)
+    return entry is not None and entry[1] == path.stat().st_size and entry[0] == _digest(path)
 
 
 def _day(text: str) -> Optional[datetime]:
@@ -57,8 +105,8 @@ def _digest(path: Path) -> str:
     return digest.hexdigest()
 
 
-def bundle_day(directory: Path, date_text: str, members: List[Path]) -> bool:
-    """Bundle one day's files; True when the bundle is in place and the originals are gone."""
+def bundle_day(directory: Path, date_text: str, members: List[Path], keep: frozenset = frozenset()) -> bool:
+    """Bundle one day's files; True when the bundle is in place and the originals (but `keep`) are gone."""
     bundle = directory / f"{date_text}-daily.tar.gz"
     part = directory / f"{bundle.name}.part"
     index_name = f"{date_text}-daily.index"
@@ -80,7 +128,8 @@ def bundle_day(directory: Path, date_text: str, members: List[Path]) -> bool:
         return False
     part.unlink(missing_ok=True)
     for path in members:
-        path.unlink(missing_ok=True)
+        if path not in keep:
+            path.unlink(missing_ok=True)
     return True
 
 
@@ -124,6 +173,7 @@ def archive_directory(directory: Union[str, Path], retain_days: int = RETAIN_DAY
                 lines.append(f"[CLN] WARN: could not delete stale batch directory {path.name}")
 
     # every date that still has files, daily bundles included (a day kept only as a bundle must leave too)
+    newest = frozenset(newest_of_each_kind(files))
     dates = sorted({DATED.match(path.name).group(1) for path in files
                     if DATED.match(path.name) and not path.name.endswith(".part")})
     for date_text in dates:
@@ -131,25 +181,42 @@ def archive_directory(directory: Union[str, Path], retain_days: int = RETAIN_DAY
         if date is None:
             continue
         of_day = [path for path in files if path.name.startswith(date_text + "-") and not path.name.endswith(".part")]
+        kept = sorted(path.name for path in of_day if path in newest)
         if date < cutoff:
             for path in of_day:
-                path.unlink(missing_ok=True)
-            lines.append(f"[CLN] deleted files for {date_text} (> {retain_days} days old)")
+                if path not in newest:
+                    path.unlink(missing_ok=True)
+            lines.append(f"[CLN] deleted files for {date_text} (> {retain_days} days old)"
+                         + (f"; newest of its kind kept loose: {', '.join(kept)}" if kept else ""))
             continue
         if date_text == today:
             continue
         bundle = real / f"{date_text}-daily.tar.gz"
         loose = [path for path in of_day if path != bundle and not path.name.endswith(".csv")]
         if bundle.exists():
-            if loose:
-                lines.append(f"[CLN] {date_text}: 每日包已存在；{len(loose)} 个迟到文件留在包旁边，到期与每日包一起删除")
-            else:
+            listed = bundled_index(bundle, date_text) if loose else {}
+            if listed is None:
+                lines.append(f"[CLN] {date_text}: WARN 每日包的 index 读不出，包旁的 {len(loose)} 个文件原样保留")
+                continue
+            same = [path for path in loose if _same_as_bundled(path, listed)]
+            archived = [path for path in same if path not in newest]
+            for path in archived:
+                path.unlink(missing_ok=True)
+            if archived:
+                lines.append(f"[CLN] {date_text}: removed {len(archived)} file(s) already in the daily bundle "
+                             f"(a newer one of their kind arrived)")
+            late = [path for path in loose if path not in same]
+            if late:
+                lines.append(f"[CLN] {date_text}: 每日包已存在；{len(late)} 个迟到文件留在包旁边，到期与每日包一起删除")
+            elif not archived:
                 lines.append(f"[CLN] {date_text}: daily bundle already exists, skipping")
             continue
         if not loose:
             continue
-        if bundle_day(real, date_text, loose):
-            lines.append(f"[CLN] {date_text}: bundled {len(loose)} file(s) → {bundle.name}")
+        kept = sorted(path.name for path in loose if path in newest)
+        if bundle_day(real, date_text, loose, newest):
+            lines.append(f"[CLN] {date_text}: bundled {len(loose)} file(s) → {bundle.name}"
+                         + (f"; newest of its kind kept loose: {', '.join(kept)}" if kept else ""))
         else:
             lines.append(f"[CLN] {date_text}: WARN bundle failed, originals kept")
     return lines
