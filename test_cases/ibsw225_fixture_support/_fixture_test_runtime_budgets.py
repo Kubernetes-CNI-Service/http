@@ -141,10 +141,11 @@ class BudgetWorkflowTests(unittest.TestCase):
                         with patch.object(observer.socket,'socket',return_value=connection), \
                              patch.object(observer,'_fixed_sdk',return_value=SimpleNamespace()):
                             with self.assertRaises(expected) as caught:
-                                leaf.observe_initial_plan_once(password='PRIVATE_PASSWORD')
+                                leaf.observe_initial_plan_once(password='secret-value')
                         if isinstance(failure,TimeoutError):
                             self.assertEqual(caught.exception.reason_code,'SSH_CONNECT_TIMEOUT')
                             self.assertNotIn('PRIVATE',str(caught.exception))
+                            self.assertNotIn('secret-value',str(caught.exception))
 
     def test_real_session_and_reader_get_fresh_command_budget_after_slow_login(self):
         clock=SimpleNamespace(now=100.0)
@@ -174,7 +175,7 @@ class BudgetWorkflowTests(unittest.TestCase):
                     with patch.object(observer.time,'monotonic',lambda:clock.now), \
                          patch.object(observer.socket,'socket',return_value=connection), \
                          patch.object(observer,'_fixed_sdk',return_value=sdk):
-                        result=leaf.observe_initial_plan_once(password='PRIVATE_TEST_PASSWORD')
+                        result=leaf.observe_initial_plan_once(password='secret-value')
             self.assertEqual(result['initial_plan']['state'],'INITIAL_NATIVE_DATA_PLAN')
             self.assertEqual([c.command for c in channels],
                 [observer._IDENTITY_COMMAND,'nv show system version','nv show system health'])

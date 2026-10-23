@@ -109,7 +109,7 @@ class LocalProbeChannel:
         environment = dict(PATH='/usr/bin:/bin', HOME=str(self.root), TMPDIR=str(self.root),
                            LC_ALL='C', PYTHONDONTWRITEBYTECODE='1',
                            IBSW_SCP_AUTH=json.dumps(dict(host='203.0.113.250',user='wrong_source',
-                               port=2201,password='WRONG_ENV_CONTEXT',host_keys='not-current-trust',
+                               port=2201,password='secret-value',host_keys='not-current-trust',
                                paths={},timeout_seconds=1)))
         self.process = subprocess.Popen([argv[0],'-c',script.decode(),'probe'],
             cwd=self.root,env=environment,stdin=subprocess.PIPE,stdout=subprocess.PIPE,

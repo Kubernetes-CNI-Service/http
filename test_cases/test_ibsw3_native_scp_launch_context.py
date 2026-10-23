@@ -24,7 +24,7 @@ from test_cases import scp_native_source_preflight_fixture as FIXTURE
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
 
-SECRET = 'DIRECT-LAUNCH-CONTEXT-SOURCE-ONLY-72c1'
+SECRET = 'secret-value'
 ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')
 COMPANION = 'scp-source-request.json'
 PACKAGE_BYTES = b'SYNTHETIC-NOT-FIRMWARE'

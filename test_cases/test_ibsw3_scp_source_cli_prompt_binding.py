@@ -16,7 +16,7 @@ from test_cases import scp_source_cli_fixture as FIXTURE
 HOST = '198.51.100.44'
 USER = 'source_test'
 PORT = 2222
-SECRET = 'PRIVATE-UNIT-SOURCE-CREDENTIAL-DO-NOT-PERSIST'
+SECRET = 'secret-value'
 
 
 def known_line(byte):

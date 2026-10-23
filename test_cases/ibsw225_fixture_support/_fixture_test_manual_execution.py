@@ -313,12 +313,12 @@ class ManualTests(unittest.TestCase):
                 prepared=driver.prepare_manual_run(app.__file__,str(project),args)
                 with driver.open_manual_run(app.__file__,str(project),args,prepared["run_directory"]) as scope:
                     with scope.open_readonly_query_inputs(HOST,known_hosts_path=str(known),identity_path=None,management_public_path=None,user="admin") as leaf:
-                        dispatch=leaf.execute_component_once("os",password="SYNTHETIC-PASSWORD")
+                        dispatch=leaf.execute_component_once("os",password="secret-value")
                         self.assertEqual(dispatch.state,"DISPATCHED_UNKNOWN")
                         self.assertEqual(dispatch.target_version,"25.03.1010")
                         self.assertTrue(scope.component_attempt_may_have_started(HOST,"os"))
                         with self.assertRaisesRegex(ValueError,"never retry"):
-                            leaf.execute_component_once("os",password="SYNTHETIC-PASSWORD")
+                            leaf.execute_component_once("os",password="secret-value")
             stage=Path(prepared["run_directory"])/HOST/"os-0001"
             self.assertEqual((stage/"before.commands").read_bytes(),BACKUP)
             self.assertTrue((stage/"component-dispatch.json").is_file())
@@ -327,7 +327,7 @@ class ManualTests(unittest.TestCase):
             self.assertIn(b"http://192.0.2.254:8088/image/nvos-amd64-25.03.1010.bin",script)
             self.assertIn(b"nv action fetch system image",script)
             self.assertIn(b"nv action install system image",script)
-            self.assertNotIn(b"SYNTHETIC-PASSWORD",script)
+            self.assertNotIn(b"secret-value",script)
 
     def test_safe_failure_reason_does_not_echo_exception_payload(self):
         reason=schedule._native_failure_reason(ValueError("PASSWORD-AND-PRIVATE-CONFIG"))
@@ -347,10 +347,11 @@ class ManualTests(unittest.TestCase):
                     scope.request_prepared_step(HOST,"os",1)
                     with patch.object(executor,"_execute_component_once",side_effect=ValueError("PRIVATE-ERROR")) as dispatch:
                         report=schedule.run_upgrade_component(scope,HOST,"os",known_hosts_path=str(known),
-                            identity_path=None,management_public_path=None,user="admin",password="PRIVATE")
+                            identity_path=None,management_public_path=None,user="admin",password="secret-value")
                     self.assertEqual(dispatch.call_count,1)
                     self.assertEqual(report["state"],"UNKNOWN")
                     self.assertNotIn("PRIVATE",report["reason"])
+                    self.assertNotIn("secret-value",report["reason"])
                     row=scope.read_component_status_data("os")["targets"][0]
                     self.assertEqual(row["state"],"UNKNOWN")
                     self.assertTrue(row["manual_required"])

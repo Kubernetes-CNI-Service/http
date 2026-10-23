@@ -26,17 +26,17 @@ class LimitsAndStabilityTests(unittest.TestCase):
                 self.assertEqual(pipeline.worker_limits(n),(upgrade,verify))
 
     def test_preboot_ssh_cannot_start_service_readiness_and_new_boot_does_not_wait_120(self):
-        gate=pipeline.BootStability('00000000-0000-0000-0000-000000000001')
-        self.assertEqual(gate.observe('00000000-0000-0000-0000-000000000001',10),'WAIT_BOOT')
+        gate=pipeline.BootStability('00000000-0000-0000-0000-020000000001')
+        self.assertEqual(gate.observe('00000000-0000-0000-0000-020000000001',10),'WAIT_BOOT')
         self.assertIsNone(gate.epoch)
-        self.assertEqual(gate.observe('00000000-0000-0000-0000-000000000002',20),'READY')
-        self.assertEqual(gate.epoch,'00000000-0000-0000-0000-000000000002')
+        self.assertEqual(gate.observe('00000000-0000-0000-0000-020000000002',20),'READY')
+        self.assertEqual(gate.epoch,'00000000-0000-0000-0000-020000000002')
 
     def test_another_actual_boot_requires_new_service_readiness_not_a_timer(self):
-        gate=pipeline.BootStability('00000000-0000-0000-0000-000000000001')
-        gate.observe('00000000-0000-0000-0000-000000000002',10)
-        self.assertEqual(gate.observe('00000000-0000-0000-0000-000000000003',125),'READY')
-        self.assertEqual(gate.epoch,'00000000-0000-0000-0000-000000000003')
+        gate=pipeline.BootStability('00000000-0000-0000-0000-020000000001')
+        gate.observe('00000000-0000-0000-0000-020000000002',10)
+        self.assertEqual(gate.observe('00000000-0000-0000-0000-020000000003',125),'READY')
+        self.assertEqual(gate.epoch,'00000000-0000-0000-0000-020000000003')
 
     def test_wait_queue_is_due_ordered_and_deduplicates_devices(self):
         q=pipeline.WaitingQueue()
@@ -106,9 +106,9 @@ class CollectorDiagnosticsTests(unittest.TestCase):
         self.assertNotIn('SYNTHETIC-SECRET',str(captured.exception))
 
     def test_no_retry_is_authorized_by_missing_exit_evidence(self):
-        gate=pipeline.BootStability('00000000-0000-0000-0000-000000000001')
-        gate.observe('00000000-0000-0000-0000-000000000002',0)
-        self.assertEqual(gate.observe('00000000-0000-0000-0000-000000000002',120),'READY')
+        gate=pipeline.BootStability('00000000-0000-0000-0000-020000000001')
+        gate.observe('00000000-0000-0000-0000-020000000002',0)
+        self.assertEqual(gate.observe('00000000-0000-0000-0000-020000000002',120),'READY')
         # Readiness is only a scheduling stage, never installation success.
         self.assertFalse(hasattr(gate,'verified'))
 

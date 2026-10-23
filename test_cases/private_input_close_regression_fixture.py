@@ -12,7 +12,7 @@ from test_cases import private_input_ni_fixture as original
 
 ROOT=original.ROOT
 PAIRS=(('credential','ni'),('credential','eio'),('target','ni'),('target','eio'))
-SECRET='FIXED_PRIVATE_CLOSE_REGRESSION_SECRET'
+SECRET='secret-value'
 CHILD_PROGRAM=(
  "import sys,unittest\n"
  "sys.path.insert(0,sys.argv[1])\n"

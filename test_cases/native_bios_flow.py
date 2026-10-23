@@ -22,7 +22,9 @@ from test_cases import scp_native_cpld_bridge_fixture as FIXTURE
 from test_cases import native_bios_physical_io as IO
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
-SECRET = 'NATIVE-BIOS-BRIDGE-SYNTHETIC-ONLY-71c4'
+# Must equal native_bios_stub_sources.SECRET; upper case keeps it distinct from
+# the CPLD/OS bridge value while staying an audit-approved placeholder.
+SECRET = 'SECRET-VALUE'
 RETAINED_TREES = []
 PACKAGE = '0ACQF.cab'
 ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',

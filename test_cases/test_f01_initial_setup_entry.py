@@ -15,7 +15,7 @@ from unittest import mock
 SUBJECT = "tools.ufm_initial_setup"
 GLOBAL = b"""common:
   switch:
-    password: NEVER_ECHO_THIS_SECRET
+    password: secret-value
 servers:
 - ufm:
     version: 2.5.1-8
@@ -72,7 +72,7 @@ class UfmInitialSetupDirectTests(unittest.TestCase):
             self.assertEqual("2.5.1-8", plan["requested_version"])
             self.assertEqual("CSV_IPV4_FIRST", plan["access"]["policy"])
             self.assertFalse(plan["access"]["dhcp_required"])
-            self.assertNotIn("NEVER_ECHO_THIS_SECRET", json.dumps(plan))
+            self.assertNotIn("secret-value", json.dumps(plan))
 
     def test_only_explicit_ipv4_unreachable_allows_oob_and_no_claim_of_observation(self):
         api = subject(self)
@@ -172,7 +172,7 @@ class UfmInitialSetupGenerationWorkflowTests(unittest.TestCase):
             self.assertFalse(manifest["completion"])
             self.assertEqual(0o600, script.stat().st_mode & 0o777)
             self.assertEqual(0o600, Path(result["manifest"]).stat().st_mode & 0o777)
-            self.assertNotIn(b"NEVER_ECHO_THIS_SECRET", raw + Path(result["manifest"]).read_bytes())
+            self.assertNotIn(b"secret-value", raw + Path(result["manifest"]).read_bytes())
             self.assertEqual(before, {name: (project / name).read_bytes() for name in before})
             self.assertEqual(before_sdk, {name: sys.modules.get(name) for name in before_sdk})
 

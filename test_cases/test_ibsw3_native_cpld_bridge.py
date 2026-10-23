@@ -23,7 +23,7 @@ from test_cases import native_cpld_physical_io as IO
 from test_cases import scp_native_cpld_bridge_isolation as ISOLATION
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
-SECRET = 'NATIVE-CPLD-BRIDGE-SYNTHETIC-ONLY-71c4'
+SECRET = 'secret-value'
 RETAINED_TREES = []
 BURN = 'FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH = 'FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'

@@ -15,7 +15,7 @@ from unittest import mock
 SUBJECT="tools.ufm_deployment_script_builder"
 GLOBAL_BYTES=b"""common:
   switch:
-    password: DO_NOT_COPY_INPUT_SECRET_20261013
+    password: secret-value
 servers:
 - ufm:
     version: 2.5.1-8
@@ -59,7 +59,7 @@ class F01StageScriptBuilderDirectTests(unittest.TestCase):
         run_id="20261013T000000Z-"+"1"*32
         raw=api._render_stage_probe("EXAMPLE-UFM01","eno8303",run_id)
         self.assertEqual(expected_script(run_id),raw)
-        for forbidden in (b"DO_NOT_COPY_INPUT_SECRET",b"passwd",b"reboot",b"docker",b"ufm_ha_cluster",b"authorized_keys"):
+        for forbidden in (b"secret-value",b"passwd",b"reboot",b"docker",b"ufm_ha_cluster",b"authorized_keys"):
             self.assertNotIn(forbidden,raw)
         with self.assertRaises(api.ScriptBuildHold):
             api._render_stage_probe("EXAMPLE-UFM01","eno8303;echo unsafe",run_id)
@@ -190,7 +190,7 @@ class F01StageScriptBuilderInputWorkflowTests(unittest.TestCase):
                 self.assertEqual(0o600,result.manifest_path.stat().st_mode&0o777)
                 for folder in (location,location.parent,location.parent.parent,location.parent.parent.parent):
                     self.assertEqual(0o700,folder.stat().st_mode&0o777)
-                self.assertNotIn(b"DO_NOT_COPY_INPUT_SECRET",result.script_path.read_bytes()+result.manifest_path.read_bytes())
+                self.assertNotIn(b"secret-value",result.script_path.read_bytes()+result.manifest_path.read_bytes())
             self.assertEqual(GLOBAL_BYTES,(project/"01-global.yaml").read_bytes())
             self.assertEqual(CSV_BYTES,(project/"02-devices_config.csv").read_bytes())
 

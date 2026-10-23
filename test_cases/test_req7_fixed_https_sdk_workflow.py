@@ -25,7 +25,7 @@ class FixedHttpsSdkWorkflowTests(unittest.TestCase):
                     scopes=('https://www.googleapis.com/auth/spreadsheets',),always_use_jwt_access=False)
                 token=transport._protocol_only_http('token')
                 grid=transport._protocol_only_http('sheets-read',target=fixture.TARGET)
-                token_body=b'{"access_token":"owned-access-token","expires_in":3600,"token_type":"Bearer"}'
+                token_body=b'{"access_token":"secret-value","expires_in":3600,"token_type":"Bearer"}'
                 grid_body=b'{"spreadsheetId":"synthetic_spreadsheet_id_0001"}'
                 reply=(fixture.response(200,grid_body) if fault=='healthy' else
                        fixture.response(302,grid_body,location=True) if fault=='redirect' else
@@ -37,7 +37,7 @@ class FixedHttpsSdkWorkflowTests(unittest.TestCase):
                 with fixture.peer(self,[fixture.response(200,token_body),reply]) as peer:
                     with peer.client(transport) as sockets:
                         sa.refresh(Request(token))
-                        self.assertEqual('owned-access-token',sa.token)
+                        self.assertEqual('secret-value',sa.token)
                         frozen=credentials.Credentials(token=sa.token,expiry=sa.expiry,
                             scopes=('https://www.googleapis.com/auth/spreadsheets',))
                         authenticated=AuthorizedHttp(frozen,http=grid,max_refresh_attempts=0)
@@ -72,7 +72,7 @@ class FixedHttpsSdkWorkflowTests(unittest.TestCase):
                     key.public_key().verify(decode(parts[2]),('.'.join(parts[:2])).encode('ascii'),padding.PKCS1v15(),hashes.SHA256())
                     self.assertEqual(b'GET /v4/spreadsheets/synthetic_spreadsheet_id_0001?fields=spreadsheetId&alt=json HTTP/1.1\r\n',get[0])
                     self.assertIn(b'Host: sheets.googleapis.com\r\n',get[1])
-                    self.assertIn(b'Authorization: Bearer owned-access-token\r\n',get[1])
+                    self.assertIn(b'Authorization: Bearer secret-value\r\n',get[1])
                     self.assertEqual(b'',get[2])
                     self.assertEqual(6,len(peer.closed))
                     self.assertTrue(all(closed for _kind,closed in peer.closed))
@@ -94,7 +94,7 @@ class FixedHttpsSdkWorkflowTests(unittest.TestCase):
                     scopes=('https://www.googleapis.com/auth/spreadsheets',),always_use_jwt_access=False)
                 token=transport._protocol_only_http('token')
                 adapter=Request(token)
-                payload=b'{"access_token":"owned-access-token","expires_in":3600}'
+                payload=b'{"access_token":"secret-value","expires_in":3600}'
                 with fixture.peer(self,[fixture.response(status,payload,length=length,location=status==302)]) as peer:
                     with peer.client(transport) as sockets:
                         caught=None

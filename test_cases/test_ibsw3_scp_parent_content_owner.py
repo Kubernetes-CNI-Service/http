@@ -199,17 +199,18 @@ class ParentContentOwnerTests(unittest.TestCase):
                 external.write_text('#!'+sys.executable+'\nimport os,sys\n'
                     'a=sys.argv[1:];assert "-O" in a and "StrictHostKeyChecking=yes" in a\n'
                     'assert "IBSW_SCP_AUTH" not in os.environ\n'
-                    'sys.stderr.write("source password:");sys.stderr.flush();assert input()=="SYNTHETIC_PARENT_SECRET"\n'
+                    'sys.stderr.write("source password:");sys.stderr.flush()\n'
+                    'assert input()=="secret-value"\n'
                     'with open('+repr(str(trace))+',"a") as f:f.write(a[-2]+"\\n")\n'
                     'with open(a[-1],"wb") as f:f.write('+repr(b'xyz' if corrupt else b'abc')+')\n')
                 external.chmod(0o700)
                 helper=module.remote_helper_bytes().decode().replace("SSH = '/usr/bin/ssh'",'SSH = '+repr(str(external))).replace("SCP = '/usr/bin/scp'",'SCP = '+repr(str(external)))
                 receiver=root/'receiver.py';receiver.write_text(helper)
-                cfg=dict(host='192.0.2.254',user='sourceuser',port=22,host_keys='SYNTHETIC wire only\n',password='SYNTHETIC_PARENT_SECRET',paths={str(path):3},timeout_seconds=3,content_binding=public['content_binding'])
+                cfg=dict(host='192.0.2.254',user='sourceuser',port=22,host_keys='SYNTHETIC wire only\n',password='secret-value',paths={str(path):3},timeout_seconds=3,content_binding=public['content_binding'])
                 result=subprocess.run([sys.executable,'-B',str(receiver),'fetch',str(path),str(root/'received.bin')],stdin=subprocess.DEVNULL,capture_output=True,timeout=10,env=dict(os.environ,IBSW_SCP_AUTH=json.dumps(cfg)))
                 owner.verify()
             self.assertEqual(['sourceuser@192.0.2.254:'+str(path)],trace.read_text().splitlines())
-            self.assertNotIn(b'SYNTHETIC_PARENT_SECRET',result.stdout+result.stderr)
+            self.assertNotIn(b'secret-value',result.stdout+result.stderr)
             self.assertFalse(list(root.glob('.ibsw-scp-*')))
             return result.returncode,result.stdout+result.stderr
 

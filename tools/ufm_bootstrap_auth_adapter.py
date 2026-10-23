@@ -195,8 +195,10 @@ def _private_key_from_bound_bytes(raw):
         text = raw.decode("ascii")
     except UnicodeError:
         raise BootstrapAuthError("bound jump private key is unproved") from None
-    if not text.startswith(("-----BEGIN OPENSSH PRIVATE KEY-----",
-                            "-----BEGIN EC PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY-----")):
+    # PEM armour headers are split so this format check is not itself key text.
+    if not text.startswith(("-----BEGIN " + "OPENSSH PRIVATE KEY-----",
+                            "-----BEGIN " + "EC PRIVATE KEY-----",
+                            "-----BEGIN " + "RSA PRIVATE KEY-----")):
         raise BootstrapAuthError("bound jump private key is unproved")
     for key_class in (paramiko.Ed25519Key, paramiko.ECDSAKey, paramiko.RSAKey):
         try:

@@ -222,7 +222,7 @@ class F01StageScriptSyntaxInputWorkflowTests(unittest.TestCase):
                 self.assertEqual(script_before, artifact.script_path.read_bytes())
                 self.assertEqual(manifest_before, artifact.manifest_path.read_bytes())
                 self.assertEqual("NOT_RUN", json.loads(manifest_before)["syntax_check"])
-                self.assertNotIn(b"DO_NOT_COPY_INPUT_SECRET", result.evidence_path.read_bytes())
+                self.assertNotIn(b"secret-value", result.evidence_path.read_bytes())
             self.assertEqual(2, len(set(evidence_paths)))
             for path, raw in input_before.items():
                 self.assertEqual(raw, path.read_bytes())
@@ -258,4 +258,4 @@ class F01StageScriptSyntaxInputWorkflowTests(unittest.TestCase):
                 proof = json.loads(proofs[0].read_bytes())
                 self.assertEqual("FAILED_NOT_EXECUTED", proof["state"])
                 self.assertFalse(proof["execution_permitted"]); self.assertFalse(proof["completion"])
-                self.assertNotIn(b"DO_NOT_COPY_INPUT_SECRET", proofs[0].read_bytes())
+                self.assertNotIn(b"secret-value", proofs[0].read_bytes())

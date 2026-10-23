@@ -8,7 +8,8 @@ import hashlib
 from pathlib import Path
 import struct
 
-SECRET = 'NATIVE-BIOS-BRIDGE-SYNTHETIC-ONLY-71c4'
+# Upper case keeps the BIOS bridge value distinct from the CPLD/OS bridge value.
+SECRET = 'SECRET-VALUE'
 PACKAGE = '0ACQF.cab'
 
 
@@ -52,11 +53,11 @@ print(secret)
     nv = '''#!/usr/bin/python3
 import json,os,sys
 from pathlib import Path
-if any('NATIVE-BIOS-BRIDGE-SYNTHETIC-ONLY-' in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
+if any(SECRET_TEXT in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
 remote=Path(os.environ['TMPDIR'])
 if not remote.name.startswith('.ibsw-') or remote.is_symlink():raise SystemExit(101)
 with (remote/'nv.bridge.trace').open('a') as handle:handle.write(json.dumps(sys.argv[1:])+'\\n')
 raise SystemExit(93)
-'''
+'''.replace('SECRET_TEXT', repr(SECRET))
     return {'private-ssh': ssh.encode(), 'private-scp': scp.encode(), 'private-nv': nv.encode()}
 

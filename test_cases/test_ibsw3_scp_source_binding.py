@@ -75,7 +75,7 @@ class ScpSourceBindingTests(unittest.TestCase):
                 'a=sys.argv[1:]\nassert "-O" in a and "StrictHostKeyChecking=yes" in a\n'
                 'assert "IBSW_SCP_AUTH" not in os.environ\n'
                 'sys.stderr.write("source password:");sys.stderr.flush()\n'
-                'assert input()=="SYNTHETIC_ONLY"\n'
+                'assert input()=="secret-value"\n'
                 'with open('+repr(str(trace))+',"a") as f:f.write(a[-2]+"\\n")\n'
                 'with open(a[-1],"wb") as f:f.write('+repr(b'xyz' if wrong else b'abc')+')\n')
             external.chmod(0o700)
@@ -84,7 +84,7 @@ class ScpSourceBindingTests(unittest.TestCase):
             helper=helper.replace("SCP = '/usr/bin/scp'",'SCP = '+repr(str(external)))
             program=root/'helper.py';program.write_text(helper)
             context=dict(host='192.0.2.254',user='sourceuser',port=22,host_keys='synthetic private stub\n',
-                password='SYNTHETIC_ONLY',paths={PACKAGE:3},timeout_seconds=3)
+                password='secret-value',paths={PACKAGE:3},timeout_seconds=3)
             if not missing:
                 context['content_binding']=dict(version=1,binding_sha256='1'*64,
                     packages={PACKAGE:dict(size=3,sha256=ABC_SHA)})
@@ -92,7 +92,7 @@ class ScpSourceBindingTests(unittest.TestCase):
                 stdin=subprocess.DEVNULL,capture_output=True,timeout=10,
                 env=dict(os.environ,IBSW_SCP_AUTH=json.dumps(context)))
             raw=observed.stdout+observed.stderr
-            self.assertNotIn(b'SYNTHETIC_ONLY',raw)
+            self.assertNotIn(b'secret-value',raw)
             self.assertFalse(list(root.glob('.ibsw-scp-*')))
             pulls=trace.read_text().splitlines() if trace.exists() else []
             image=(root/'image').read_bytes() if (root/'image').exists() else None

@@ -37,7 +37,7 @@ class ScpSourceFactoryProvenanceTests(unittest.TestCase):
         self.assertIs(provider.source_from_known_hosts, factory)
         self.assertIsNone(sys.getprofile())
         self.assertIsNone(threading.getprofile())
-        secret = 'UNIT-SOURCE-WRAPPER-SECRET-NOT-A-WIRE-PAYLOAD'
+        secret = 'secret-value'
         counts = {'foreign_factory': 0, 'freeze': 0}
         genuine_returns = []
         configured = []

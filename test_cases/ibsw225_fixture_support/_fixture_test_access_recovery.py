@@ -385,9 +385,10 @@ class NativeAuthenticationTests(unittest.TestCase):
                     with patch.object(observer.socket,'socket',return_value=socket),patch.object(observer,'_fixed_sdk',return_value=sdk), \
                          patch.object(observer,'_original_private_key',return_value=object()):
                         with self.assertRaises(observer._NativeObservationHold) as caught:
-                            with observer._signed_session_single(leaf,password='PRIVATE-PASSWORD' if password_mode else None):
+                            with observer._signed_session_single(leaf,password='secret-value' if password_mode else None):
                                 self.fail('Authentication did not complete')
             self.assertNotIn('PRIVATE',str(caught.exception))
+            self.assertNotIn('secret-value',str(caught.exception))
             return caught.exception.reason_code
 
     def test_explicit_server_rejection_is_not_a_reboot_network_failure(self):

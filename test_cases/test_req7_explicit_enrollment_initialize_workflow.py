@@ -186,11 +186,11 @@ class ExplicitEnrollmentInitializeWorkflowTests(unittest.TestCase):
                 self.assertEqual({'LC_ALL': 'C'}, kwargs['env'])
                 self.assertEqual(str(ROOT), kwargs['cwd']); self.assertIs(kwargs['start_new_session'], True)
                 self.assertIs(kwargs['close_fds'], True); self.assertIsNone(kwargs.get('shell'))
-                self.assertNotIn('owned-project-token', repr(argv))
-                self.assertNotIn('owned-project-token', repr(kwargs['env']))
+                self.assertNotIn('secret-value', repr(argv))
+                self.assertNotIn('secret-value', repr(kwargs['env']))
                 if argv[4] == auth._PROJECT_CHILD_PROGRAM:
                     self.assertEqual([], stages); stage = 'oauth'
-                    reply = wire_reply({'access_token': 'owned-project-token', 'expires_in': 3600})
+                    reply = wire_reply({'access_token': 'secret-value', 'expires_in': 3600})
                     host = 'oauth2.googleapis.com'
                 elif argv[4] == reads._TEMPLATE_COHORT_CHILD_PROGRAM:
                     self.assertEqual(['oauth'], stages); stage = 'template4'

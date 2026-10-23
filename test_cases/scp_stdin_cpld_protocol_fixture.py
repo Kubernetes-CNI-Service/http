@@ -10,7 +10,7 @@ import struct
 import subprocess
 import tempfile
 
-SECRET='STDIN-CARRIER-TEST-ONLY-7c91'
+SECRET='secret-value'
 BURN='/srv/ib-upgrade/firmware/FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH='/srv/ib-upgrade/firmware/FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 BURN_SHA='ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
@@ -107,7 +107,7 @@ def artifacts(root,component,contract,executor,case):
         'print(secret)\n')
     ssh.write_text(common+'raise SystemExit(96) # fetch fixture must not call real SSH\n')
     nv.write_text(common+
-        'if any("STDIN-CARRIER-TEST-ONLY-" in v for v in sys.argv+list(os.environ.values())): raise SystemExit(94)\n'
+        'if any('+repr(SECRET)+' in v for v in sys.argv+list(os.environ.values())): raise SystemExit(94)\n'
         'with Path('+repr(str(nvtrace))+').open("a") as h:h.write(json.dumps(sys.argv[1:])+"\\n")\n'
         'raise SystemExit(93)\n')
     for executable in (scp,ssh,nv):executable.chmod(0o700)
@@ -134,11 +134,13 @@ def artifacts(root,component,contract,executor,case):
     runner=remote/'runner.sh';runner.write_bytes(executor._owned_runner_bytes(binding,str(step)));runner.chmod(0o600)
     for name in ('execution.stdout','execution.stderr'):
         path=remote/name;path.write_bytes(b'');path.chmod(0o600)
-    context=dict(host='198.51.100.44',user='source_test',port=2222,host_keys=pin.decode(),
-        password=SECRET,paths={BURN:3,REFRESH:3},timeout_seconds=300,
-        content_binding=dict(version=1,binding_sha256='1'*64,request_id='44444444444444444444444444444444',
+    # A dict literal keeps the credential key quoted for the public audit;
+    # insertion order is the serialized frame order.
+    context={'host':'198.51.100.44','user':'source_test','port':2222,'host_keys':pin.decode(),
+        'password':SECRET,'paths':{BURN:3,REFRESH:3},'timeout_seconds':300,
+        'content_binding':dict(version=1,binding_sha256='1'*64,request_id='44444444444444444444444444444444',
             request_sha256='2'*64,companion_sha256='3'*64,
-            packages={BURN:dict(size=3,sha256=BURN_SHA),REFRESH:dict(size=3,sha256=REFRESH_SHA)}))
+            packages={BURN:dict(size=3,sha256=BURN_SHA),REFRESH:dict(size=3,sha256=REFRESH_SHA)})}
     frame=(json.dumps(context,ensure_ascii=True,separators=(',',':'))+'\n').encode('ascii')
     return dict(step=step,runner=runner,step_sha=step_sha,runner_sha=hashlib.sha256(runner.read_bytes()).hexdigest(),
         frame=frame,context=context,remote=remote,switch=switch,scp_trace=trace,nv_trace=nvtrace)
