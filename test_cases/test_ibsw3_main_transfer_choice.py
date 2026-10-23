@@ -106,7 +106,8 @@ class MainTransferChoiceTests(unittest.TestCase):
                 if type(current) is driver._PreparedRunScope and hasattr(current,'parsed'):
                     methods.append(current.parsed.method)
         self.assertIsNone(sys.getprofile())
-        self.assertIsNone(threading.getprofile())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
         source_prompt = None
         fixture = FIXTURE.ThreeComponentWorkflowTests()
         try:

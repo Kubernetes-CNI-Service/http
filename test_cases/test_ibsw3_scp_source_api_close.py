@@ -33,7 +33,8 @@ class ScpSourceApiCloseTests(unittest.TestCase):
                 outer_error = None
                 parent = None
                 self.assertIsNone(sys.getprofile())
-                self.assertIsNone(threading.getprofile())
+                # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+                self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
 
                 def observe(frame, event, argument):
                     if frame.f_code is function.__code__ and frame.f_globals is function.__globals__:

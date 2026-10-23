@@ -8,7 +8,10 @@ import hashlib
 from pathlib import Path
 import struct
 
-SECRET = 'secret-value'
+# The private nv stub embeds only CARRIER_PREFIX, never the whole unit
+# credential.
+CARRIER_PREFIX = 'NATIVE-CPLD-BRIDGE-SYNTHETIC-ONLY-'
+SECRET = CARRIER_PREFIX + '71c4'
 BURN = 'FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH = 'FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 
@@ -53,10 +56,10 @@ print(secret)
     nv = '''#!/usr/bin/python3
 import json,os,sys
 from pathlib import Path
-if any(SECRET_TEXT in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
+if any(CARRIER_TEXT in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
 remote=Path(os.environ['TMPDIR'])
 if not remote.name.startswith('.ibsw-') or remote.is_symlink():raise SystemExit(101)
 with (remote/'nv.bridge.trace').open('a') as handle:handle.write(json.dumps(sys.argv[1:])+'\\n')
 raise SystemExit(93)
-'''.replace('SECRET_TEXT', repr(SECRET))
+'''.replace('CARRIER_TEXT', repr(CARRIER_PREFIX))
     return {'private-ssh': ssh.encode(), 'private-scp': scp.encode(), 'private-nv': nv.encode()}

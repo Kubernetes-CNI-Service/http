@@ -23,7 +23,10 @@ from test_cases import native_cpld_physical_io as IO
 from test_cases import scp_native_cpld_bridge_isolation as ISOLATION
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
-SECRET = 'secret-value'
+# Independent literal; must equal native_cpld_stub_sources.SECRET, whose
+# private stubs embed only this carrier prefix.
+CARRIER_PREFIX = 'NATIVE-CPLD-BRIDGE-SYNTHETIC-ONLY-'
+SECRET = CARRIER_PREFIX + '71c4'
 RETAINED_TREES = []
 BURN = 'FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH = 'FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
@@ -136,8 +139,9 @@ class NativeCpldBridgeWorkflowTests(unittest.TestCase):
                     except BaseException as error: r.fault_error = error
 
         self.assertIsNone(sys.getprofile()); self.assertIsNone(sys.gettrace())
-        self.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
-        self.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
+        self.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
         try:
             sys.setprofile(observe); threading.setprofile(observe)
             with patch.object(sys, 'stdin', CLI.UnitTTY()), \

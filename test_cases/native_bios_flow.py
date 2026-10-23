@@ -22,9 +22,10 @@ from test_cases import scp_native_cpld_bridge_fixture as FIXTURE
 from test_cases import native_bios_physical_io as IO
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
-# Must equal native_bios_stub_sources.SECRET; upper case keeps it distinct from
-# the CPLD/OS bridge value while staying an audit-approved placeholder.
-SECRET = 'SECRET-VALUE'
+# Independent literal; must equal native_bios_stub_sources.SECRET, whose
+# private stubs embed only this carrier prefix.
+CARRIER_PREFIX = 'NATIVE-BIOS-BRIDGE-SYNTHETIC-ONLY-'
+SECRET = CARRIER_PREFIX + '71c4'
 RETAINED_TREES = []
 PACKAGE = '0ACQF.cab'
 ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
@@ -156,7 +157,8 @@ class BiosExercise(unittest.TestCase):
             selected = None
             for name in package_names:
                 p = root / 'packages' / name
-                try: named = p.stat(follow_symlinks=False)
+                # lstat() == stat(follow_symlinks=False); the keyword form is 3.10+.
+                try: named = p.lstat()
                 except FileNotFoundError: continue
                 if (facts.st_dev, facts.st_ino) == (named.st_dev, named.st_ino):
                     selected = name; break
@@ -168,8 +170,9 @@ class BiosExercise(unittest.TestCase):
             return value
 
         self.assertIsNone(sys.getprofile()); self.assertIsNone(sys.gettrace())
-        self.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
-        self.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
+        self.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
         try:
             sys.setprofile(observe); threading.setprofile(observe)
             with patch.object(os, 'read', read), patch.object(sys, 'stdin', CLI.UnitTTY()), \

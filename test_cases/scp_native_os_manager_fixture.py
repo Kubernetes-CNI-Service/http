@@ -360,8 +360,9 @@ def exercise(case, *, two, fault):
 
     bridge.before_lstat, bridge.after_ack = before_lstat, after_ack
     case.assertIsNone(sys.getprofile()); case.assertIsNone(sys.gettrace())
-    case.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
-    case.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+    # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+    case.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
+    case.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
     try:
         sys.setprofile(observe); threading.setprofile(observe)
         sys.settrace(trace); threading.settrace(trace)

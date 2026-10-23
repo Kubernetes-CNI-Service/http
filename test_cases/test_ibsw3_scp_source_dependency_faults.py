@@ -56,7 +56,8 @@ class ScpSourceDependencyFaultTests(unittest.TestCase):
                 freeze = FIXTURE.driver._PreparedRunScope.freeze_scp_package_sources
                 counts = dict(freeze=0)
                 self.assertIsNone(sys.getprofile())
-                self.assertIsNone(threading.getprofile())
+                # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+                self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
 
                 def observe(frame, event, argument):
                     if (event == 'call' and frame.f_code is freeze.__code__

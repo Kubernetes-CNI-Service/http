@@ -21,7 +21,8 @@ class NativeBorrowHybridProvenanceTests(unittest.TestCase):
         fork = getattr(scope_type, 'fork_native_component_scope', None)
         self.assertIsNotNone(fork, 'CAPABILITY_NOT_REACHED: no real native fork')
         self.assertIsNone(sys.getprofile())
-        self.assertIsNone(threading.getprofile())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
         for fault in ('readiness_fields_only', 'wrong_native_component', 'wrong_native_indices'):
             with self.subTest(fault=fault):
                 seen = []

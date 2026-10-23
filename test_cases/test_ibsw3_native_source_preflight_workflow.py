@@ -58,8 +58,9 @@ class NativeScpSourcePreflightWorkflowTests(unittest.TestCase):
         active_sessions, active_outer, active_wrappers, traced = {}, {}, {}, {}
         missing = object()
         self.assertIsNone(sys.getprofile()); self.assertIsNone(sys.gettrace())
-        self.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
-        self.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
+        self.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
             trust = root / 'scp-source-known_hosts'

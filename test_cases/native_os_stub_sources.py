@@ -4,7 +4,10 @@ import hashlib
 import struct
 
 
-SECRET = 'secret-value'
+# Same carrier as the CPLD bridge. The private nv stub embeds only
+# CARRIER_PREFIX, never the whole unit credential.
+CARRIER_PREFIX = 'NATIVE-CPLD-BRIDGE-SYNTHETIC-ONLY-'
+SECRET = CARRIER_PREFIX + '71c4'
 PACKAGE = 'nvos-amd64-25.03.1010.bin'
 BURN = 'FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH = 'FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
@@ -56,11 +59,11 @@ print(secret)
     nv = '''#!/usr/bin/python3
 import json,os,sys,time
 from pathlib import Path
-if any(SECRET_TEXT_LITERAL in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
+if any(CARRIER_TEXT_LITERAL in value for value in sys.argv+list(os.environ.values())):raise SystemExit(94)
 remote=Path(os.environ['TMPDIR'])
 if not remote.name.startswith('.ibsw-') or remote.is_symlink():raise SystemExit(101)
 with (remote/'nv.os.trace').open('a') as handle:
     handle.write(json.dumps(dict(argv=sys.argv[1:],time_ns=time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)))+'\\n')
 raise SystemExit(93)
-'''.replace('SECRET_TEXT_LITERAL', repr(SECRET))
+'''.replace('CARRIER_TEXT_LITERAL', repr(CARRIER_PREFIX))
     return {'private-ssh': ssh.encode(), 'private-scp': scp.encode(), 'private-nv': nv.encode()}

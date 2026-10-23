@@ -36,7 +36,8 @@ class ScpSourceFactoryProvenanceTests(unittest.TestCase):
         self.assertIs(factory.__globals__, vars(provider))
         self.assertIs(provider.source_from_known_hosts, factory)
         self.assertIsNone(sys.getprofile())
-        self.assertIsNone(threading.getprofile())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
         secret = 'secret-value'
         counts = {'foreign_factory': 0, 'freeze': 0}
         genuine_returns = []
@@ -104,7 +105,7 @@ class ScpSourceFactoryProvenanceTests(unittest.TestCase):
             self.assertIs(installed_slot, foreign_same_named_factory)
             self.assertIs(provider.source_from_known_hosts, factory)
             self.assertIsNone(sys.getprofile())
-            self.assertIsNone(threading.getprofile())
+            self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
             self.assertEqual(0, counts['foreign_factory'],
                              'FOREIGN_SOURCE_FACTORY_MUST_BE_REFUSED_BEFORE_CALL')
             self.assertEqual([], configured,

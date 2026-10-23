@@ -89,7 +89,8 @@ class ScpSourceCliPromptBindingTests(unittest.TestCase):
             self.assertTrue(callable(configure),
                             'MISSING_SOURCE_CONFIGURATION_CAPABILITY; factory/prompt=NOT_REACHED')
             self.assertIsNone(sys.getprofile())
-            self.assertIsNone(threading.getprofile())
+            # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+            self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
             factory = provider.source_from_known_hosts
             prepare = FIXTURE.driver.prepare_manual_run
             freeze = FIXTURE.driver._PreparedRunScope.freeze_scp_package_sources

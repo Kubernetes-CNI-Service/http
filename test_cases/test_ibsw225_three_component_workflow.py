@@ -672,7 +672,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
                 with real_open(path, "xb") as stream:
                     stream.write(payload)
                 os.chmod(path, 0o600)
-                seeded.append((path, payload, identity(path.stat(follow_symlinks=False))))
+                # lstat() == stat(follow_symlinks=False); the keyword form is 3.10+.
+                seeded.append((path, payload, identity(path.lstat())))
             active = True
             return real_initialize(scope)
 
@@ -711,7 +712,7 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             # original untrusted material to prove exact bytes and metadata.
             for path, payload, original_identity in seeded:
                 self.assertEqual(path.read_bytes(), payload)
-                self.assertEqual(identity(path.stat(follow_symlinks=False)), original_identity)
+                self.assertEqual(identity(path.lstat()), original_identity)
 
 if __name__=='__main__':
     unittest.main()

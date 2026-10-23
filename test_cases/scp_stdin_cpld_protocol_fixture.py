@@ -10,7 +10,10 @@ import struct
 import subprocess
 import tempfile
 
-SECRET='secret-value'
+# The private nv stub embeds only this carrier prefix, never the whole unit
+# credential, so "no file under the owned tree holds SECRET" stays meaningful.
+CARRIER_PREFIX='STDIN-CARRIER-TEST-ONLY-'
+SECRET=CARRIER_PREFIX+'7c91'
 BURN='/srv/ib-upgrade/firmware/FUI1_BURN_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 REFRESH='/srv/ib-upgrade/firmware/FUI1_REFRESH_CPLD000232_REV0900_CPLD000383_REV0800_CPLD000389_REV0600.vme'
 BURN_SHA='ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
@@ -107,7 +110,7 @@ def artifacts(root,component,contract,executor,case):
         'print(secret)\n')
     ssh.write_text(common+'raise SystemExit(96) # fetch fixture must not call real SSH\n')
     nv.write_text(common+
-        'if any('+repr(SECRET)+' in v for v in sys.argv+list(os.environ.values())): raise SystemExit(94)\n'
+        'if any('+repr(CARRIER_PREFIX)+' in v for v in sys.argv+list(os.environ.values())): raise SystemExit(94)\n'
         'with Path('+repr(str(nvtrace))+').open("a") as h:h.write(json.dumps(sys.argv[1:])+"\\n")\n'
         'raise SystemExit(93)\n')
     for executable in (scp,ssh,nv):executable.chmod(0o700)

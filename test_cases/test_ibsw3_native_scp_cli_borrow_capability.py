@@ -40,7 +40,8 @@ class NativeScpCliBorrowCapabilityTests(unittest.TestCase):
         # actual workflow below creates its own real project and calls main.
         self.require_natural_scp_cli()
         self.assertIsNone(sys.getprofile(), 'refuse an existing interpreter profiler')
-        self.assertIsNone(threading.getprofile(), 'refuse an existing thread profiler')
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)(), 'refuse an existing thread profiler')
         scope_type = SCP.driver._PreparedRunScope
         freeze = scope_type.freeze_scp_package_sources
         # Optional fixed native API: do not mask the earlier natural CLI FAIL.

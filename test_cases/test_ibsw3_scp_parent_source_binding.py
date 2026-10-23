@@ -43,9 +43,10 @@ class ScpParentSourceBindingTests(unittest.TestCase):
         active = {}
         real_read, real_fstat = os.read, os.fstat
         self.assertIsNone(sys.getprofile())
-        self.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
         self.assertIsNone(sys.gettrace())
-        self.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+        self.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()

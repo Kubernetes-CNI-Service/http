@@ -24,7 +24,10 @@ from test_cases import scp_native_source_preflight_fixture as FIXTURE
 from test_cases import test_ibsw3_scp_source_cli_prompt_binding as CLI
 
 
-SECRET = 'secret-value'
+# Distinct unit credential for this direct carrier, kept apart from the
+# bridge/stub values.
+UNIT_PREFIX = 'DIRECT-LAUNCH-CONTEXT-SOURCE-ONLY-'
+SECRET = UNIT_PREFIX + '72c1'
 ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh', 'runner-binding.json')
 COMPANION = 'scp-source-request.json'
 PACKAGE_BYTES = b'SYNTHETIC-NOT-FIRMWARE'
@@ -65,8 +68,9 @@ class NativeScpLaunchContextDirectTests(unittest.TestCase):
         package = root / 'packages/image/nvos-amd64-25.03.1010.bin'
         state['package'] = package
         self.assertIsNone(sys.getprofile()); self.assertIsNone(sys.gettrace())
-        self.assertIsNone(getattr(threading, 'getprofile', lambda: None)())
-        self.assertIsNone(getattr(threading, 'gettrace', lambda: None)())
+        # threading.getprofile()/gettrace() are 3.10+; on 3.9 they are read from the hooks threading.setprofile()/settrace() store.
+        self.assertIsNone(getattr(threading, 'getprofile', lambda: threading._profile_hook)())
+        self.assertIsNone(getattr(threading, 'gettrace', lambda: threading._trace_hook)())
 
         def key(row):
             return row.st_dev, row.st_ino, stat.S_IFMT(row.st_mode)
