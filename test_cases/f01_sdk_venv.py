@@ -43,7 +43,6 @@ CHILD_TIMEOUT = 1800
 KILL_GRACE = 30
 OUTPUT_TAIL = 12000
 COUNTS = ("failures", "errors", "skipped", "expected_failures", "unexpected_successes")
-IDENTITY_KEYS = ("base_prefix", "version", "cache_tag", "machine")
 
 # The interpreter identity both child programs report next to their own result.
 _IDENTITY = ("{'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'version': list(sys.version_info[:3]),"
@@ -51,7 +50,8 @@ _IDENTITY = ("{'prefix': sys.prefix, 'base_prefix': sys.base_prefix, 'version': 
 # Child programs, run as `<venv python> -I -B -c <program> <repository root> [test id]`: -I ignores PYTHON*
 # variables, the user site and the working directory, so the repository root is put on sys.path explicitly.
 # The tagged result line goes to stdout on a line of its own (after a newline, so output a test leaves
-# without one cannot be glued to it); unittest progress goes to stderr.
+# without one cannot be glued to it); unittest progress goes to stderr. CHILD writes its result to
+# sys.__stdout__, so a test that replaced or closed sys.stdout cannot redirect or lose it.
 PROBE = (
     "import json, platform, sys\n"
     "sys.path.insert(0, sys.argv[1])\n"
@@ -71,8 +71,8 @@ CHILD = (
     "value.update(run=result.testsRun, failures=len(result.failures), errors=len(result.errors),"
     " skipped=len(result.skipped), expected_failures=len(result.expectedFailures),"
     " unexpected_successes=len(result.unexpectedSuccesses))\n"
-    "sys.stdout.write('\\n' + " + repr(RESULT_PREFIX) + " + json.dumps(value) + '\\n')\n"
-    "sys.stdout.flush()\n"
+    "sys.__stdout__.write('\\n' + " + repr(RESULT_PREFIX) + " + json.dumps(value) + '\\n')\n"
+    "sys.__stdout__.flush()\n"
     "sys.exit(0 if result.wasSuccessful() else 1)\n"
 )
 

@@ -16,6 +16,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import shutil
 import signal
@@ -170,6 +171,17 @@ ROUTED_F01_TESTS = {
 }
 
 
+# Marker in the argv of every real process these tests start, so a harness can find and kill leftovers.
+TEST_PROCESS_MARKER = "f01-sdk-venv-test-grandchild"
+
+
+def kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 class FakeChild:
     """subprocess.Popen stand-in: records the call; replies (returncode, stdout, stderr) or times out once."""
 
@@ -236,8 +248,14 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         self.assertEqual([], result.skipped, "the routing never skips")
         return result, calls, recorded, killed
 
+    @staticmethod
+    def proof_identity():
+        """Written here, not taken from the helper: what a child must share with this interpreter."""
+        return {"base_prefix": os.path.realpath(sys.base_prefix), "version": list(sys.version_info[:3]),
+                "cache_tag": sys.implementation.cache_tag, "machine": platform.machine()}
+
     def identity(self, **changes):
-        value = dict(f01_sdk_venv.interpreter_identity(), prefix=str(self.venv))
+        value = dict(self.proof_identity(), prefix=str(self.venv))
         value.update(changes)
         return value
 
@@ -255,6 +273,10 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         self.assertEqual(1, len(result.failures), result.errors)
         self.assertEqual([], result.errors)
         return result.failures[0][1]
+
+    def test_the_helper_reports_the_proof_interpreter_identity(self):
+        self.assertEqual(self.proof_identity(), f01_sdk_venv.interpreter_identity())
+        self.assertIsNone(f01_sdk_venv.identity_problem(self.identity(), self.venv))
 
     def test_helper_uses_the_table_venv_and_the_deps_install_command(self):
         deps = load_script("deps_workflow_f01_routing", ROOT / "infra/deps.py")
@@ -315,14 +337,14 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         self.assertEqual(7, len(child))
         self.assertTrue(child[6].endswith(".Probe.test_identity"), child)
         for kwargs in (probe_kwargs, child_kwargs):
-            self.assertEqual(str(ROOT), kwargs["cwd"])
-            self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
-            self.assertEqual((subprocess.PIPE, subprocess.PIPE), (kwargs["stdout"], kwargs["stderr"]))
-            self.assertEqual(("utf-8", "replace"), (kwargs["encoding"], kwargs["errors"]))
-            self.assertIs(True, kwargs["start_new_session"])
+            self.assertEqual(str(ROOT), kwargs.get("cwd"))
+            self.assertEqual(subprocess.DEVNULL, kwargs.get("stdin"))
+            self.assertEqual((subprocess.PIPE, subprocess.PIPE), (kwargs.get("stdout"), kwargs.get("stderr")))
+            self.assertEqual(("utf-8", "replace"), (kwargs.get("encoding"), kwargs.get("errors")))
+            self.assertIs(True, kwargs.get("start_new_session"))
             self.assertNotIn("text", kwargs)
-        self.assertIsNone(probe_kwargs["env"])
-        self.assertEqual("1", child_kwargs["env"][f01_sdk_venv.CHILD_ENV])
+        self.assertIsNone(probe_kwargs.get("env"))
+        self.assertEqual("1", (child_kwargs.get("env") or {}).get(f01_sdk_venv.CHILD_ENV))
         self.assertNotIn(f01_sdk_venv.CHILD_ENV, os.environ)
         # The identity probe ran once for this interpreter; a second routed test reuses it.
         _result, _calls, again, _killed = self.run_routed(replies=[self.child()])
@@ -330,7 +352,7 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
 
     def test_a_venv_without_the_identity_or_of_another_interpreter_fails(self):
         self.make_venv()
-        mine = f01_sdk_venv.interpreter_identity()
+        mine = self.proof_identity()
         probes = {
             "refused": (1, "", "tools.ufm_bootstrap_auth_adapter.BootstrapAuthError: "
                                "SSH SDK implementation identity is unproved\n"),
@@ -354,7 +376,7 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
 
     def test_any_child_outcome_but_one_clean_pass_on_the_proof_interpreter_fails(self):
         self.make_venv()
-        mine = f01_sdk_venv.interpreter_identity()
+        mine = self.proof_identity()
         outcomes = {
             "assertion failed": self.child(1, failures=1),
             "error": self.child(1, errors=1),
@@ -397,16 +419,19 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pidfile = Path(directory) / "grandchild.pid"
             program = ("import subprocess, sys, time\n"
-                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', sys.argv[2]])\n"
                        "open(sys.argv[1], 'w').write(str(child.pid))\n"
                        "sys.stdout.buffer.write(b'\\xff\\xfe before timeout\\n'); sys.stdout.flush()\n"
                        "time.sleep(120)\n")
-            code, stdout, stderr = f01_sdk_venv._run([sys.executable, "-I", "-c", program, str(pidfile)], 5)
-            self.assertIsNone(code)
-            self.assertIn("timed out after 5 s", stderr)
-            self.assertIn("�", stdout)
-            self.assertIn("before timeout", stdout)
+            code, stdout, stderr = f01_sdk_venv._run(
+                [sys.executable, "-I", "-c", program, str(pidfile), TEST_PROCESS_MARKER], 15)
+            self.assertTrue(pidfile.is_file(), f"the child never wrote its grandchild pid:\n{stdout}\n{stderr}")
             grandchild = int(pidfile.read_text())
+            self.addCleanup(kill_quietly, grandchild)
+            self.assertIsNone(code)
+            self.assertIn("timed out after 15 s", stderr or "")
+            self.assertIn("\ufffd", stdout or "")
+            self.assertIn("before timeout", stdout or "")
             deadline = time.monotonic() + 15
             while time.monotonic() < deadline:
                 try:
@@ -416,6 +441,28 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
                 time.sleep(0.1)
             else:
                 self.fail(f"grandchild {grandchild} survived the child's timeout")
+
+    def test_a_descendant_that_left_the_group_cannot_hold_the_timeout_open(self):
+        """A grandchild that called setsid survives the group kill and keeps the pipes open; _run stops
+        waiting for it after KILL_GRACE instead of hanging."""
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / "escaped.pid"
+            program = ("import subprocess, sys, time\n"
+                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[2]],"
+                       " start_new_session=True)\n"
+                       "open(sys.argv[1], 'w').write(str(child.pid))\n"
+                       "print('started', flush=True)\n"
+                       "time.sleep(60)\n")
+            started = time.monotonic()
+            with mock.patch.object(f01_sdk_venv, "KILL_GRACE", 1):
+                code, stdout, stderr = f01_sdk_venv._run(
+                    [sys.executable, "-I", "-c", program, str(pidfile), TEST_PROCESS_MARKER], 3)
+            elapsed = time.monotonic() - started
+            self.assertTrue(pidfile.is_file(), f"the child never wrote its grandchild pid:\n{stdout}\n{stderr}")
+            self.addCleanup(kill_quietly, int(pidfile.read_text()))
+            self.assertIsNone(code)
+            self.assertIn("timed out after 3 s", stderr or "")
+            self.assertLess(elapsed, 20, "an escaped grandchild must not hold _run open")
 
     def test_a_child_marker_outside_the_target_venv_fails_instead_of_recursing(self):
         self.make_venv()
@@ -433,11 +480,14 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
             with self.subTest(test_id=test_id):
                 code, stdout, stderr = f01_sdk_venv._run(
                     [sys.executable, "-I", "-B", "-c", f01_sdk_venv.CHILD, str(ROOT), test_id], 300)
+                stdout, stderr = stdout or "", stderr or ""
                 self.assertEqual(returncode, code, stdout + stderr)
                 summary = f01_sdk_venv.tagged(stdout, f01_sdk_venv.RESULT_PREFIX)
-                self.assertEqual(expected, {key: summary[key] for key in expected}, stdout + stderr)
+                self.assertIsInstance(summary, dict, stdout + stderr)
+                self.assertEqual(expected, {key: summary.get(key) for key in expected}, stdout + stderr)
                 self.assertIsNone(f01_sdk_venv.identity_problem(summary, Path(sys.prefix)))
                 self.assertIn("Ran 1 test", stderr)
+                self.assertNotIn("Ran 1 test", stdout, "unittest progress belongs to stderr")
 
     def test_exactly_the_identity_tests_of_the_three_f01_modules_are_routed(self):
         for module_name, expected in ROUTED_F01_TESTS.items():

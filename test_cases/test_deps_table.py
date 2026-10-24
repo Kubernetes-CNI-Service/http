@@ -589,6 +589,15 @@ class CheckFilesTests(unittest.TestCase):
                 f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
                 f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n# wheel: {paramiko_wheel} sha256:{foreign}\n",
                 IBSW_MACOS, f"wheel {paramiko_wheel} has two digests"),
+            # A last-wins parser silently accepted this order: the real digest overwrote the foreign one.
+            "foreign digest listed before the real one": (
+                f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
+                f"# wheel: {paramiko_wheel} sha256:{foreign}\n# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
+                IBSW_MACOS, f"wheel {paramiko_wheel} has two digests"),
+            "the same digest listed twice": (
+                f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
+                f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
+                IBSW_MACOS, f"wheel {paramiko_wheel} is listed twice"),
             "wheel comment of another version": (
                 f"# wheel: {paramiko_wheel} sha256:",
                 f"# wheel: {paramiko_wheel.replace('-5.0.0-', '-5.0.1-')} sha256:",
@@ -620,9 +629,9 @@ class CheckFilesTests(unittest.TestCase):
             "variant list does not cover its platform":
                 (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(requirements=IBSW),
                  "infra/requirements-ibsw-upgrade.txt does not cover platform macos-cp39-arm64"),
-            "variant repeats the target's python":
+            "variant python of another platform":
                 (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(python="3.12"),
-                 "variant macos-cp39-arm64 repeats python 3.12"),
+                 "python 3.12 does not match platform macos-cp39-arm64"),
             "variant python does not match its platform":
                 (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(python="3.10"),
                  "python 3.10 does not match platform macos-cp39-arm64"),
@@ -644,6 +653,22 @@ class CheckFilesTests(unittest.TestCase):
                 self.write_table(root, table)
                 with self.assertRaisesRegex(self.deps.TableError, message):
                     self.deps.load_table(root)
+
+    def test_one_python_may_serve_several_platforms_through_variants(self):
+        """A macos-cp312 variant next to the Linux cp312 default is valid: the platform selects the variant."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_tree(Path(directory))
+            table = json.loads(TABLE_PATH.read_text(encoding="ascii"))
+            table["platforms"]["macos-cp312-arm64"] = {"note": "test-only platform", "status": "supported"}
+            table["requirement_files"][IBSW_MACOS]["platforms"].append("macos-cp312-arm64")
+            target = table["targets"]["venv-ibsw-upgrade"]
+            target["platforms"].append("macos-cp312-arm64")
+            target["variants"]["macos-cp312-arm64"] = {"python": "3.12", "requirements": IBSW_MACOS}
+            self.write_table(root, table)
+            loaded = self.deps.load_table(root)
+            ibsw = loaded["targets"]["venv-ibsw-upgrade"]
+            self.assertEqual(("3.12", IBSW_MACOS), self.deps.venv_variant(ibsw, "macos-cp312-arm64"))
+            self.assertEqual(("3.12", IBSW), self.deps.venv_variant(ibsw, "linux-cp312-x86_64"))
 
     def test_missing_list_and_invalid_table_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -803,6 +828,9 @@ class EnvironmentCheckTests(unittest.TestCase):
                 self.assertEqual(["mismatch"], [row["status"] for row in mismatch], report.render())
                 for word in words:
                     self.assertIn(word, mismatch[0]["detail"])
+                if "not a platform" in words:
+                    for platform_name in self.table["targets"][target]["platforms"]:
+                        self.assertIn(platform_name, mismatch[0]["detail"])
                 self.assertIn("install --target " + target, mismatch[0]["fix"])
 
     def test_venv_check_names_a_broken_interpreter_symlink(self):

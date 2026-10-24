@@ -129,7 +129,9 @@ AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 
 ```
 
 macOS 使用哈希清单 `infra/requirements-ibsw-upgrade-macos-cp39.txt`（CPython 3.9、Apple Silicon
-arm64，版本与 Linux 清单相同），安装需要 PyPI 访问；Intel Mac 不受支持。需要该身份的 F01 测试由
+arm64，版本与 Linux 清单相同），安装需要 PyPI 访问；Intel Mac 不受支持。`deps.py check` 和 install
+复用已有 venv 时只核对平台与 python 版本，不把 venv 绑定到某一个基解释器（pyenv 或 Homebrew 的 3.9 arm64
+venv 也会通过）；这一绑定只由 `test_cases/f01_sdk_venv.py` 在测试时强制。需要该身份的 F01 测试由
 `test_cases/f01_sdk_venv.py` 的 `@sdk_identity_test` 标记：只有 runner 本身就是这个 venv 时才在进程内
 运行；否则用该 venv 的解释器在子进程中运行同一个测试 ID，断言不变。子进程必须先证明生产身份，并且
 必须就是证明解释器的 venv：base_prefix（realpath）、`sys.version_info[:3]`、

@@ -22,6 +22,9 @@ install  Create ~/.venvs/http/<name> for venv-ibsw-upgrade or venv-cabletracker 
          whose F01 SDK identity tests run in this venv), otherwise the target's own list. An existing
          venv is reused only when its interpreter is that same platform; check likewise requires the
          venv's interpreter platform to be the target's and pyvenv.cfg to carry that variant's python.
+         Neither binds the venv to one base interpreter (a pyenv or Homebrew 3.9 arm64 venv passes):
+         the F01 SDK identity tests enforce that binding at test time (test_cases/f01_sdk_venv.py
+         requires the child's base_prefix, version, cache tag and machine to be the proof interpreter's).
          Root installs only into its own home (HOME must be root's home: plain sudo, not sudo -E).
          A half-built venv is reported with the directory to remove; nothing is deleted.
 bundle   Phase 2 (offline apt + wheel bundle); not implemented yet.
@@ -101,15 +104,15 @@ def _string_list(value: object, label: str) -> list:
 def _validate_venv_variants(target_name: str, row: dict, files: dict) -> None:
     """Every platform of a venv target has one hashed list covering it and a matching cpXY python.
 
-    `variants` maps a platform to {python, requirements} that replace the target's own pair there; the
-    variant lists pin the same set, and each python appears once so a venv's version selects its variant.
+    `variants` maps a platform to {python, requirements} that replace the target's own pair there, and the
+    variant lists pin the same set. The platform (system, cpXY, machine) selects the variant, so one python
+    may serve several platforms (for example linux-cp312 and a future macos-cp312 variant).
     """
     _require(isinstance(row.get("python"), str) and row["python"], f"venv target {target_name} needs a python")
     target_platforms = row.get("platforms", [])
     variants = row.get("variants", {})
     _require(isinstance(variants, dict), f"venv target {target_name} variants must be an object")
     own_set = files[row["requirements"]]["set"]
-    pythons = [row["python"]]
     for platform_name, variant in variants.items():
         label = f"venv target {target_name} variant {platform_name}"
         _require(platform_name in target_platforms, f"{label} is not one of its platforms")
@@ -119,8 +122,6 @@ def _validate_venv_variants(target_name: str, row: dict, files: dict) -> None:
                  f"{label} needs a hashed requirements file from requirement_files")
         _require(files[variant["requirements"]]["set"] == own_set,
                  f"{label} list has set {files[variant['requirements']]['set']}, the target's list has set {own_set}")
-        _require(variant["python"] not in pythons, f"{label} repeats python {variant['python']}")
-        pythons.append(variant["python"])
     for platform_name in target_platforms:
         python, requirements = venv_variant(row, platform_name)
         _require(platform_name in files[requirements].get("platforms", []),
@@ -776,7 +777,7 @@ def check_venv_target(table: dict, target_name: str, report: Report, *, import_p
     # must be one of the target's, and pyvenv.cfg must carry the python of that platform's variant.
     try:
         venv_platform = probe_platform(str(python))
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as exc:
         report.add(target_name, "error", "venv python", f"cannot identify {python}: {exc}", f"recreate the venv: {fix}")
         return
     site_python = ".".join(version.split(".")[:2]) or target["python"]
@@ -852,7 +853,8 @@ def run_check(root: Path, table: dict, targets: list) -> Report:
 
 def probe_platform(python: str) -> str:
     """Table platform name (e.g. linux-cp312-x86_64, macos-cp39-arm64) of an interpreter, by running it."""
-    result = subprocess.run([python, "-I", "-c", IDENTITY_PROBE], stdin=subprocess.DEVNULL,
+    # -I -B: no PYTHON* environment, user site or cwd, and no .pyc written (also in a dry run).
+    result = subprocess.run([python, "-I", "-B", "-c", IDENTITY_PROBE], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60, check=False)
     if result.returncode:
         raise RuntimeError(f"cannot run {python}")
@@ -900,7 +902,7 @@ def install(root: Path, table: dict, target_name: str, python: str, dry_run: boo
         return EXIT_USAGE
     try:
         platform_name = probe_platform(python)
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as exc:
         print(f"[ERROR] cannot identify the base interpreter {python}: {exc}", file=sys.stderr)
         return EXIT_USAGE
     if platform_name not in target["platforms"]:
@@ -923,7 +925,7 @@ def install(root: Path, table: dict, target_name: str, python: str, dry_run: boo
         # Never reuse a venv of another platform or python: its interpreter must be the selected variant's.
         try:
             existing = probe_platform(str(venv_python))
-        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RuntimeError, subprocess.SubprocessError) as exc:
             return half_built(venv, target_name, f"its interpreter {venv_python} cannot be identified ({exc})")
         if existing != platform_name:
             print(f"[ERROR] {venv} holds a {existing} interpreter, but {python} is {platform_name}, which selects "
