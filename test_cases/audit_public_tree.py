@@ -10,6 +10,7 @@ value, so this command is safe to run in CI logs.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 from dataclasses import dataclass
 import hashlib
@@ -324,7 +325,9 @@ PATH_CREDENTIAL_RE = re.compile(
 # (``password=password``, ``api_key=self.api_key``) carries no secret.  It is
 # exempt only when the tokenizer places a NAME token exactly at the value, so a
 # value inside a string, a comment or embedded config text, a number, and every
-# non-Python file are still rejected.
+# non-Python file are still rejected.  A bare name is code only when it repeats
+# the keyword or the file binds it (assignment, parameter, import, ...); a lone
+# unbound name such as ``api_key=CorrectHorseBattery9`` is still a literal.
 PYTHON_SOURCE_SUFFIXES = (".py", ".py.txt")
 PYTHON_NAME_CHAIN_RE = re.compile(
     rb"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*"
@@ -687,28 +690,71 @@ def _public_factory_verifier_file_exact(
     return True
 
 
-def python_name_positions(relative: str, data: bytes) -> frozenset | None:
-    """(line, character column) of every NAME token, or None when the path is
-    not Python source or does not tokenize (then nothing is exempt)."""
+@dataclass(frozen=True)
+class PythonNames:
+    positions: frozenset   # (line, character column) of every NAME token
+    bound: frozenset       # names the file binds
+
+
+def python_bound_names(data: bytes) -> frozenset:
+    """Names the source binds: assignment, loop and comprehension targets,
+    parameters, imports, definitions, with/except aliases, global/nonlocal.
+    Empty when it does not parse (then only keyword repeats and attributes
+    are exempt)."""
+    try:
+        tree = ast.parse(data)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.alias):
+            bound.add((node.asname or node.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+    return frozenset(bound)
+
+
+def python_name_positions(relative: str, data: bytes) -> PythonNames | None:
+    """The NAME token positions and bound names of Python source, or None when
+    the path is not Python source or does not tokenize (then nothing is
+    exempt)."""
     if not relative.lower().endswith(PYTHON_SOURCE_SUFFIXES):
         return None
     try:
-        return frozenset(
+        positions = frozenset(
             token.start
             for token in tokenize.tokenize(io.BytesIO(data).readline)
             if token.type == tokenize.NAME
         )
     except (tokenize.TokenError, SyntaxError, UnicodeDecodeError, LookupError):
         return None
+    return PythonNames(positions, python_bound_names(data))
 
 
 def unquoted_value_is_python_name(
-    line: bytes, match: re.Match, line_number: int, names: frozenset | None,
+    line: bytes, match: re.Match, line_number: int, names: PythonNames | None,
 ) -> bool:
-    if names is None or not PYTHON_NAME_CHAIN_RE.fullmatch(match.group(1)):
+    value = match.group(1)
+    if names is None or not PYTHON_NAME_CHAIN_RE.fullmatch(value):
         return False
     column = len(line[: match.start(1)].decode("utf-8", errors="replace"))
-    return (line_number, column) in names
+    if (line_number, column) not in names.positions:
+        return False
+    parts = value.decode("ascii").split(".")
+    if len(parts) > 1:
+        return True                       # attribute access: self.api_key
+    keyword = re.match(
+        rb"(?i)[A-Za-z_-]+", line[match.start(0): match.start(1)]
+    ).group(0).decode("ascii")
+    return parts[0].casefold() == keyword.casefold() or parts[0] in names.bound
 
 
 def scan_content(relative: str, data: bytes) -> list[Finding]:
