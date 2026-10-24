@@ -443,15 +443,24 @@ def matching_files(root: Path, patterns: tuple[str, ...]) -> tuple[Path, ...]:
             if descriptor is not None:
                 os.close(descriptor)
 
+    try:
+        # The same checkout may be named through a symlinked parent (macOS
+        # /var -> /private/var) while ROOT is resolved.
+        real_scan = root.resolve().relative_to(ROOT.resolve())
+    except ValueError:
+        real_scan = None
+
     def is_deployable(path: Path) -> bool:
         if not path.is_file() or is_readme_name(path.name):
             return False
         try:
             relative = path.relative_to(ROOT)
         except ValueError:
-            # This helper is also useful for isolated external fixtures; the
-            # repository-root contract cannot classify those paths.
-            return True
+            if real_scan is None:
+                # This helper is also useful for isolated external fixtures;
+                # the repository-root contract cannot classify those paths.
+                return True
+            relative = real_scan / path.relative_to(root)
         if path_disposition(PurePosixPath(relative.as_posix())) != "production":
             return False
         return transfer_exclude_reason(PurePosixPath(relative.as_posix())) is None

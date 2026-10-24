@@ -322,6 +322,69 @@ class ReferenceOnlySelectorWorkflowTests(unittest.TestCase):
                     self.fail(f"manifest audit did not use central disposition: {exc}")
             self.assertEqual(scripts, validated["scripts"])
 
+    def test_transfer_selector_classifies_a_symlinked_checkout_by_its_real_location(self):
+        # macOS names every TemporaryDirectory checkout through /var ->
+        # /private/var while sync-code.py's ROOT is resolved; the same tree
+        # must not be waved through as an external fixture under that name.
+        with tempfile.TemporaryDirectory() as directory:
+            holder = Path(directory)
+            workspace = holder / "real"
+            for relative in (
+                "AGENTS.md",
+                "LOCAL-NOTES.md",
+                "deploy.py",
+                "monitor/runtime.py",
+                "monitor/tests/fixture.py",
+            ):
+                path = workspace / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("VALUE = True\n", encoding="utf-8")
+            alias = holder / "alias"
+            alias.symlink_to(workspace, target_is_directory=True)
+
+            with mock.patch.object(SYNC, "ROOT", workspace.resolve()):
+                for scan, patterns, expected in (
+                    ("", ("*.md", "*.py"), ("AGENTS.md", "deploy.py")),
+                    ("monitor", ("**/*.py",), ("runtime.py",)),
+                ):
+                    with self.subTest(scan=scan or "."):
+                        self.assertEqual(
+                            {
+                                "resolved": tuple(
+                                    workspace.resolve() / scan / name
+                                    for name in expected
+                                ),
+                                "alias": tuple(
+                                    alias / scan / name for name in expected
+                                ),
+                            },
+                            {
+                                "resolved": SYNC.matching_files(
+                                    workspace.resolve() / scan, patterns,
+                                ),
+                                "alias": SYNC.matching_files(
+                                    alias / scan, patterns,
+                                ),
+                            },
+                        )
+
+    def test_runner_authority_does_not_depend_on_checkout_path_spelling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "checkout"
+            alias.symlink_to(ROOT, target_is_directory=True)
+            resolved = RUNNER.deployment_authority_paths(ROOT)
+            aliased = RUNNER.deployment_authority_paths(alias)
+        self.assertEqual(set(), aliased - resolved)
+        self.assertEqual(set(), resolved - aliased)
+        self.assertEqual(
+            {},
+            {
+                relative: CONTRACT.transfer_exclude_reason(relative)
+                for relative in sorted(aliased)
+                if CONTRACT.transfer_exclude_reason(relative) is not None
+            },
+        )
+
     def test_consumers_do_not_own_reference_prefix_tables(self):
         for relative in (
             "tools/sync-code.py",
