@@ -1720,6 +1720,17 @@ def run_validation_selection(
 # deadline, leftover, residue, gate or cleanup problem returns 1 before any
 # approval.  On success the caller writes the same attestation bytes as the
 # serial path; the execution form is recorded only in the external audit file.
+#
+# S0 (first real run, 2026-10-24): lane temporary and work roots must lie outside
+# the machine-shared /tmp and /var/tmp (the suite writes into /tmp directly while
+# other lanes pin every ancestor directory); a lane checkout must pass the serial
+# post-run check (manifest re-validation and snapshot), and tracked or untracked
+# non-ignored leftovers still block; a change of a lane checkout's ignored files
+# refuses the proof unless the plan's leftover_allowlist reviewed its shape (serial
+# shows it to every later test, other lanes do not); lane-TMPDIR entries and
+# reviewed changes are only inventoried and removed with the lane.  Test failures
+# and unreviewed ignored-file changes never skip phase B (the run still fails);
+# runner-detected isolation and gate problems do.
 # ---------------------------------------------------------------------------
 
 FULL_SHARD_PLAN_RELATIVE = "test_cases/full_shard_plan.json"
@@ -1738,8 +1749,9 @@ FULL_SHARD_PLAN_KEYS = frozenset({
     "schema_version", "description", "derivation", "lane_deadline_seconds",
     "phase_a", "phase_b", "slices", "same_lane", "phase_b_reasons",
 })
-# Optional plan keys; an absent runtime_skips allows no runtime skip at all.
-FULL_SHARD_PLAN_OPTIONAL_KEYS = frozenset({"runtime_skips"})
+# Optional plan keys; an absent runtime_skips allows no runtime skip at all, and an
+# absent leftover_allowlist reviews no change of a lane checkout's ignored files.
+FULL_SHARD_PLAN_OPTIONAL_KEYS = frozenset({"runtime_skips", "leftover_allowlist"})
 # A serial skip entry id of a test (MODULE.Class.test) or of one of its
 # sub-tests (MODULE.Class.test (params)); fixture holders use FULL_SHARD_HOLDER_RE.
 FULL_SHARD_SKIP_ENTRY_RE = re.compile(
@@ -1755,6 +1767,18 @@ FULL_SHARD_PS = "/bin/ps"
 FULL_SHARD_LSOF = "/usr/sbin/lsof"
 # The only GIT_* variables kept for coordinator git and lanes (see _full_shard_environment).
 FULL_SHARD_GIT_CONFIG_SELECTORS = frozenset({"GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL"})
+# Machine-shared temporary directories (S0): the suite itself creates entries
+# directly in /tmp (for example test_load_release_transaction's /tmp/http-rt-*
+# release roots) while lanes run concurrently, and several quiet-window checks pin
+# the stat of every ancestor directory from "/".  No lane root may lie below them.
+FULL_SHARD_SHARED_TEMP_ROOTS = ("/tmp", "/var/tmp")
+# Ignored-file shapes some test reads across the whole checkout (census of the suite's
+# traversals: rglob("*.py"), os.walk for test_*.py, rglob("*.service"/"*.timer"),
+# rglob("02-AIR-devices_config.csv")) or the serial source discovery considers
+# (*.py, *.sh, *.cgi).  The plan's leftover_allowlist can never review them.
+FULL_SHARD_OBSERVED_LEFTOVER_SUFFIXES = frozenset({".py", ".sh", ".cgi", ".service", ".timer"})
+FULL_SHARD_OBSERVED_LEFTOVER_NAMES = frozenset({"02-AIR-devices_config.csv"})
+FULL_SHARD_DEFAULT_MANIFEST_RELATIVE = "test_cases/script_test_manifest.json"
 
 # Executed by `sys.executable -B -c` in a lane checkout.  It reproduces
 # `python -m unittest discover -b -s test_cases -t . -p test_*.py [-v]`:
@@ -1874,12 +1898,12 @@ _emit({"event": "start", "canonical_sha256": _digest, "count": len(_rows),
        "executable": os.path.realpath(sys.executable), "version": list(sys.version_info[:3]),
        "cache_tag": sys.implementation.cache_tag, "platform": sys.platform,
        "machine": os.uname().machine, "cwd": os.getcwd(),
-       "tmpdir": os.environ.get("TMPDIR", "")})
+       "tmpdir": os.environ.get("TMPDIR", ""), "epoch": round(time.time(), 3)})
 _module_cleanups = len(getattr(unittest.case, "_module_cleanups", []))
 if _mode == "enumerate":
     _emit({"event": "rows", "rows": _rows, "module_cleanups": _module_cleanups,
            "decorator_skips": _decorator_skips(_pairs)})
-    _emit({"event": "finished", "tests_run": 0, "successful": True})
+    _emit({"event": "finished", "tests_run": 0, "successful": True, "epoch": round(time.time(), 3)})
     os.close(_out)
     sys.exit(0)
 if _spec.get("canonical_sha256") != _digest or _spec.get("count") != len(_rows):
@@ -1953,7 +1977,8 @@ _runner = unittest.TextTestRunner(
     warnings=None if sys.warnoptions else "default",
 )
 _result = _runner.run(_run_suite)
-_emit({"event": "finished", "tests_run": _result.testsRun, "successful": _result.wasSuccessful()})
+_emit({"event": "finished", "tests_run": _result.testsRun, "successful": _result.wasSuccessful(),
+       "epoch": round(time.time(), 3)})
 os.close(_out)
 sys.exit(0 if _result.wasSuccessful() else 1)
 '''
@@ -1994,6 +2019,146 @@ def validate_full_shard_destination(root: Path, destination: Path) -> None:
         raise ImpactError("--sharded parent directory is unavailable")
     if parent == repository or repository in parent.parents:
         raise ImpactError("--sharded destination must be outside the repository")
+
+
+def full_shard_shared_temp_problems(
+    paths: Mapping[str, object], shared_roots: Sequence[str] = FULL_SHARD_SHARED_TEMP_ROOTS,
+) -> list[str]:
+    """Refuse lane roots below a machine-shared temporary directory (S0).
+
+    Lanes run concurrently; the suite itself creates entries directly in /tmp, and
+    the quiet-window checks of 11-load, b-xlsx_to_dot and the monitor publication path
+    pin the stat of every ancestor directory from "/".  A lane TMPDIR or checkout
+    below such a directory would see another lane change its ancestor; a serial run
+    never overlaps those tests.  Paths are judged by realpath, existing or not, and by
+    the identity (st_dev, st_ino) of every existing ancestor, so another spelling of
+    the same directory on a case-insensitive volume is refused as well.
+    """
+    roots: list[str] = []
+    identities: dict[tuple[int, int], str] = {}
+    for shared in shared_roots:
+        real = os.path.realpath(shared)
+        if real not in roots:
+            roots.append(real)
+        try:
+            info = os.stat(real)
+        except OSError:
+            continue
+        identities.setdefault((info.st_dev, info.st_ino), real)
+    problems = []
+    for label, path in paths.items():
+        real = os.path.realpath(os.fspath(path))
+        hit = next(
+            (root for root in roots if real == root or real.startswith(root.rstrip(os.sep) + os.sep)),
+            None,
+        )
+        if hit is None:
+            for candidate in [Path(real), *Path(real).parents]:
+                try:
+                    info = os.stat(candidate)
+                except OSError:
+                    continue
+                hit = identities.get((info.st_dev, info.st_ino))
+                if hit is not None:
+                    break
+        if hit is not None:
+            problems.append(
+                f"{label} {os.fspath(path)} is inside the machine-shared temporary directory "
+                f"{hit}: the suite writes there directly while other lanes pin every ancestor "
+                "directory; put TMPDIR and the --sharded directory below a dedicated directory "
+                "that no other process uses as its TMPDIR or writes into during the run"
+            )
+    return problems
+
+
+def full_shard_unreviewed_leftovers(paths: Iterable[str], allowlist: Mapping[str, str]) -> list[str]:
+    """Sorted paths that no reviewed plan pattern (fnmatchcase; '*' also spans '/') matches.
+
+    A path of an observed shape (FULL_SHARD_OBSERVED_LEFTOVER_*) is never reviewed.
+    """
+    def observed(path: str) -> bool:
+        name = path.rsplit("/", 1)[-1]
+        return (
+            name in FULL_SHARD_OBSERVED_LEFTOVER_NAMES
+            or os.path.splitext(name)[1] in FULL_SHARD_OBSERVED_LEFTOVER_SUFFIXES
+        )
+
+    return sorted(
+        path for path in paths
+        if observed(path) or not any(fnmatch.fnmatchcase(path, pattern) for pattern in allowlist)
+    )
+
+
+def full_shard_inventory(paths: Iterable[str]) -> dict:
+    """Sorted list, count and sha256 (NUL-joined file-system bytes) of leftover paths."""
+    ordered = sorted(paths)
+    return {
+        "paths": ordered, "count": len(ordered),
+        "sha256": hashlib.sha256(b"\0".join(os.fsencode(path) for path in ordered)).hexdigest(),
+    }
+
+
+def full_shard_chain(path: object) -> list[list]:
+    """[path, nine-field stat or None] for every directory from "/" down to realpath(path)."""
+    real = Path(os.path.realpath(os.fspath(path)))
+    chain: list[list] = []
+    for item in [*reversed(real.parents), real]:
+        try:
+            info = os.lstat(item)
+        except OSError:
+            nine = None
+        else:
+            nine = [info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns]
+        chain.append([str(item), nine])
+    return chain
+
+
+def full_shard_chain_drift(before: Sequence[Sequence], after: Sequence[Sequence]) -> list[dict]:
+    """Every chain entry whose stat differs (or appears/disappears) between two readings."""
+    old = {path: nine for path, nine in before}
+    new = {path: nine for path, nine in after}
+    order = [path for path, _nine in before] + [path for path, _nine in after if path not in old]
+    return [
+        {"path": path, "before": old.get(path), "after": new.get(path)}
+        for path in order if old.get(path) != new.get(path)
+    ]
+
+
+def _full_shard_serial_check(checkout: Path, root: Path, manifest_path: Path) -> dict:
+    """The serial cycle's post-run predicate (_one_cycle) for one checkout.
+
+    Re-validates the manifest against the checkout (source inventory, tests,
+    deployment selectors, support) and reads its snapshot; any refusal raises.  The
+    selectors run in this process and may extend sys.path at import (for example
+    infra/docker/activate.py); sys.path is restored afterwards.
+    """
+    checkout, manifest_path = Path(checkout), Path(manifest_path)
+    try:
+        located = checkout / manifest_path.relative_to(root)
+    except ValueError:
+        located = manifest_path
+    saved = list(sys.path)
+    try:
+        validated = load_and_validate_manifest(checkout, located)
+        return snapshot_as_json(make_snapshot(checkout, located, validated))
+    finally:
+        sys.path[:] = saved
+
+
+def _full_shard_snapshot_changes(before: Mapping, after: Mapping) -> list[str]:
+    """Names of what differs between two serial source/test snapshots (snapshot_as_json)."""
+    changes = []
+    if before.get("impact_manifest_sha256") != after.get("impact_manifest_sha256"):
+        changes.append("manifest")
+    for section in ("scripts", "tests", "support"):
+        old, new = before.get(section) or {}, after.get(section) or {}
+        changes.extend(
+            f"{section}:{key}" for key in sorted(set(old) | set(new)) if old.get(key) != new.get(key)
+        )
+    if not changes and before != after:
+        changes.append("snapshot schema")
+    return changes
 
 
 def _full_shard_plan_error(message: str) -> ImpactError:
@@ -2136,6 +2301,23 @@ def validate_full_shard_plan(plan: object) -> None:
             )
         if not isinstance(reason, str) or not reason.strip():
             raise _full_shard_plan_error(f"runtime_skips reason of {entry} must be a non-empty string")
+    allowlist = plan.get("leftover_allowlist", {})
+    if not isinstance(allowlist, dict):
+        raise _full_shard_plan_error(
+            "leftover_allowlist must map reviewed checkout path patterns to their reasons"
+        )
+    for pattern, reason in allowlist.items():
+        if (
+            not isinstance(pattern, str) or not pattern or "\0" in pattern or "\\" in pattern
+            or pattern.startswith("/") or any(part in ("", ".", "..") for part in pattern.split("/"))
+            or any(character in pattern.split("/", 1)[0] for character in "*?[")
+        ):
+            raise _full_shard_plan_error(
+                f"leftover_allowlist pattern {pattern!r} must be a relative POSIX pattern "
+                "with a literal first component and no empty, '.' or '..' components"
+            )
+        if not isinstance(reason, str) or not reason.strip():
+            raise _full_shard_plan_error(f"leftover_allowlist reason of {pattern} must be a non-empty string")
 
 
 def load_full_shard_plan(root: Path) -> dict:
@@ -2268,8 +2450,23 @@ def merge_full_shard_lane(
     records: Sequence[Mapping] | None, exit_info: Mapping,
     *, identity: Mapping, canonical_sha256: str,
 ) -> dict:
-    """Check one lane's records against its assignment; never trust the lane's own verdict."""
+    """Check one lane's records against its assignment; never trust the lane's own verdict.
+
+    Every problem is listed in "problems".  "gate_problems" is the subset that is not a
+    plain test outcome: anything about coverage, records, identity, crash, deadline or
+    an exit status that the lane's own records do not explain.  A lane whose only
+    problems are test outcomes (non-success results and class/module fixture errors,
+    with a consistent finished record and exit 1) reports no gate problem; serial
+    unittest records the same outcomes and keeps running.
+    """
     problems: list[str] = []
+    gate_problems: list[str] = []
+
+    def problem(message: str, *, gate: bool = True) -> None:
+        problems.append(message)
+        if gate:
+            gate_problems.append(message)
+
     assigned_set = set(assigned)
     executed: list[int] = []
     seen: set[int] = set()
@@ -2278,36 +2475,36 @@ def merge_full_shard_lane(
     skips: list[dict] = []
     finished = None
     if records is None:
-        problems.append(f"lane {lane}: missing result file")
+        problem(f"lane {lane}: missing result file")
         records = []
     starts = [record for record in records if record.get("event") == "start"]
     if len(starts) != 1:
-        problems.append(f"lane {lane}: expected exactly one start record, found {len(starts)}")
+        problem(f"lane {lane}: expected exactly one start record, found {len(starts)}")
     else:
         reported = {key: starts[0].get(key) for key in identity}
         if reported != dict(identity):
-            problems.append(f"lane {lane}: interpreter identity differs from the coordinator: {reported}")
+            problem(f"lane {lane}: interpreter identity differs from the coordinator: {reported}")
         if (
             starts[0].get("canonical_sha256") != canonical_sha256
             or starts[0].get("count") != len(rows)
         ):
-            problems.append(f"lane {lane}: canonical discovery differs from the coordinator's enumeration")
+            problem(f"lane {lane}: canonical discovery differs from the coordinator's enumeration")
     for record in records:
         event = record.get("event")
         if event == "test":
             index = record.get("index")
             if type(index) is not int or not 0 <= index < len(rows):
-                problems.append(f"lane {lane}: reported an unknown canonical index {index!r}")
+                problem(f"lane {lane}: reported an unknown canonical index {index!r}")
                 continue
             if record.get("id") != rows[index]["id"]:
-                problems.append(
+                problem(
                     f"lane {lane}: index {index} reported id {record.get('id')!r} but the canonical "
                     f"id is {rows[index]['id']!r}"
                 )
             if index not in assigned_set:
-                problems.append(f"lane {lane}: executed {rows[index]['id']} outside its assigned lane")
+                problem(f"lane {lane}: executed {rows[index]['id']} outside its assigned lane")
             if index in seen:
-                problems.append(f"lane {lane}: {rows[index]['id']} executed more than once")
+                problem(f"lane {lane}: {rows[index]['id']} executed more than once")
             seen.add(index)
             executed.append(index)
             if record.get("outcome") not in FULL_SHARD_ACCEPTED_OUTCOMES:
@@ -2316,13 +2513,13 @@ def merge_full_shard_lane(
             index = record.get("index")
             entry_id = str(record.get("id"))
             if type(index) is not int or index not in assigned_set:
-                problems.append(
+                problem(
                     f"lane {lane}: skip entry {record.get('id')!r} is outside its assigned rows"
                 )
                 continue
             # The running test's id, or a sub-test id "<test id> <params>" of it.
             if entry_id != rows[index]["id"] and not entry_id.startswith(rows[index]["id"] + " "):
-                problems.append(
+                problem(
                     f"lane {lane}: skip entry {entry_id!r} does not belong to canonical row "
                     f"{rows[index]['id']!r}"
                 )
@@ -2331,20 +2528,33 @@ def merge_full_shard_lane(
         elif event == "holder":
             holders.append(record)
         elif event == "fatal":
-            problems.append(f"lane {lane}: fatal: {record.get('reason')}")
+            problem(f"lane {lane}: fatal: {record.get('reason')}")
         elif event == "finished":
             finished = record
         elif event != "start":
-            problems.append(f"lane {lane}: unknown or corrupt record {event!r}")
+            problem(f"lane {lane}: unknown or corrupt record {event!r}")
     suppressed: set[int] = set()
+    errored: set[int] = set()
+    holder_errors = 0
     for holder in holders:
         description = str(holder.get("description", ""))
         if holder.get("kind") == "error":
-            problems.append(f"lane {lane}: class/module fixture error: {description}")
+            # A test outcome: serial unittest records the same error and, after a failed
+            # setUpClass/setUpModule, does not run that class's or module's tests either.
+            holder_errors += 1
+            problem(f"lane {lane}: class/module fixture error: {description}", gate=False)
+            match = FULL_SHARD_HOLDER_RE.fullmatch(description)
+            if match is not None:
+                kind, target = match.groups()
+                for index in assigned:
+                    row = rows[index]
+                    owner = f"{row['class_module']}.{row['class']}" if kind == "setUpClass" else row["module"]
+                    if owner == target and index not in seen:
+                        errored.add(index)
             continue
         match = FULL_SHARD_HOLDER_RE.fullmatch(description)
         if holder.get("kind") != "skip" or match is None:
-            problems.append(f"lane {lane}: unrecognised holder record: {description!r}")
+            problem(f"lane {lane}: unrecognised holder record: {description!r}")
             continue
         kind, target = match.groups()
         skips.append({"id": description, "reason": holder.get("reason")})
@@ -2355,40 +2565,62 @@ def merge_full_shard_lane(
                 suppressed.add(index)
     missing = sorted(assigned_set - seen - suppressed)
     if missing:
-        problems.append(
+        problem(
             f"lane {lane}: {len(missing)} assigned rows were not executed: "
-            + ", ".join(rows[index]["id"] for index in missing[:5])
+            + ", ".join(rows[index]["id"] for index in missing[:5]),
+            gate=not set(missing) <= errored,
         )
+    errored &= set(missing)
     tests_run = None
     if finished is None:
-        problems.append(f"lane {lane}: no finished record (crash, kill or early exit)")
+        problem(f"lane {lane}: no finished record (crash, kill or early exit)")
     else:
         tests_run = finished.get("tests_run")
         if tests_run != len(executed):
-            problems.append(
+            problem(
                 f"lane {lane}: finished record counts {tests_run!r} tests but {len(executed)} were reported"
             )
     if exit_info.get("deadline_exceeded"):
-        problems.append(f"lane {lane}: lane deadline exceeded; its process group was terminated")
+        problem(f"lane {lane}: lane deadline exceeded; its process group was terminated")
+    # The lane exits 0 exactly when its TextTestRunner result was successful and 1
+    # otherwise; only then do its records explain its exit status.
+    failed = bool(non_success) or holder_errors > 0
+    consistent = (
+        finished is not None and type(finished.get("successful")) is bool
+        and finished["successful"] is (not failed)
+        and exit_info.get("exit") == (1 if failed else 0)
+    )
+    if finished is not None and not consistent:
+        problem(
+            f"lane {lane}: exit {exit_info.get('exit')!r} and finished successful="
+            f"{finished.get('successful')!r} disagree with the reported outcomes"
+        )
     if exit_info.get("exit") != 0:
-        problems.append(f"lane {lane}: exit {exit_info.get('exit')}")
+        problem(f"lane {lane}: exit {exit_info.get('exit')}", gate=not (consistent and failed))
     if non_success:
-        problems.append(
+        problem(
             f"lane {lane}: {len(non_success)} non-success outcomes: "
-            + ", ".join(f"{item['id']} ({item['outcome']})" for item in non_success[:5])
+            + ", ".join(f"{item['id']} ({item['outcome']})" for item in non_success[:5]),
+            gate=False,
         )
     return {
-        "problems": problems, "executed": sorted(executed), "suppressed": sorted(suppressed),
+        "problems": problems, "gate_problems": gate_problems, "executed": sorted(executed),
+        "suppressed": sorted(suppressed), "errored": sorted(errored),
         "non_success": non_success, "tests_run": tests_run, "skips": skips,
     }
 
 
 def full_shard_coverage_problems(count: int, merged: Mapping[str, Mapping]) -> list[str]:
-    """Every canonical row executed or recognisably suppressed exactly once, nothing else."""
+    """Every canonical row executed or recognisably suppressed exactly once, nothing else.
+
+    Rows that a recognised setUpClass/setUpModule error holder kept from running
+    ("errored") are accounted for by that error, as in serial unittest; such a run has
+    already failed on the error itself and never issues a proof.
+    """
     problems: list[str] = []
     owner: dict[int, str] = {}
     for lane, result in merged.items():
-        for index in [*result["executed"], *result["suppressed"]]:
+        for index in [*result["executed"], *result["suppressed"], *result.get("errored", ())]:
             if type(index) is not int or not 0 <= index < count:
                 problems.append(f"lane {lane}: index {index!r} is outside canonical discovery")
             elif index in owner:
@@ -2517,8 +2749,9 @@ def _full_shard_wait_lanes(
                     code = process.returncode
                 if code is None:
                     continue
+                wall = round(time.monotonic() - started, 3)
                 finished[lane] = {
-                    "exit": code, "seconds": round(time.monotonic() - started, 3),
+                    "exit": code, "seconds": wall, "wall_seconds": wall,
                     "started_epoch": started_epoch, "ended_epoch": round(time.time(), 3),
                     "deadline_exceeded": exceeded,
                 }
@@ -2865,35 +3098,83 @@ class _FullShardLane:
             raise
         return process, log, time.monotonic(), round(time.time(), 3)
 
-    def leftover_problems(self, main_digest: Mapping[str, str]) -> list[str]:
-        problems = []
+    def leftover_gate(
+        self, main_digest: Mapping[str, str], main_snapshot: Mapping | None = None,
+        snapshot_of: Callable[[Path], Mapping] | None = None,
+        allowlist: Mapping[str, str] | None = None,
+    ) -> tuple[list[str], list[str], dict]:
+        """(gate problems, proof-only problems, leftover inventory) of one finished lane.
+
+        Gate (isolation; skips phase B), as serial --all would refuse or a lane must
+        never do: changed tracked bytes, untracked non-ignored files, and a lane checkout
+        that fails the serial post-run check (_one_cycle re-validates the manifest and
+        re-reads the snapshot after the run and refuses approval on any difference; both
+        can see ignored files, e.g. on production paths).
+
+        Proof-only (refuses the proof, phase B still runs): a change of the checkout's
+        ignored files (new or removed) that no plan leftover_allowlist pattern reviews.
+        Serial --all never checks ignored files, but every later serial test sees them,
+        while another lane does not; only shapes reviewed as unobservable by other
+        tests keep the shard equivalent.
+
+        Audited only: the full lists of new and removed ignored files and the lane
+        TMPDIR entries (serial leaves its TMPDIR unchecked; no test lists a temporary
+        root).  All of it is private to this lane and removed with it at cleanup.
+        """
+        gate: list[str] = []
+        proof_only: list[str] = []
+        ignored: list[str] = []
+        removed: list[str] = []
         try:
             digest = _full_shard_tracked_digest(self.clone)
             changed = sorted(path for path in set(digest) | set(main_digest)
                              if digest.get(path) != main_digest.get(path))
             if changed:
-                problems.append(
+                gate.append(
                     f"lane {self.name}: tracked bytes changed in the lane checkout: "
                     + ", ".join(changed[:10])
                 )
             untracked = _full_shard_untracked(self.clone)
             if untracked:
-                problems.append(f"lane {self.name}: untracked leftovers in the lane checkout: "
-                                + ", ".join(untracked[:10]))
-            ignored = sorted(_full_shard_ignored(self.clone) - self.ignored_before)
-            if ignored:
-                problems.append(f"lane {self.name}: new ignored leftovers in the lane checkout: "
-                                + ", ".join(ignored[:10]))
-        except ImpactError as exc:
-            problems.append(f"lane {self.name}: leftover gate failed: {exc}")
+                gate.append(f"lane {self.name}: untracked leftovers in the lane checkout: "
+                            + ", ".join(untracked[:10]))
+            current = _full_shard_ignored(self.clone)
+            ignored = sorted(current - self.ignored_before)
+            removed = sorted(self.ignored_before - current)
+        except Exception as exc:
+            gate.append(f"lane {self.name}: leftover gate failed: {exc}")
+        # Only a checkout whose tracked bytes are intact is re-validated: the post-run
+        # validation executes the checkout's deployment selectors in this process.
+        if snapshot_of is not None and not gate:
+            try:
+                after = snapshot_of(self.clone)
+            except Exception as exc:
+                gate.append(
+                    f"lane {self.name}: the serial source/test snapshot of the lane checkout "
+                    f"fails the serial post-run validation: {exc}"
+                )
+            else:
+                changes = _full_shard_snapshot_changes(main_snapshot or {}, after)
+                if changes:
+                    gate.append(
+                        f"lane {self.name}: the serial source/test snapshot of the lane checkout "
+                        "changed (serial --all would refuse approval): " + ", ".join(changes[:10])
+                    )
+        unreviewed = full_shard_unreviewed_leftovers([*ignored, *removed], allowlist or {})
+        if unreviewed:
+            proof_only.append(
+                f"lane {self.name}: ignored files of the lane checkout changed outside the plan's "
+                "leftover_allowlist (every later serial test would see the change, other lanes "
+                "do not): " + ", ".join(unreviewed[:10])
+            )
         try:
-            left = sorted(os.listdir(self.tmpdir))
+            tmpdir = full_shard_inventory(os.listdir(self.tmpdir))
         except OSError as exc:
-            left = [f"<unreadable: {exc}>"]
-        if left:
-            problems.append(f"lane {self.name}: lane TMPDIR is not empty after the lane: "
-                            + ", ".join(left[:10]))
-        return problems
+            tmpdir = dict(full_shard_inventory([]), error=f"{type(exc).__name__}: {exc}")
+        return gate, proof_only, {
+            "ignored": full_shard_inventory(ignored), "ignored_removed": full_shard_inventory(removed),
+            "unreviewed": full_shard_inventory(unreviewed), "tmpdir": tmpdir,
+        }
 
     def record(self) -> dict:
         return {
@@ -2902,12 +3183,33 @@ class _FullShardLane:
         }
 
 
+def _full_shard_record_epoch(records: Sequence[Mapping] | None, event: str) -> float | None:
+    """The lane's own clock reading in its first record of this event, if any."""
+    for record in records or ():
+        if record.get("event") == event:
+            value = record.get("epoch")
+            return value if type(value) in (int, float) else None
+    return None
+
+
 def _full_shard_run_phase(
     lanes: Sequence[_FullShardLane], specs: Mapping[str, Mapping], deadline: int,
     rows: Sequence[Mapping], assignment: Mapping[str, Sequence[int]], canonical_sha256: str,
-    main_digest: Mapping[str, str], audit: dict, label: str,
-) -> dict:
-    """Launch lanes together, wait (hang guard), then merge records and run lane gates."""
+    main_digest: Mapping[str, str], audit: dict, label: str, *,
+    main_snapshot: Mapping | None = None, snapshot_of: Callable[[Path], Mapping] | None = None,
+    leftover_allowlist: Mapping[str, str] | None = None,
+) -> tuple[dict, list[str]]:
+    """Launch lanes together, wait (hang guard), then merge records and run lane gates.
+
+    Returns the merged lane results and this phase's gate problems: every problem the
+    runner detects that is not a plain test outcome or an unreviewed ignored-file change
+    (coverage, records, crash, deadline, unexplained exit, tracked/untracked/serial-check
+    leftovers, residue).  All problems of either kind go to the audit and refuse the proof.
+    """
+    key = label.lower()
+    chains = {"temp_parent": lanes[0].temp_parent, "work": lanes[0].clone.parent}
+    chains_before = {name: full_shard_chain(path) for name, path in chains.items()}
+    audit[f"phase_{key}_started_epoch"] = round(time.time(), 3)
     started = time.monotonic()
     launched: dict[str, tuple] = {}
     try:
@@ -2921,24 +3223,50 @@ def _full_shard_run_phase(
     print(f"sharded full: phase {label} started: " + ", ".join(
         f"{lane.name} ({len(assignment[lane.name])} cases)" for lane in lanes))
     finished = _full_shard_wait_lanes(launched, deadline)
-    audit[f"phase_{label.lower()}_seconds"] = round(time.monotonic() - started, 1)
+    audit[f"phase_{key}_seconds"] = round(time.monotonic() - started, 1)
+    audit[f"phase_{key}_ended_epoch"] = round(time.time(), 3)
+    # Attribution only (never a gate): which ancestor of the shared lane roots changed
+    # while the lanes ran.  A lane must not write there; the machine may.
+    audit["chain_drift"][label] = {
+        name: full_shard_chain_drift(chains_before[name], full_shard_chain(path))
+        for name, path in chains.items()
+    }
     merged = {}
+    gate: list[str] = []
     identity = full_shard_lane_identity()
     for lane in lanes:
         info = finished[lane.name]
+        records = _full_shard_read_records(lane.result)
         result = merge_full_shard_lane(
-            lane.name, rows, assignment[lane.name], _full_shard_read_records(lane.result), info,
+            lane.name, rows, assignment[lane.name], records, info,
             identity=identity, canonical_sha256=canonical_sha256,
         )
         merged[lane.name] = result
-        audit["lanes"][lane.name].update(info)
-        audit["lanes"][lane.name]["rows"] = len(assignment[lane.name])
-        audit["lanes"][lane.name]["suppressed"] = len(result["suppressed"])
-        audit["lanes"][lane.name]["suppressed_ids"] = [rows[index]["id"] for index in result["suppressed"]]
-        audit["lanes"][lane.name]["skips"] = result["skips"]
+        entry = audit["lanes"][lane.name]
+        entry.update(info)
+        entry["lane_tests_started_epoch"] = _full_shard_record_epoch(records, "start")
+        entry["lane_finished_epoch"] = _full_shard_record_epoch(records, "finished")
+        entry["rows"] = len(assignment[lane.name])
+        entry["suppressed"] = len(result["suppressed"])
+        entry["suppressed_ids"] = [rows[index]["id"] for index in result["suppressed"]]
+        entry["errored_ids"] = [rows[index]["id"] for index in result["errored"]]
+        entry["skips"] = result["skips"]
         audit["problems"].extend(result["problems"])
+        gate.extend(result["gate_problems"])
+        audit["non_gate_problems"].extend(
+            problem for problem in result["problems"] if problem not in result["gate_problems"]
+        )
         audit["non_success"].extend(result["non_success"])
-        audit["problems"].extend(lane.leftover_problems(main_digest))
+        gate_started = time.monotonic()
+        blocking, proof_only, inventory = lane.leftover_gate(
+            main_digest, main_snapshot, snapshot_of, leftover_allowlist,
+        )
+        entry["leftovers"] = inventory
+        entry["gate_seconds"] = round(time.monotonic() - gate_started, 3)
+        audit["problems"].extend(blocking)
+        gate.extend(blocking)
+        audit["problems"].extend(proof_only)
+        audit["non_gate_problems"].extend(proof_only)
         print(f"sharded full: lane {lane.name} exit {info['exit']} in {info['seconds']} s")
     markers = _full_shard_markers(
         path for lane in lanes for path in (lane.clone, lane.tmpdir, lane.pycache)
@@ -2948,36 +3276,60 @@ def _full_shard_run_phase(
             markers, [launched[lane.name][0].pid for lane in lanes],
         )
     except (ImpactError, OSError, subprocess.SubprocessError) as exc:
-        audit["problems"].append(f"phase {label}: residue gate failed: {exc}")
+        message = f"phase {label}: residue gate failed: {exc}"
+        audit["problems"].append(message)
+        gate.append(message)
         residue, waited = [], None
-    audit[f"phase_{label.lower()}_residue_wait_seconds"] = waited
+    audit[f"phase_{key}_residue_wait_seconds"] = waited
     if residue:
         audit["residue"].extend(residue)
-        audit["problems"].append(
+        message = (
             f"phase {label}: {len(residue)} residual processes outlived their lane "
             "(recorded, then terminated)"
         )
-    return merged
+        audit["problems"].append(message)
+        gate.append(message)
+    return merged, gate
 
 
 def _full_shard_execute(
     root: Path, plan: Mapping, verbose: bool, work: Path, lanes_dir: Path,
-    temp_parent: Path, audit: dict,
+    temp_parent: Path, audit: dict, *, manifest_path: Path | None = None,
 ) -> None:
+    shared = full_shard_shared_temp_problems({
+        "lane temporary parent (TMPDIR)": temp_parent, "--sharded work directory": work,
+    })
+    if shared:
+        audit["problems"].extend(shared)
+        return
+    if manifest_path is None:
+        manifest_path = root / FULL_SHARD_DEFAULT_MANIFEST_RELATIVE
+    manifest_path = Path(manifest_path)
+
+    def snapshot_of(checkout: Path) -> dict:
+        return _full_shard_serial_check(checkout, root, manifest_path)
+
+    allowlist = plan.get("leftover_allowlist", {})
+
+    def gate_found() -> bool:
+        # Unreviewed ignored-file changes refuse the proof but never stop the run.
+        proof_only = set(audit["non_gate_problems"])
+        return any(problem not in proof_only for problem in audit["problems"])
+
     deadline = plan["lane_deadline_seconds"]
     main_refs = _full_shard_refs(root)
     audit["head"] = main_refs.splitlines()[0] if main_refs else None
     main_digest = _full_shard_tracked_digest(root)
-    ignored = sorted(_full_shard_ignored(root))
-    audit["ignored_inventory"] = {
-        "count": len(ignored),
-        "sha256": hashlib.sha256("\0".join(ignored).encode("utf-8")).hexdigest(),
-    }
+    main_snapshot = snapshot_of(root)
+    ignored = full_shard_inventory(_full_shard_ignored(root))
+    audit["ignored_inventory"] = {"count": ignored["count"], "sha256": ignored["sha256"]}
     enumeration = _FullShardLane("enum", "enumeration", work, lanes_dir, temp_parent)
     audit["enumeration"] = enumeration.record()
     audit["lanes_prepared"] = ["enum"]
+    prepared = time.monotonic()
     problems = enumeration.prepare(root, main_refs)
     audit["enumeration"] = enumeration.record()
+    audit["enumeration"]["prepare_seconds"] = round(time.monotonic() - prepared, 3)
     if problems:
         audit["problems"].extend(problems)
         return
@@ -3005,7 +3357,15 @@ def _full_shard_execute(
     records = _full_shard_read_records(enumeration.result) or []
     starts = [record for record in records if record.get("event") == "start"]
     row_records = [record for record in records if record.get("event") == "rows"]
-    audit["problems"].extend(enumeration.leftover_problems(main_digest))
+    gate_started = time.monotonic()
+    blocking, proof_only, inventory = enumeration.leftover_gate(
+        main_digest, main_snapshot, snapshot_of, allowlist,
+    )
+    audit["enumeration"]["leftovers"] = inventory
+    audit["enumeration"]["gate_seconds"] = round(time.monotonic() - gate_started, 3)
+    audit["problems"].extend(blocking)
+    audit["problems"].extend(proof_only)
+    audit["non_gate_problems"].extend(proof_only)
     if info["exit"] != 0 or len(starts) != 1 or len(row_records) != 1:
         audit["problems"].append(
             f"canonical enumeration failed (exit {info['exit']}); see {enumeration.log}"
@@ -3031,7 +3391,7 @@ def _full_shard_execute(
     audit["decorator_skips"] = [
         {"id": rows[item["index"]]["id"], "reason": item["reason"]} for item in decorator_skips
     ]
-    if audit["problems"]:
+    if gate_found():
         return
     runtime_skips = plan.get("runtime_skips", {})
     try:
@@ -3050,27 +3410,37 @@ def _full_shard_execute(
     for lane in [*phase_a, phase_b]:
         audit["lanes_prepared"].append(lane.name)
         audit["lanes"][lane.name] = lane.record()
+        prepared = time.monotonic()
         problems = lane.prepare(root, main_refs)
         audit["lanes"][lane.name] = lane.record()
+        audit["lanes"][lane.name]["prepare_seconds"] = round(time.monotonic() - prepared, 3)
         audit["lanes"][lane.name]["rows"] = len(assignment[lane.name])
         audit["problems"].extend(problems)
         specs[lane.name] = {
             "verbose": verbose, "canonical_sha256": canonical_sha256,
             "count": len(rows), "indices": assignment[lane.name],
         }
-    if audit["problems"]:
+    if gate_found():
         return
     run_started = time.monotonic()
-    merged = _full_shard_run_phase(
+    merged, phase_a_gate = _full_shard_run_phase(
         phase_a, specs, deadline, rows, assignment, canonical_sha256, main_digest, audit, "A",
+        main_snapshot=main_snapshot, snapshot_of=snapshot_of, leftover_allowlist=allowlist,
     )
-    if audit["problems"]:
+    # Like serial --all, test failures alone do not stop the run: phase B still runs
+    # and the run still fails (so do unreviewed ignored-file changes).  Runner-detected
+    # isolation and gate problems (coverage, crash, deadline, records, tracked/untracked/
+    # serial-check leftovers, residue) stop it here.  An isolation problem that only
+    # shows as a failing test is a test outcome to this rule; it still refuses the proof.
+    if phase_a_gate:
         audit["phase_b_skipped"] = True
         audit["run_wall_seconds"] = round(time.monotonic() - run_started, 1)
         return
-    merged.update(_full_shard_run_phase(
+    merged_b, _phase_b_gate = _full_shard_run_phase(
         [phase_b], specs, deadline, rows, assignment, canonical_sha256, main_digest, audit, "B",
-    ))
+        main_snapshot=main_snapshot, snapshot_of=snapshot_of, leftover_allowlist=allowlist,
+    )
+    merged.update(merged_b)
     audit["run_wall_seconds"] = round(time.monotonic() - run_started, 1)
     audit["problems"].extend(full_shard_coverage_problems(len(rows), merged))
     audit["problems"].extend(full_shard_skip_problems(rows, decorator_skips, runtime_skips, merged))
@@ -3100,7 +3470,10 @@ def _full_shard_cleanup(work: Path, audit: dict) -> None:
     audit["problems"].extend(audit["cleanup"]["problems"])
 
 
-def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evidence_dir: Path) -> int:
+def run_sharded_selection(
+    root: Path, selection: Selection, verbose: bool, evidence_dir: Path, *,
+    manifest_path: Path | None = None,
+) -> int:
     """Canonical full discovery as the reviewed two-phase plan; 0 only when every gate holds."""
     if sys.platform not in FULL_SHARD_PLATFORMS:
         raise ImpactError(_full_shard_platform_message())
@@ -3121,7 +3494,7 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
     work.mkdir(mode=0o700)
     lanes_dir.mkdir(mode=0o700)
     audit: dict = {
-        "schema": "http-full-shard-audit/1", "status": None, "argv": list(sys.argv),
+        "schema": "http-full-shard-audit/2", "status": None, "argv": list(sys.argv),
         "root": str(root), "head": None, "plan_path": FULL_SHARD_PLAN_RELATIVE,
         "plan_sha256": plan_sha256, "plan_derivation": plan["derivation"],
         "lane_deadline_seconds": plan["lane_deadline_seconds"],
@@ -3129,7 +3502,10 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
         "temp_parent": str(temp_parent), "canonical_sha256": None, "canonical_count": None,
         "enumeration": {}, "lanes": {}, "lanes_prepared": [], "phase_a_seconds": None,
         "phase_b_seconds": None, "run_wall_seconds": None, "phase_b_skipped": False,
-        "problems": [], "non_success": [], "residue": [], "ignored_inventory": None,
+        "phase_a_started_epoch": None, "phase_a_ended_epoch": None,
+        "phase_b_started_epoch": None, "phase_b_ended_epoch": None, "chain_drift": {},
+        "problems": [], "gate_problems": [], "non_gate_problems": [],
+        "non_success": [], "residue": [], "ignored_inventory": None,
         "decorator_skips": None, "runtime_skips": plan.get("runtime_skips", {}), "skips": None,
         "cleanup": {"removed": [], "problems": []}, "started_epoch": round(time.time(), 3),
     }
@@ -3141,7 +3517,10 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
             problem for problem in _full_shard_gid_problems([evidence_dir, work, lanes_dir, temp_parent])
         )
         if not audit["problems"]:
-            _full_shard_execute(root, plan, verbose, work, lanes_dir, temp_parent, audit)
+            _full_shard_execute(
+                root, plan, verbose, work, lanes_dir, temp_parent, audit,
+                manifest_path=manifest_path,
+            )
     except (ImpactError, OSError, subprocess.SubprocessError, ValueError, KeyError) as exc:
         audit["problems"].append(f"coordinator error: {type(exc).__name__}: {exc}")
     except BaseException as exc:
@@ -3156,6 +3535,11 @@ def run_sharded_selection(root: Path, selection: Selection, verbose: bool, evide
         except BaseException as exc:
             interrupted = exc
             audit["problems"].append(f"cleanup interrupted: {type(exc).__name__}")
+    # Everything that is not a plain test outcome or an unreviewed ignored-file change
+    # is a gate problem (isolation, coverage, records, tracked/untracked/serial-check
+    # leftovers, residue, cleanup or coordinator); any problem of either kind fails the run.
+    non_gate = set(audit["non_gate_problems"])
+    audit["gate_problems"] = [problem for problem in audit["problems"] if problem not in non_gate]
     audit["status"] = "passed" if not audit["problems"] else "failed"
     audit["total_wall_seconds"] = round(time.monotonic() - started, 1)
     audit["ended_epoch"] = round(time.time(), 3)
@@ -3344,7 +3728,9 @@ def _one_cycle(args: argparse.Namespace, *, watch: bool = False) -> tuple[int, s
                 root, selection, args.verbose, args.timings,
             )
         elif getattr(args, "sharded", None) is not None:
-            result = run_sharded_selection(root, selection, args.verbose, args.sharded)
+            result = run_sharded_selection(
+                root, selection, args.verbose, args.sharded, manifest_path=manifest_path,
+            )
         else:
             result = run_selection(root, selection, args.verbose)
     except ImpactError as exc:

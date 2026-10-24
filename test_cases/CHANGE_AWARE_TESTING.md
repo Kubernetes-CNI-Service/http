@@ -373,8 +373,8 @@ canonical 枚举保留协调器的 TMPDIR（与串行子进程相同，不用私
 `-v` 日志的跳过行与审计 `skips` 闭合。本门禁不支持、遇到即 fail closed（串行会如实记录，当前树没有
 实例）的跳过形态：同一跳过项被报告多次（例如参数相同的子用例跳过两次，或用例本体与 tearDown 各跳过
 一次），以及在 tearDownClass、tearDownModule 或类/模块清理阶段抛出的 SkipTest。枚举只导入，导入期
-写入的临时文件落在协调器 TMPDIR 而不受枚举的遗留门检查；各车道在私有 TMPDIR 中执行同样的导入，
-仍由车道遗留门检出。
+写入的临时文件落在协调器 TMPDIR 而不受枚举的遗留清单记录；各车道在私有 TMPDIR 中执行同样的导入，
+记入该车道的遗留清单（2026-10-24 起私有 TMPDIR 内容只记录、不阻断，见下文 S0 修订）。
 
 门禁（任何一项都返回 1，批准 ledger 不变，证据全部保留在 ABSOLUTE_NEW_DIR）：主 checkout 必须是
 干净的已提交树（clone 的 index/worktree/untracked、.git 形态与 HEAD/refs 逐项核对）；车道
@@ -382,10 +382,18 @@ clone、私有 TMPDIR 与私有 0700 pyc 前缀的 gid 等于用户主 gid；车
 每车道挂死守卫期限 `lane_deadline_seconds`（不得小于 9000 秒，即不小于下文记录的最近正式串行全量
 墙钟 8,816.975 秒，车道不会因跑满该已记录的串行时长而被终止；套件增长使正式串行墙钟接近此下限时，
 须先提高下限与计划期限；它不是任何测试的时限，到期后整进程组 TERM→KILL）；车道崩溃、提前退出、无 finished 记录、结果文件
-缺失、fixture 错误、非成功结果；运行后 clone 的 tracked 字节变化、未跟踪遗留、新增被忽略遗留
-（只排除 `__pycache__/*.pyc`）与私有 TMPDIR 非空；以 lane 进程组、argv 中的 lane 路径、工作目录
+缺失、fixture 错误、非成功结果；运行后 clone 的 tracked 字节变化、未跟踪且未忽略的遗留，以及 clone
+未通过串行运行后的复核（与 `_one_cycle` 运行后相同：对该 clone 重新执行 `load_and_validate_manifest`
+——源码清单、测试清单、部署选择器、support——再复读 `make_snapshot` 并与运行前的主 checkout 比较；
+两者都能看到生产路径上被忽略的文件）；以 lane 进程组、argv 中的 lane 路径、工作目录
 位于 lane 路径三种口径查到的残留进程（先在 20 秒内只观察不发信号，仍残留则记录后终止并判失败）；
-阶段 A 任一问题都不进入阶段 B。全部通过后先删除全部 clone、私有 TMPDIR 与 pyc 前缀并核实已删除，
+车道私有 TMPDIR 或 `--sharded` 目录的 work 位于机器共享的 `/tmp`、`/var/tmp` 之下（按 realpath 与
+各级祖先的 dev/inode 判定）；车道 clone 的被忽略文件出现计划 `leftover_allowlist` 未审阅的变化（新增
+或原有的消失，只排除 `__pycache__/*.pyc`）。被审阅形态的被忽略文件变化与私有 TMPDIR 内容只逐车道记入
+审计清单（见下文 S0 修订）。阶段 A 出现 runner 能直接检出的隔离或门禁问题（上列除「非成功结果」、
+「fixture 错误」与「未审阅的被忽略文件变化」以外的任何一项）时不进入阶段 B；阶段 A 只有这三类问题时
+阶段 B 照常运行，整次仍返回 1、不签证明。只表现为测试失败的隔离问题在此规则下按测试结果处理，同样不签
+证明。全部通过后先删除全部 clone、私有 TMPDIR 与 pyc 前缀并核实已删除，
 任一删除失败也返回 1；只有此后 runner 才按原流程复核 snapshot 与环境并原子写入批准。删除只对
 unlink/rmdir 失败放开目录权限后重试，其余失败原样报告；清理中的任何异常都记为一条问题并返回 1，
 `audit.json` 总会写出（ASCII 编码，非 UTF-8 文件名不会使其写入失败）。协调器的 git 调用与车道环境
@@ -416,6 +424,66 @@ unlink/rmdir 失败放开目录权限后重试，其余失败原样报告；清�
 至少 3 对计时与覆盖对照、并登记 REAL_ENVIRONMENT `TC-REAL-FULL-SHARD-001` 之前，本模式只作候选，
 不用于正式 load、同步或发布证明。失败按本文件「全量失败」规则处理，不重跑、不放宽、不改时限。
 私有 TMPDIR 与 clone 目录只是隔离手段，不是隔离证明；隔离证据来自上述门禁与专用会话对照。
+
+S0 修订（2026-10-24，第一次真实分片运行，诊断而非证明）：
+
+- 车道布局：S0 有 9 个用例只在分片中失败（req23 primary escrow 3、primary input window 3、primary
+  temp producer 1、private metadata 1、`test_project_contracts` 的 monitor DOT held source 1）。它们都在
+  「从 `/` 起登记每一级祖先目录的 stat 九元组并要求整个静默窗口内不变」的产品检查里 HOLD
+  （11-load 的 b-primary escrow 与 saved optional P 复核、`b-xlsx_to_dot.py` 的 private primary
+  workspace、`generate-monitor-html.py` 的 publication 路径）。S0 的车道 TMPDIR 都在 `/private/tmp`
+  之下，而同时运行的 `test_load_release_transaction`（独占一个车道）在每个 `ReleaseTransactionTests`
+  用例中直接在 `/tmp` 增删 `http-rt-*.noindex`；可以从调用栈定位到层级的那一例，变化的正是
+  `/private/tmp`，其余 8 例只能确定属于同一族检查；同一窗口内机器其他进程也在 `/private/tmp` 新建条目，
+  因此证据与「套件自身的 `/tmp` 写入」这一原因一致，但不能排除机器写入的份额。串行中这些用例与该模块
+  从不重叠。修法只改布局：车道私有 TMPDIR 与 `--sharded` 的 work 目录不得位于 `/tmp`、`/var/tmp` 之下
+  （按 realpath，并按各级祖先的 dev/inode，使大小写不敏感卷上的另一种拼写同样被拒），否则在任何车道运行前
+  失败；测试与产品门都不改。整机其他进程改动 TMPDIR 祖先仍可能让串行与分片同样偶发这类 HOLD（串行 armG
+  出现过一次），这属于运行环境前提：TMPDIR 与 `--sharded` 目录应放在一个专用父目录之下，它不被任何进程当作
+  TMPDIR，运行期间也没有其他作业在其中或其祖先中新建条目。`getconf DARWIN_USER_TEMP_DIR` 比
+  `/private/tmp` 安静（复审 300 秒探针：前者 1 次变化，后者 92 次），但仍是本用户各进程共用的 TMPDIR；
+  共用的证据目录 `runs/` 在同一探针中变化 5 次，也不宜作 `--sharded` 目录的父目录。
+- 遗留语义：串行 `--all` 的 `run_selection` 在主 checkout 与操作员 TMPDIR 中运行，只按退出码判定，
+  随后 `_one_cycle` 重新执行 `load_and_validate_manifest` 并复读 `make_snapshot` 与运行前比较；它从不
+  检查被忽略文件与 TMPDIR 内容，这些文件留在主 checkout 与 TMPDIR 中，后续用例与后续运行都能看到。
+  分片的车道之间看不到彼此的被忽略文件，所以「只记录、不阻断」只在同车道方向上与串行等价；跨车道方向上，
+  串行中较晚的用例会读到较早用例留下的被忽略文件，分片中不会。S0 与串行 armG 的实测给出了这样的实例：
+  两者都留下同样的 611 个被忽略文件（4 种形态），其中 `outputs/test-diagnostics/download-parent-red-*`
+  含 300 个 `*.py`，`test_monitor_writer_quiesce_workflow` 的 `ROOT.rglob("*.py")` 会解析它们——串行中
+  这 2 个 quiesce 用例因此 ERROR（ROOTCAUSE G4），分片中 quiesce 在另一车道、通过。分片据此规定：
+  tracked 变化、未跟踪且未忽略的文件、clone 未通过同一串行运行后复核（tracked 未变时才在协调器中执行该
+  clone 的部署选择器，执行前后恢复 `sys.path`）是门禁问题；车道 clone 的被忽略文件变化（新增或原有的消失）
+  必须匹配计划 `leftover_allowlist` 中经审阅、写明理由的形态（`fnmatchcase`，`*` 可跨 `/`；首个路径
+  组件必须是字面量），否则作为不签证明的非门禁问题（阶段 B 照常运行）；整树遍历或串行源码发现会读的
+  形态（`*.py`、`*.sh`、`*.cgi`、`*.service`、`*.timer`、`02-AIR-devices_config.csv`）即使位于审阅过的
+  目录下也永远不算审阅。匹配的变化与私有 TMPDIR 内容只逐车道记入 `audit.json` 的
+  `leftovers`（`ignored`、`ignored_removed`、`unreviewed`、`tmpdir`，各为排序后的路径、个数，以及以 NUL
+  连接的文件系统字节的 sha256），成功时随 clone 与 TMPDIR 一并删除。当前计划只审阅
+  `outputs/test-diagnostics/collector-prefix-feedback-*`，依据是对 `test_cases/*.py` 全部 302 个文件的
+  静态普查：没有测试列出或通配临时根目录；整树遍历只有 4 个模块（quiesce workflow 的 `*.py`、
+  `test_test_case_repository` 的 `test_*.py`、`test_project_contracts` 的 `02-AIR-devices_config.csv`、
+  `test_ztp_monitor_watch_runtime_workflow` 的 `*.service`/`*.timer`），该形态都不命中。
+  `download-parent-red-*` 不审阅：在 G4 修好之前分片与串行都不能签证明。`.deployment.lock` 与
+  `monitor/.generate-monitor-html.lock` 也不审阅：测试经产品打包代码遍历 checkout（例如
+  `test_upload_package_contract` 断言 monitor 锁不被打包），串行在该用例之前已由别的用例建出锁，所在车道
+  却可能没有，断言的检出力因此不同——用正确代码两臂都绿，排除规则回退时却会串行红、分片绿，专用会话
+  对照发现不了。所以分片运行前主 checkout 必须已有这两个空的被忽略文件（正式 checkout 在真实 load 后本来
+  就有），这样串行与每个车道从第一个用例起看到的相同，车道也不再「新增」它们；缺少时车道新建它们，按未审阅
+  变化拒签。普查只覆盖测试源码直接列目录或整树遍历的口径，经产品代码间接遍历 checkout 或扫描临时根目录的
+  情形没有穷尽（上面的打包即是一例）；就地改写已有被忽略文件（名字集合不变）也看不到。这两类是残余风险：
+  审阅新形态时要先查产品代码中的遍历，专用会话对照只能发现两臂结果不同的情形，发现不了只影响检出力的差异。
+- 阶段 B：串行有测试失败时仍跑完全部测试。分片只在阶段 A 出现 runner 能直接检出的隔离或门禁问题时
+  跳过阶段 B；阶段 A 只有测试结果失败或未审阅的被忽略文件变化时阶段 B 照常运行，整次仍返回 1、不签证明。
+  `audit.json` 的 `non_gate_problems` 只含非成功结果、class/module fixture 错误、记录一致（finished 为不
+  成功且退出码为 1）时的退出码、被 setUpClass/setUpModule 错误挡住未运行的行（记为 `errored_ids`，与串行
+  unittest 相同）以及未审阅的被忽略文件变化；其余全部问题都列入 `gate_problems`。任何一类问题都使整次失败。
+  车道遗留门中的意外异常记为门禁问题，不会中断该阶段的残留门。
+- 计时：审计 schema 改为 `http-full-shard-audit/2`。每车道保留 `started_epoch`、`ended_epoch`、
+  `seconds`，新增同值的 `wall_seconds`、`prepare_seconds`（clone、clone 门与被忽略文件扫描）、
+  `gate_seconds`（车道结束后的遗留与 snapshot 门），以及车道自报的 `lane_tests_started_epoch`（发现完成、
+  开始运行用例）与 `lane_finished_epoch`；阶段级新增 `phase_a/b_started_epoch` 与 `phase_a/b_ended_epoch`；
+  `chain_drift` 记录每阶段前后共享车道根（临时父目录与 work 目录）从 `/` 起各级 stat 的变化，只用于
+  归因，不作门禁。
 
 ### 2026-10-09 再审与候选判定
 

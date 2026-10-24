@@ -123,8 +123,14 @@ macOS 上另有 opt-in 的两阶段分片全量（候选，见 `CHANGE_AWARE_TES
 「opt-in 两阶段分片全量」小节）：`--all --sharded ABSOLUTE_NEW_DIR [-v]` 按受管计划
 `test_cases/full_shard_plan.json` 在私有 APFS clone 中并行运行阶段 A 车道，再单独运行唯一的
 阶段 B 安静车道；每个 canonical 用例必须恰好执行一次，跳过项必须是 canonical 枚举（沿用协调器
-TMPDIR）得到的装饰器跳过、或计划 `runtime_skips` 以相同原因列出的运行时跳过，任何失败、遗留、残留、期限或清理问题都
-返回 1 并把证据留在仓库外的 `ABSOLUTE_NEW_DIR`。成功时写入与串行 `--all` 逐字节相同的证明，
+TMPDIR）得到的装饰器跳过、或计划 `runtime_skips` 以相同原因列出的运行时跳过，任何失败、阻断性遗留
+（tracked 变化、未跟踪且未忽略的文件、clone 未通过串行运行后的 manifest 与 snapshot 复核）、被忽略文件
+出现计划 `leftover_allowlist` 未审阅的变化、残留、期限或清理问题都
+返回 1 并把证据留在仓库外的 `ABSOLUTE_NEW_DIR`；被审阅形态的被忽略文件与车道 TMPDIR 内容只逐车道记入
+审计；阶段 A 只有测试失败或未审阅的被忽略文件变化时仍运行阶段 B，runner 能直接检出的隔离或门禁问题才跳过
+阶段 B。`TMPDIR` 与 `ABSOLUTE_NEW_DIR` 都不得位于 `/tmp`、`/var/tmp` 之下，宜放在一个不被其他进程当作
+TMPDIR、运行期间无人写入的专用父目录下；主 checkout 开跑前须已有空的被忽略文件 `.deployment.lock` 与
+`monitor/.generate-monitor-html.lock`（2026-10-24 S0 修订）。成功时写入与串行 `--all` 逐字节相同的证明，
 执行形态只记在 `ABSOLUTE_NEW_DIR/audit.json`。它不能与 `--validation-only` 等其他模式同用；
 与串行相同，主 checkout 须带有 `refs/remotes/origin/v2` 且第一父链无 merge，车道 clone 原样继承这些引用、从不 fetch。在 `TC-REAL-FULL-SHARD-001` 的专用会话同版对照完成前，不用于正式 load、同步或发布证明。
 
