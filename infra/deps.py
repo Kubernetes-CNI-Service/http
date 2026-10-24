@@ -867,7 +867,8 @@ def parser() -> argparse.ArgumentParser:
                        help="files, a target name from the table, or all (repeatable)")
     check.add_argument("--json", action="store_true", help="print the result as JSON")
     install_parser = sub.add_parser("install", help="create one of the two venvs from hashed requirements")
-    install_parser.add_argument("--target", required=True, choices=("venv-ibsw-upgrade", "venv-cabletracker"))
+    install_parser.add_argument("--target", required=True, choices=("venv-ibsw-upgrade", "venv-cabletracker"),
+                                help="the venv to create under ~/.venvs/http/<name>")
     install_parser.add_argument("--python", default=sys.executable,
                                 help="base interpreter for python3 -m venv (default: this interpreter)")
     install_parser.add_argument("--dry-run", action="store_true", help="print the commands only")
