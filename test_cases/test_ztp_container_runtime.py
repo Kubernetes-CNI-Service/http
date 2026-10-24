@@ -37,9 +37,11 @@ DOCKER_ROOT = ROOT / "infra/docker"
 # command matches infra-setup.py RECOVERY_COMMAND (--recover-monitor-authority --apply).
 # 2026-10-23: section "镜像内 Python 依赖" (unified dependency table step 3a: engine list + gate).
 # 2026-10-24: same section, REQ7 retirement step 3b (the two old REQ7 locks and gates left the image).
-PUBLISHED_DOCKER_README_SIZE = 49389
+# 2026-10-24: same section, step 3b review S2/S3 (per-file venv origin check; the full-suite
+# proof does not bind the engine library versions yet).
+PUBLISHED_DOCKER_README_SIZE = 49938
 PUBLISHED_DOCKER_README_SHA256 = (
-    "1d3600b65920efdf882cf3045711146fd82b5d23ba4dc81307d8e109b9a8091a"
+    "d4e4a87b265b44729a54203ea22e1db1897502f0195f2ca3625783f7afdf137d"
 )
 
 

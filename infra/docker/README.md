@@ -463,8 +463,12 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 - 第二份是 CableTracker 引擎（`monitor/issue-tracker/cabletracker/cabletracker_runner.py`）和
   `format_precheck.py` 的完整依赖：原 REQ7 cable 锁的 20 个分发（版本和 sha256 逐项相同），加上
   httpx、openai、PySocks 及其闭包，共 36 个，CPython 3.12 Linux x86_64/aarch64。装完后
-  `activate.py verify-issue-tracker-engine-runtime` 核对版本，并在 venv 内逐个导入引擎模块；任何一项
-  失败，构建即失败。
+  `activate.py verify-issue-tracker-engine-runtime` 核对版本，检查每个分发记录的每个文件都是 venv 内的
+  单链接普通文件，再在 venv 内逐个导入引擎模块；任何一项失败，构建即失败。
+- 已接受的边界：本机全量测试证明（`run_related_tests.py --all` 写入的 attestation）暂时只绑定解释器身份和
+  TOPLEVEL-5，不绑定引擎这 36 个库的已装版本；引擎版本只由上面的镜像构建关卡核对。等全量证明的性能改造
+  合入、证明格式定下来以后，再加一个引擎依赖的证明键。在此之前，本机引擎库的版本以
+  `python3 infra/deps.py check --target local-test` 为准。
 - **每台 Docker 主机都要重建镜像。** 这份清单和 `activate.py` 都列在 `IMAGE_COUPLED_SOURCE_PATHS` 里，
   而引入这份清单的改动和第 3b 步都改了 `activate.py`。旧镜像激活新 release 时，`activate.py` 报
   `image-coupled source is missing/differs … build a compatible image` 并拒绝；不会走到 cron 记 WARNING

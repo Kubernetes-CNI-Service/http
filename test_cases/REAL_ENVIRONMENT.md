@@ -3475,7 +3475,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 步骤
 
-1. 在联网、同架构的构建机上，按 `infra/docker/README.md` 的构建流程执行 `sudo ./infra/docker/deploy.sh build`。构建日志里两次 `pip install`（TOPLEVEL-5 和引擎清单）都成功，没有 `verify-req7-*` 步骤；`verify-issue-tracker-engine-runtime` 输出 `"verified": true`、`"distributions": 36`。
+1. 在联网、同架构的构建机上，按 `infra/docker/README.md` 的构建流程执行 `sudo ./infra/docker/deploy.sh build`。构建日志里两次 `pip install`（TOPLEVEL-5 和引擎清单）都成功，没有 `verify-req7-*` 步骤；`verify-issue-tracker-engine-runtime` 输出 `"verified": true`、`"distributions": 36`。这个关卡还逐个检查 36 个分发记录的每个文件都是 venv 内的单链接普通文件（步骤 3b 从已退役的 REQ7 关卡移来）；若报 `has a file outside` 或 `has no file inventory`，记录分发名和路径，按构建失败处理，不要绕过。
 2. 在新容器的源码根目录执行：
    - `/opt/http-ztp/venv/bin/python -c 'import googleapiclient, httpx, openai, socks'`；
    - `/opt/http-ztp/venv/bin/python infra/deps.py check --target container --json`，退出 0。

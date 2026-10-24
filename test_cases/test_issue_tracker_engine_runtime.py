@@ -64,7 +64,16 @@ def import_module(name, package=None):
     if name in scenario.get("broken", []):
         raise ImportError("synthetic import failure")
     imported.append(name)
+site = venv / "lib/python3.12/site-packages"
+inventories = scenario.get("files", {})
+def distribution(name):
+    if name not in versions:
+        raise metadata.PackageNotFoundError(name)
+    recorded = inventories.get(name, [name + ".dist-info/METADATA"])
+    return SimpleNamespace(version=versions[name], files=[pathlib.PurePosixPath(item) for item in recorded],
+                           locate_file=lambda relative: site / relative)
 activate.importlib_metadata.version = version
+activate.importlib_metadata.distribution = distribution
 activate.importlib.util.find_spec = find_spec
 activate.importlib.import_module = import_module
 out, err = io.StringIO(), io.StringIO()
@@ -104,6 +113,11 @@ class ActivateEngineRuntimeTests(unittest.TestCase):
         self.outside = base / "elsewhere/openai.py"
         self.outside.parent.mkdir()
         self.outside.write_text("VALUE = 1\n", encoding="utf-8")
+        # Each engine distribution's recorded files (the synthetic RECORD): one METADATA inside the venv.
+        for name in engine_versions():
+            record = site / f"{name}.dist-info/METADATA"
+            record.parent.mkdir(parents=True)
+            record.write_text(f"Name: {name}\n", encoding="utf-8")
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -158,6 +172,38 @@ class ActivateEngineRuntimeTests(unittest.TestCase):
                 result = self.run_child()
                 self.assertEqual(2, result["code"])
                 self.assertIn("Issue Tracker engine requirements", result["stderr"])
+
+    def test_every_recorded_file_of_every_engine_distribution_must_be_inside_the_venv(self):
+        # REQ7 retirement step 3b (review S3): the retired REQ7 gates checked every recorded file of their
+        # 20 distributions; the engine gate now does it for all 36, before any engine module is imported.
+        site = self.venv / "lib/python3.12/site-packages"
+        inside = site / "cryptography/hazmat/bindings/_rust.abi3.so"
+        inside.parent.mkdir(parents=True)
+        inside.write_bytes(b"synthetic extension module\n")
+        complete = self.run_child(files={"cryptography": ["cryptography.dist-info/METADATA",
+                                                          "cryptography/hazmat/bindings/_rust.abi3.so"]})
+        self.assertEqual(0, complete["code"], complete["stderr"])
+        self.assertEqual(EXPECTED_IMPORTS, complete["imported"], "control: a complete inventory inside the venv")
+        linked = site / "certifi/cacert.pem"
+        linked.parent.mkdir(parents=True)
+        linked.symlink_to(self.outside)
+        hardlinked = site / "urllib3/connection.py"
+        hardlinked.parent.mkdir(parents=True)
+        os.link(self.outside, hardlinked)
+        scenarios = {
+            "a file outside the venv": ({"cryptography": [str(self.outside)]}, "cryptography has a file outside"),
+            "a link in the venv to a file outside": ({"certifi": ["certifi/cacert.pem"]}, "certifi has a file outside"),
+            "a hard-linked file": ({"urllib3": ["urllib3/connection.py"]}, "urllib3 has a file outside"),
+            "an absent recorded file": ({"idna": ["idna/absent.py"]}, "idna has a file outside"),
+            "no file inventory": ({"pyasn1": []}, "pyasn1 has no file inventory"),
+        }
+        for label, (files, message) in scenarios.items():
+            with self.subTest(case=label):
+                result = self.run_child(files=files)
+                self.assertEqual(2, result["code"])
+                self.assertIn(message, result["stderr"])
+                self.assertNotIn('"verified": true', result["stdout"])
+                self.assertEqual([], result["imported"], "refused before any engine module is imported")
 
     def test_import_list_covers_every_third_party_import_of_the_engine_and_precheck(self):
         tree_activate = ast.parse(ACTIVATE.read_bytes())

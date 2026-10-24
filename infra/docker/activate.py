@@ -288,7 +288,9 @@ def _hashed_requirement_pins(payload: bytes) -> Tuple[Tuple[str, str], ...]:
 def validate_issue_tracker_engine_runtime() -> dict:
     """Require the hashed CableTracker engine closure in the managed venv, then import the engine modules.
 
-    Versions come from the image source tree's requirements file; every engine module must
+    Versions come from the image source tree's requirements file; every file each engine
+    distribution records must be a single-link regular file inside the venv (the per-file check of
+    the retired REQ7 gates, kept by REQ7 retirement step 3b), and every engine module must
     resolve to a single-link file inside the venv and import.
     """
     import platform
@@ -311,6 +313,19 @@ def validate_issue_tracker_engine_runtime() -> dict:
             raise ActivationError(f"missing Issue Tracker engine distribution: {name}") from None
         if actual != expected:
             raise ActivationError(f"Issue Tracker engine {name} must be {expected}, got {actual}")
+    for name, _expected in pins:
+        try:
+            distribution = importlib_metadata.distribution(name)
+        except importlib_metadata.PackageNotFoundError:
+            raise ActivationError(f"missing Issue Tracker engine distribution: {name}") from None
+        files = distribution.files
+        if not files:
+            raise ActivationError(f"Issue Tracker engine distribution {name} has no file inventory")
+        for relative in files:
+            if not _origin_within(os.fspath(distribution.locate_file(relative)), CONTAINER_VENV):
+                raise ActivationError(
+                    f"Issue Tracker engine distribution {name} has a file outside {CONTAINER_VENV}: {relative}"
+                )
     for module in ISSUE_TRACKER_ENGINE_IMPORTS:
         try:
             spec = importlib.util.find_spec(module)
