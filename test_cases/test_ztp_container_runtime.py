@@ -35,9 +35,10 @@ DOCKER_ROOT = ROOT / "infra/docker"
 # Reviewed AM-1..AM-6 plus PK1/M1/M2, strict DNS-domain, and admission-evidence
 # contracts; prior trust-boundary prose retained. 2026-10-19: the native recovery
 # command matches infra-setup.py RECOVERY_COMMAND (--recover-monitor-authority --apply).
-PUBLISHED_DOCKER_README_SIZE = 45285
+# 2026-10-23: section "镜像内 Python 依赖" (unified dependency table step 3a: engine list + gate).
+PUBLISHED_DOCKER_README_SIZE = 46719
 PUBLISHED_DOCKER_README_SHA256 = (
-    "831420b98323b19121d9073b54521c3319333de08c14de7a9db5f3776aa9492b"
+    "d6285eedf5b7b5d2696a6fad4e97e05c5715ba55c124db9124ea5bcf168fc65d"
 )
 
 
@@ -172,6 +173,8 @@ IMAGE_COUPLED_SOURCE_PATHS_EXPECTED = (
     "infra/docker/req7-cable-dependency-policy.json",
     "infra/docker/requirements-req7-cable-sync.txt",
     "tools/req7_cable_dependency_contract.py",
+    # 2026-10-23 unified dependency table step 3a: the image installs the CableTracker engine list.
+    "infra/docker/requirements-issue-tracker-engine.txt",
     "infra/docker/activate.py",
     "infra/docker/entrypoint.py",
     "infra/docker/healthcheck.py",

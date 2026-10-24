@@ -2800,8 +2800,16 @@ ISSUE_TRACKER_SYNC=${BASE}/../../monitor/issue-tracker/issue-tracker-sync.py
 issue_tracker_sync() {
     local domain=$1 engine_python=python3 rc=0
     [[ -f "$ISSUE_TRACKER_SYNC" ]] || { log "[ISSUE-TRACKER] WARNING: missing $ISSUE_TRACKER_SYNC"; return 0; }
-    # the container image keeps the engine's Google/OpenAI client libraries in its venv
-    [[ -x /opt/http-ztp/venv/bin/python ]] && engine_python=/opt/http-ztp/venv/bin/python
+    # The engine needs the Google/OpenAI client closure of infra/docker/requirements-issue-tracker-engine.txt.
+    # Images built from the current Dockerfile install it into /opt/http-ztp/venv (older images lack
+    # httpx/openai); a native server uses the cabletracker venv of the user this cron runs as
+    # (python3 infra/deps.py install --target venv-cabletracker). Without either, python3 is used, the
+    # engine fails at import and the WARNING below records it.
+    if [[ -x /opt/http-ztp/venv/bin/python ]]; then
+        engine_python=/opt/http-ztp/venv/bin/python
+    elif [[ -n ${HOME:-} && -x $HOME/.venvs/http/cabletracker/bin/python ]]; then
+        engine_python=$HOME/.venvs/http/cabletracker/bin/python
+    fi
     python3 "$ISSUE_TRACKER_SYNC" --only "$domain" --engine-python "$engine_python" >/dev/null 2>&1 || rc=$?
     case "$rc" in
         0) log "[ISSUE-TRACKER] ${domain}: done (see 99-output-monitor/issue-tracker-sync.log)" ;;

@@ -34,7 +34,10 @@
         "test_cases.test_public_s_phase_workflow",
         "test_cases.test_public_publication_contract",
         "test_cases.test_public_publication_workflow",
-        "test_cases.test_public_publication_v3_overlap"
+        "test_cases.test_public_publication_v3_overlap",
+        "test_cases.test_deps_table",
+        "test_cases.test_deps_table_workflow",
+        "test_cases.test_issue_tracker_engine_runtime"
       ]
     },
     {
@@ -620,7 +623,10 @@
     "test_cases/ibsw_v2_switch_sim.py",
     "monitor/issue-tracker/cabletracker/mapping_v4.json",
     "test_cases/issue_tracker_template.py",
-    "monitor/issue-tracker/engine.lock.json"
+    "monitor/issue-tracker/engine.lock.json",
+    "infra/dependencies.json",
+    "infra/docker/requirements-issue-tracker-engine.txt",
+    "infra/requirements-ibsw-upgrade.txt"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -644,6 +650,7 @@
     "infiniband/monitor/sw-link.sh": "ethernet/monitor/sw-link.sh",
     "infra/check_infra.py": "infra/check_infra.py",
     "infra/deploy_infra.py": "infra/deploy_infra.py",
+    "infra/deps.py": "infra/deps.py",
     "infra/docker/activate.py": "infra/docker/activate.py",
     "infra/docker/deploy.sh": "infra/docker/deploy.sh",
     "infra/docker/entrypoint.py": "infra/docker/entrypoint.py",
@@ -887,6 +894,21 @@
       "tests": [
         "test_cases.test_f01_initial_setup_entry"
       ]
+    },
+    {
+      "id": "deps_table_direct",
+      "paths": ["infra/deps.py"],
+      "tests": ["test_cases.test_deps_table"]
+    },
+    {
+      "id": "issue_tracker_engine_runtime_direct",
+      "paths": [
+        "infra/docker/activate.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh"
+      ],
+      "tests": ["test_cases.test_issue_tracker_engine_runtime"]
     },
     {
       "id": "req7_cable_dependency_contract",
@@ -2189,6 +2211,39 @@
       "tests": [
         "test_cases.test_f01_initial_setup_entry"
       ]
+    },
+    {
+      "id": "deps_table_to_cron_image_and_code_copies",
+      "members": [
+        "infra/deps.py",
+        "infra/docker/activate.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh",
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infra/infra-setup.py",
+        "tools/tar-for-upload.py",
+        "tools/package-shared-artifacts.py",
+        "tools/deploy-shared-artifacts.py",
+        "tools/f01_ssh_dependency_identity.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/req7_dependency_contract.py",
+        "tools/req7_cable_dependency_contract.py",
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": ["test_cases.test_deps_table_workflow", "test_cases.test_deps_table"]
+    },
+    {
+      "id": "issue_tracker_engine_imports_to_image_gate_and_cron",
+      "members": [
+        "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+        "monitor/issue-tracker/format_precheck.py",
+        "infra/docker/activate.py",
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh"
+      ],
+      "tests": ["test_cases.test_issue_tracker_engine_runtime"]
     },
     {
       "id": "req7_cable_dependency_pair_to_original_fd_and_metadata",
@@ -3607,6 +3662,14 @@
     }
   ],
   "path_rules": [
+    {
+      "paths": ["infra/dependencies.json", "infra/docker/requirements-issue-tracker-engine.txt", "infra/requirements-ibsw-upgrade.txt"],
+      "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow", "test_cases.test_issue_tracker_engine_runtime", "test_cases.test_ztp_container_runtime", "test_cases.test_req7_cable_runtime_workflow", "test_cases.test_change_aware_test_runner"]
+    },
+    {
+      "paths": ["infra/docker/Dockerfile", "test_cases/run_related_tests.py", "requirements-container-top-level.lock", "requirements-dev.txt", "requirements-f01-ssh.lock", "infiniband/bringup/xdr-upgrade/requirements.txt", "infra/docker/requirements-req7-online.txt", "infra/docker/requirements-req7-cable-sync.txt", "tools/ibdiagnet-analyze-tool/requirements.txt"],
+      "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow"]
+    },
     {
       "paths": ["test_cases/run_related_tests.py", "infra/docker/req7-cable-dependency-policy.json", "infra/docker/requirements-req7-cable-sync.txt"],
       "tests": ["test_cases.test_req7_cable_runner_workflow", "test_cases.test_change_aware_test_runner", "test_cases.test_req7_dependency_workflow"]

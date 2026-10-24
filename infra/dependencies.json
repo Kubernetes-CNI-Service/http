@@ -1,0 +1,1059 @@
+{
+  "about": "Unified dependency table of the whole project (owner 2026-10-23). Phase 1: infra/deps.py checks environments and checks every existing list semantically; existing lists keep their bytes and are not generated from this table.",
+  "apt_sets": {
+    "base": {
+      "packages": [
+        "wget",
+        "lldpd",
+        "tzdata"
+      ],
+      "reason": "infra-setup.py BASE_PACKAGES"
+    },
+    "common": {
+      "packages": [
+        "ipmitool",
+        "sshpass",
+        "docker.io",
+        "unzip",
+        "nfs-common",
+        "arping",
+        "jq"
+      ],
+      "reason": "infra-setup.py COMMON_PACKAGES"
+    },
+    "container": {
+      "packages": [
+        "apache2",
+        "apache2-utils",
+        "ca-certificates",
+        "curl",
+        "git",
+        "graphviz",
+        "iproute2",
+        "iputils-ping",
+        "isc-dhcp-server",
+        "jq",
+        "logrotate",
+        "openssh-client",
+        "procps",
+        "python3",
+        "python3-dateutil",
+        "python3-et-xmlfile",
+        "python3-markupsafe",
+        "python3-numpy",
+        "python3-tz",
+        "python3-venv",
+        "rsync",
+        "rsyslog",
+        "sshpass",
+        "supervisor",
+        "tar",
+        "tzdata",
+        "unzip",
+        "util-linux",
+        "whois"
+      ],
+      "reason": "infra/docker/Dockerfile apt-get install block"
+    },
+    "native-additions": {
+      "packages": [
+        "python3-venv",
+        "rsync",
+        "whois"
+      ],
+      "reason": "needed natively (python3 -m venv for the two venvs, rsync for sync-code, mkpasswd from whois) but not yet installed by infra-setup.py; phase 2 adds them to infra-setup"
+    },
+    "optional-services": {
+      "packages": [
+        "apache2",
+        "apache2-utils",
+        "ssl-cert",
+        "isc-dhcp-server"
+      ],
+      "reason": "infra-setup.py OPTIONAL_SERVICE_PACKAGES (--install-apache / --install-dhcp)"
+    },
+    "ztp": {
+      "packages": [
+        "python3",
+        "python3-yaml",
+        "python3-jinja2",
+        "python3-openpyxl",
+        "python3-pandas",
+        "python3-xlsxwriter",
+        "openssh-client",
+        "curl"
+      ],
+      "reason": "infra-setup.py ZTP_DEPENDENCY_PACKAGES: system python3 modules of cron.sh, workers, pages, load and CGI"
+    }
+  },
+  "code_copies": [
+    {
+      "kind": "pins",
+      "path": "infra/docker/activate.py",
+      "set": "toplevel-5",
+      "symbol": "CONTAINER_TOPLEVEL_REQUIREMENTS"
+    },
+    {
+      "exact": true,
+      "kind": "import-map",
+      "path": "infra/docker/activate.py",
+      "set": "toplevel-5",
+      "symbol": "CONTAINER_TOPLEVEL_IMPORTS"
+    },
+    {
+      "kind": "names",
+      "path": "infra/docker/activate.py",
+      "symbol": "CONTAINER_TRANSITIVE_IMPORTS",
+      "target_field": "container.apt_python_modules"
+    },
+    {
+      "kind": "names",
+      "path": "infra/docker/activate.py",
+      "set_field": "issue-tracker-engine.import_probe",
+      "symbol": "ISSUE_TRACKER_ENGINE_IMPORTS"
+    },
+    {
+      "kind": "requirement-path",
+      "path": "infra/docker/activate.py",
+      "set": "issue-tracker-engine",
+      "symbol": "ISSUE_TRACKER_ENGINE_REQUIREMENTS"
+    },
+    {
+      "kind": "pins",
+      "path": "test_cases/run_related_tests.py",
+      "set": "toplevel-5",
+      "symbol": "CONTAINER_TOPLEVEL_REQUIREMENTS"
+    },
+    {
+      "kind": "pins",
+      "path": "tools/f01_ssh_dependency_identity.py",
+      "set": "ssh-runtime",
+      "symbol": "_PINS"
+    },
+    {
+      "kind": "pins",
+      "path": "tools/ibsw_upgrade_observer.py",
+      "set": "ssh-runtime",
+      "symbol": "SSH_RUNTIME_PINS"
+    },
+    {
+      "kind": "pins",
+      "path": "tools/req7_dependency_contract.py",
+      "set": "req7-online",
+      "symbol": "PINS"
+    },
+    {
+      "kind": "pins",
+      "path": "tools/req7_cable_dependency_contract.py",
+      "set": "req7-cable",
+      "symbol": "PINS"
+    },
+    {
+      "kind": "import-map",
+      "path": "DAY0-Prepare/11-load.py",
+      "set": "toplevel-5",
+      "symbol": "MACOS_GENERATION_MODULES"
+    },
+    {
+      "kind": "import-map",
+      "path": "DAY0-Prepare/11-load.py",
+      "set": "toplevel-5",
+      "symbol": "MACOS_VALIDATION_MODULES"
+    },
+    {
+      "kind": "names",
+      "path": "DAY0-Prepare/11-load.py",
+      "symbol": "MACOS_TRANSFER_COMMANDS",
+      "target_field": "local-test.commands"
+    },
+    {
+      "apt_sets": [
+        "base"
+      ],
+      "kind": "apt",
+      "path": "infra/infra-setup.py",
+      "symbol": "BASE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "common"
+      ],
+      "kind": "apt",
+      "path": "infra/infra-setup.py",
+      "symbol": "COMMON_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "ztp"
+      ],
+      "kind": "apt",
+      "path": "infra/infra-setup.py",
+      "symbol": "ZTP_DEPENDENCY_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "optional-services"
+      ],
+      "kind": "apt",
+      "path": "infra/infra-setup.py",
+      "symbol": "OPTIONAL_SERVICE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "base",
+        "common",
+        "ztp",
+        "optional-services"
+      ],
+      "kind": "apt",
+      "path": "infra/infra-setup.py",
+      "symbol": "MGMT_CACHE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "base",
+        "common",
+        "ztp",
+        "optional-services"
+      ],
+      "kind": "apt",
+      "known_missing": [
+        "apache2-utils"
+      ],
+      "path": "tools/tar-for-upload.py",
+      "symbol": "REQUIRED_OFFLINE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "base",
+        "common",
+        "ztp",
+        "optional-services"
+      ],
+      "kind": "apt",
+      "known_missing": [
+        "apache2-utils"
+      ],
+      "path": "tools/package-shared-artifacts.py",
+      "symbol": "REQUIRED_OFFLINE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "base",
+        "common",
+        "ztp",
+        "optional-services"
+      ],
+      "kind": "apt",
+      "known_missing": [
+        "apache2-utils"
+      ],
+      "path": "tools/deploy-shared-artifacts.py",
+      "symbol": "REQUIRED_OFFLINE_PACKAGES"
+    },
+    {
+      "apt_sets": [
+        "container"
+      ],
+      "kind": "dockerfile-apt",
+      "path": "infra/docker/Dockerfile",
+      "symbol": "apt-get install"
+    },
+    {
+      "kind": "venv-path",
+      "path": "infiniband/bringup/xdr-upgrade/upgrade.py",
+      "symbol": "_RUNTIME_VENV_PATHS",
+      "target": "venv-ibsw-upgrade"
+    }
+  ],
+  "commands": {
+    "arping": "arping",
+    "curl": "curl",
+    "git": "git",
+    "htpasswd": "apache2-utils",
+    "ip": "iproute2",
+    "ipmitool": "ipmitool",
+    "jq": "jq",
+    "mkpasswd": "whois",
+    "python3": "python3",
+    "rsync": "rsync",
+    "scp": "openssh-client",
+    "ss": "iproute2",
+    "ssh": "openssh-client",
+    "ssh-copy-id": "openssh-client",
+    "ssh-keygen": "openssh-client",
+    "sshpass": "sshpass",
+    "unzip": "unzip",
+    "wget": "wget"
+  },
+  "not_dependency_lists": {
+    "monitor/issue-tracker/engine.lock.json": "sha256 of the copied CableTracker engine files, not a package list"
+  },
+  "platforms": {
+    "linux-cp310-aarch64": {
+      "note": "Ubuntu 22.04 venvs: hashed cp310 lists come with phase 2 bundle",
+      "status": "planned"
+    },
+    "linux-cp310-x86_64": {
+      "note": "Ubuntu 22.04 venvs: hashed cp310 lists come with phase 2 bundle",
+      "status": "planned"
+    },
+    "linux-cp312-aarch64": {
+      "note": "Ubuntu 24.04 native and the container",
+      "status": "supported"
+    },
+    "linux-cp312-x86_64": {
+      "note": "Ubuntu 24.04 native and the container",
+      "status": "supported"
+    },
+    "macos-cp39-arm64": {
+      "note": "local-test: CLT /usr/bin/python3 user site",
+      "status": "supported"
+    }
+  },
+  "python_distributions": {
+    "annotated-types": {
+      "import_names": [
+        "annotated_types"
+      ],
+      "used_by": "pydantic (openai)",
+      "version": "0.7.0"
+    },
+    "anyio": {
+      "import_names": [
+        "anyio"
+      ],
+      "used_by": "httpx/openai",
+      "version": "4.12.1"
+    },
+    "bcrypt": {
+      "import_names": [
+        "bcrypt"
+      ],
+      "used_by": "paramiko",
+      "version": "5.0.0"
+    },
+    "certifi": {
+      "import_names": [
+        "certifi"
+      ],
+      "used_by": "requests/httpx (CableTracker engine)",
+      "version": "2026.7.22"
+    },
+    "cffi": {
+      "import_names": [
+        "cffi",
+        "_cffi_backend"
+      ],
+      "used_by": "cryptography, pynacl",
+      "version": "2.0.0"
+    },
+    "charset-normalizer": {
+      "import_names": [
+        "charset_normalizer"
+      ],
+      "used_by": "requests",
+      "version": "3.5.1"
+    },
+    "cryptography": {
+      "import_names": [
+        "cryptography"
+      ],
+      "used_by": "google-auth, paramiko",
+      "version": "50.0.1"
+    },
+    "distro": {
+      "import_names": [
+        "distro"
+      ],
+      "used_by": "openai",
+      "version": "1.9.0"
+    },
+    "et-xmlfile": {
+      "import_names": [
+        "et_xmlfile"
+      ],
+      "used_by": "openpyxl",
+      "version": "2.0.0"
+    },
+    "exceptiongroup": {
+      "import_names": [
+        "exceptiongroup"
+      ],
+      "used_by": "anyio on Python < 3.11 only",
+      "version": "1.3.1"
+    },
+    "google-api-core": {
+      "import_names": [
+        "google.api_core"
+      ],
+      "used_by": "google-api-python-client",
+      "version": "2.30.3"
+    },
+    "google-api-python-client": {
+      "import_names": [
+        "googleapiclient"
+      ],
+      "used_by": "CableTracker engine, format_precheck.py",
+      "version": "2.198.0"
+    },
+    "google-auth": {
+      "import_names": [
+        "google.auth",
+        "google.oauth2"
+      ],
+      "used_by": "CableTracker engine, format_precheck.py, monitor/issue_tracker_sdk_authentication.py",
+      "version": "2.50.0"
+    },
+    "google-auth-httplib2": {
+      "import_names": [
+        "google_auth_httplib2"
+      ],
+      "used_by": "CableTracker engine",
+      "version": "0.3.1"
+    },
+    "googleapis-common-protos": {
+      "import_names": [
+        "google.rpc"
+      ],
+      "used_by": "google-api-core",
+      "version": "1.75.0"
+    },
+    "h11": {
+      "import_names": [
+        "h11"
+      ],
+      "used_by": "httpcore",
+      "version": "0.16.0"
+    },
+    "httpcore": {
+      "import_names": [
+        "httpcore"
+      ],
+      "used_by": "httpx",
+      "version": "1.0.9"
+    },
+    "httplib2": {
+      "import_names": [
+        "httplib2"
+      ],
+      "used_by": "CableTracker engine",
+      "version": "0.32.0"
+    },
+    "httpx": {
+      "import_names": [
+        "httpx"
+      ],
+      "used_by": "CableTracker engine (httpx[socks]), openai",
+      "version": "0.28.1"
+    },
+    "idna": {
+      "import_names": [
+        "idna"
+      ],
+      "used_by": "requests, httpx",
+      "version": "3.19"
+    },
+    "invoke": {
+      "import_names": [
+        "invoke"
+      ],
+      "used_by": "paramiko",
+      "version": "2.2.1"
+    },
+    "jinja2": {
+      "import_names": [
+        "jinja2"
+      ],
+      "used_by": "ztp config generators (90-c2-generate_configs.py)",
+      "version": "3.1.6"
+    },
+    "jiter": {
+      "import_names": [
+        "jiter"
+      ],
+      "used_by": "openai",
+      "version": "0.16.0"
+    },
+    "markupsafe": {
+      "import_names": [
+        "markupsafe"
+      ],
+      "used_by": "jinja2",
+      "version": "3.0.3"
+    },
+    "numpy": {
+      "import_names": [
+        "numpy"
+      ],
+      "used_by": "pandas (pip-managed only on local-test; apt elsewhere)",
+      "version": "2.0.2"
+    },
+    "openai": {
+      "import_names": [
+        "openai"
+      ],
+      "used_by": "CableTracker engine (AI features stay disabled; module-level import)",
+      "version": "2.48.0"
+    },
+    "openpyxl": {
+      "import_names": [
+        "openpyxl"
+      ],
+      "used_by": "setup, P2P, Issue Tracker topology",
+      "version": "3.1.5"
+    },
+    "pandas": {
+      "import_names": [
+        "pandas"
+      ],
+      "used_by": "analysis tools (ibdiagnet-analyze-tool, ib-tool-Jie)",
+      "version": "2.3.3"
+    },
+    "paramiko": {
+      "import_names": [
+        "paramiko"
+      ],
+      "used_by": "fleet/ibsw upgrade SSH, F01 UFM tools",
+      "version": "5.0.0"
+    },
+    "proto-plus": {
+      "import_names": [
+        "proto"
+      ],
+      "used_by": "google-api-core",
+      "version": "1.27.2"
+    },
+    "protobuf": {
+      "import_names": [
+        "google.protobuf"
+      ],
+      "used_by": "google-api-core",
+      "version": "6.33.6"
+    },
+    "pyasn1": {
+      "import_names": [
+        "pyasn1"
+      ],
+      "used_by": "pyasn1-modules",
+      "version": "0.6.4"
+    },
+    "pyasn1-modules": {
+      "import_names": [
+        "pyasn1_modules"
+      ],
+      "used_by": "google-auth",
+      "version": "0.4.2"
+    },
+    "pycparser": {
+      "import_names": [
+        "pycparser"
+      ],
+      "used_by": "cffi",
+      "version": "2.23"
+    },
+    "pydantic": {
+      "import_names": [
+        "pydantic"
+      ],
+      "used_by": "openai",
+      "version": "2.13.5"
+    },
+    "pydantic-core": {
+      "import_names": [
+        "pydantic_core"
+      ],
+      "used_by": "pydantic",
+      "version": "2.46.5"
+    },
+    "pynacl": {
+      "import_names": [
+        "nacl"
+      ],
+      "used_by": "paramiko",
+      "version": "1.6.2"
+    },
+    "pyparsing": {
+      "import_names": [
+        "pyparsing"
+      ],
+      "used_by": "httplib2",
+      "version": "3.3.2"
+    },
+    "pysocks": {
+      "import_names": [
+        "socks",
+        "sockshandler"
+      ],
+      "used_by": "upstream CableTracker requirements (SOCKS proxies)",
+      "version": "1.7.1"
+    },
+    "python-dateutil": {
+      "import_names": [
+        "dateutil"
+      ],
+      "used_by": "pandas",
+      "version": "2.9.0.post0"
+    },
+    "pytz": {
+      "import_names": [
+        "pytz"
+      ],
+      "used_by": "pandas",
+      "version": "2026.2"
+    },
+    "pyyaml": {
+      "import_names": [
+        "yaml"
+      ],
+      "used_by": "project_contract.py and most generators/loaders",
+      "version": "6.0.3"
+    },
+    "requests": {
+      "import_names": [
+        "requests"
+      ],
+      "used_by": "CableTracker engine, google-api-core",
+      "version": "2.32.5"
+    },
+    "sniffio": {
+      "import_names": [
+        "sniffio"
+      ],
+      "used_by": "anyio/openai",
+      "version": "1.3.1"
+    },
+    "socksio": {
+      "import_names": [
+        "socksio"
+      ],
+      "used_by": "httpx[socks]",
+      "version": "1.0.0"
+    },
+    "tqdm": {
+      "import_names": [
+        "tqdm"
+      ],
+      "used_by": "openai",
+      "version": "4.70.1"
+    },
+    "typing-extensions": {
+      "import_names": [
+        "typing_extensions"
+      ],
+      "used_by": "pydantic, openai, cryptography on old Python",
+      "version": "4.16.0"
+    },
+    "typing-inspection": {
+      "import_names": [
+        "typing_inspection"
+      ],
+      "used_by": "pydantic",
+      "version": "0.4.2"
+    },
+    "tzdata": {
+      "import_names": [
+        "tzdata"
+      ],
+      "used_by": "pandas",
+      "version": "2026.2"
+    },
+    "uritemplate": {
+      "import_names": [
+        "uritemplate"
+      ],
+      "used_by": "google-api-python-client",
+      "version": "4.2.0"
+    },
+    "urllib3": {
+      "import_names": [
+        "urllib3"
+      ],
+      "used_by": "requests",
+      "version": "2.6.3"
+    },
+    "xlsxwriter": {
+      "import_names": [
+        "xlsxwriter"
+      ],
+      "used_by": "validation reports (lldp-analyze-tool and others)",
+      "version": "3.2.9"
+    }
+  },
+  "python_sets": {
+    "ibdiagnet-analyze-tool": {
+      "distributions": [
+        "pandas",
+        "openpyxl",
+        "xlsxwriter"
+      ],
+      "reason": "tools/ibdiagnet-analyze-tool lower bounds"
+    },
+    "ibsw-upgrade": {
+      "distributions": [
+        "pyyaml",
+        "paramiko",
+        "bcrypt",
+        "cryptography",
+        "invoke",
+        "pynacl",
+        "cffi",
+        "pycparser",
+        "typing-extensions"
+      ],
+      "import_probe": [
+        "paramiko",
+        "yaml"
+      ],
+      "reason": "upgrade.py SSH runtime plus PyYAML; F01 reuses this venv (F01 imports project_contract.py, which imports yaml)"
+    },
+    "issue-tracker-engine": {
+      "distributions": [
+        "annotated-types",
+        "anyio",
+        "certifi",
+        "cffi",
+        "charset-normalizer",
+        "cryptography",
+        "distro",
+        "google-api-core",
+        "google-api-python-client",
+        "google-auth",
+        "google-auth-httplib2",
+        "googleapis-common-protos",
+        "h11",
+        "httpcore",
+        "httplib2",
+        "httpx",
+        "idna",
+        "jiter",
+        "openai",
+        "proto-plus",
+        "protobuf",
+        "pyasn1",
+        "pyasn1-modules",
+        "pycparser",
+        "pydantic",
+        "pydantic-core",
+        "pyparsing",
+        "pysocks",
+        "requests",
+        "sniffio",
+        "socksio",
+        "tqdm",
+        "typing-extensions",
+        "typing-inspection",
+        "uritemplate",
+        "urllib3"
+      ],
+      "import_probe": [
+        "httplib2",
+        "httpx",
+        "google_auth_httplib2",
+        "google.oauth2.service_account",
+        "googleapiclient.discovery",
+        "googleapiclient.errors",
+        "requests",
+        "openai"
+      ],
+      "reason": "CableTracker engine (cabletracker_runner.py) and format_precheck.py: the REQ7 cable lock plus httpx[socks], openai and PySocks; closure measured by a cp312 resolve"
+    },
+    "python-lt-3.11": {
+      "distributions": [
+        "exceptiongroup"
+      ],
+      "reason": "anyio needs it on Python < 3.11 (local-test CLT 3.9)"
+    },
+    "req7-cable": {
+      "distributions": [
+        "certifi",
+        "cffi",
+        "charset-normalizer",
+        "cryptography",
+        "google-api-core",
+        "google-api-python-client",
+        "google-auth-httplib2",
+        "google-auth",
+        "googleapis-common-protos",
+        "httplib2",
+        "idna",
+        "proto-plus",
+        "protobuf",
+        "pyasn1-modules",
+        "pyasn1",
+        "pycparser",
+        "pyparsing",
+        "requests",
+        "uritemplate",
+        "urllib3"
+      ],
+      "reason": "REQ7 cable SDK lock (retired in step 3b)"
+    },
+    "req7-online": {
+      "distributions": [
+        "google-auth",
+        "pyasn1-modules",
+        "pyasn1",
+        "cryptography",
+        "cffi",
+        "pycparser"
+      ],
+      "reason": "REQ7 C-14 online lock (retired in step 3b)"
+    },
+    "ssh-runtime": {
+      "distributions": [
+        "paramiko",
+        "bcrypt",
+        "cryptography",
+        "invoke",
+        "pynacl",
+        "cffi",
+        "pycparser",
+        "typing-extensions"
+      ],
+      "reason": "exact SSH pins of upgrade.py and F01"
+    },
+    "toplevel-5": {
+      "distributions": [
+        "jinja2",
+        "pyyaml",
+        "pandas",
+        "openpyxl",
+        "xlsxwriter"
+      ],
+      "reason": "TOPLEVEL-5: container venv top level and the development/test minimum"
+    },
+    "toplevel-5-closure": {
+      "distributions": [
+        "markupsafe",
+        "numpy",
+        "python-dateutil",
+        "pytz",
+        "tzdata",
+        "et-xmlfile"
+      ],
+      "reason": "pip-installed TOPLEVEL-5 closure on local-test (apt provides it in the container)"
+    }
+  },
+  "requirement_files": {
+    "infiniband/bringup/xdr-upgrade/requirements.txt": {
+      "format": "pins",
+      "set": "ibsw-upgrade",
+      "unpinned": [
+        "pyyaml"
+      ]
+    },
+    "infra/docker/requirements-issue-tracker-engine.txt": {
+      "format": "hashed",
+      "set": "issue-tracker-engine"
+    },
+    "infra/docker/requirements-req7-cable-sync.txt": {
+      "format": "hashed",
+      "set": "req7-cable"
+    },
+    "infra/docker/requirements-req7-online.txt": {
+      "format": "hashed",
+      "set": "req7-online"
+    },
+    "infra/requirements-ibsw-upgrade.txt": {
+      "format": "hashed",
+      "set": "ibsw-upgrade"
+    },
+    "requirements-container-top-level.lock": {
+      "format": "hashed",
+      "set": "toplevel-5"
+    },
+    "requirements-dev.txt": {
+      "format": "pins",
+      "set": "toplevel-5"
+    },
+    "requirements-f01-ssh.lock": {
+      "format": "pins",
+      "set": "ssh-runtime"
+    },
+    "tools/ibdiagnet-analyze-tool/requirements.txt": {
+      "format": "lower-bounds",
+      "set": "ibdiagnet-analyze-tool"
+    }
+  },
+  "schema_version": 1,
+  "targets": {
+    "ci": {
+      "kind": "ci",
+      "note": "registered only; CI installs requirements-dev.txt while the full suite needs more (not fixed in phase 1)",
+      "python": "3.12",
+      "python_sets": [
+        "toplevel-5"
+      ],
+      "requirements": "requirements-dev.txt",
+      "workflow_files": [
+        ".github/workflows/tests.yml",
+        ".github/workflows/monitor-authority-root.yml"
+      ]
+    },
+    "container": {
+      "apt_python_modules": {
+        "dateutil": "python3-dateutil",
+        "et_xmlfile": "python3-et-xmlfile",
+        "markupsafe": "python3-markupsafe",
+        "numpy": "python3-numpy",
+        "pytz": "python3-tz"
+      },
+      "apt_sets": [
+        "container"
+      ],
+      "commands": [
+        "curl",
+        "ip",
+        "jq",
+        "mkpasswd",
+        "htpasswd",
+        "rsync",
+        "ss",
+        "ssh",
+        "sshpass"
+      ],
+      "installed_by": "infra/docker/Dockerfile",
+      "interpreter": "/opt/http-ztp/venv/bin/python",
+      "kind": "container-venv",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
+      "python": "3.12",
+      "python_sets": [
+        "toplevel-5",
+        "req7-online",
+        "req7-cable",
+        "issue-tracker-engine"
+      ],
+      "system_site_packages": true
+    },
+    "local-test": {
+      "clt_provided": {
+        "altgraph": "0.17.2",
+        "future": "0.18.2",
+        "macholib": "1.15.2",
+        "pip": "21.2.4",
+        "setuptools": "58.0.4",
+        "six": "1.15.0",
+        "wheel": "0.37.0"
+      },
+      "commands": [
+        "git",
+        "ssh",
+        "scp",
+        "ssh-keygen",
+        "rsync"
+      ],
+      "installed_by": "python3 -m pip install --user --no-deps --require-hashes --only-binary=:all: (hashed macOS cp39 list: phase 2)",
+      "interpreter": "/usr/bin/python3",
+      "kind": "user-site",
+      "omit": {
+        "pysocks": "tests never import socks; install it for parity when convenient"
+      },
+      "platforms": [
+        "macos-cp39-arm64"
+      ],
+      "python": "3.9",
+      "python_sets": [
+        "toplevel-5",
+        "toplevel-5-closure",
+        "req7-online",
+        "req7-cable",
+        "issue-tracker-engine",
+        "ssh-runtime",
+        "python-lt-3.11"
+      ]
+    },
+    "native": {
+      "apt_sets": [
+        "base",
+        "common",
+        "ztp",
+        "native-additions"
+      ],
+      "commands": [
+        "arping",
+        "curl",
+        "ipmitool",
+        "jq",
+        "mkpasswd",
+        "python3",
+        "rsync",
+        "ssh",
+        "ssh-copy-id",
+        "sshpass",
+        "unzip",
+        "wget"
+      ],
+      "installed_by": "infra/infra-setup.py --mgmt",
+      "interpreter": "/usr/bin/python3",
+      "kind": "apt",
+      "note": "owner 2026-10-23: system modules stay apt versions (PyYAML 6.0.1 natively vs 6.0.3 in tests); only exact-version stacks use the two venvs",
+      "observed_versions": {
+        "python3": "3.12.3-0ubuntu2.1",
+        "python3-dateutil": "2.8.2-3ubuntu1",
+        "python3-six": "1.16.0-4",
+        "python3-yaml": "6.0.1-2build2",
+        "source": "Ubuntu 24.04 offline apps index dated 2026-08-24 (amd64 and arm64; not in git); python3-jinja2/openpyxl/pandas/xlsxwriter/numpy/venv/pip are absent from that index"
+      },
+      "optional_apt_sets": [
+        "optional-services"
+      ],
+      "optional_commands": [
+        "htpasswd"
+      ],
+      "python": [
+        "3.10",
+        "3.12"
+      ],
+      "python_modules": {
+        "jinja2": "python3-jinja2",
+        "openpyxl": "python3-openpyxl",
+        "pandas": "python3-pandas",
+        "xlsxwriter": "python3-xlsxwriter",
+        "yaml": "python3-yaml"
+      }
+    },
+    "venv-cabletracker": {
+      "consumers": [
+        "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+        "monitor/issue-tracker/format_precheck.py",
+        "ethernet/monitor/cron.sh"
+      ],
+      "installed_by": "python3 infra/deps.py install --target venv-cabletracker (as the user whose crontab runs cron.sh; never sudo)",
+      "kind": "venv",
+      "path": "~/.venvs/http/cabletracker",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
+      "python": "3.12",
+      "python_sets": [
+        "issue-tracker-engine"
+      ],
+      "requirements": "infra/docker/requirements-issue-tracker-engine.txt",
+      "system_site_packages": false
+    },
+    "venv-ibsw-upgrade": {
+      "consumers": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "tools/ufm_bootstrap_auth_adapter.py"
+      ],
+      "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (as the user who runs upgrade.py; never sudo)",
+      "kind": "venv",
+      "path": "~/.venvs/http/ibsw-upgrade",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
+      "python": "3.12",
+      "python_sets": [
+        "ibsw-upgrade"
+      ],
+      "requirements": "infra/requirements-ibsw-upgrade.txt",
+      "system_site_packages": false
+    }
+  }
+}

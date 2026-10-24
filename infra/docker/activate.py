@@ -157,6 +157,20 @@ CONTAINER_TRANSITIVE_IMPORTS = (
     "numpy",
     "pytz",
 )
+# The CableTracker engine run by cron.sh (issue-tracker-sync.py --engine-python) and
+# format_precheck.py import these modules; the hashed closure is the requirements file below.
+# infra/dependencies.json keeps the same list (python_sets.issue-tracker-engine.import_probe).
+ISSUE_TRACKER_ENGINE_REQUIREMENTS = "infra/docker/requirements-issue-tracker-engine.txt"
+ISSUE_TRACKER_ENGINE_IMPORTS = (
+    "httplib2",
+    "httpx",
+    "google_auth_httplib2",
+    "google.oauth2.service_account",
+    "googleapiclient.discovery",
+    "googleapiclient.errors",
+    "requests",
+    "openai",
+)
 # These files execute from, or are installed into, the immutable image.  They
 # must remain byte-identical.  Project inputs, ordinary generators and workers
 # execute from the separately verified live release and may advance without
@@ -171,6 +185,7 @@ IMAGE_COUPLED_SOURCE_PATHS = frozenset({
     "infra/docker/req7-cable-dependency-policy.json",
     "infra/docker/requirements-req7-cable-sync.txt",
     "tools/req7_cable_dependency_contract.py",
+    ISSUE_TRACKER_ENGINE_REQUIREMENTS,
     "infra/docker/activate.py",
     "infra/docker/entrypoint.py",
     "infra/docker/healthcheck.py",
@@ -325,6 +340,80 @@ def validate_python_runtime() -> None:
             raise ActivationError(
                 f"cannot import Python closure module {module}: {exc}"
             ) from exc
+
+
+def _hashed_requirement_pins(payload: bytes) -> Tuple[Tuple[str, str], ...]:
+    """(name, version) of a pip hash-locked list; every record must be name==version plus sha256 hashes."""
+    pins = []
+    pending: list = []
+    try:
+        text = payload.decode("ascii")
+    except UnicodeError:
+        raise ActivationError("Issue Tracker engine requirements are not ASCII") from None
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        continuation = stripped.endswith("\\")
+        pending.append(stripped[:-1].strip() if continuation else stripped)
+        if continuation:
+            continue
+        tokens = " ".join(pending).split()
+        pending = []
+        name, separator, version = tokens[0].partition("==")
+        if (not separator or not name or not version or not tokens[1:]
+                or not all(re.fullmatch(r"--hash=sha256:[0-9a-f]{64}", token) for token in tokens[1:])):
+            raise ActivationError("Issue Tracker engine requirements must be exact hash-locked pins")
+        pins.append((name, version))
+    if pending or not pins:
+        raise ActivationError("Issue Tracker engine requirements are empty or truncated")
+    return tuple(pins)
+
+
+def validate_issue_tracker_engine_runtime() -> dict:
+    """Require the hashed CableTracker engine closure in the managed venv, then import the engine modules.
+
+    Versions come from the image source tree's requirements file; every engine module must
+    resolve to a single-link file inside the venv and import.
+    """
+    import platform
+
+    if (Path(sys.executable) != CONTAINER_VENV_PYTHON
+            or sys.platform != "linux" or sys.version_info[:2] != (3, 12)
+            or platform.python_implementation() != "CPython"):
+        raise ActivationError("Issue Tracker engine runtime requires managed Linux CPython 3.12 venv")
+    try:
+        payload = (DEFAULT_IMAGE_SOURCE_TREE / ISSUE_TRACKER_ENGINE_REQUIREMENTS).read_bytes()
+    except OSError as exc:
+        raise ActivationError(
+            f"cannot read {ISSUE_TRACKER_ENGINE_REQUIREMENTS}: {exc.__class__.__name__}"
+        ) from None
+    pins = _hashed_requirement_pins(payload)
+    for name, expected in pins:
+        try:
+            actual = importlib_metadata.version(name)
+        except importlib_metadata.PackageNotFoundError:
+            raise ActivationError(f"missing Issue Tracker engine distribution: {name}") from None
+        if actual != expected:
+            raise ActivationError(f"Issue Tracker engine {name} must be {expected}, got {actual}")
+    for module in ISSUE_TRACKER_ENGINE_IMPORTS:
+        try:
+            spec = importlib.util.find_spec(module)
+        except (ImportError, AttributeError, ValueError) as exc:
+            raise ActivationError(f"cannot inspect Issue Tracker engine module {module}: {exc}") from exc
+        if spec is None:
+            raise ActivationError(f"missing Issue Tracker engine module: {module}")
+        if not _origin_within(getattr(spec, "origin", None), CONTAINER_VENV):
+            raise ActivationError(f"Issue Tracker engine module {module} is outside {CONTAINER_VENV}")
+        try:
+            importlib.import_module(module)
+        except ImportError as exc:
+            raise ActivationError(f"cannot import Issue Tracker engine module {module}: {exc}") from exc
+    return {
+        "requirements_sha256": hashlib.sha256(payload).hexdigest(),
+        "distributions": len(pins),
+        "imports": list(ISSUE_TRACKER_ENGINE_IMPORTS),
+    }
 
 
 class MonitorAuthorityError(ActivationError):
@@ -3737,7 +3826,7 @@ def parser() -> argparse.ArgumentParser:
             "plan", "status", "exec-service", "build-source-manifest",
             "verify-source-manifest", "verify-image-source-manifest", "verify-control-auth-image",
             "verify-deployment-image", "verify-python-runtime", "verify-req7-python-runtime",
-            "verify-req7-cable-python-runtime",
+            "verify-req7-cable-python-runtime", "verify-issue-tracker-engine-runtime",
         ),
     )
     result.add_argument("service", nargs="?")
@@ -3755,6 +3844,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 raise ActivationError("verify-req7-cable-python-runtime takes no arguments or overrides")
             _print_json({"verified": True, "contract": "REQ7-CABLE-SDK-V1",
                          **validate_req7_cable_python_runtime()})
+            return 0
+        if args.action == "verify-issue-tracker-engine-runtime":
+            supplied = sys.argv[1:] if argv is None else argv
+            if tuple(supplied) != ("verify-issue-tracker-engine-runtime",):
+                raise ActivationError("verify-issue-tracker-engine-runtime takes no arguments or overrides")
+            _print_json({"verified": True, "contract": "ISSUE-TRACKER-ENGINE-V1",
+                         **validate_issue_tracker_engine_runtime()})
             return 0
         if args.action == "verify-req7-python-runtime":
             if args.service is not None:

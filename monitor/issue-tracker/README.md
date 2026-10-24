@@ -55,6 +55,10 @@ python3 monitor/issue-tracker/issue-tracker-sync.py --force          # 输入没
 ```
 
 - 引擎在顶层就导入 Google 库和 openai、httpx。运行它的解释器必须装齐这些包；可以用 `--engine-python` 指定解释器。AI、BCM、Agent 功能都没有开启，引擎只访问 Google OAuth 和 Sheets。
+- 引擎的依赖清单是 `infra/docker/requirements-issue-tracker-engine.txt`：36 个分发，带哈希，登记在 `infra/dependencies.json`。
+  - 容器：镜像把它装进 `/opt/http-ztp/venv`。
+  - 原生服务器：由运行 cron 的那个用户执行 `python3 infra/deps.py install --target venv-cabletracker`，建出 `~/.venvs/http/cabletracker`；不要用 sudo。
+  - `cron.sh` 按顺序选引擎解释器：容器 venv → 该用户的 `~/.venvs/http/cabletracker/bin/python` → `python3`。`python3` 缺包时引擎在导入阶段就失败，cronjob.log 记一条 WARNING。
 - 某个域的最新输入（文件名加 sha256）、规划文件和目标表都与上次成功同步时相同，就跳过这个域。失败的运行不会被记成已同步，下次照常重试。
 - 整理好的数据按网络放在项目的 `99-output-monitor/` 下（UFM 算 IB）：
   - `infiniband/issue-tracker/`：`ib-cvt.json`、`ib-cvt.summary.json`、`state.json`

@@ -454,6 +454,23 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 
 ## 构建与离线边界
 
+### 镜像内 Python 依赖
+
+- 镜像在 `/opt/http-ztp/venv`（`--system-site-packages`）里依次安装四份带哈希的清单，全部
+  `--no-deps --require-hashes`，后三份另加 `--only-binary=:all:`：
+  `requirements-container-top-level.lock`（TOPLEVEL-5）、`infra/docker/requirements-req7-online.txt`、
+  `infra/docker/requirements-req7-cable-sync.txt`、`infra/docker/requirements-issue-tracker-engine.txt`。
+- 最后一份是 CableTracker 引擎（`monitor/issue-tracker/cabletracker/cabletracker_runner.py`）和
+  `format_precheck.py` 的完整依赖：REQ7 cable 清单的 20 个分发（版本和 sha256 逐项相同），加上
+  httpx、openai、PySocks 及其闭包，共 36 个，CPython 3.12 Linux x86_64/aarch64。装完后
+  `activate.py verify-issue-tracker-engine-runtime` 核对版本，并在 venv 内逐个导入引擎模块；任何一项
+  失败，构建即失败。
+- 这份清单列在 `IMAGE_COUPLED_SOURCE_PATHS` 里，改动它必须重建镜像。在它之前构建的镜像没有
+  httpx/openai，`cron.sh` 的在线同步会在 cronjob.log 里记 WARNING。
+- 全部依赖统一登记在 `infra/dependencies.json`。`python3 infra/deps.py check --target files` 核对各清单
+  与表一致；在容器源码根目录执行 `/opt/http-ztp/venv/bin/python infra/deps.py check --target container`
+  检查镜像 venv。表本身不是镜像耦合文件，改表不需要重建镜像。
+
 ### 镜像上下文与 live 项目边界（H1–H4）
 
 三份 `.dockerignore` 只重包含 DAY0 顶层 Python 脚本和中性模板，不重开整个 DAY0 目录。

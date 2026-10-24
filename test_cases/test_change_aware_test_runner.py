@@ -1077,6 +1077,10 @@ class ImpactManifestTests(unittest.TestCase):
                 "monitor/issue-tracker/cabletracker/mapping_v4.json",
                 "test_cases/issue_tracker_template.py",
                 "monitor/issue-tracker/engine.lock.json",
+                # 2026-10-23 unified dependency table (phase 1).
+                "infra/dependencies.json",
+                "infra/docker/requirements-issue-tracker-engine.txt",
+                "infra/requirements-ibsw-upgrade.txt",
             ],
             manifest["tracked_support"],
         )

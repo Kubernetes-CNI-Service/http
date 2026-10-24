@@ -3446,3 +3446,58 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 已安装的版本不回滚；没有升级成功的设备上暂存的镜像保留在 `/home/admin`，重跑时直接复用，需要时手工删除；
   - 第一次 Ctrl-C 只停止新的下发，正在升级的设备继续被跟踪直到有结果；第二次 Ctrl-C 立即退出，在途设备记 UNKNOWN，需要人工确认；
   - 未执行前保持 NOT RUN，不得写 PASS。
+
+## TC-REAL-DEPS-ENGINE-IMAGE-001 — 重建镜像，在容器和原生 venv 里验证 CableTracker 引擎依赖
+
+### 基本信息
+
+- Case ID：`TC-REAL-DEPS-ENGINE-IMAGE-001`；类型：real-environment / Docker 镜像重建 / 原生 venv；状态：**OPEN / NOT RUN**。
+- 对应需求：owner 2026-10-23 统一依赖表第一阶段（步骤 3a）。镜像安装 `infra/docker/requirements-issue-tracker-engine.txt`，并由 `activate.py verify-issue-tracker-engine-runtime` 把关；原生服务器用 `infra/deps.py install --target venv-cabletracker`；`cron.sh` 的 `issue_tracker_sync()` 选择引擎解释器。
+- 自动化文件：`test_cases.test_deps_table`、`test_cases.test_issue_tracker_engine_runtime`、`test_cases.test_deps_table_workflow`。这三个模块用假 python、假 pip、临时 HOME 和合成的 venv 元数据运行，不下载 wheel，不建镜像，不导入 Google/OpenAI 库。
+- 适用平台：management-server，Ubuntu 24.04 amd64 与 arm64 各一台；Docker 后端和原生各做一次。
+
+### 风险与目标
+
+- 本机测试证明不了这些事：pip 在真实 CPython 3.12 上按哈希装齐 36 个分发；引擎模块在镜像 venv 里能真实导入；原生 venv 在 cron 用户下可用。
+- 在此之前构建的镜像没有 httpx/openai，引擎在导入阶段失败，cron 只记 WARNING。
+- 成功标准：新镜像构建通过引擎关卡；容器和原生两边的 `deps.py check` 都退出 0；下一轮 prod 采集的 `[ISSUE-TRACKER]` 行不再是导入失败。
+
+### 前置条件与输入
+
+- owner 书面授权的维护窗口：重建并替换镜像会重启容器内的服务。
+- 构建机能访问 PyPI，或组织批准的镜像源。
+- 当前精确源码树。记录现有 image ID、容器状态和 `cronjob.log` 末尾。
+- 原生一侧：知道哪个用户的 crontab 运行 `cron.sh`；该用户能执行 `python3 -m venv`（需要 `python3-venv`）。
+
+### 步骤
+
+1. 在联网、同架构的构建机上，按 `infra/docker/README.md` 的构建流程执行 `sudo ./infra/docker/deploy.sh build`。构建日志里四次 `pip install` 都成功；`verify-issue-tracker-engine-runtime` 输出 `"verified": true`、`"distributions": 36`。
+2. 在新容器的源码根目录执行：
+   - `/opt/http-ztp/venv/bin/python -c 'import googleapiclient, httpx, openai, socks'`；
+   - `/opt/http-ztp/venv/bin/python infra/deps.py check --target container --json`，退出 0。
+3. 项目已启用 issue-tracker 且凭据就位时，执行 `python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only`：只做转换和格式预检，不写表。记录退出码。
+4. 原生 Ubuntu 24.04，以运行 cron 的那个用户（不是 root，不用 sudo）执行：
+   - `python3 infra/deps.py install --target venv-cabletracker`，然后 `python3 infra/deps.py check --target venv-cabletracker`，退出 0；
+   - `python3 infra/deps.py install --target venv-ibsw-upgrade`，然后确认 `upgrade.py` 自动切换到该 venv。
+5. 等下一轮 prod 采集，检查 `cronjob.log` 的 `[ISSUE-TRACKER]` 行。
+
+### 预期结果
+
+- 正向：步骤 1–5 全部如上。
+- 拒绝：用 root 执行 `deps.py install` 退出 2；在 Ubuntu 22.04（cp310）上执行 `install` 退出 2，并提示「planned for phase 2」。
+- 不允许的副作用：构建和 check 不读取、不打印任何凭据；`deps.py` 不写 `~/.venvs/http/` 以外的位置。
+- 需要保存的证据：构建日志、新旧 image ID、两边 check 的 JSON 输出、每个 venv 的 `pip list --format=freeze`、`cronjob.log` 片段。
+
+### 故障注入与清理
+
+- 在构建机的临时源码副本里改坏引擎清单的一个哈希：构建应在 pip 阶段失败。删除 openai 一行：构建应在 `verify-issue-tracker-engine-runtime` 失败。两种情况都不得产出可部署镜像。
+- 清理：保留旧镜像以便回滚。原生 venv 可以直接删除 `~/.venvs/http/cabletracker` 后重建。
+- 重复执行：venv 已存在时，`install` 只按哈希补装，再做一次 check。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_deps_table.py`、`test_cases/test_issue_tracker_engine_runtime.py`、`test_cases/test_deps_table_workflow.py`
+- [x] 修复前能够稳定失败（新模块在基线 4583161 上失败）
+- [x] 修复后通过（定向运行）
+- [ ] 已纳入全量 discovery（需正式本机 load 的全量证明，未执行）
+- [ ] 真实镜像重建与原生 venv 验证（本卡，NOT RUN）

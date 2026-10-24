@@ -27,6 +27,9 @@ OLD_COUPLED = (
     "infra/docker/supervisord.conf", "infra/docker/apache-ztp.conf",
     "infra/docker/logrotate-http-ztp.conf", "tools/ztp_service_runtime.py", "tools/control-auth.py",
 )
+# 2026-10-23 unified dependency table step 3a: the CableTracker engine list is installed into the
+# image next to the Cable trio and is image-coupled on its own (it outlives the trio, step 3b).
+ENGINE_COUPLED = ("infra/docker/requirements-issue-tracker-engine.txt",)
 
 # A genuine isolated interpreter, not extraction/execution of an AST body.
 # Only the already installed PyYAML package is loaded explicitly because -I
@@ -141,13 +144,13 @@ class CableRuntimeWorkflowTests(unittest.TestCase):
     def test_real_image_manifests_reject_missing_or_drifted_new_coupled_trio(self):
         activate = fixture.load(self)
         self.assertEqual(activate.IMAGE_COUPLED_SOURCE_PATHS,
-                         frozenset((*OLD_COUPLED, *fixture.TRIO)))
+                         frozenset((*OLD_COUPLED, *ENGINE_COUPLED, *fixture.TRIO)))
         with tempfile.TemporaryDirectory(prefix="cable-image-") as directory:
             base = Path(directory).resolve(strict=True)
             source = base / "source"
             for name in ("infra", "monitor", "ethernet", "infiniband", "nvlink", "ztp", "tools"):
                 (source / name).mkdir(parents=True)
-            for relative in (*OLD_COUPLED, *fixture.TRIO):
+            for relative in (*OLD_COUPLED, *ENGINE_COUPLED, *fixture.TRIO):
                 path = source / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes((fixture.ROOT / relative).read_bytes() if relative in fixture.TRIO
