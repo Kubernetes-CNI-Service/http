@@ -4,6 +4,14 @@ Below 10G the switches relay the image per OOB leaf; 10G-<100G pull directly wit
 window 60*ceil(N/16) and at most Gbps*0.8 concurrent downloads; 100G and above use
 60*ceil(N/32) and no cap. Physical, bond and bridge egress interfaces must all resolve
 to the real port; anything unresolved counts as 1G (relay).
+
+Several HTTP addresses (owner 2026-10-24): common.mgmt.http.address may list one address
+per ztp-server network, and those networks are normally not routed to each other. Each
+switch uses the configured address on the interface of `ip route get <switch>`: the
+route's src when it is configured, else the only configured address on that interface;
+several without the src is ambiguous, none means no HTTP listener there, and no route is
+no route. Those switches fail closed; nothing falls back to another network's address.
+[LINK] lists every egress with its speed and switch count; the mode follows the slowest.
 """
 import sys
 import tempfile
@@ -25,8 +33,9 @@ class FakeHost:
         self.root = root
         self.net = root / "class" / "net"
         self.net.mkdir(parents=True)
-        self.routes = {}
-        self.addresses = [SERVER]
+        self.routes = {}                  # switch -> (device, next hop[, src])
+        self.addresses = [SERVER]         # on every interface unless device_addresses names it
+        self.device_addresses = {}        # interface -> [address, ...] (primary first)
         self.neighbours = {}
         self.fdb = {}
 
@@ -58,11 +67,19 @@ class FakeHost:
             (path / "brif" / member).mkdir()
 
     def run(self, argv):
-        if argv[:4] == ["ip", "-o", "addr", "show"]:
-            return "".join(f"2: x    inet {address}/24 scope global x\n" for address in self.addresses)
+        if argv[:6] == ["ip", "-o", "addr", "show", "dev", argv[5] if len(argv) > 5 else None]:
+            on = self.device_addresses.get(argv[5], self.addresses)
+            return "".join(f"2: {argv[5]}    inet {address}/24 scope global {'secondary ' if index else ''}{argv[5]}\n"
+                           for index, address in enumerate(on))
+        if argv == ["ip", "-o", "addr", "show"]:
+            everything = list(self.addresses) + [a for on in self.device_addresses.values() for a in on]
+            return "".join(f"2: x    inet {address}/24 scope global x\n" for address in everything)
         if argv[:3] == ["ip", "route", "get"]:
-            device, via = self.routes[argv[3]]
-            return f"{argv[3]} " + (f"via {via} " if via else "") + f"dev {device} src {SERVER} uid 0\n    cache\n"
+            if argv[3] not in self.routes:
+                raise OSError("ip route get exited 2")             # RTNETLINK answers: Network is unreachable
+            device, via, *src = self.routes[argv[3]]
+            return (f"{argv[3]} " + (f"via {via} " if via else "")
+                    + f"dev {device} src {src[0] if src else SERVER} uid 0\n    cache\n")
         if argv[:3] == ["ip", "neigh", "show"]:
             mac = self.neighbours.get(argv[3])
             return f"{argv[3]} lladdr {mac} REACHABLE\n" if mac else ""
@@ -177,6 +194,88 @@ class LinkDecisionTest(unittest.TestCase):
         decision = self.host.detect(["198.51.100.1", "198.51.100.2"])
         self.assertEqual((decision.speed_mbps, decision.divisor), (10000, 16))
         self.assertEqual(decision.egress, ("eno1", "eno2"))
+
+    # ------------------------------------------------------------ several HTTP addresses (owner 2026-10-24)
+    def two_networks(self):
+        """eno1 192.0.2.0/24 (HTTP 192.0.2.10, 100G) and eno2 198.51.100.0/24 (HTTP 198.51.100.10, 10G)."""
+        self.host.iface("eno1", speed=100000, physical=True)
+        self.host.iface("eno2", speed=10000, physical=True)
+        self.host.device_addresses.update({"eno1": ["192.0.2.10"], "eno2": ["198.51.100.10"]})
+        self.host.routes.update({"192.0.2.41": ("eno1", None, "192.0.2.10"),
+                                 "192.0.2.42": ("eno1", None, "192.0.2.10"),
+                                 "198.51.100.41": ("eno2", None, "198.51.100.10")})
+        return ["192.0.2.41", "192.0.2.42", "198.51.100.41"], ["192.0.2.10", "198.51.100.10"]
+
+    def test_each_switch_uses_the_http_address_on_its_own_network(self):
+        switches, configured = self.two_networks()
+        services = link.resolve_services(switches, configured, run=self.host.run)
+        self.assertEqual({switch: (item.address, item.device, item.reason) for switch, item in services.items()},
+                         {"192.0.2.41": ("192.0.2.10", "eno1", None), "192.0.2.42": ("192.0.2.10", "eno1", None),
+                          "198.51.100.41": ("198.51.100.10", "eno2", None)})
+        decision = link.detect(switches, configured, run=self.host.run, sysfs_root=self.host.root)
+        self.assertEqual((decision.speed_mbps, decision.mode, decision.source), (10000, "direct", "detected"),
+                         "the slowest egress decides")
+        self.assertEqual(decision.egress, ("eno1", "eno2"))
+        line = decision.line()
+        self.assertIn("eno1 100G 2 switch(es) http 192.0.2.10", line)
+        self.assertIn("eno2 10G 1 switch(es) http 198.51.100.10", line)
+        self.assertFalse([argv for argv in self.calls() if argv[:3] == ["ip", "route", "get"] and "from" in argv],
+                         "the route to a switch is looked up without a source address")
+
+    def calls(self):
+        seen, original = [], self.host.run
+
+        def record(argv):
+            seen.append(list(argv))
+            return original(argv)
+        switches, configured = list(self.host.routes), ["192.0.2.10", "198.51.100.10"]
+        link.resolve_services(switches, configured, run=record)
+        link.detect(switches, configured, run=record, sysfs_root=self.host.root)
+        return seen
+
+    def test_a_single_scalar_address_still_works(self):
+        self.host.iface("eno1", speed=10000, physical=True)
+        self.host.routes["198.51.100.1"] = ("eno1", None)
+        services = link.resolve_services(["198.51.100.1"], [SERVER], run=self.host.run)
+        self.assertEqual((services["198.51.100.1"].address, services["198.51.100.1"].reason), (SERVER, None))
+        decision = link.detect(["198.51.100.1"], SERVER, run=self.host.run, sysfs_root=self.host.root)
+        self.assertEqual((decision.speed_mbps, decision.mode), (10000, "direct"))
+
+    def test_a_network_without_a_configured_address_fails_closed(self):
+        switches, configured = self.two_networks()
+        self.host.iface("eno3", speed=10000, physical=True)
+        self.host.device_addresses["eno3"] = ["203.0.113.10"]           # this host is there, Apache is not
+        self.host.routes["203.0.113.41"] = ("eno3", None, "203.0.113.10")
+        services = link.resolve_services(switches + ["203.0.113.41"], configured, run=self.host.run)
+        lost = services["203.0.113.41"]
+        self.assertEqual((lost.address, lost.device, lost.reason), (None, "eno3", "HTTP_SERVICE_ADDRESS_NONE"))
+        decision = link.detect(switches + ["203.0.113.41"], configured, run=self.host.run, sysfs_root=self.host.root)
+        self.assertTrue(any("eno3" in warning and "no configured HTTP address" in warning
+                            for warning in decision.warnings), decision.warnings)
+
+    def test_a_configured_secondary_address_is_used_when_the_route_source_is_not_configured(self):
+        switches, configured = self.two_networks()
+        self.host.device_addresses["eno2"] = ["198.51.100.10", "198.51.100.20"]   # primary, secondary
+        services = link.resolve_services(switches, ["192.0.2.10", "198.51.100.20"], run=self.host.run)
+        self.assertEqual((services["198.51.100.41"].address, services["198.51.100.41"].reason), ("198.51.100.20", None))
+
+    def test_several_configured_addresses_on_one_interface(self):
+        switches, configured = self.two_networks()
+        self.host.device_addresses["eno2"] = ["198.51.100.10", "198.51.100.20", "198.51.100.30"]
+        both = ["192.0.2.10", "198.51.100.20", "198.51.100.30"]
+        ambiguous = link.resolve_services(switches, both, run=self.host.run)["198.51.100.41"]
+        self.assertEqual((ambiguous.address, ambiguous.reason), (None, "HTTP_SERVICE_ADDRESS_AMBIGUOUS"))
+        self.host.routes["198.51.100.41"] = ("eno2", None, "198.51.100.30")       # the route's src is one of them
+        chosen = link.resolve_services(switches, both, run=self.host.run)["198.51.100.41"]
+        self.assertEqual((chosen.address, chosen.reason), ("198.51.100.30", None))
+
+    def test_no_route_fails_closed(self):
+        switches, configured = self.two_networks()
+        services = link.resolve_services(switches + ["203.0.113.99"], configured, run=self.host.run)
+        self.assertEqual((services["203.0.113.99"].address, services["203.0.113.99"].reason),
+                         (None, "HTTP_SERVICE_ADDRESS_NO_ROUTE"))
+        decision = link.detect(switches + ["203.0.113.99"], configured, run=self.host.run, sysfs_root=self.host.root)
+        self.assertEqual(decision.speed_mbps, 10000, "the routed switches still decide the mode")
 
     def test_override_wins_and_is_validated(self):
         decision = self.host.detect(["198.51.100.1"], override="100G")

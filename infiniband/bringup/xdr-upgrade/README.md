@@ -17,6 +17,10 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
   - 10G 到 100G 以下：每台直接从 ztp-server 拉，错峰窗口 `60 × ceil(N/16)` 秒，同时下载不超过接口 Gbps × 0.8；
   - 100G 及以上：错峰窗口 `60 × ceil(N/32)` 秒，不设并发上限；
   - 判定不了的接口栈按 1G 处理（接力）；`--server-link` 可以指定。
+- **多个 HTTP 地址**（2026-10-24）：`common.mgmt.http.address` 可以是一个地址或地址列表（每个 ztp-server 网络一个）。
+  每台交换机用 `ip route get <交换机>` 出口上配置的那个地址下载（`[HTTP]` 一行列出）；出口上没有、有多个而无法确定、
+  或者没有路由时，该设备只做只读预检，需要升级就记 FAILED（`HTTP_SERVICE_ADDRESS_NONE` / `_AMBIGUOUS` / `_NO_ROUTE`），
+  不写任何东西，也不会改用别的网络上的地址。多个出口时按最慢的出口决定分发方式。
 - **OOB 分组**来自 `--p2p`（默认项目里的 `p2p.xlsx`）中每台 eth0/mgmt 的对端，打印一行 `[GROUPS]`。
 - **所有包都先暂存再安装**：OS、BIOS、CPLD 都先放到 `/home/admin` 并在交换机上校验 sha256，
   再用 `local` 方法安装。`--method http|scp` 只决定交换机从 ztp-server 拉包的方式。

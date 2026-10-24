@@ -41,7 +41,7 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 ## 3. 流程
 
 ```
-入口：速率检测 [LINK] → P2P 分组 [GROUPS] → 问密码 → 主进程
+入口：每台的 HTTP 地址 [HTTP] 与速率检测 [LINK] → P2P 分组 [GROUPS] → 问密码、校验密码 → 主进程
 主进程：全部预检（检查池） → 按组件 os → bios → cpld 逐阶段：
   金丝雀（逐台、走完所有跳数、从 ztp-server 直拉，拉取优先）
   ∥ 分发（与金丝雀并行；OS 在 <10G 时按 OOB leaf 接力，否则直拉；BIOS/CPLD 一律直拉）
@@ -141,14 +141,31 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 
 ## 7. 分发（owner 2026-10-23）
 
+- **每台交换机的 HTTP 地址**（owner 2026-10-24）：
+  - `common.mgmt.http.address` 可以是一个 IPv4，也可以是 IPv4 列表：Apache 可以在多个地址上监听，每个 ztp-server
+    网络一个，这些网络通常互不路由。每个地址按项目合同（`validate_service_endpoint`）校验，重复的去掉；
+    本分支不改 01-global 的 schema 和 `project_contract`。
+  - 对每台交换机在本机执行 `ip route get <交换机 eth0_ip>`（不带 `from`），取 `dev` 和 `src`。候选是配置的 HTTP
+    地址中位于这个出口上的（`ip -o addr show dev <dev>`）：
+    - `src` 在候选里就用 `src`；否则只有一个候选就用它（例如 HTTP 地址是这个口的第二地址）；
+    - 多个候选而 `src` 不在其中：`HTTP_SERVICE_ADDRESS_AMBIGUOUS`；没有候选（这个网络上没有 HTTP 监听）：
+      `HTTP_SERVICE_ADDRESS_NONE`；没有路由：`HTTP_SERVICE_ADDRESS_NO_ROUTE`。
+  - 这三种设备只做只读预检（不做 access bootstrap）；需要升级时记 FAILED，原因里写设备名和出口；不写任何东西，
+    也绝不改用另一个网络上的地址。不需要升级的照常记 AT_TARGET。
+  - 包的 URL 按每台自己的地址拼，端口和路径不变；接力时从 ztp-server 拉的那台也用它自己的地址；`--method scp` 不变。
+    v1 的策略读取只接受一个地址，所以列表时先用第一个地址生成 URL，再在取包时换成该设备自己的地址。
+  - 入口打印一行 `[HTTP]`：每个出口、所用地址和设备数；没有可用地址的设备各打一行 `[HTTP] WARN`。
+    `plan.json` 的 `http` 记下配置的地址和每台的地址、出口、src、原因。
 - **速率检测**（`fleet_link`）：
-  1. 包地址必须是本机地址；
-  2. 对每台交换机执行 `ip route get <交换机> from <包地址>`；
+  1. 配置的 HTTP 地址至少要有一个是本机地址，否则按未知处理；不在本机的地址给出警告；
+  2. 出口来自上面同一次 `ip route get <交换机>`（不带 `from`）；
   3. 从出口逐层找到物理口：
      - bond：主备模式取主用口；layer2 哈希且经网关时取最慢成员；其他情况把 up 的成员相加；
      - bridge：不读 bridge 自身速率，排除 veth/tap，多个物理成员时查 FDB，查不到取最慢；
      - VLAN/macvlan：取下层接口；
-  4. 虚拟机网卡、非以太网、读不到的速率都判为未知。未知按 1G（接力）处理。
+  4. 虚拟机网卡、非以太网、读不到的速率都判为未知。未知按 1G（接力）处理；
+  5. 多个出口时按最慢的出口决定（保守）；没有可用 HTTP 地址的设备不下载，它们的出口不参与判定。`[LINK]` 逐个列出
+     出口、速率、设备数和所用的 HTTP 地址；某个出口上没有配置的 HTTP 地址时给出警告。
 - **分档**：
 
   | 速率 | 方式 | 错峰窗口 | ztp-server 同时拉取 |
@@ -217,15 +234,15 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 
 | 模块 | 内容 |
 |---|---|
-| `test_fleet_link` | 分档公式；物理口；bond 各模式；带 veth 的 bridge；FDB；VLAN over bond；未知按 1G；多出口；覆盖 |
+| `test_fleet_link` | 分档公式；物理口；bond 各模式；带 veth 的 bridge；FDB；VLAN over bond；未知按 1G；多出口；覆盖；多个 HTTP 地址：每台用自己网络上的地址、路由查询不带 from、[LINK] 列出每个出口；单个地址照旧；网络上没有 HTTP 地址、地址不唯一、没有路由都失败关闭；第二地址 |
 | `test_fleet_distribution` | P2P 分组；48 台一组四轮且只拉一次服务器；新持有者立即服务；闸门上限与间隔；重试、退役、熔断；排空后放行；直拉错峰与轮转 |
 | `test_fleet_probe` | 安装中、首次 ping 失败、两次 ping 之间重启、误判打回不重置停留、各类状态、三个上限（默认 60/30/15 分钟）、v1 日志最慢的 718 秒 NVUE 就绪仍在上限内、过期结果、不重启作业；ping 不通 1 分钟后进入 rebooting Q（停机 70 秒的设备比 3 分钟时早交回，boot_id 未变仍回 upgrading Q 且不交回） |
 | `test_fleet_ssh` | 进程内 paramiko 服务端：密钥、密码回退、主机密钥固定（含哈希条目、@revoked）、命令超时、与 v1 规则一致；密码被拒为 PASSWORD_REJECTED（不算类重启），密钥被拒仍为 AUTH_REJECTED |
-| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳；验证超时重试一次（默认 30 秒、等待期间检查池空闲；已请求修复、未说明、其他错误码和判定不通过都不重试；类重启错误仍回 rebooting Q）；预检密码被拒即 HOLD（之后不再启动预检、在跑的跑完、其余 SKIPPED PASSWORD_REJECTED_HOLD、汇总说明、其他预检失败不 HOLD）；检查 worker 默认 16、升级 worker 8、在途 32；汇总的密钥被拒清单（不需安装的给出 ssh-copy-id、没有密码的说明未尝试密码、只报告） |
+| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳；验证超时重试一次（默认 30 秒、等待期间检查池空闲；已请求修复、未说明、其他错误码和判定不通过都不重试；类重启错误仍回 rebooting Q）；预检密码被拒即 HOLD（之后不再启动预检、在跑的跑完、其余 SKIPPED PASSWORD_REJECTED_HOLD、汇总说明、其他预检失败不 HOLD）；检查 worker 默认 16、升级 worker 8、在途 32；汇总的密钥被拒清单（不需安装的给出 ssh-copy-id、没有密码的说明未尝试密码、只报告）；没有 HTTP 地址的设备只读预检、需要升级记 FAILED、不取包不下发 |
 | `test_ibsw_v2_device_scripts` | 检查脚本（stdin 执行、读 stdin 的命令吃不掉脚本、步骤目录状态）；取包助手（HTTP 重试、内容不符、空间、目录不安全、scp 只用密码） |
 | `test_ibsw_v2_device` | 安装前失败白名单；BUSY/PENDING；规划与渲染；单台模拟交换机从预检到验证（导入密钥、真实 v1 组件脚本和 runner、重启丢密钥后恢复、修复缺失配置、证据无密码）；验证查询超时或通道失败时异常带 `repair_requested`（修复请求前为假、之后为真）；输错密码在任何写入前被拒（回退会话和导入会话两种）、密钥被拒仍回退到密码、探测仍报 auth_fail、密码校验只用密码登录且只跑 `true` |
 | `test_ibsw_v2_workflow` | 6 台模拟交换机、1G 接力、两跳 OS、v1 金丝雀规则、不可达与已在目标 |
-| `test_ibsw_v2_entry` | `--help`；参数检查；运行守卫；`--plan` 只读；经入口完整升级；证据无密码；输错一次重问后正常升级（错误密码只试一次、只在一台上）；三次都错退出且没碰任何设备；TCP/22 不通的设备不参与校验；没有设备响应时继续并报告不可达；`--check-workers` 默认 16、上限 32；已在目标但密钥被拒的设备在汇总里给出 ssh-copy-id 且公钥未被改动；`--plan` 不带密码时汇总说明未尝试密码 |
+| `test_ibsw_v2_entry` | `--help`；参数检查；运行守卫；`--plan` 只读；经入口完整升级；证据无密码；输错一次重问后正常升级（错误密码只试一次、只在一台上）；三次都错退出且没碰任何设备；TCP/22 不通的设备不参与校验；没有设备响应时继续并报告不可达；`--check-workers` 默认 16、上限 32；已在目标但密钥被拒的设备在汇总里给出 ssh-copy-id 且公钥未被改动；`--plan` 不带密码时汇总说明未尝试密码；两个网络各一个 HTTP 地址时每台从自己网络的地址下载、路由查询不带 from；所在网络没有 HTTP 地址的设备失败关闭且没有任何写入 |
 
 模拟交换机（`test_cases/ibsw_v2_switch_sim.py`）真实执行检查脚本、取包助手、v1 组件脚本和 owned runner。
 `nv`、`curl`、`scp` 等由桩程序代替，安装后会模拟重启、换 boot_id、nvued 稍后就绪。`connector_for(凭据)`
@@ -238,7 +255,8 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 - CPLD 烧写的实际耗时与 30 分钟停留上限的关系（v1 日志的结果见下面的实测）；
 - OS 安装后主机密钥是否变化；
 - `nv action fetch … file://` 的去向和磁盘需求（预检按镜像大小的 2 倍检查）；
-- ztp-server 的实际接口栈与 `[LINK]` 判定是否一致；`--method scp` 时 sshd 的 `MaxStartups`。
+- ztp-server 的实际接口栈与 `[LINK]` 判定是否一致；`--method scp` 时 sshd 的 `MaxStartups`；
+- 配了多个 HTTP 地址时，`[HTTP]` 给每台选的地址是否就是它所在网络上 Apache 监听的地址。
 
 ### 2026-10-23 v1 现场日志实测
 

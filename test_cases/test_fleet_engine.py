@@ -248,7 +248,8 @@ class QuickLink(link.LinkDecision):
 
 class World:
     def __init__(self, test, hosts, *, speed=1000, groups=None, needs=None, in_flight=32, versions=None,
-                 upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, check_workers=None, **ops):
+                 upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, check_workers=None,
+                 service_issues=None, **ops):
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
@@ -273,7 +274,8 @@ class World:
                                          else {"verify_retry_seconds": verify_retry_seconds}),
                                       **({} if check_workers is None else {"check_workers": check_workers}))
         self.engine = engine.Engine(self.devices, self.family, self.ops, self.options,
-                                    engine.Evidence(base / "run"), out=self.out)
+                                    engine.Evidence(base / "run"), out=self.out,
+                                    **({} if service_issues is None else {"service_issues": service_issues}))
 
     def run(self, **kwargs):
         report = self.engine.run(**kwargs)
@@ -470,6 +472,24 @@ class PasswordHoldTest(unittest.TestCase):
         self.assertEqual(results["q0"], ("SKIPPED", "UNREACHABLE_CONNECT_FAILED"))
         self.assertEqual((results["q1"], results["q2"]), (("UPGRADED", None), ("UPGRADED", None)))
         self.assertIsNone(world.report["hold"])
+
+
+class ServiceIssueTest(unittest.TestCase):
+    """Owner 2026-10-24: a switch whose network has no usable HTTP address fails closed in precheck. It is
+    prechecked read-only (no access bootstrap), ends FAILED with the reason when it needs an upgrade, and
+    nothing is fetched or dispatched for it; one that needs nothing is still AT_TARGET."""
+
+    def test_a_switch_without_a_service_address_is_failed_before_any_write(self):
+        needs = {"s0": {"os": [["os-2.bin"]]}, "s1": {"os": []}, "s2": {"os": [["os-2.bin"]]}}
+        reason = "HTTP_SERVICE_ADDRESS_NONE: s0 egress eno3"
+        world = World(self, ["s0", "s1", "s2"], needs=needs, selected=("os",),
+                      service_issues={"s0": reason, "s1": "HTTP_SERVICE_ADDRESS_NONE: s1 egress eno3"})
+        results = world.run()
+        self.assertEqual(results, {"s0": ("FAILED", reason), "s1": ("AT_TARGET", None), "s2": ("UPGRADED", None)})
+        self.assertEqual({host: upgrade for _t, host, upgrade in world.events("precheck")},
+                         {"s0": False, "s1": False, "s2": True}, "read-only precheck: no access bootstrap")
+        self.assertEqual([host for _t, host, _d in world.events("fetch-start") + world.events("dispatch")
+                          if host == "s0"], [])
 
 
 class KeyRejectedSummaryTest(unittest.TestCase):

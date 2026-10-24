@@ -3440,6 +3440,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - `nv action fetch system image file://…` 把镜像复制到哪里、需要多少磁盘；
   - ztp-server 的实际接口栈（物理口、bond、bridge）是否与 `[LINK]` 判定一致；
   - ztp-server 的 sshd `MaxStartups`（`--method scp` 时）。
+  - 配置多个 HTTP 地址（列表）时：`[HTTP]` 为每台选的地址与它所在网络上 Apache 的监听地址一致；某个网络没有监听地址时，该网络的设备记 FAILED `HTTP_SERVICE_ADDRESS_NONE`，设备上没有任何写入。
 - 证据：
   - 运行目录 `xdr-upgrade-v2-logs/<运行编号>/` 下的 `plan.json`、`packages.json`、`events.jsonl`、`run-report.json`；
   - 每台的 `precheck.json`、`distribution-*.json`、`dispatch.json`、`timeline.jsonl`、`verify-*.json`、`before-*.commands`；

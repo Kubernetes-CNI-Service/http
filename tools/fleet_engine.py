@@ -22,6 +22,10 @@ step after `verify_retry_seconds`, kept as a main-loop timer (no worker waits), 
 the ops said that attempt had not requested a configuration repair: ops.verify sets
 `repair_requested` on the SshError it raises, and an error without it is not retried.
 
+A switch named in `service_issues` (e.g. no HTTP address on its network, owner 2026-10-24)
+is prechecked read-only (no access bootstrap) and, when it needs an upgrade, ends FAILED
+with that reason before anything is written to it.
+
 A precheck that raises SshError PASSWORD_REJECTED holds the batch (field 2026-10-24): no
 precheck starts after it (one already running finishes), the switches not prechecked yet
 are SKIPPED with PASSWORD_REJECTED_HOLD and nothing is written to them; the engine never
@@ -324,11 +328,12 @@ class Session:
 
 class Engine:
     def __init__(self, devices, family, ops, options, evidence, *, out=sys.stderr, clock=time.monotonic,
-                 blocked_inputs=()):
+                 blocked_inputs=(), service_issues=None):
         self.family, self.ops, self.options, self.evidence = family, ops, options, evidence
         self.out, self.clock = out, clock
         self.devs = {device.hostname: Dev(device, index) for index, device in enumerate(devices)}
         self.blocked_inputs = tuple(blocked_inputs)
+        self.service_issues = dict(service_issues or {})    # hostname -> reason: read-only precheck, then FAILED
         self.events = queue.Queue()
         self.tracker = probe.ProbeTracker(options.timings)
         self.packages, self.sessions, self.canary_queue = {}, [], []
@@ -495,9 +500,9 @@ class Engine:
             if self.password_held.is_set():         # a refused password: no further precheck starts
                 return _PRECHECK_HELD
             pinged = self.ops.ping(dev.device)
+            upgrade = self.options.upgrade and dev.host not in self.service_issues   # no write to such a switch
             try:
-                facts = self.ops.precheck(dev.device, upgrade=self.options.upgrade, staged_names=names,
-                                          journal=journal)
+                facts = self.ops.precheck(dev.device, upgrade=upgrade, staged_names=names, journal=journal)
             except SshError as error:
                 if error.code == "PASSWORD_REJECTED":
                     self.password_held.set()        # here, before the main loop sees it: no task can slip through
@@ -548,6 +553,8 @@ class Engine:
             return self._final(dev, "REVIEW_REQUIRED", guard)
         if not dev.plan.needed:
             return self._final(dev, "AT_TARGET")
+        if dev.host in self.service_issues:
+            return self._final(dev, "FAILED", self.service_issues[dev.host])
         if not dev.health["admitted"]:
             return self._final(dev, "HEALTH_BLOCKED", dev.health["reason"])
         if set(dev.facts.capability_missing) & set(self.family.required_programs):

@@ -11,6 +11,11 @@ password-only login on the first selected switch that answers TCP/22 checks it b
 engine fans out; a refusal asks again, up to three attempts, and the third refusal exits
 with "nothing was changed". Switches that do not answer are skipped for this check; when
 none answers the run continues and the precheck reports them.
+
+Several HTTP addresses (owner 2026-10-24): common.mgmt.http.address may be one address or a
+list; each switch downloads from the configured address on the ztp-server interface that
+`ip route get <switch>` leaves by, and a switch whose network has none fails closed in
+precheck without any write. The `ip` commands run against a fake routing table.
 """
 import importlib.util
 import io
@@ -33,6 +38,26 @@ from test_ibsw_v2_device import SENTINEL, TYPO  # noqa: E402
 
 FAST = probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05, ssh_check=0.3,
                      dwell=8.0, ladder_budget=4.0, deadline=15.0)
+class FakeIp:
+    """This host's `ip` for the entry: a route per switch (device, src) and the addresses on each device."""
+
+    def __init__(self):
+        self.routes, self.on, self.calls = {}, {}, []
+
+    def run(self, argv):
+        self.calls.append(list(argv))
+        if argv[:3] == ["ip", "route", "get"]:
+            if argv[3] not in self.routes:
+                raise OSError("ip route get exited 2")
+            device, src = self.routes[argv[3]]
+            return f"{argv[3]} dev {device} src {src} uid 0\n    cache\n"
+        if argv[:4] == ["ip", "-o", "addr", "show"]:
+            devices = [argv[5]] if argv[4:5] == ["dev"] else list(self.on)
+            return "".join(f"2: {device}    inet {address}/24 scope global {device}\n"
+                           for device in devices for address in self.on.get(device, ()))
+        raise OSError("unexpected command " + " ".join(argv))
+
+
 HEADER = ("hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,bgp_asn,"
           "bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl")
 
@@ -145,9 +170,16 @@ switches:
         self.known_hosts = base / "known_hosts"
         self.known_hosts.write_text(pins)
         self.fleet = SimFleet(self.switches, http, self.key.get_base64())
+        self.ip = FakeIp()                                       # one network: eth0 carries the HTTP address
+        self.ip.on["eth0"] = ["192.0.2.10"]
+        for switch in self.switches:
+            self.ip.routes[switch.address] = ("eth0", "192.0.2.10")
         self.common = ["--project", str(self.project), "--p2p", str(base / "p2p.csv"), "--os",
                        "--identity", str(self.private), "--management-public-key", str(self.public),
                        "--known-hosts", str(self.known_hosts), "--server-link", "1G", "--progress-seconds", "1"]
+
+    def entry(self, argv, **kwargs):
+        return load_entry().run(argv, link_run=self.ip.run, **kwargs)
 
     def ops_factory(self, **kwargs):
         return ib.LiveOps(**kwargs, connector=self.fleet.connector_for(kwargs["credentials"]),
@@ -180,7 +212,7 @@ switches:
         before = {switch.hostname: (switch.home / ".ssh/authorized_keys").read_bytes() for switch in self.switches}
         out = io.StringIO()
         asked = []
-        code = load_entry().run(self.common, out=out, password_reader=lambda prompt: asked.append(prompt) or SENTINEL,
+        code = self.entry(self.common, out=out, password_reader=lambda prompt: asked.append(prompt) or SENTINEL,
                                 ops_factory=self.ops_factory)
         text = out.getvalue()
         self.assertEqual(code, 3, text)
@@ -198,7 +230,7 @@ switches:
 
     def test_upgrade_through_the_entry(self):
         out = io.StringIO()
-        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
                                 ops_factory=self.ops_factory, timings=FAST)
         text = out.getvalue()
         self.assertRegex(text, r"UPGRADED \(2\)[^\n]*\n  sw01\n  sw02", text)
@@ -213,7 +245,7 @@ switches:
         """O3 2026-10-24: sw03 needs nothing, so no access bootstrap adds the key; the summary says so and how."""
         sw03_keys = (self.switches[2].home / ".ssh/authorized_keys").read_bytes()
         out = io.StringIO()
-        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
                                 ops_factory=self.ops_factory, timings=FAST)
         text = out.getvalue()
         self.assertEqual(code, 3, text)
@@ -225,7 +257,7 @@ switches:
 
     def test_plan_without_a_password_says_the_password_was_not_tried(self):
         out = io.StringIO()
-        code = load_entry().run(self.common, out=out, password_reader=lambda prompt: SENTINEL,
+        code = self.entry(self.common, out=out, password_reader=lambda prompt: SENTINEL,
                                 ops_factory=self.ops_factory)
         text = out.getvalue()
         self.assertEqual(code, 3, text)
@@ -238,7 +270,7 @@ switches:
     def test_a_refused_password_is_asked_again_before_the_fan_out(self):
         read, asked = self.reader(TYPO, SENTINEL)
         out = io.StringIO()
-        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
                                 ops_factory=self.ops_factory, timings=FAST)
         text = out.getvalue()
         self.assertEqual(asked, ["Switch password: "] * 2, text)
@@ -257,7 +289,7 @@ switches:
         before = {switch.hostname: (switch.home / ".ssh/authorized_keys").read_bytes() for switch in self.switches}
         read, asked = self.reader(TYPO)
         out = io.StringIO()
-        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
                                 ops_factory=self.ops_factory, timings=FAST)
         text = out.getvalue()
         self.assertEqual(asked, ["Switch password: "] * 3, text)
@@ -277,7 +309,7 @@ switches:
             ops = self.ops_factory(**kwargs)
             ops.tcp_probe = lambda address: address != first and self.fleet.tcp(address)
             return ops
-        code = load_entry().run(self.common + ["--plan", "--password"], out=out, password_reader=read,
+        code = self.entry(self.common + ["--plan", "--password"], out=out, password_reader=read,
                                 ops_factory=factory)
         text = out.getvalue()
         self.assertEqual(asked, ["Switch password: "] * 2, text)
@@ -299,7 +331,7 @@ switches:
                 raise ssh.SshError("CONNECT_FAILED")
             ops.connector = unreachable
             return ops
-        code = load_entry().run(self.common + ["--plan", "--password"], out=out, password_reader=read,
+        code = self.entry(self.common + ["--plan", "--password"], out=out, password_reader=read,
                                 ops_factory=factory)
         text = out.getvalue()
         self.assertEqual(asked, ["Switch password: "], "nothing answered, so nothing refused the password")
@@ -308,6 +340,72 @@ switches:
             self.assertRegex(text, rf"SKIPPED \(4\)[^\n]*\n(?:  [^\n]*\n)*  {name}  UNREACHABLE_CONNECT_FAILED")
         self.assertEqual(code, 3, text)
         self.untouched(before)
+
+
+    # ------------------------------------------------------------ several HTTP addresses (owner 2026-10-24)
+    def second_network(self, address, *, device, server_address, configured):
+        """sw04 at `address`, reached through `device` whose address is `server_address`; the project lists
+        `configured` as common.mgmt.http.address."""
+        base = Path(self.tmp.name)
+        sw04 = LocalSwitch(base / "switches", "sw04", address, "02:00:00:00:00:44", "25.02.7002", password=SENTINEL)
+        self.switches.append(sw04)
+        self.fleet = SimFleet(self.switches, base / "http", self.key.get_base64())
+        csv = self.project / "02-devices_config.csv"
+        csv.write_text(csv.read_text() + ",".join(["sw04", "ib", "nvos", address, "24", "198.51.100.1",
+                                                   "02:00:00:00:00:44"] + ["na"] * 12) + "\n")
+        host_key = ssh._sdk().ECDSAKey.generate()
+        self.known_hosts.write_text(self.known_hosts.read_text() + f"{address} {host_key.get_name()} {host_key.get_base64()}\n")
+        p2p = base / "p2p.csv"
+        p2p.write_text(p2p.read_text() + "sw04,eth0,oob-leaf03,swp1\n")
+        globals_file = self.project / "01-global.yaml"
+        text = globals_file.read_text()
+        self.assertEqual(text.count("address: 192.0.2.10"), 1)
+        globals_file.write_text(text.replace("address: 192.0.2.10", "address: " + configured))
+        self.ip.on[device] = [server_address]
+        self.ip.routes[address] = (device, server_address)
+        return sw04
+
+    def downloads(self):
+        """{hostname: [url, ...]} of the HTTP pulls the switches made."""
+        found = {}
+        for context in self.fleet.contexts:
+            if context.get("method") == "http":
+                found.setdefault(Path(context["dest_dir"]).parents[1].name, []).append(context["url"])
+        return found
+
+    def test_each_switch_downloads_from_the_http_address_on_its_own_network(self):
+        self.second_network("198.51.100.44", device="eth1", server_address="198.51.100.10",
+                            configured="[192.0.2.10, 198.51.100.10]")
+        out = io.StringIO()
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
+                          ops_factory=self.ops_factory, timings=FAST)
+        text = out.getvalue()
+        self.assertRegex(text, r"UPGRADED \(3\)[^\n]*\n  sw01\n  sw02\n  sw04", text)
+        self.assertEqual(code, 3, text)
+        downloads = self.downloads()
+        self.assertTrue(downloads.get("sw04"), downloads)
+        self.assertTrue(all(url.startswith("http://198.51.100.10:8088/") for url in downloads["sw04"]), downloads)
+        for name, urls in downloads.items():
+            if name != "sw04":
+                self.assertTrue(all(url.startswith("http://192.0.2.10:8088/") for url in urls), downloads)
+        self.assertIn(["ip", "route", "get", "198.51.100.44"], self.ip.calls, "its own route, no source address")
+        self.assertFalse([argv for argv in self.ip.calls if "from" in argv])
+
+    def test_a_switch_on_a_network_without_an_http_address_fails_closed(self):
+        sw04 = self.second_network("203.0.113.44", device="eth2", server_address="203.0.113.10",
+                                   configured="[192.0.2.10, 198.51.100.10]")
+        keys = (sw04.home / ".ssh/authorized_keys").read_bytes()
+        out = io.StringIO()
+        code = self.entry(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
+                          ops_factory=self.ops_factory, timings=FAST)
+        text = out.getvalue()
+        self.assertRegex(text, r"FAILED \(1\)[^\n]*\n  sw04  HTTP_SERVICE_ADDRESS_NONE[^\n]*eth2", text)
+        self.assertRegex(text, r"UPGRADED \(2\)[^\n]*\n  sw01\n  sw02", text)
+        self.assertEqual(code, 3, text)
+        self.assertNotIn("sw04", self.downloads(), "never pointed at another network's address")
+        self.assertEqual((sw04.home / ".ssh/authorized_keys").read_bytes(), keys, "nothing written")
+        self.assertEqual([path.name for path in sw04.home.iterdir() if path.name.startswith(".ibsw-")], [])
+        self.assertEqual((sw04.state / "version").read_text(), "25.02.7002")
 
 
 if __name__ == "__main__":

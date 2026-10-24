@@ -5,6 +5,14 @@ Runs first, before any password prompt or device access. Reads local facts only:
 below 10G they relay switch to switch per OOB leaf; at 10G and above every switch
 pulls from the server, staggered and capped. Anything that cannot be resolved to a
 physical port counts as 1G (relay), which is the mode that is safe on any link.
+
+The HTTP service may listen on several addresses, one per ztp-server network, and those
+networks are normally not routed to each other (owner 2026-10-24). Each switch therefore
+uses the configured address on the interface that `ip route get <switch>` leaves by: the
+route's src when it is configured, else the only configured address on that interface.
+Several without the src (ambiguous), none (no HTTP listener there) or no route at all
+make that switch fail closed; it never falls back to an address on another network.
+The distribution mode follows the slowest egress, and [LINK] lists every egress.
 """
 from __future__ import annotations
 
@@ -38,6 +46,7 @@ class LinkDecision:
     egress: tuple[str, ...] = ()
     layers: tuple[Layer, ...] = ()
     warnings: tuple[str, ...] = field(default=())
+    paths: tuple = ()      # (egress, speed Mb/s or None, switch count, HTTP addresses used), one per egress
 
     def window_seconds(self, count: int) -> int:
         """60 x ceil(N/16) at 10G-<100G, 60 x ceil(N/32) at 100G and above."""
@@ -56,6 +65,9 @@ class LinkDecision:
         described = [layer for layer in self.layers if layer.detail]
         if described:
             text += " (" + "; ".join(layer.name + ": " + layer.detail for layer in described) + ")"
+        for device, speed, count, addresses in self.paths:
+            text += (f" · {device} {'unknown' if speed is None else _label(speed)} {count} switch(es) "
+                     f"http {','.join(addresses) or 'none'}")
         return text
 
 
@@ -63,14 +75,15 @@ def _label(mbps: int) -> str:
     return f"{mbps // 1000}G" if mbps >= 1000 and mbps % 1000 == 0 else f"{mbps}M"
 
 
-def decide(speed_mbps: int | None, *, source: str, egress=(), layers=(), warnings=()) -> LinkDecision:
+def decide(speed_mbps: int | None, *, source: str, egress=(), layers=(), warnings=(), paths=()) -> LinkDecision:
     if speed_mbps is None or speed_mbps < 10000:
         mode, divisor, cap = "relay", None, None
     elif speed_mbps < 100000:
         mode, divisor, cap = "direct", 16, max(1, int(speed_mbps * 0.8) // 1000)
     else:
         mode, divisor, cap = "direct", 32, None
-    return LinkDecision(speed_mbps, source, mode, divisor, cap, tuple(egress), tuple(layers), tuple(warnings))
+    return LinkDecision(speed_mbps, source, mode, divisor, cap, tuple(egress), tuple(layers), tuple(warnings),
+                        tuple(paths))
 
 
 def from_override(value: str) -> LinkDecision:
@@ -95,14 +108,67 @@ def local_addresses(run=_run) -> set[str]:
     return found
 
 
-def route_egress(destination: str, source: str, run=_run) -> tuple[str, str | None]:
-    """(device, next hop or None) of `ip route get <destination> from <source>`."""
-    text = run(["ip", "route", "get", destination, "from", source])
+def route_to(destination: str, run=_run) -> tuple[str, str | None, str | None]:
+    """(device, next hop or None, src or None) of `ip route get <destination>` (no source address)."""
+    text = run(["ip", "route", "get", destination])
     device = re.search(r"\bdev (\S+)", text)
     if device is None:
         raise ValueError("no egress device in route")
     via = re.search(r"\bvia (\S+)", text)
-    return device[1], (via[1] if via else None)
+    src = re.search(r"\bsrc (\S+)", text)
+    return device[1], (via[1] if via else None), (str(ipaddress.ip_address(src[1])) if src else None)
+
+
+def device_addresses(device: str, run=_run) -> list[str]:
+    """Addresses on one interface, primary first (`ip -o addr show dev <device>`)."""
+    found = []
+    for line in run(["ip", "-o", "addr", "show", "dev", device]).splitlines():
+        match = re.search(r"\binet6? ([0-9A-Fa-f.:]+)/\d+", line)
+        if match and str(ipaddress.ip_address(match[1])) not in found:
+            found.append(str(ipaddress.ip_address(match[1])))
+    return found
+
+
+NO_ROUTE, NONE, AMBIGUOUS = ("HTTP_SERVICE_ADDRESS_NO_ROUTE", "HTTP_SERVICE_ADDRESS_NONE",
+                             "HTTP_SERVICE_ADDRESS_AMBIGUOUS")
+
+
+@dataclass(frozen=True)
+class Service:
+    """The HTTP address one switch downloads from, or why it has none (then it fails closed)."""
+    switch: str
+    device: str | None = None          # egress interface of `ip route get <switch>`
+    via: str | None = None
+    src: str | None = None
+    address: str | None = None
+    reason: str | None = None          # NO_ROUTE | NONE | AMBIGUOUS
+    candidates: tuple[str, ...] = ()
+
+
+def resolve_services(switch_addresses, configured, *, run=_run) -> dict:
+    """{switch address: Service} for the configured HTTP addresses (several allowed, duplicates ignored)."""
+    configured = tuple(dict.fromkeys(str(ipaddress.ip_address(value)) for value in configured))
+    on_device, found = {}, {}
+    for switch in switch_addresses:
+        try:
+            device, via, src = route_to(switch, run)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            found[switch] = Service(switch, reason=NO_ROUTE)
+            continue
+        if device not in on_device:
+            try:
+                on_device[device] = device_addresses(device, run)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                on_device[device] = []
+        candidates = tuple(value for value in configured if value in on_device[device])
+        if src in candidates:
+            chosen, reason = src, None
+        elif len(candidates) == 1:
+            chosen, reason = candidates[0], None
+        else:
+            chosen, reason = None, (AMBIGUOUS if candidates else NONE)
+        found[switch] = Service(switch, device, via, src, chosen, reason, candidates)
+    return found
 
 
 class _Sysfs:
@@ -248,38 +314,67 @@ def _fdb_port(bridge, next_hop, run):
     return None
 
 
-def detect(switch_addresses, server_address, *, run=_run, sysfs_root=Path("/sys"), override=None) -> LinkDecision:
-    """Decide the distribution mode from the server's egress toward every switch."""
+def detect(switch_addresses, server_addresses, *, run=_run, sysfs_root=Path("/sys"), override=None,
+           services=None) -> LinkDecision:
+    """Decide the distribution mode from the server's egress toward every switch.
+
+    server_addresses: one address or a list (several HTTP addresses). services: resolve_services() already run
+    for these switches, so the route lookups are not repeated."""
     if override is not None:
         return from_override(override)
+    configured = [server_addresses] if isinstance(server_addresses, str) else list(server_addresses or ())
     try:
-        server = str(ipaddress.ip_address(server_address))
+        configured = list(dict.fromkeys(str(ipaddress.ip_address(value)) for value in configured))
     except ValueError:
-        return decide(None, source="unknown", warnings=[f"server address {server_address!r} is not an IP address"])
+        return decide(None, source="unknown", warnings=[f"server address {server_addresses!r} is not an IP address"])
+    if not configured:
+        return decide(None, source="unknown", warnings=["no server address configured"])
     try:
-        if server not in local_addresses(run):
-            return decide(None, source="unknown", warnings=[
-                f"server address {server} is not on this host; run on the ztp-server or pass --server-link"])
+        local = local_addresses(run)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         return decide(None, source="unknown", warnings=[f"cannot list local addresses: {error}"])
+    foreign = [value for value in configured if value not in local]
+    if len(foreign) == len(configured):
+        return decide(None, source="unknown", warnings=[
+            f"server address {', '.join(foreign)} is not on this host; run on the ztp-server or pass --server-link"])
+    warnings = [f"server address {value} is not on this host; no switch can use it" for value in foreign]
+    if services is None:
+        services = resolve_services(switch_addresses, configured, run=run)
     sysfs = _Sysfs(sysfs_root)
-    routes = {}
+    routes, per_device = {}, {}
     for address in switch_addresses:
-        try:
-            routes.setdefault(route_egress(address, server, run), []).append(address)
-        except (OSError, ValueError, subprocess.SubprocessError) as error:
-            return decide(None, source="unknown", warnings=[f"no route from {server} to {address}: {error}"])
-    speeds, layers, warnings, egress = [], [], [], []
+        service = services[address]
+        if service.device is None:
+            warnings.append(f"no route to {address}; that switch fails closed ({NO_ROUTE})")
+            continue
+        routes.setdefault((service.device, service.via), []).append(service)
+        per_device.setdefault(service.device, []).append(service)
+    speeds, layers, egress, device_speed = [], [], [], {}
     for (device, next_hop) in sorted(routes, key=lambda item: (item[0], item[1] or "")):
         speed, walked, notes = resolve(sysfs, device, run=run, next_hop=next_hop)
         if device not in egress:
             egress.append(device)
+        device_speed.setdefault(device, []).append(speed)
         layers += walked
         warnings += notes
-        speeds.append(speed)
+        if any(item.address for item in routes[(device, next_hop)]):
+            speeds.append(speed)          # switches that fail closed never download: they do not set the mode
+    paths = []
+    for device in egress:
+        items = per_device[device]
+        used = tuple(dict.fromkeys(item.address for item in items if item.address))
+        known = device_speed[device]
+        paths.append((device, None if None in known else min(known), len(items), used))
+        lost = [item for item in items if item.reason]
+        if lost and not used and all(item.reason == NONE for item in lost):
+            warnings.append(f"{device}: no configured HTTP address on this interface; its {len(lost)} switch(es) "
+                            f"fail closed ({NONE})")
+        elif lost:
+            warnings.append(f"{device}: {len(lost)} switch(es) without a usable HTTP address fail closed "
+                            f"({', '.join(sorted({item.reason for item in lost}))})")
     if not speeds or any(speed is None for speed in speeds):
-        return decide(None, source="unknown", egress=egress, layers=layers,
+        return decide(None, source="unknown", egress=egress, layers=layers, paths=paths,
                       warnings=warnings + ["egress speed unknown; treating the server link as 1G (relay)"])
     if len(set(egress)) > 1:
         warnings.append("switches are reached through several interfaces; using the slowest")
-    return decide(min(speeds), source="detected", egress=egress, layers=layers, warnings=warnings)
+    return decide(min(speeds), source="detected", egress=egress, layers=layers, warnings=warnings, paths=paths)

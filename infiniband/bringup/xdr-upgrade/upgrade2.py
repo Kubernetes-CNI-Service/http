@@ -17,6 +17,7 @@ again, three attempts in all (field 2026-10-24).
 from __future__ import annotations
 
 import argparse
+import copy
 from datetime import datetime, timezone
 import getpass
 import hashlib
@@ -140,6 +141,24 @@ def _ask(prompt, reader):
     return value
 
 
+def _http_endpoints(document):
+    """common.mgmt.http.address as one IPv4 or a list of IPv4 (owner 2026-10-24: Apache may listen on several
+    addresses, one per ztp-server network). Each is validated like the project contract; duplicates removed."""
+    from project_contract import validate_service_endpoint
+    http = (((document.get("common") or {}).get("mgmt") or {}).get("http") or {}) if isinstance(document, dict) else {}
+    raw = http.get("address") if isinstance(http, dict) else None
+    values = raw if isinstance(raw, list) else [raw]
+    if not values:
+        raise ValueError("common.mgmt.http.address is an empty list")
+    endpoints = []
+    for index, value in enumerate(values):
+        field = f"common.mgmt.http.address[{index}]" if isinstance(raw, list) else "common.mgmt.http"
+        endpoint = validate_service_endpoint(value, http.get("port", 80), field=field)
+        if endpoint.host not in [item.host for item in endpoints]:
+            endpoints.append(endpoint)
+    return endpoints, isinstance(raw, list)
+
+
 def _check_password(ops, devices, ssh):
     """One password-only login running `true` on the first selected switch that answers TCP/22 (field
     2026-10-24). Switches where the password could not be offered (no TCP/22, no SSH, host key not pinned
@@ -189,20 +208,55 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     global_text = Path(paths.global_path).read_text(encoding="utf-8-sig")
     snapshot = select_inventory_devices(snapshot_inventory(csv_text, global_text), args.devices)
     document = load_global_text(global_text)
-    policy = normalize_upgrade(document, selected=selected, method=args.method, package_dir=args.package_dir)
+    endpoints, listed = [], False
+    policy_document = document
+    if args.method == "http":
+        try:
+            endpoints, listed = _http_endpoints(document)
+        except ValueError as error:
+            print(f"ERROR: {error}", file=out)
+            return EXIT_BAD_INPUT
+        if listed:                          # the v1 policy reader takes one address: build URLs with the first
+            policy_document = copy.deepcopy(document)
+            policy_document["common"]["mgmt"]["http"]["address"] = endpoints[0].host
+    policy = normalize_upgrade(policy_document, selected=selected, method=args.method, package_dir=args.package_dir)
     devices = list(snapshot.devices)
     names = [device.hostname for device in devices]
 
-    if args.method == "http":
-        server = (document.get("common", {}).get("mgmt", {}).get("http", {}) or {}).get("address")
-    else:
-        server = args.mgmt_server
     kwargs = {} if link_run is None else {"run": link_run}
-    decision = fleet_link.detect([device.address for device in devices], str(server), sysfs_root=sysfs_root,
-                                 override=args.server_link, **kwargs)
+    addresses = [device.address for device in devices]
+    services, service_issues, origins = {}, {}, {}
+    if args.method == "http":               # each switch: the HTTP address on its own network, or fail closed
+        services = fleet_link.resolve_services(addresses, [endpoint.host for endpoint in endpoints], **kwargs)
+        origin_of = {endpoint.host: endpoint.origin for endpoint in endpoints}
+        for device in devices:
+            service = services[device.address]
+            if service.address:
+                origins[device.hostname] = origin_of[service.address]
+            else:
+                service_issues[device.hostname] = (
+                    f"{service.reason}: {device.hostname} egress {service.device or '-'}"
+                    + (f" ({', '.join(service.candidates)})" if service.candidates else ""))
+        decision = fleet_link.detect(addresses, [endpoint.host for endpoint in endpoints], sysfs_root=sysfs_root,
+                                     override=args.server_link, services=services, **kwargs)
+    else:
+        decision = fleet_link.detect(addresses, str(args.mgmt_server), sysfs_root=sysfs_root,
+                                     override=args.server_link, **kwargs)
     print(decision.line(), file=out)
     for warning in decision.warnings:
         print("[LINK] WARN " + warning, file=out)
+    if args.method == "http":
+        uses = {}
+        for device in devices:
+            service = services[device.address]
+            if service.address:
+                key = (service.device, service.address)
+                uses[key] = uses.get(key, 0) + 1
+        listing = " · ".join(f"{egress} {address} {count} switch(es)"
+                             for (egress, address), count in sorted(uses.items()))
+        print("[HTTP] " + (listing or "no switch has an HTTP address on its network"), file=out)
+        for hostname, reason in service_issues.items():
+            print(f"[HTTP] WARN {reason}; this switch fails closed and nothing is written to it", file=out)
 
     p2p = Path(args.p2p) if args.p2p else Path(paths.project or ENTRY.parent) / "p2p.xlsx"
     if p2p.is_file():
@@ -238,7 +292,8 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     ops_arguments = dict(pins=pins, credentials=credentials, policy=policy, selected=selected,
                          run_id=run_id, switch_dir=args.local_dir, force_health=args.force,
                          management_line=Path(public).read_bytes().splitlines()[0] + b"\n",
-                         method=args.method, scp_server=scp_server)
+                         method=args.method, scp_server=scp_server,
+                         **({"http_origins": origins, "http_base": endpoints[0].origin} if endpoints else {}))
     make_ops = ops_factory or ib.LiveOps
     ops = make_ops(**ops_arguments)
     password_check = None
@@ -276,7 +331,13 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         blocked_inputs=[dict(hostname=item.hostname, reasons=list(item.reasons)) for item in snapshot.blocked_devices],
         link=dict(line=decision.line(), speed_mbps=decision.speed_mbps, source=decision.source, mode=decision.mode,
                   warnings=list(decision.warnings), layers=[layer.__dict__ for layer in decision.layers]),
-        groups=groups, key_fingerprint=key_fingerprint, password_check=password_check))
+        groups=groups, key_fingerprint=key_fingerprint, password_check=password_check,
+        http=dict(configured=[endpoint.host for endpoint in endpoints], listed=listed,
+                  switches={device.hostname: dict(address=services[device.address].address,
+                                                  egress=services[device.address].device,
+                                                  src=services[device.address].src,
+                                                  reason=services[device.address].reason)
+                            for device in devices} if services else {})))
     options = fleet_engine.Options(
         run_id=run_id, selected=selected, upgrade=bool(args.upgrade),
         link=decision, groups=groups, skip_canary=args.skip_canary, check_workers=args.check_workers,
@@ -285,7 +346,7 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         progress_seconds=args.progress_seconds, password_given=password is not None,
         **({"timings": timings} if timings is not None else {}))
     engine = fleet_engine.Engine(devices, ib.IbFamily(policy), ops, options, evidence, out=out,
-                                 blocked_inputs=snapshot.blocked_devices)
+                                 blocked_inputs=snapshot.blocked_devices, service_issues=service_issues)
     interrupts = []
 
     def on_interrupt(_signum, _frame):

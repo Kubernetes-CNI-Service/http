@@ -667,19 +667,37 @@ class LiveOps:
 
     def __init__(self, *, pins, credentials, policy, selected, run_id, switch_dir="/home/admin", force_health=False,
                  management_line=None, method="http", scp_server=None, sock_factory=None,
-                 ping_run=subprocess.run, tcp_probe=tcp22, relay_timeout=1200, connector=None, dir_for=None):
+                 ping_run=subprocess.run, tcp_probe=tcp22, relay_timeout=1200, connector=None, dir_for=None,
+                 http_origins=None, http_base=None):
         if method not in ("http", "scp") or (method == "scp" and scp_server is None):
             raise ValueError("--method http, or scp with the ztp-server account")
+        if http_origins is not None and not http_base:
+            raise ValueError("http_origins needs the http_base the package URLs were built with")
         self.pins, self.creds, self.policy, self.selected = pins, credentials, policy, tuple(selected)
         self.run_id, self.switch_dir, self.force_health = run_id, switch_dir, force_health
         self.management_line, self.method, self.scp_server = management_line, method, scp_server
         self.sock_factory, self.ping_run, self.tcp_probe, self.relay_timeout = sock_factory, ping_run, tcp_probe, relay_timeout
         self.connector = connector          # tests: connector(device, method) -> session
         self._dir_for = dir_for             # tests: one directory per simulated switch
+        # Several HTTP addresses (owner 2026-10-24): hostname -> origin on the switch's own network; the package
+        # URLs were built with http_base. A switch without an origin is never sent to another network's address.
+        self.http_origins = None if http_origins is None else dict(http_origins)
+        self.http_base = http_base
 
     def dir_for(self, device):
         """The switch's package/step directory (production: --local-dir, /home/admin)."""
         return self._dir_for(device) if self._dir_for else self.switch_dir
+
+    def http_url(self, device, url):
+        """The package URL on the switch's own network (unchanged with one HTTP address)."""
+        if self.http_origins is None:
+            return url
+        origin = self.http_origins.get(device.hostname)
+        if origin is None:
+            raise DeviceError("HTTP_SERVICE_ADDRESS_NONE", device.hostname)
+        if not url.startswith(self.http_base + "/"):
+            raise DeviceError("PACKAGE_URL_OUTSIDE_HTTP_BASE")
+        return origin + url[len(self.http_base):]
 
     def _open(self, device, method):
         if self.connector is not None:
@@ -735,7 +753,7 @@ class LiveOps:
             context["password"] = self.creds.password            # the switches' own admin password
             budget = self.relay_timeout + 900
         elif self.method == "http":
-            context.update(method="http", url=url or package.url, attempts=4, timeout=600)
+            context.update(method="http", url=self.http_url(device, url or package.url), attempts=4, timeout=600)
             budget = 4 * 600 + 15 + 900
         else:
             server = self.scp_server
