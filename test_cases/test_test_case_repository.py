@@ -55,7 +55,11 @@ class TestCaseRepositoryTests(unittest.TestCase):
             "monitor/cabletracker-main/tests/test_offline_workflow.py",
         ))
         expected_outside = reference_tests if reference_root.is_dir() else []
-        self.assertEqual(expected_outside, sorted(outside))
+        # The owner's CableTracker reference project (tools/cabletracker, owner 2026-10-23) is refreshed by
+        # the owner, so only its disposition is pinned, never its file list (as in
+        # test_reference_only_path_disposition): its test files may be present, each reference-only below.
+        lldpq_reference = [path for path in outside if path.startswith("tools/cabletracker/")]
+        self.assertEqual(expected_outside, sorted(path for path in outside if path not in lldpq_reference))
         for relative in outside:
             self.assertEqual("reference-only", path_disposition(relative))
         self.assertGreaterEqual(len(discovered), 20)
