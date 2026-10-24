@@ -137,18 +137,6 @@
       "symbol": "SSH_RUNTIME_PINS"
     },
     {
-      "kind": "pins",
-      "path": "tools/req7_dependency_contract.py",
-      "set": "req7-online",
-      "symbol": "PINS"
-    },
-    {
-      "kind": "pins",
-      "path": "tools/req7_cable_dependency_contract.py",
-      "set": "req7-cable",
-      "symbol": "PINS"
-    },
-    {
       "kind": "import-map",
       "path": "DAY0-Prepare/11-load.py",
       "set": "toplevel-5",
@@ -402,7 +390,7 @@
         "google.auth",
         "google.oauth2"
       ],
-      "used_by": "CableTracker engine, format_precheck.py, monitor/issue_tracker_sdk_authentication.py",
+      "used_by": "CableTracker engine, format_precheck.py",
       "version": "2.50.0"
     },
     "google-auth-httplib2": {
@@ -756,49 +744,13 @@
         "requests",
         "openai"
       ],
-      "reason": "CableTracker engine (cabletracker_runner.py) and format_precheck.py: the REQ7 cable lock plus httpx[socks], openai and PySocks; closure measured by a cp312 resolve"
+      "reason": "CableTracker engine (cabletracker_runner.py) and format_precheck.py: the 20 distributions of the retired REQ7 cable lock (same versions and wheel hashes) plus httpx[socks], openai and PySocks; closure measured by a cp312 resolve"
     },
     "python-lt-3.11": {
       "distributions": [
         "exceptiongroup"
       ],
       "reason": "anyio needs it on Python < 3.11 (local-test CLT 3.9)"
-    },
-    "req7-cable": {
-      "distributions": [
-        "certifi",
-        "cffi",
-        "charset-normalizer",
-        "cryptography",
-        "google-api-core",
-        "google-api-python-client",
-        "google-auth-httplib2",
-        "google-auth",
-        "googleapis-common-protos",
-        "httplib2",
-        "idna",
-        "proto-plus",
-        "protobuf",
-        "pyasn1-modules",
-        "pyasn1",
-        "pycparser",
-        "pyparsing",
-        "requests",
-        "uritemplate",
-        "urllib3"
-      ],
-      "reason": "REQ7 cable SDK lock (retired in step 3b)"
-    },
-    "req7-online": {
-      "distributions": [
-        "google-auth",
-        "pyasn1-modules",
-        "pyasn1",
-        "cryptography",
-        "cffi",
-        "pycparser"
-      ],
-      "reason": "REQ7 C-14 online lock (retired in step 3b)"
     },
     "ssh-runtime": {
       "distributions": [
@@ -846,14 +798,6 @@
     "infra/docker/requirements-issue-tracker-engine.txt": {
       "format": "hashed",
       "set": "issue-tracker-engine"
-    },
-    "infra/docker/requirements-req7-cable-sync.txt": {
-      "format": "hashed",
-      "set": "req7-cable"
-    },
-    "infra/docker/requirements-req7-online.txt": {
-      "format": "hashed",
-      "set": "req7-online"
     },
     "infra/requirements-ibsw-upgrade.txt": {
       "format": "hashed",
@@ -923,8 +867,6 @@
       "python": "3.12",
       "python_sets": [
         "toplevel-5",
-        "req7-online",
-        "req7-cable",
         "issue-tracker-engine"
       ],
       "system_site_packages": true
@@ -959,8 +901,6 @@
       "python_sets": [
         "toplevel-5",
         "toplevel-5-closure",
-        "req7-online",
-        "req7-cable",
         "issue-tracker-engine",
         "ssh-runtime",
         "python-lt-3.11"

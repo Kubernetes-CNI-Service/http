@@ -179,12 +179,6 @@ ISSUE_TRACKER_ENGINE_IMPORTS = (
 # this boundary separately because entrypoint restores it from the image.
 IMAGE_COUPLED_SOURCE_PATHS = frozenset({
     CONTAINER_TOPLEVEL_LOCK_NAME,
-    "infra/docker/req7-dependency-policy.json",
-    "infra/docker/requirements-req7-online.txt",
-    "tools/req7_dependency_contract.py",
-    "infra/docker/req7-cable-dependency-policy.json",
-    "infra/docker/requirements-req7-cable-sync.txt",
-    "tools/req7_cable_dependency_contract.py",
     ISSUE_TRACKER_ENGINE_REQUIREMENTS,
     "infra/docker/activate.py",
     "infra/docker/entrypoint.py",
@@ -202,85 +196,6 @@ IMAGE_COUPLED_SOURCE_PATHS = frozenset({
 
 class ActivationError(RuntimeError):
     """The container cannot safely prepare or activate the requested runtime."""
-
-
-def validate_req7_python_runtime() -> dict:
-    """Verify the separate C-14 closure before SDK imports; never activate it."""
-    from req7_dependency_contract import (
-        DependencyContractError, load_dependency_contract,
-        architecture_artifacts, installed_dependency_identity,
-    )
-    import platform
-
-    if (Path(sys.executable) != CONTAINER_VENV_PYTHON
-            or sys.platform != "linux" or sys.version_info[:2] != (3, 12)
-            or platform.python_implementation() != "CPython"):
-        raise ActivationError("REQ7 runtime requires managed Linux CPython 3.12 venv")
-    try:
-        contract = load_dependency_contract(DEFAULT_IMAGE_SOURCE_TREE)
-        architecture = platform.machine()
-        architecture_artifacts(contract, architecture)
-        identity = installed_dependency_identity(contract)
-        for name, _version in identity.versions:
-            distribution = importlib_metadata.distribution(name)
-            files = distribution.files
-            if not files:
-                raise ActivationError("REQ7 dependency file inventory is missing")
-            for relative in files:
-                if not _origin_within(os.fspath(distribution.locate_file(relative)), CONTAINER_VENV):
-                    raise ActivationError("REQ7 dependency origin is outside managed venv")
-        return {"policy_sha256": identity.policy_sha256, "lock_sha256": identity.lock_sha256,
-                "versions": [f"{n}=={v}" for n, v in identity.versions], "architecture": architecture}
-    except (DependencyContractError, importlib_metadata.PackageNotFoundError, OSError, ValueError):
-        raise ActivationError("REQ7 dependency policy or runtime identity is invalid") from None
-
-
-def validate_req7_cable_python_runtime() -> dict:
-    """Check the source-tree Cable SDK metadata/declared-origin contract.
-
-    This source-tree diagnostic is not worker permission or a
-    native SDK factory. Declared file origins are not RECORD-content/wheel
-    integrity, import execution provenance or continuously held FD authority.
-    Keep the old C14 verifier and identity separate.
-    """
-    # Direct absolute activation from a non-repository cwd must also resolve
-    # the canonical tools package used by the new helper. The fixed source
-    # root is not caller-configurable; remove only this inserted entry.
-    source_entry = os.fspath(TOOLS_DIRECTORY.parent)
-    sys.path.insert(0, source_entry)
-    try:
-        from tools.req7_cable_dependency_contract import (
-            CableDependencyContractError, load_cable_dependency_contract,
-            cable_architecture_artifacts, installed_cable_dependency_identity,
-        )
-    finally:
-        for index, entry in enumerate(sys.path):
-            if entry is source_entry:
-                del sys.path[index]
-                break
-    import platform
-
-    if (Path(sys.executable) != CONTAINER_VENV_PYTHON
-            or sys.platform != "linux" or sys.version_info[:2] != (3, 12)
-            or platform.python_implementation() != "CPython"):
-        raise ActivationError("Cable SDK runtime requires managed Linux CPython 3.12 venv")
-    try:
-        contract = load_cable_dependency_contract(DEFAULT_IMAGE_SOURCE_TREE)
-        architecture = platform.machine()
-        cable_architecture_artifacts(contract, architecture)
-        identity = installed_cable_dependency_identity(contract)
-        for name, _version in identity.versions:
-            distribution = importlib_metadata.distribution(name)
-            files = distribution.files
-            if not files:
-                raise ActivationError("Cable SDK dependency file inventory is missing")
-            for relative in files:
-                if not _origin_within(os.fspath(distribution.locate_file(relative)), CONTAINER_VENV):
-                    raise ActivationError("Cable SDK dependency origin is outside managed venv")
-        return {"policy_sha256": identity.policy_sha256, "lock_sha256": identity.lock_sha256,
-                "versions": [f"{n}=={v}" for n, v in identity.versions], "architecture": architecture}
-    except (CableDependencyContractError, importlib_metadata.PackageNotFoundError, OSError, ValueError):
-        raise ActivationError("Cable SDK dependency policy or runtime identity is invalid") from None
 
 
 def _origin_within(origin: object, root: Path) -> bool:
@@ -3825,8 +3740,7 @@ def parser() -> argparse.ArgumentParser:
         choices=(
             "plan", "status", "exec-service", "build-source-manifest",
             "verify-source-manifest", "verify-image-source-manifest", "verify-control-auth-image",
-            "verify-deployment-image", "verify-python-runtime", "verify-req7-python-runtime",
-            "verify-req7-cable-python-runtime", "verify-issue-tracker-engine-runtime",
+            "verify-deployment-image", "verify-python-runtime", "verify-issue-tracker-engine-runtime",
         ),
     )
     result.add_argument("service", nargs="?")
@@ -3838,24 +3752,12 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.action == "verify-req7-cable-python-runtime":
-            supplied = sys.argv[1:] if argv is None else argv
-            if tuple(supplied) != ("verify-req7-cable-python-runtime",):
-                raise ActivationError("verify-req7-cable-python-runtime takes no arguments or overrides")
-            _print_json({"verified": True, "contract": "REQ7-CABLE-SDK-V1",
-                         **validate_req7_cable_python_runtime()})
-            return 0
         if args.action == "verify-issue-tracker-engine-runtime":
             supplied = sys.argv[1:] if argv is None else argv
             if tuple(supplied) != ("verify-issue-tracker-engine-runtime",):
                 raise ActivationError("verify-issue-tracker-engine-runtime takes no arguments or overrides")
             _print_json({"verified": True, "contract": "ISSUE-TRACKER-ENGINE-V1",
                          **validate_issue_tracker_engine_runtime()})
-            return 0
-        if args.action == "verify-req7-python-runtime":
-            if args.service is not None:
-                raise ActivationError("verify-req7-python-runtime takes no arguments")
-            _print_json({"verified": True, "contract": "REQ7-C14-T6-A", **validate_req7_python_runtime()})
             return 0
         if args.action == "verify-python-runtime":
             if args.service is not None:

@@ -20,7 +20,7 @@ import tempfile
 import unittest
 
 from test_cases.module_loader import load_script
-from test_cases.test_deps_table import LINUX_312, run_deps, write_fake_python
+from test_cases.test_deps_table import LINUX_312, RETIRED_LISTS, run_deps, write_fake_python
 from test_cases.test_issue_tracker_engine_runtime import CONTAINER_PYTHON, cron_function
 
 
@@ -77,11 +77,19 @@ class DependencyTableWorkflowTests(unittest.TestCase):
         for command in (engine_install, engine_gate):
             self.assertEqual(1, text.count(command), command)
             self.assertIn("    && " + command + " \\", lines)
-        self.assertLess(text.index(INSTALL + "infra/docker/requirements-req7-cable-sync.txt"), text.index(engine_install))
-        for gate in ("verify-python-runtime", "verify-req7-python-runtime", "verify-req7-cable-python-runtime"):
-            self.assertLess(text.index(engine_install), text.index(GATE + gate + " "))
-            self.assertLess(text.index(GATE + gate + " "), text.index(engine_gate))
+        toplevel = "-r /opt/http-ztp/source-tree/requirements-container-top-level.lock"
+        self.assertLess(text.index(toplevel), text.index(engine_install))
+        self.assertLess(text.index(engine_install), text.index(GATE + "verify-python-runtime "))
+        self.assertLess(text.index(GATE + "verify-python-runtime "), text.index(engine_gate))
+        # REQ7 retirement step 3b (2026-10-24): the engine list is the image's only Issue Tracker list; the two
+        # old REQ7 locks and their build-time gates are gone from the image and from activate.py.
+        for retired in (*RETIRED_LISTS, "verify-req7-python-runtime", "verify-req7-cable-python-runtime"):
+            self.assertNotIn(retired, text)
         activate = load_script("deps_workflow_activate", ROOT / "infra/docker/activate.py")
+        [action] = [item for item in activate.parser()._actions if item.dest == "action"]
+        self.assertIn("verify-issue-tracker-engine-runtime", action.choices)
+        self.assertEqual([], sorted(choice for choice in action.choices if "req7" in choice))
+        self.assertEqual([], sorted(path for path in activate.IMAGE_COUPLED_SOURCE_PATHS if "req7" in path))
         self.assertEqual(ENGINE, activate.ISSUE_TRACKER_ENGINE_REQUIREMENTS)
         self.assertIn(ENGINE, activate.IMAGE_COUPLED_SOURCE_PATHS)
         # The table itself and the native-only ibsw list are not image-coupled: editing them must not
@@ -107,6 +115,8 @@ class DependencyTableWorkflowTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         rows = json.loads(result.stdout)["targets"]["files"]["items"]
         items = {row["item"] for row in rows if row["status"] == "ok"}
+        self.assertEqual([], sorted(row["item"] for row in rows if "req7" in row["item"]),
+                         "the retired REQ7 lists and contracts are no longer checked (step 3b)")
         for expected in (
             "infra/docker/activate.py::ISSUE_TRACKER_ENGINE_IMPORTS",
             "infra/docker/activate.py::CONTAINER_TOPLEVEL_REQUIREMENTS",
@@ -115,7 +125,6 @@ class DependencyTableWorkflowTests(unittest.TestCase):
             "tools/tar-for-upload.py::REQUIRED_OFFLINE_PACKAGES",
             "tools/ibsw_upgrade_observer.py::SSH_RUNTIME_PINS",
             "tools/f01_ssh_dependency_identity.py::_PINS",
-            "tools/req7_cable_dependency_contract.py::PINS",
             "infiniband/bringup/xdr-upgrade/upgrade.py::_RUNTIME_VENV_PATHS",
             "DAY0-Prepare/11-load.py::MACOS_GENERATION_MODULES",
             ENGINE, IBSW,

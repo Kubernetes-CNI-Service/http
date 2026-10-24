@@ -1,7 +1,7 @@
 """Unified dependency table: direct contract of infra/deps.py, infra/dependencies.json and the hashed lists.
 
 The expected closure, versions and owner decisions below are written out independently of
-the implementation; the REQ7 cable lock and the container lock are parsed here with a parser
+the implementation; the engine list and the container lock are parsed here with a parser
 of this module, never with infra/deps.py. Environment checks run against a temporary HOME,
 fake dpkg-query/commands and a fake base python; nothing is installed and no network is used.
 """
@@ -32,7 +32,35 @@ DEPS_PATH = ROOT / "infra/deps.py"
 TABLE_PATH = ROOT / "infra/dependencies.json"
 ENGINE = "infra/docker/requirements-issue-tracker-engine.txt"
 IBSW = "infra/requirements-ibsw-upgrade.txt"
-CABLE = "infra/docker/requirements-req7-cable-sync.txt"
+# Retired in REQ7 retirement step 3b (2026-10-24) with requirements-req7-online.txt; the image installs only
+# the engine list now, which keeps the retired lock's 20 distributions byte for byte.
+RETIRED_LISTS = ("infra/docker/requirements-req7-cable-sync.txt", "infra/docker/requirements-req7-online.txt")
+# The 20 distributions of the retired cable lock (read from it at 7d5518d; unchanged until step 3b removed it).
+EXPECTED_ENGINE_BASE = {
+    "certifi": "2026.7.22",
+    "cffi": "2.0.0",
+    "charset-normalizer": "3.5.1",
+    "cryptography": "50.0.1",
+    "google-api-core": "2.30.3",
+    "google-api-python-client": "2.198.0",
+    "google-auth": "2.50.0",
+    "google-auth-httplib2": "0.3.1",
+    "googleapis-common-protos": "1.75.0",
+    "httplib2": "0.32.0",
+    "idna": "3.19",
+    "proto-plus": "1.27.2",
+    "protobuf": "6.33.6",
+    "pyasn1": "0.6.4",
+    "pyasn1-modules": "0.4.2",
+    "pycparser": "2.23",
+    "pyparsing": "3.3.2",
+    "requests": "2.32.5",
+    "uritemplate": "4.2.0",
+    "urllib3": "2.6.3",
+}
+# sha256 over those 20 records (name==version and sorted hashes) and their wheel comments, computed from the
+# retired lock by req7-batch2-3b/edit_deps_test_b3.py; see engine_base_records_sha256.
+EXPECTED_ENGINE_BASE_RECORDS_SHA256 = "73173aa17b78436e3684308e0898a07ccdb7e571ca555c929eae7a3ac3c673a7"
 CONTAINER_LOCK = "requirements-container-top-level.lock"
 XDR = "infiniband/bringup/xdr-upgrade/requirements.txt"
 # Measured by a cp312 resolve (pip download with dependencies, Ubuntu 24.04, 2026-10-23) of the
@@ -83,6 +111,13 @@ def parse_lock(path: Path) -> tuple:
         records[norm(name)] = (version, [token.split(":", 1)[1] for token in tokens[1:]])
     assert not pending, path
     return records, wheels, text.splitlines()[0]
+
+
+def engine_base_records_sha256(records: dict, wheels: dict, names) -> str:
+    lines = [f"{name}=={records[name][0]} {' '.join(sorted(records[name][1]))}" for name in sorted(names)]
+    lines += [f"{wheel} {digest}" for wheel, digest in sorted(wheels.items())
+              if norm(wheel.split("-", 1)[0]) in names]
+    return hashlib.sha256("\n".join(lines).encode("ascii")).hexdigest()
 
 
 def parse_pins(path: Path) -> dict:
@@ -223,16 +258,18 @@ class TableContractTests(unittest.TestCase):
         self.assertEqual({"altgraph", "future", "macholib", "pip", "setuptools", "six", "wheel"},
                          set(target["clt_provided"]))
 
-    def test_engine_set_is_the_cable_lock_plus_the_measured_extras(self):
-        cable, _wheels, _header = parse_lock(ROOT / CABLE)
-        self.assertEqual(20, len(cable))
+    def test_engine_set_is_the_retired_cable_closure_plus_the_measured_extras(self):
+        self.assertEqual(20, len(EXPECTED_ENGINE_BASE))
         engine = set(self.table["python_sets"]["issue-tracker-engine"]["distributions"])
-        self.assertEqual(set(cable) | set(EXPECTED_ENGINE_EXTRAS), engine)
+        self.assertEqual(set(EXPECTED_ENGINE_BASE) | set(EXPECTED_ENGINE_EXTRAS), engine)
         self.assertEqual(36, len(engine))
-        for name, version in EXPECTED_ENGINE_EXTRAS.items():
+        for name, version in {**EXPECTED_ENGINE_BASE, **EXPECTED_ENGINE_EXTRAS}.items():
             self.assertEqual(version, self.table["python_distributions"][name]["version"], name)
-        for name, (version, _hashes) in cable.items():
-            self.assertEqual(version, self.table["python_distributions"][name]["version"], name)
+        # The two retired REQ7 sets are gone; every target that had them still gets their distributions.
+        self.assertEqual(set(), {"req7-online", "req7-cable"} & set(self.table["python_sets"]))
+        for target in ("container", "local-test"):
+            with self.subTest(target=target):
+                self.assertIn("issue-tracker-engine", self.table["targets"][target]["python_sets"])
 
     def test_every_third_party_import_of_a_production_script_is_in_the_table(self):
         if str(ROOT) not in sys.path:
@@ -302,7 +339,8 @@ class TableContractTests(unittest.TestCase):
                        if path and pattern.search(path) and path_disposition(path) == "production")
         registered = set(self.table["requirement_files"]) | set(self.table["not_dependency_lists"])
         self.assertEqual([], [path for path in found if path not in registered])
-        self.assertTrue({ENGINE, IBSW, CABLE, CONTAINER_LOCK, XDR} <= set(found))
+        self.assertTrue({ENGINE, IBSW, CONTAINER_LOCK, XDR} <= set(found))
+        self.assertEqual(set(), set(RETIRED_LISTS) & (set(found) | registered))
 
 
 class HashedListTests(unittest.TestCase):
@@ -336,18 +374,17 @@ class HashedListTests(unittest.TestCase):
         self.assertEqual(sorted(records), list(records))
         return records
 
-    def test_engine_list_shares_identical_versions_and_hashes_with_the_cable_lock(self):
+    def test_engine_list_keeps_the_retired_cable_wheels_byte_for_byte(self):
         engine = self.assert_hash_locked(ENGINE)
-        cable, cable_wheels, _header = parse_lock(ROOT / CABLE)
         self.assertEqual(36, len(engine))
-        for name, (version, hashes) in cable.items():
+        for name, version in EXPECTED_ENGINE_BASE.items():
             with self.subTest(distribution=name):
                 self.assertIn(name, engine)
                 self.assertEqual(version, engine[name][0])
-                self.assertEqual(set(hashes), set(engine[name][1]))
         _engine_records, engine_wheels, _header = parse_lock(ROOT / ENGINE)
-        for wheel, digest in cable_wheels.items():
-            self.assertEqual(digest, engine_wheels.get(wheel), wheel)
+        self.assertEqual(EXPECTED_ENGINE_BASE_RECORDS_SHA256,
+                         engine_base_records_sha256(engine, engine_wheels, set(EXPECTED_ENGINE_BASE)),
+                         "the image's former cable-lock wheels changed")
         for name, version in EXPECTED_ENGINE_EXTRAS.items():
             self.assertEqual(version, engine[name][0], name)
 
@@ -355,14 +392,13 @@ class HashedListTests(unittest.TestCase):
         ibsw = self.assert_hash_locked(IBSW)
         xdr = parse_pins(ROOT / XDR)
         container, _wheels, _header = parse_lock(ROOT / CONTAINER_LOCK)
-        cable, _cable_wheels, _header = parse_lock(ROOT / CABLE)
         engine, _engine_wheels, _header = parse_lock(ROOT / ENGINE)
         self.assertEqual(set(xdr), set(ibsw))
         for name, version in xdr.items():
             self.assertEqual(version or container[name][0], ibsw[name][0], name)
         self.assertEqual(set(container["pyyaml"][1]), set(ibsw["pyyaml"][1]))
         for name in ("cryptography", "cffi", "pycparser"):
-            self.assertEqual(set(cable[name][1]), set(ibsw[name][1]), name)
+            self.assertEqual(set(engine[name][1]), set(ibsw[name][1]), name)
         self.assertEqual(set(engine["typing-extensions"][1]), set(ibsw["typing-extensions"][1]))
         self.assertEqual({"paramiko", "bcrypt", "invoke", "pynacl", "pyyaml", "cryptography", "cffi",
                           "pycparser", "typing-extensions"}, set(ibsw))

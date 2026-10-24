@@ -36,9 +36,10 @@ DOCKER_ROOT = ROOT / "infra/docker"
 # contracts; prior trust-boundary prose retained. 2026-10-19: the native recovery
 # command matches infra-setup.py RECOVERY_COMMAND (--recover-monitor-authority --apply).
 # 2026-10-23: section "镜像内 Python 依赖" (unified dependency table step 3a: engine list + gate).
-PUBLISHED_DOCKER_README_SIZE = 49347
+# 2026-10-24: same section, REQ7 retirement step 3b (the two old REQ7 locks and gates left the image).
+PUBLISHED_DOCKER_README_SIZE = 49389
 PUBLISHED_DOCKER_README_SHA256 = (
-    "45a6cb2e6931f482ab3d4c21a523dd8ed612b84f561bffeeac49c5d7d5bfd64d"
+    "1d3600b65920efdf882cf3045711146fd82b5d23ba4dc81307d8e109b9a8091a"
 )
 
 
@@ -167,13 +168,8 @@ REQUIRED_LIFECYCLE_SOURCE_PATHS = (
 )
 IMAGE_COUPLED_SOURCE_PATHS_EXPECTED = (
     "requirements-container-top-level.lock",
-    "infra/docker/req7-dependency-policy.json",
-    "infra/docker/requirements-req7-online.txt",
-    "tools/req7_dependency_contract.py",
-    "infra/docker/req7-cable-dependency-policy.json",
-    "infra/docker/requirements-req7-cable-sync.txt",
-    "tools/req7_cable_dependency_contract.py",
     # 2026-10-23 unified dependency table step 3a: the image installs the CableTracker engine list.
+    # 2026-10-24 step 3b: the two old REQ7 locks, their policies and contracts left the image.
     "infra/docker/requirements-issue-tracker-engine.txt",
     "infra/docker/activate.py",
     "infra/docker/entrypoint.py",
@@ -6608,6 +6604,76 @@ class ActivationContractTests(QuietContractTest):
                 "verify-source-manifest", "--source-root", os.fspath(root),
                 "--manifest", os.fspath(manifest),
             ]))
+
+    def test_runtime_origin_must_be_one_single_link_regular_file_inside_its_root(self) -> None:
+        # Moved from the retired test_req7_cable_runtime (7d5518d:132-158; REQ7 retirement step 3b,
+        # 2026-10-24): its symlink, hard-link and absent-origin faults were the only tests of these
+        # refusals of activate._origin_within, which the TOPLEVEL-5 and Issue Tracker engine gates still use.
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            root = base / "venv"
+            root.mkdir()
+            inside = root / "module.py"
+            inside.write_text("VALUE = 1\n", encoding="utf-8")
+            outside = base / "outside.py"
+            outside.write_text("VALUE = 2\n", encoding="utf-8")
+            self.assertTrue(activate._origin_within(os.fspath(inside), root), "control: a file in the venv")
+            link = root / "link.py"
+            link.symlink_to(outside)
+            refused = {
+                "outside the root": os.fspath(outside),
+                "symlink in the root to outside": os.fspath(link),
+                "relative": "venv/module.py",
+                "not a string": None,
+                "absent": os.fspath(root / "absent.py"),
+                "a directory": os.fspath(root),
+            }
+            for label, origin in refused.items():
+                with self.subTest(origin=label):
+                    self.assertFalse(activate._origin_within(origin, root))
+            os.link(inside, base / "second-link.py")
+            self.assertFalse(activate._origin_within(os.fspath(inside), root), "a hard-linked file")
+
+    def test_image_manifest_missing_or_live_drifted_coupled_member_is_refused(self) -> None:
+        # Moved from the retired test_req7_cable_runtime_workflow (7d5518d:144-181; REQ7 retirement step 3b,
+        # 2026-10-24), which checked the retired Cable trio; it held the only test of the "missing" branch of
+        # verify_compatible_live_source. The engine list, still image-coupled, stands in for the trio.
+        activate = load_script("activate.py")
+        member = "infra/docker/requirements-issue-tracker-engine.txt"
+        self.assertIn(member, activate.IMAGE_COUPLED_SOURCE_PATHS)
+        with tempfile.TemporaryDirectory(prefix="coupled-image-") as directory:
+            base = Path(directory).resolve(strict=True)
+            source = base / "source"
+            for name in ("infra", "monitor", "ethernet", "infiniband", "nvlink", "ztp", "tools"):
+                (source / name).mkdir(parents=True)
+            for relative in IMAGE_COUPLED_SOURCE_PATHS_EXPECTED:
+                path = source / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"PRIVATE_SOURCE_IDENTITY_FIXTURE = True\n")
+            (source / "infra/docker/runtime-contract.json").write_text(
+                '{"schema_version":1,"compatible_image_contracts":["3"]}\n', encoding="ascii")
+            image = base / "image-source.json"
+            live = source / "infra/docker/deployment-source-manifest.json"
+            activate.write_image_source_manifest(source, image)
+            live.write_bytes(image.read_bytes())
+            self.assertIn(member, {row["path"] for row in activate.verify_compatible_live_source(source, image)},
+                          "control: the member is verified")
+            recorded = json.loads(image.read_text(encoding="ascii"))
+            missing = base / "missing-member-image.json"
+            missing.write_text(json.dumps({"schema_version": recorded["schema_version"], "files": [
+                row for row in recorded["files"] if row["path"] != member]}), encoding="ascii")
+            with self.assertRaisesRegex(activate.ActivationError, "image-coupled source is missing"):
+                activate.verify_compatible_live_source(source, missing)
+            path = source / member
+            before = path.read_bytes()
+            path.write_bytes(before + b"\n# FOREIGN_COUPLED_SOURCE\n")
+            activate.write_image_source_manifest(source, live)
+            with self.assertRaisesRegex(activate.ActivationError, "image-coupled source differs"):
+                activate.verify_compatible_live_source(source, image)
+            path.write_bytes(before)
+            activate.write_image_source_manifest(source, live)
+            self.assertIn(member, {row["path"] for row in activate.verify_compatible_live_source(source, image)})
 
     def test_preloaded_probe_binds_ubuntu_os_live_manifest_and_source_tree(self) -> None:
         activate = load_script("activate.py")

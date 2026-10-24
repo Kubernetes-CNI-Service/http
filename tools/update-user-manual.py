@@ -363,7 +363,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     is_validation_report_helper = relative == "test_cases/validation_unittest.py"
     is_library = (
         path.name == "__init__.py" or "/lib/" in f"/{relative}"
-        or relative == "tools/req7_dependency_contract.py"
         or path.name in {
             "_package_common.py", "deployment_lock.py", "deployment_prewrite_guard.py",
             "project_contract.py", "ztp_service_runtime.py", "switch_collection_gate.py",
@@ -470,13 +469,6 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。"
         recovery = "让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。"
         example = f"rg -n \"{path.stem}\" DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者"
-        if relative == "tools/req7_dependency_contract.py":
-            scenario = "REQ7 C-14 公开依赖策略和精确锁校验；不导入 SDK、不安装、不访问网络或启用服务。"
-            prerequisite = "调用方冻结受测源码；固定相对路径无链接、单链接普通文件、有界读取且名字/字节身份复核一致。"
-            inputs = "infra/docker/req7-dependency-policy.json、requirements-req7-online.txt 及当前 Python 的已安装分发元数据。"
-            outputs = "不可变策略/锁 SHA256、平台 wheel 清单与精确版本元数据身份，或脱敏拒绝；不写文件。"
-            success = "仅表示公开依赖合同和元数据一致；不授予发送许可、不证明 Linux wheel 已执行、SDK 鉴权或整个 REQ7。"
-            recovery = "缺包、版本/路径/架构/锁漂移时 fail closed；保留证据，不能自动安装、猜测依赖或手改批准 ledger。"
     elif is_cgi:
         direct = "否；由 Apache CGI 环境调用，不能在 shell 中伪造为生产成功。"
         environment = "Native Apache 或 Docker 容器 Apache，以受限请求方法和 www-data 权限运行。"

@@ -64,14 +64,9 @@ class PreflightFixture(unittest.TestCase):
                          "PYTHONPYCACHEPREFIX": str(self.base / "pycache"),
                          "PF_CHILD_MARKER": str(self.marker)})
         self.write("test_cases/__init__.py", "")
-        for relative in ("tools/project_contract.py", "tools/req7_dependency_contract.py",
-                         "tools/req7_cable_dependency_contract.py", "test_cases/run_related_tests.py",
+        for relative in ("tools/project_contract.py", "test_cases/run_related_tests.py",
                          "test_cases/test_public_publication_workflow.py",
-                         "requirements-container-top-level.lock",
-                         "infra/docker/req7-dependency-policy.json",
-                         "infra/docker/requirements-req7-online.txt",
-                         "infra/docker/req7-cable-dependency-policy.json",
-                         "infra/docker/requirements-req7-cable-sync.txt"):
+                         "requirements-container-top-level.lock"):
             self.write(relative, (ROOT / relative).read_bytes())
         marker_test = (
             "import os, unittest\nfrom pathlib import Path\n"
@@ -89,8 +84,7 @@ class PreflightFixture(unittest.TestCase):
                    "def image_source_paths(root): return ()\n")
         self.write("tools/_package_common.py",
                    "def deployment_archive_source_paths(root): return ()\n")
-        scripts = {p: p for p in ("tools/project_contract.py", "tools/req7_dependency_contract.py",
-                                  "tools/req7_cable_dependency_contract.py", "tools/sync-code.py",
+        scripts = {p: p for p in ("tools/project_contract.py", "tools/sync-code.py",
                                   "infra/docker/activate.py", "tools/_package_common.py")}
         manifest = {
             "schema_version": 1, "baseline_tests": [D], "scripts": scripts,
@@ -101,14 +95,8 @@ class PreflightFixture(unittest.TestCase):
             ],
             "test_rules": [{"id": "fixture-direct", "paths": list(scripts), "tests": [D]}],
             "workflows": [{"id": "fixture-workflow", "members": list(scripts), "tests": [D]}],
-            "tracked_support": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock",
-                                "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt",
-                                "infra/docker/req7-cable-dependency-policy.json",
-                                "infra/docker/requirements-req7-cable-sync.txt"],
-            "path_rules": [{"paths": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock",
-                                     "infra/docker/req7-dependency-policy.json", "infra/docker/requirements-req7-online.txt",
-                                     "infra/docker/req7-cable-dependency-policy.json",
-                                     "infra/docker/requirements-req7-cable-sync.txt"],
+            "tracked_support": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock"],
+            "path_rules": [{"paths": ["test_cases/run_related_tests.py", "requirements-container-top-level.lock"],
                             "full_suite": True}],
         }
         self.write("test_cases/script_test_manifest.json", json.dumps(manifest))
@@ -285,17 +273,9 @@ class PreflightDirectTests(PreflightFixture):
 
 
 class PreflightRunnerWorkflowTests(PreflightFixture):
-    def test_full_fixture_binds_governed_req7_dependency_files_before_runtime_checks(self):
-        helper = "tools/req7_dependency_contract.py"
-        policy = "infra/docker/req7-dependency-policy.json"
-        lock = "infra/docker/requirements-req7-online.txt"
-        self.assertTrue((self.root / helper).is_file(), "real full CLI fixture needs the dependency validator")
-        manifest = json.loads((self.root / "test_cases/script_test_manifest.json").read_bytes())
-        self.assertEqual(helper, manifest["scripts"][helper])
-        for relative, digest in ((policy, "4e0fa1652f94999c657e92b0e3d81162538449b6d4c6ceae527580bd47d4cd32"),
-                                 (lock, "b10a83b5f4b6c767b5dc7c80e0353179f2136fd651a8cb6cc838e23b7692bfbe")):
-            self.assertIn(relative, manifest["tracked_support"])
-            self.assertEqual(digest, hashlib.sha256((self.root / relative).read_bytes()).hexdigest())
+    def test_clean_full_fixture_lists_without_a_child_or_an_approval_change(self):
+        # Kept from the retired REQ7 dependency variant (REQ7 retirement batch 3b, 2026-10-24): on a clean
+        # tree the real full CLI computes the full-suite environment and only lists.
         before = self.ledger.read_bytes()
         result = self.cli("--all", "--list", deny_bind=True)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)

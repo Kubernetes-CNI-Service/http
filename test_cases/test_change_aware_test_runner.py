@@ -46,37 +46,6 @@ CONTAINER_TOPLEVEL_LOCK_SUPPORT = {
         CONTAINER_TOPLEVEL_LOCK.read_bytes()
     ).hexdigest(),
 }
-from test_cases.test_req7_dependency_contract import (
-    PINS as EXPECTED_REQ7_PINS, policy_bytes as expected_req7_policy_bytes,
-    lock_bytes as expected_req7_lock_bytes,
-)
-EXPECTED_REQ7_IDENTITY = {
-    "policy_sha256": hashlib.sha256(expected_req7_policy_bytes()).hexdigest(),
-    "lock_sha256": hashlib.sha256(expected_req7_lock_bytes()).hexdigest(),
-    "versions": [f"{n}=={v}" for n, v in EXPECTED_REQ7_PINS]
-    + (["typing_extensions==4.16.0"] if sys.version_info[:2] < (3, 11) else []),
-    "linux_artifacts_executed": False,
-}
-CONTAINER_TOPLEVEL_LOCK_SUPPORT.update({
-    "infra/docker/req7-dependency-policy.json": EXPECTED_REQ7_IDENTITY["policy_sha256"],
-    "infra/docker/requirements-req7-online.txt": EXPECTED_REQ7_IDENTITY["lock_sha256"],
-})
-from test_cases.test_req7_cable_dependency import (
-    PINS as EXPECTED_REQ7_CABLE_PINS,
-    policy_bytes as expected_req7_cable_policy_bytes,
-    lock_bytes as expected_req7_cable_lock_bytes,
-)
-EXPECTED_REQ7_CABLE_IDENTITY = {
-    "policy_sha256": hashlib.sha256(expected_req7_cable_policy_bytes()).hexdigest(),
-    "lock_sha256": hashlib.sha256(expected_req7_cable_lock_bytes()).hexdigest(),
-    "versions": [f"{n}=={v}" for n, v in EXPECTED_REQ7_CABLE_PINS]
-    + (["typing_extensions==4.16.0"] if sys.version_info[:2] < (3, 11) else []),
-    "linux_artifacts_executed": False,
-}
-CONTAINER_TOPLEVEL_LOCK_SUPPORT.update({
-    "infra/docker/req7-cable-dependency-policy.json": EXPECTED_REQ7_CABLE_IDENTITY["policy_sha256"],
-    "infra/docker/requirements-req7-cable-sync.txt": EXPECTED_REQ7_CABLE_IDENTITY["lock_sha256"],
-})
 EXPECTED_TEST_SUITES = [
     "repository-governance",
     "packaging-sync",
@@ -971,10 +940,6 @@ class ImpactManifestTests(unittest.TestCase):
                 "infra/docker/logrotate-http-ztp.conf",
                 "infra/docker/rsyslog-dhcp.conf",
                 "infra/docker/runtime-contract.json",
-                "infra/docker/req7-dependency-policy.json",
-                "infra/docker/requirements-req7-online.txt",
-                "infra/docker/req7-cable-dependency-policy.json",
-                "infra/docker/requirements-req7-cable-sync.txt",
                 "infra/docker/supervisord.conf",
                 "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
                 "ztp/config/cumulus/ar_profile_custom.conf",
@@ -1923,8 +1888,6 @@ class ApprovalLedgerTests(unittest.TestCase):
                         "container_toplevel_lock_sha256": hashlib.sha256(
                             CONTAINER_TOPLEVEL_LOCK.read_bytes()
                         ).hexdigest(),
-                        "req7_dependencies": EXPECTED_REQ7_IDENTITY,
-                        "req7_cable_dependencies": EXPECTED_REQ7_CABLE_IDENTITY,
                     },
                     "scenario_coverage": {
                         "root-entrypoint-workflow": (
@@ -2014,6 +1977,43 @@ class ApprovalLedgerTests(unittest.TestCase):
         current = RUNNER.full_suite_attestation(snapshot)
         current["environment"]["container_toplevel_lock_sha256"] = "0" * 64
         self.assertFalse(RUNNER.full_suite_attestation_is_current(snapshot, current))
+
+    def test_environment_drift_before_or_during_approval_write_keeps_the_prior_ledger(self):
+        # Moved from the retired test_req7_cable_runner_workflow (7d5518d:249-310, its drift loop; REQ7
+        # retirement step 3b, 2026-10-24), which drifted the retired Cable metadata: atomic_write_approvals
+        # re-derives the full-suite environment before writing and again while the temporary ledger exists;
+        # a drift at either point refuses, leaves no temporary file and keeps the prior ledger bytes.
+        snapshot = RUNNER.Snapshot(
+            manifest_sha256="a" * 64,
+            scripts={}, tests={}, support=dict(CONTAINER_TOPLEVEL_LOCK_SUPPORT),
+        )
+        environment = RUNNER.full_suite_environment()
+        real_machine = platform.machine()
+        prior = b'{"prior":"must-preserve"}\n'
+        for drift_call, message in ((1, "changed before approval write"),
+                                    (2, "changed during approval write")):
+            with self.subTest(drift=message), tempfile.TemporaryDirectory() as directory:
+                approvals = Path(directory) / "approved.json"
+                approvals.write_bytes(prior)
+                calls = []
+
+                def machine(drift_call=drift_call):
+                    calls.append(sorted(path.name for path in Path(directory).glob(".approved.json.*")))
+                    return "drifted-machine" if len(calls) == drift_call else real_machine
+
+                with mock.patch.object(RUNNER.platform, "machine", side_effect=machine), \
+                        self.assertRaisesRegex(RUNNER.ImpactError, message):
+                    RUNNER.atomic_write_approvals(
+                        approvals, snapshot, full_suite=True,
+                        full_suite_environment_value=environment,
+                    )
+                self.assertEqual(drift_call, len(calls))
+                self.assertEqual([], calls[0], "nothing is written before the first re-check")
+                if drift_call == 2:
+                    self.assertEqual(1, len(calls[1]), "the second re-check sees the temporary ledger")
+                self.assertEqual(prior, approvals.read_bytes())
+                self.assertEqual([], sorted(path.name for path in Path(directory).iterdir()
+                                            if path.name != "approved.json"))
 
     def test_toplevel_version_drift_blocks_full_run_and_stales_existing_proof(self):
         manifest = {"baseline_tests": []}

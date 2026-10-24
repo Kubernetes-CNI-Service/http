@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>751</strong> 个受维护文件</span>
+          <span><strong>738</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -599,7 +599,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infra" data-nav-title="infra/ 文件" class="catalog-group">
-          <summary><code>infra/</code> — 36 个文件</summary>
+          <summary><code>infra/</code> — 32 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infra/apache-publication-boundary/README.md"><td><code>infra/apache-publication-boundary/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Apache 静态发布边界与信任模型。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/check_infra.py"><td><code>infra/check_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Collect infra execution logs and health status from CSV server devices。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -622,11 +622,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/docker/hostlock.py"><td><code>infra/docker/hostlock.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Run one host lifecycle command under the validated deployment lock。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/logrotate-http-ztp.conf"><td><code>infra/docker/logrotate-http-ztp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/management_ssh_key.py"><td><code>infra/docker/management_ssh_key.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Reconcile the fixed host-root and Docker-service Ed25519 identity pair。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/req7-cable-dependency-policy.json"><td><code>infra/docker/req7-cable-dependency-policy.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/req7-dependency-policy.json"><td><code>infra/docker/req7-dependency-policy.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的机器可读合同、状态或夹具；字段身份由生产脚本或测试严格验证。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/requirements-issue-tracker-engine.txt"><td><code>infra/docker/requirements-issue-tracker-engine.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：Issue Tracker engine (CableTracker) v1: CPython 3.12 Linux aarch64/x86_64; wheels only; pip --only-binary=:all: --no-deps --require-hashes. Table: infra/dependencies.json。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/requirements-req7-cable-sync.txt"><td><code>infra/docker/requirements-req7-cable-sync.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：REQ7 Cable sync SDK v1: CPython 3.12 Linux aarch64/x86_64; wheels only; no extras; pip --no-deps --require-hashes。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infra/docker/requirements-req7-online.txt"><td><code>infra/docker/requirements-req7-online.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：REQ7 C-14: CPython 3.12 Linux aarch64/x86_64; wheels only; no extras; pip --no-deps --require-hashes。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/rsyslog-dhcp.conf"><td><code>infra/docker/rsyslog-dhcp.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>Native 基础设施与 Docker/Supervisor 运行时使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/runtime-contract.json"><td><code>infra/docker/runtime-contract.json</code></td><td><strong>类别：</strong>数据/合同；<strong>作用：</strong>Docker 容器运行身份、路径、服务和安全设置的机器可读合同。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/docker/supervisord.conf"><td><code>infra/docker/supervisord.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>容器内 Supervisor 程序、依赖顺序、日志与自动重启配置。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -706,7 +702,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 412 个文件</summary>
+          <summary><code>test_cases/</code> — 405 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1057,13 +1053,6 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_req19_infra_log_workflow.py"><td><code>test_cases/test_req19_infra_log_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-19: real setup/deploy/check modules on a hermetic temporary tree。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req22_runtime_contract.py"><td><code>test_cases/test_req22_runtime_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent REQ22 DHCP runtime input and mode expectations。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req22_setup_contract.py"><td><code>test_cases/test_req22_setup_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent REQ22 setup input expectations。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_cable_dependency.py"><td><code>test_cases/test_req7_cable_dependency.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent public Cable SDK dependency contract; SOURCE-only until root runs。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_cable_dependency_workflow.py"><td><code>test_cases/test_req7_cable_dependency_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Two real validators share FD checks but never dependency identity types。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_cable_runner_workflow.py"><td><code>test_cases/test_req7_cable_runner_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent new Cable identity in actual runner proof consumers。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_cable_runtime.py"><td><code>test_cases/test_req7_cable_runtime.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent managed-runtime metadata/origin gate; no SDK or installation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_cable_runtime_workflow.py"><td><code>test_cases/test_req7_cable_runtime_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real activation/FD-loader and image compatibility, not an executed image。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_dependency_contract.py"><td><code>test_cases/test_req7_dependency_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent REQ7 C-14 dependency policy, artifacts and fail-closed reads。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
-            <tr data-file-path="test_cases/test_req7_dependency_workflow.py"><td><code>test_cases/test_req7_dependency_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Actual activation/runner consumers of REQ7 policy; no Docker or SDK import。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_ib_provenance.py"><td><code>test_cases/test_req7_ib_provenance.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ7 IB expected-topology identity is the CVT bytes, not a release ID。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req7_ib_provenance_workflow.py"><td><code>test_cases/test_req7_ib_provenance_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real CVT producer must carry byte-bound IB topology provenance。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_req8_public_cli_help_contract.py"><td><code>test_cases/test_req8_public_cli_help_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct public CLI help contracts for REQ-8/H-29。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1123,7 +1112,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-tools" data-nav-title="tools/ 文件" class="catalog-group">
-          <summary><code>tools/</code> — 113 个文件</summary>
+          <summary><code>tools/</code> — 111 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="tools/_package_common.py"><td><code>tools/_package_common.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Internal shared archive implementation for tar-for-upload/download。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/collect-ztp-diagnostics.py"><td><code>tools/collect-ztp-diagnostics.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Create a bounded, redacted support bundle for the ZTP management stack。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1218,8 +1207,6 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/password-update.py"><td><code>tools/password-update.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Safely rotate Cumulus and NVOS password hashes in a project global YAML。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/project_contract.py"><td><code>tools/project_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared deployment-project schema and transfer exclusion contract。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/rehydrate-finished.py"><td><code>tools/rehydrate-finished.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Materialize one verified finished record as a new DAY0 project。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="tools/req7_cable_dependency_contract.py"><td><code>tools/req7_cable_dependency_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Separate CableTracker-style SDK source contract; no SDK import or send。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="tools/req7_dependency_contract.py"><td><code>tools/req7_dependency_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ7 C-14 public dependency contracts; no SDK import, install or network。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ssh_key_preparation.py"><td><code>tools/ssh_key_preparation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared, bounded OpenSSH public-key selection and project publication。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/sync-code.py"><td><code>tools/sync-code.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Incrementally sync local HTTP/ZTP code and one DAY0 project to a host。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/tar-for-download.py"><td><code>tools/tar-for-download.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Package management-server project data for downloading and safekeeping。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1398,7 +1385,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>579</strong> 个脚本型文件</span>
+          <span><strong>570</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -2525,7 +2512,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 390 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 383 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -8430,132 +8417,6 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req22_setup_contract</code></pre></div>
         </details>
-        <details data-script-reference="test_cases/test_req7_cable_dependency.py" class="script-reference">
-          <summary><code>test_cases/test_req7_cable_dependency.py</code> — Independent public Cable SDK dependency contract; SOURCE-only until root runs。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Independent public Cable SDK dependency contract; SOURCE-only until root runs。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_cable_dependency</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_cable_dependency</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_cable_dependency_workflow.py" class="script-reference">
-          <summary><code>test_cases/test_req7_cable_dependency_workflow.py</code> — Two real validators share FD checks but never dependency identity types。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Two real validators share FD checks but never dependency identity types。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_cable_dependency_workflow</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_cable_dependency_workflow</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_cable_runner_workflow.py" class="script-reference">
-          <summary><code>test_cases/test_req7_cable_runner_workflow.py</code> — Independent new Cable identity in actual runner proof consumers。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Independent new Cable identity in actual runner proof consumers。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_cable_runner_workflow</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_cable_runner_workflow</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_cable_runtime.py" class="script-reference">
-          <summary><code>test_cases/test_req7_cable_runtime.py</code> — Independent managed-runtime metadata/origin gate; no SDK or installation。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Independent managed-runtime metadata/origin gate; no SDK or installation。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_cable_runtime</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_cable_runtime</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_cable_runtime_workflow.py" class="script-reference">
-          <summary><code>test_cases/test_req7_cable_runtime_workflow.py</code> — Real activation/FD-loader and image compatibility, not an executed image。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Real activation/FD-loader and image compatibility, not an executed image。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_cable_runtime_workflow</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_cable_runtime_workflow</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_dependency_contract.py" class="script-reference">
-          <summary><code>test_cases/test_req7_dependency_contract.py</code> — Independent REQ7 C-14 dependency policy, artifacts and fail-closed reads。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Independent REQ7 C-14 dependency policy, artifacts and fail-closed reads。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_dependency_contract</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_dependency_contract</code></pre></div>
-        </details>
-        <details data-script-reference="test_cases/test_req7_dependency_workflow.py" class="script-reference">
-          <summary><code>test_cases/test_req7_dependency_workflow.py</code> — Actual activation/runner consumers of REQ7 policy; no Docker or SDK import。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Actual activation/runner consumers of REQ7 policy; no Docker or SDK import。</dd>
-            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
-            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
-            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
-            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_req7_dependency_workflow</dd>
-            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
-            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
-            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
-            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_req7_dependency_workflow</code></pre></div>
-        </details>
         <details data-script-reference="test_cases/test_req7_ib_provenance.py" class="script-reference">
           <summary><code>test_cases/test_req7_ib_provenance.py</code> — REQ7 IB expected-topology identity is the CVT bytes, not a release ID。</summary>
           <div class="script-body"><dl>
@@ -9546,7 +9407,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH</code></pre></div>
         </details>
-        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 104 个脚本</h4>
+        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 102 个脚本</h4>
         <details data-script-reference="tools/_package_common.py" class="script-reference">
           <summary><code>tools/_package_common.py</code> — Internal shared archive implementation for tar-for-upload/download。</summary>
           <div class="script-body"><dl>
@@ -11058,42 +10919,6 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B tools/rehydrate-finished.py --help</code></pre></div>
-        </details>
-        <details data-script-reference="tools/req7_cable_dependency_contract.py" class="script-reference">
-          <summary><code>tools/req7_cable_dependency_contract.py</code> — Separate CableTracker-style SDK source contract; no SDK import or send。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>Separate CableTracker-style SDK source contract; no SDK import or send。</dd>
-            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
-            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
-            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
-            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
-            <dt>语法/调用方式：</dt><dd>python3 -B tools/req7_cable_dependency_contract.py [options]</dd>
-            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
-            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
-            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
-            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
-            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>python3 -B -m py_compile tools/req7_cable_dependency_contract.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
-        </details>
-        <details data-script-reference="tools/req7_dependency_contract.py" class="script-reference">
-          <summary><code>tools/req7_dependency_contract.py</code> — REQ7 C-14 public dependency contracts; no SDK import, install or network。</summary>
-          <div class="script-body"><dl>
-            <dt>作用：</dt><dd>REQ7 C-14 public dependency contracts; no SDK import, install or network。</dd>
-            <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
-            <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
-            <dt>使用场景：</dt><dd>REQ7 C-14 公开依赖策略和精确锁校验；不导入 SDK、不安装、不访问网络或启用服务。</dd>
-            <dt>前置条件：</dt><dd>调用方冻结受测源码；固定相对路径无链接、单链接普通文件、有界读取且名字/字节身份复核一致。</dd>
-            <dt>语法/调用方式：</dt><dd>由上层 Python 模块导入 tools/req7_dependency_contract.py 中的公开函数/类</dd>
-            <dt>主要参数：</dt><dd>无受支持的独立 CLI。</dd>
-            <dt>输入：</dt><dd>infra/docker/req7-dependency-policy.json、requirements-req7-online.txt 及当前 Python 的已安装分发元数据。</dd>
-            <dt>输出/状态：</dt><dd>不可变策略/锁 SHA256、平台 wheel 清单与精确版本元数据身份，或脱敏拒绝；不写文件。</dd>
-            <dt>成功判据：</dt><dd>仅表示公开依赖合同和元数据一致；不授予发送许可、不证明 Linux wheel 已执行、SDK 鉴权或整个 REQ7。</dd>
-            <dt>失败恢复：</dt><dd>缺包、版本/路径/架构/锁漂移时 fail closed；保留证据，不能自动安装、猜测依赖或手改批准 ledger。</dd>
-          </dl>
-          <p><strong>示例：</strong></p>
-          <pre><code>rg -n &quot;req7_dependency_contract&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="tools/ssh_key_preparation.py" class="script-reference">
           <summary><code>tools/ssh_key_preparation.py</code> — Shared, bounded OpenSSH public-key selection and project publication。</summary>

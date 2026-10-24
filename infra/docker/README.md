@@ -456,17 +456,17 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
 
 ### 镜像内 Python 依赖
 
-- 镜像在 `/opt/http-ztp/venv`（`--system-site-packages`）里依次安装四份带哈希的清单，全部
-  `--no-deps --require-hashes`，后三份另加 `--only-binary=:all:`：
-  `requirements-container-top-level.lock`（TOPLEVEL-5）、`infra/docker/requirements-req7-online.txt`、
-  `infra/docker/requirements-req7-cable-sync.txt`、`infra/docker/requirements-issue-tracker-engine.txt`。
-- 最后一份是 CableTracker 引擎（`monitor/issue-tracker/cabletracker/cabletracker_runner.py`）和
-  `format_precheck.py` 的完整依赖：REQ7 cable 清单的 20 个分发（版本和 sha256 逐项相同），加上
+- 镜像在 `/opt/http-ztp/venv`（`--system-site-packages`）里依次安装两份带哈希的清单，都是
+  `--no-deps --require-hashes`，第二份另加 `--only-binary=:all:`：
+  `requirements-container-top-level.lock`（TOPLEVEL-5）、`infra/docker/requirements-issue-tracker-engine.txt`。
+  REQ7 退役第 3b 步（2026-10-24）起，镜像不再安装旧的两份 REQ7 锁，也不再执行它们的两项构建校验。
+- 第二份是 CableTracker 引擎（`monitor/issue-tracker/cabletracker/cabletracker_runner.py`）和
+  `format_precheck.py` 的完整依赖：原 REQ7 cable 锁的 20 个分发（版本和 sha256 逐项相同），加上
   httpx、openai、PySocks 及其闭包，共 36 个，CPython 3.12 Linux x86_64/aarch64。装完后
   `activate.py verify-issue-tracker-engine-runtime` 核对版本，并在 venv 内逐个导入引擎模块；任何一项
   失败，构建即失败。
 - **每台 Docker 主机都要重建镜像。** 这份清单和 `activate.py` 都列在 `IMAGE_COUPLED_SOURCE_PATHS` 里，
-  而引入这份清单的改动同时改了 `activate.py`。旧镜像激活新 release 时，`activate.py` 报
+  而引入这份清单的改动和第 3b 步都改了 `activate.py`。旧镜像激活新 release 时，`activate.py` 报
   `image-coupled source is missing/differs … build a compatible image` 并拒绝；不会走到 cron 记 WARNING
   那一步。所以下一次 load 之前，先在维护窗口里执行 `sudo ./infra/docker/deploy.sh build`。
   - 构建机要能访问 PyPI（或组织批准的镜像源）：pip 在构建时下载这 36 个 wheel 中镜像里还没有的部分。

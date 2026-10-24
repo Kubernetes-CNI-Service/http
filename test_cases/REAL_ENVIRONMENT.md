@@ -3455,7 +3455,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 基本信息
 
 - Case ID：`TC-REAL-DEPS-ENGINE-IMAGE-001`；类型：real-environment / Docker 镜像重建 / 原生 venv；状态：**OPEN / NOT RUN**。
-- 对应需求：owner 2026-10-23 统一依赖表第一阶段（步骤 3a）。镜像安装 `infra/docker/requirements-issue-tracker-engine.txt`，并由 `activate.py verify-issue-tracker-engine-runtime` 把关；原生服务器用 `infra/deps.py install --target venv-cabletracker`；`cron.sh` 的 `issue_tracker_sync()` 选择引擎解释器。
+- 对应需求：owner 2026-10-23 统一依赖表第一阶段（步骤 3a）。镜像安装 `infra/docker/requirements-issue-tracker-engine.txt`，并由 `activate.py verify-issue-tracker-engine-runtime` 把关；原生服务器用 `infra/deps.py install --target venv-cabletracker`；`cron.sh` 的 `issue_tracker_sync()` 选择引擎解释器。步骤 3b（2026-10-24，REQ7 退役）删除旧的两份 REQ7 锁和它们的两项构建校验，再次改了 Dockerfile 和 `activate.py`，同样要按本卡重建镜像。
 - 自动化文件：`test_cases.test_deps_table`、`test_cases.test_issue_tracker_engine_runtime`、`test_cases.test_deps_table_workflow`。这三个模块用假 python、假 pip、临时 HOME 和合成的 venv 元数据运行，不下载 wheel，不建镜像，不导入 Google/OpenAI 库。
 - 适用平台：management-server，Ubuntu 24.04 amd64 与 arm64 各一台；Docker 后端和原生各做一次。
 
@@ -3475,7 +3475,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 步骤
 
-1. 在联网、同架构的构建机上，按 `infra/docker/README.md` 的构建流程执行 `sudo ./infra/docker/deploy.sh build`。构建日志里四次 `pip install` 都成功；`verify-issue-tracker-engine-runtime` 输出 `"verified": true`、`"distributions": 36`。
+1. 在联网、同架构的构建机上，按 `infra/docker/README.md` 的构建流程执行 `sudo ./infra/docker/deploy.sh build`。构建日志里两次 `pip install`（TOPLEVEL-5 和引擎清单）都成功，没有 `verify-req7-*` 步骤；`verify-issue-tracker-engine-runtime` 输出 `"verified": true`、`"distributions": 36`。
 2. 在新容器的源码根目录执行：
    - `/opt/http-ztp/venv/bin/python -c 'import googleapiclient, httpx, openai, socks'`；
    - `/opt/http-ztp/venv/bin/python infra/deps.py check --target container --json`，退出 0。
