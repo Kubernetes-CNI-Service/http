@@ -3667,6 +3667,10 @@
       "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow", "test_cases.test_issue_tracker_engine_runtime", "test_cases.test_ztp_container_runtime", "test_cases.test_req7_cable_runtime_workflow", "test_cases.test_change_aware_test_runner"]
     },
     {
+      "paths": ["user-manual.html", "infra/docker/README.md", "monitor/issue-tracker/README.md", "test_cases/REAL_ENVIRONMENT.md"],
+      "tests": ["test_cases.test_deps_table_workflow"]
+    },
+    {
       "paths": ["infra/docker/Dockerfile", "test_cases/run_related_tests.py", "requirements-container-top-level.lock", "requirements-dev.txt", "requirements-f01-ssh.lock", "infiniband/bringup/xdr-upgrade/requirements.txt", "infra/docker/requirements-req7-online.txt", "infra/docker/requirements-req7-cable-sync.txt", "tools/ibdiagnet-analyze-tool/requirements.txt"],
       "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow"]
     },

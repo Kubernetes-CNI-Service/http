@@ -9,9 +9,11 @@ green on the repository; the new files travel with sync/upload/image.
 
 from __future__ import annotations
 
+import html
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -130,6 +132,74 @@ class DependencyTableWorkflowTests(unittest.TestCase):
             self.assertEqual("production", path_disposition(relative), relative)
             self.assertIsNone(transfer_exclude_reason(Path(relative)), relative)
         self.assertTrue(os.access(ROOT / "infra/deps.py", os.X_OK))
+
+
+def section(text: str, heading: str) -> str:
+    """From `heading` up to the next heading of the same or a higher level."""
+    start = text.index(heading)
+    level = len(heading) - len(heading.lstrip("#"))
+    following = re.compile(r"^#{1,%d} " % level, re.M).search(text, start + len(heading))
+    return text[start:following.start() if following else len(text)]
+
+
+def manual_hand_written() -> str:
+    text = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+    for begin, end in re.findall(r"(<!-- BEGIN GENERATED [^>]*-->).*?(<!-- END GENERATED [^>]*-->)", text, re.S):
+        text = text[:text.index(begin)] + text[text.index(end) + len(end):]
+    return html.unescape(text)
+
+
+class DependencyDocumentationTests(unittest.TestCase):
+    """The operator-facing statements that cron.sh, deps.py and the image actually implement."""
+
+    def setUp(self):
+        self.table = json.loads((ROOT / TABLE).read_text(encoding="ascii"))
+        self.docker = section((ROOT / "infra/docker/README.md").read_text(encoding="utf-8"), "### 镜像内 Python 依赖")
+        self.card = section((ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8"),
+                            "## TC-REAL-DEPS-ENGINE-IMAGE-001")
+        self.issue_tracker = (ROOT / "monitor/issue-tracker/README.md").read_text(encoding="utf-8")
+        self.cron = cron_function()
+
+    def test_the_native_engine_venv_belongs_to_the_user_who_runs_11_load(self):
+        # S1: setup and load install no crontab; the worker started by 11-load.py runs cron.sh.
+        installed_by = self.table["targets"]["venv-cabletracker"]["installed_by"]
+        self.assertIn("11-load.py", installed_by)
+        self.assertNotIn("crontab", installed_by)
+        for label, text in (("issue-tracker README", self.issue_tracker), ("card", self.card)):
+            with self.subTest(document=label):
+                self.assertIn("执行 11-load.py 的用户", text)
+                self.assertNotIn("运行 cron 的那个用户", text)
+                self.assertNotIn("crontab 运行", text)
+        self.assertIn("11-load.py", self.cron)
+        self.assertNotIn("the user this cron runs as", self.cron)
+
+    def test_every_docker_host_rebuilds_the_image_with_pypi_access_before_its_next_load(self):
+        # S3: activate.py is image-coupled and changed, so an old image refuses the new release.
+        for label, text in (("docker README", self.docker), ("card", self.card)):
+            with self.subTest(document=label):
+                self.assertIn("每台 Docker 主机", text)
+                self.assertIn("deploy.sh build", text)
+                self.assertIn("PyPI", text)
+                self.assertIn("拒绝", text)
+        self.assertNotIn("cron.sh 的在线同步会在 cronjob.log 里记 WARNING", self.docker)
+        self.assertNotIn("在此之前构建的镜像没有 httpx/openai，引擎在导入阶段失败，cron 只记 WARNING", self.card)
+        self.assertNotIn("older images lack", self.cron)
+        self.assertIn("rebuild", self.cron)
+
+    def test_manual_and_docker_readme_carry_the_native_venv_steps(self):
+        # S6: the hand-written part of the user manual, not only the generated catalog.
+        required = (
+            "python3 infra/deps.py check",
+            "python3 infra/deps.py install --target venv-cabletracker",
+            "python3 infra/deps.py install --target venv-ibsw-upgrade",
+            "~/.venvs/http/cabletracker",
+            "~/.venvs/http/ibsw-upgrade",
+            "11-load.py",
+        )
+        for label, text in (("user manual", manual_hand_written()), ("docker README", self.docker)):
+            for phrase in required:
+                with self.subTest(document=label, phrase=phrase):
+                    self.assertIn(phrase, text)
 
 
 if __name__ == "__main__":

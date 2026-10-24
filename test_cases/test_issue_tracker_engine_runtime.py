@@ -204,24 +204,31 @@ class CronEngineSelectionTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def run_function(self, home=None, rc=0) -> tuple:
+    def run_function(self, home=None, rc=0, domains=("eth",)) -> tuple:
         function = cron_function()
         self.assertEqual(2, function.count(CONTAINER_PYTHON))
+        calls = []
+        for domain in domains:
+            calls += [f"issue_tracker_sync {domain}", f'cat "$TEST_ARGS" >> "$TEST_ARGS.all"']
         harness = "\n".join([
             'log() { printf "%s\\n" "$*" >> "$TEST_LOG"; }',
             f'ISSUE_TRACKER_SYNC="{self.sync}"',
             function.replace(CONTAINER_PYTHON, str(self.container)),
-            "issue_tracker_sync eth",
+            *calls,
         ]) + "\n"
         env = {"PATH": f"{self.base / 'bin'}:/usr/bin:/bin", "TEST_ARGS": str(self.base / "args"),
                "TEST_LOG": str(self.base / "log"), "FAKE_RC": str(rc)}
         if home is not None:
             env["HOME"] = str(home)
+        for stale in ("args.all", "log"):
+            (self.base / stale).unlink(missing_ok=True)
         result = subprocess.run(["/bin/bash", "-c", harness], env=env, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stderr)
         args = (self.base / "args").read_text(encoding="utf-8").splitlines()
         log = (self.base / "log").read_text(encoding="utf-8")
+        every = (self.base / "args.all").read_text(encoding="utf-8").splitlines()
+        self.engines = [every[index + 1] for index, value in enumerate(every) if value == "--engine-python"]
         return args[args.index("--engine-python") + 1], args, log
 
     def make_executable(self, path: Path, mode: int = 0o755) -> Path:
@@ -245,6 +252,59 @@ class CronEngineSelectionTests(unittest.TestCase):
         user_python.chmod(0o755)
         self.assertEqual("python3", self.run_function(None)[0])
         self.assertEqual("python3", self.run_function(self.base / "nobody")[0])
+
+    def test_user_venv_is_used_only_when_nobody_else_can_change_it(self):
+        """S1/S2: from ~/.venvs down to the resolved interpreter, every component must belong to this
+        uid or root and must not be group/other writable, and no directory may be a symlink; otherwise
+        python3 is used and the reason is logged once per cron run (eth and ib share it)."""
+        home = self.base / "home"
+        venv = home / ".venvs/http/cabletracker"
+        user_python = self.make_executable(venv / "bin/python")
+        both = ("eth", "ib")
+
+        chosen, _args, log = self.run_function(home, domains=both)
+        self.assertEqual([str(user_python)] * 2, self.engines)
+        self.assertNotIn("not using", log)
+
+        unsafe = {
+            "group-writable ~/.venvs/http": (home / ".venvs/http", 0o775),
+            "other-writable ~/.venvs": (home / ".venvs", 0o757),
+            "other-writable bin": (venv / "bin", 0o757),
+            "group-writable interpreter": (user_python, 0o775),
+        }
+        for label, (path, mode) in unsafe.items():
+            with self.subTest(case=label):
+                path.chmod(mode)
+                try:
+                    _chosen, _args, log = self.run_function(home, domains=both)
+                finally:
+                    path.chmod(0o755)
+                self.assertEqual(["python3", "python3"], self.engines)
+                warnings = [line for line in log.splitlines() if "not using" in line]
+                self.assertEqual(1, len(warnings), log)
+                self.assertIn(str(user_python), warnings[0])
+                self.assertIn("python3", warnings[0])
+
+        # A symlinked directory component is refused even when its target looks safe.
+        real = self.base / "elsewhere/cabletracker"
+        real.parent.mkdir(parents=True)
+        venv.rename(real)
+        venv.symlink_to(real)
+        self.run_function(home, domains=both)
+        self.assertEqual(["python3", "python3"], self.engines)
+        venv.unlink()
+        real.rename(venv)
+
+        # bin/python may be a symlink (a real venv's is) when what it resolves to is safe:
+        # a root-owned interpreter in a root-owned directory is accepted ...
+        user_python.unlink()
+        user_python.symlink_to("/bin/sh")
+        self.assertEqual(str(user_python), self.run_function(home)[0])
+        # ... a group-writable target is not.
+        target = self.make_executable(self.base / "tools/python", mode=0o775)
+        user_python.unlink()
+        user_python.symlink_to(target)
+        self.assertEqual("python3", self.run_function(home)[0])
 
     def test_exit_codes_keep_their_log_lines(self):
         for rc, line in ((75, "another sync is running; skipped"), (1, "WARNING: eth sync exited 1")):

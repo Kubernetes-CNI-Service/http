@@ -36,9 +36,9 @@ DOCKER_ROOT = ROOT / "infra/docker"
 # contracts; prior trust-boundary prose retained. 2026-10-19: the native recovery
 # command matches infra-setup.py RECOVERY_COMMAND (--recover-monitor-authority --apply).
 # 2026-10-23: section "镜像内 Python 依赖" (unified dependency table step 3a: engine list + gate).
-PUBLISHED_DOCKER_README_SIZE = 46719
+PUBLISHED_DOCKER_README_SIZE = 49347
 PUBLISHED_DOCKER_README_SHA256 = (
-    "d6285eedf5b7b5d2696a6fad4e97e05c5715ba55c124db9124ea5bcf168fc65d"
+    "45a6cb2e6931f482ab3d4c21a523dd8ed612b84f561bffeeac49c5d7d5bfd64d"
 )
 
 

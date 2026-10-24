@@ -129,22 +129,34 @@ if args[:2] == ["-m", "venv"]:
     me = target / "bin/python"
     me.write_bytes(Path(__file__).read_bytes())
     me.chmod(0o755)
+    if os.environ.get("FAKE_PY_VENV_FAIL"):
+        # Debian/Ubuntu without python3-venv: pyvenv.cfg and bin/python exist, ensurepip failed.
+        print("The virtual environment was not created successfully because ensurepip is not available.")
+        sys.exit(1)
+    info = target / "lib/python3.12/site-packages/pip-24.0.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Name: pip\nVersion: 24.0\n\n")
     sys.exit(0)
-if args[:3] == ["-m", "pip", "install"]:
+if args[:2] == ["-m", "pip"]:
     venv = Path(__file__).resolve().parents[1]
     site = venv / "lib/python3.12/site-packages"
-    requirements = Path(args[args.index("-r") + 1])
-    for raw in requirements.read_text().splitlines():
-        line = raw.strip()
-        if line and not line.startswith(("#", "--")) and "==" in line:
-            name, version = line.split()[0].split("==")
-            info = site / ("%s-%s.dist-info" % (name.replace("-", "_"), version))
-            info.mkdir()
-            (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n\n" % (name, version))
-    info = site / "pip-26.0.dist-info"
-    info.mkdir()
-    (info / "METADATA").write_text("Name: pip\nVersion: 26.0\n\n")
-    sys.exit(0)
+    rest = [arg for arg in args[2:] if arg != "--isolated"]
+    if not (site / "pip-24.0.dist-info").is_dir():
+        print("%s: No module named pip" % __file__)
+        sys.exit(1)
+    if rest[:1] == ["--version"]:
+        print("pip 24.0 from %s" % site)
+        sys.exit(0)
+    if rest[:1] == ["install"]:
+        requirements = Path(rest[rest.index("-r") + 1])
+        for raw in requirements.read_text().splitlines():
+            line = raw.strip()
+            if line and not line.startswith(("#", "--")) and "==" in line:
+                name, version = line.split()[0].split("==")
+                info = site / ("%s-%s.dist-info" % (name.replace("-", "_"), version))
+                info.mkdir(exist_ok=True)
+                (info / "METADATA").write_text("Metadata-Version: 2.1\nName: %s\nVersion: %s\n\n" % (name, version))
+        sys.exit(0)
 sys.exit(4)
 '''
 
@@ -563,7 +575,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(2, bundle.returncode)
         self.assertIn("phase 2", bundle.stderr)
 
-    def test_install_builds_the_venv_under_home_with_hash_enforcing_pip(self):
+    def test_install_builds_the_venv_under_home_with_hash_enforcing_isolated_pip(self):
+        """S5: pip runs inside the venv with -I --isolated --no-cache-dir: no PIP_* environment,
+        no pip.conf, no ~/.cache/pip; hashes, no-deps and wheels-only stay."""
         real = Path(os.path.expanduser("~")) / ".venvs/http/cabletracker"
         real_before = real.exists() and sorted(os.listdir(real))
         with tempfile.TemporaryDirectory() as directory:
@@ -578,17 +592,20 @@ class CommandLineTests(unittest.TestCase):
             venv = home / ".venvs/http/cabletracker"
             self.assertTrue((venv / "pyvenv.cfg").is_file())
             calls = [json.loads(line) for line in log.read_text().splitlines()]
-            pip = [call for call in calls if call[1:4] == ["-m", "pip", "install"]]
+            pip = [call for call in calls if "install" in call and "-m" in call and "pip" in call]
             self.assertEqual(1, len(pip))
-            self.assertEqual(str(venv / "bin/python"), pip[0][0])
-            self.assertEqual(["--disable-pip-version-check", "--only-binary=:all:", "--no-deps", "--require-hashes",
-                              "-r", str(ROOT / ENGINE)], pip[0][4:])
-            create = [call for call in calls if call[1:3] == ["-m", "venv"]]
-            self.assertEqual([[str(fake), "-m", "venv", str(venv)]], create)
+            self.assertEqual([str(venv / "bin/python"), "-I", "-m", "pip", "--isolated", "install", "--no-cache-dir",
+                              "--disable-pip-version-check", "--only-binary=:all:", "--no-deps", "--require-hashes",
+                              "-r", str(ROOT / ENGINE)], pip[0])
+            create = [call for call in calls if "venv" in call[1:4]]
+            self.assertEqual([[str(fake), "-I", "-m", "venv", str(venv)]], create)
             self.assertIn("== venv-cabletracker: OK", result.stdout)
             again = run_deps("check", "--target", "venv-cabletracker", env=env)
             self.assertEqual(0, again.returncode, again.stdout)
             self.assertEqual(0o700, (home / ".venvs/http").stat().st_mode & 0o777)
+            # A second install into the healthy venv probes pip, then reinstalls by hash only.
+            rerun = run_deps("install", "--target", "venv-cabletracker", "--python", str(fake), env=env)
+            self.assertEqual(0, rerun.returncode, rerun.stdout + rerun.stderr)
         self.assertEqual(real_before, real.exists() and sorted(os.listdir(real)))
 
     def test_install_refuses_planned_or_foreign_platforms_and_non_venv_paths(self):
@@ -614,7 +631,45 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(2, result.returncode)
             self.assertIn("not a venv", result.stderr)
 
-    def test_install_dry_run_and_root_refusal_change_nothing(self):
+    def test_half_built_venv_names_the_directory_to_remove_and_deletes_nothing(self):
+        """S4: a venv left by a failed creation (no python3-venv), one whose pip is unusable, or one
+        without bin/python fails with the directory to remove and the command to rerun."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            fake = write_fake_python(base)
+            log = base / "argv.log"
+            env = {"HOME": str(base), "FAKE_PY_IDENTITY": LINUX_312, "FAKE_PY_LOG": str(log)}
+            venv = base / ".venvs/http/cabletracker"
+            rerun = "python3 infra/deps.py install --target venv-cabletracker"
+
+            failed = run_deps("install", "--target", "venv-cabletracker", "--python", str(fake),
+                              env=dict(env, FAKE_PY_VENV_FAIL="1"))
+            self.assertEqual(1, failed.returncode, failed.stdout + failed.stderr)
+            for needle in (str(venv), "rm -rf " + str(venv), "python3-venv", rerun):
+                self.assertIn(needle, failed.stderr)
+            self.assertTrue((venv / "pyvenv.cfg").is_file())
+
+            log.unlink()
+            stuck = run_deps("install", "--target", "venv-cabletracker", "--python", str(fake), env=env)
+            self.assertEqual(1, stuck.returncode, stuck.stdout + stuck.stderr)
+            for needle in ("rm -rf " + str(venv), rerun, "pip"):
+                self.assertIn(needle, stuck.stderr)
+            self.assertNotIn("Traceback", stuck.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([], [call for call in calls if "install" in call])
+            self.assertTrue((venv / "pyvenv.cfg").is_file())
+
+            (venv / "bin/python").unlink()
+            missing = run_deps("install", "--target", "venv-cabletracker", "--python", str(fake), env=env)
+            self.assertEqual(1, missing.returncode, missing.stdout + missing.stderr)
+            self.assertIn("rm -rf " + str(venv), missing.stderr)
+            self.assertIn(str(venv / "bin/python"), missing.stderr)
+            self.assertNotIn("Traceback", missing.stderr)
+            self.assertTrue((venv / "pyvenv.cfg").is_file())
+
+    def test_root_installs_only_into_its_own_home_and_dry_run_changes_nothing(self):
+        """S1: root may install only when HOME is root's own home directory (so sudo -E with another
+        user's HOME is refused); a dry run never writes."""
         deps = load_deps()
         table = deps.load_table(ROOT)
         with tempfile.TemporaryDirectory() as directory:
@@ -625,11 +680,21 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("--require-hashes -r " + str(ROOT / IBSW), result.stdout)
             self.assertFalse((base / ".venvs").exists())
+            root_home = base / "root-home"
+            account = mock.Mock(pw_dir=str(root_home))
             with mock.patch.dict(os.environ, env), mock.patch("os.geteuid", return_value=0), \
+                    mock.patch("pwd.getpwuid", return_value=account), \
                     contextlib.redirect_stderr(io.StringIO()) as stderr:
                 self.assertEqual(2, deps.install(ROOT, table, "venv-ibsw-upgrade", str(fake), False))
-            self.assertIn("do not run install as root", stderr.getvalue())
+            self.assertIn(str(root_home), stderr.getvalue())
+            self.assertIn("HOME", stderr.getvalue())
             self.assertFalse((base / ".venvs").exists())
+            with mock.patch.dict(os.environ, dict(env, HOME=str(root_home))), mock.patch("os.geteuid", return_value=0), \
+                    mock.patch("pwd.getpwuid", return_value=account), \
+                    contextlib.redirect_stdout(io.StringIO()) as stdout:
+                self.assertEqual(0, deps.install(ROOT, table, "venv-ibsw-upgrade", str(fake), True))
+            self.assertIn(str(root_home / ".venvs/http/ibsw-upgrade"), stdout.getvalue())
+            self.assertFalse(root_home.exists())
 
 
 if __name__ == "__main__":

@@ -12322,6 +12322,21 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
         <p>AIR 使用 <code>--air</code>，并默认只处理 Ethernet。管理服务器 load 会重新绑定现场 service IP、管理公钥、DHCP、release 和宿主服务，不能由本机生成结果替代。</p>
       </div>
 
+      <div class="callout">
+        <h3 id="v2-native-python-venvs" data-nav-title="Native Python 依赖与 venv">Native 管理服务器的 Python 依赖与两个 venv</h3>
+        <p>全部依赖登记在 <code>infra/dependencies.json</code>。系统通用模块（PyYAML、Jinja2、openpyxl、pandas、XlsxWriter）由 <code>infra-setup.py</code> 用 apt 安装；需要精确版本的两套依赖装在用户家目录下的 venv 里，用带哈希的清单安装。</p>
+        <ul>
+          <li><code>venv-cabletracker</code>：CableTracker 引擎（REQ7 在线同步），位置 <code>~/.venvs/http/cabletracker</code>。由执行 11-load.py 的用户安装：<code>cron.sh</code> 由 load 启动的 switch-collection worker 运行，setup 和 load 都不安装 crontab。</li>
+          <li><code>venv-ibsw-upgrade</code>：<code>upgrade.py</code> 的 SSH 依赖，F01 工具复用，位置 <code>~/.venvs/http/ibsw-upgrade</code>。由运行 <code>upgrade.py</code> 的用户安装。</li>
+        </ul>
+        <pre><code>cd /var/www/html
+python3 infra/deps.py check
+python3 infra/deps.py install --target venv-cabletracker   # 执行 11-load.py 的同一个用户
+python3 infra/deps.py install --target venv-ibsw-upgrade   # 运行 upgrade.py 的用户
+python3 infra/deps.py check --target venv-cabletracker --target venv-ibsw-upgrade</code></pre>
+        <p>需要 Ubuntu 24.04（CPython 3.12）、<code>python3-venv</code> 和 PyPI 访问；22.04 属于第二阶段，install 会拒绝。load 用 <code>sudo</code> 执行时这个用户是 root：用普通 <code>sudo</code> 执行 install，venv 建在 <code>/root/.venvs/http/</code>；<code>sudo -E</code> 会保留别人的 HOME，install 拒绝执行。venv 只建了一半时，install 报出要删除的目录和重跑命令，不会自动删除。<code>cron.sh</code> 只在 venv 的每一级目录和解释器都属于当前用户或 root、且不可被组或其他人写时才用它，否则改用 <code>python3</code> 并在 cronjob.log 记一次原因。Docker 后端不用这两个 venv：镜像自带引擎依赖，改动后每台 Docker 主机都要先执行 <code>deploy.sh build</code> 重建镜像再 load，详见 <code>infra/docker/README.md</code>。</p>
+      </div>
+
       <section id="v2-scenario-docker" data-chapter>
         <h2>7. 场景：Docker/Supervisor 准入状态</h2>
         <div id="v2-runbook-docker-admission" data-nav-title="Docker 当前准入状态" class="runbook" data-runbook="docker-admission"><span id="v2-runbook-docker-admission-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-runbook-docker-admission-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-runbook-docker-admission-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span>

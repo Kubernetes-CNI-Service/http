@@ -2801,14 +2801,35 @@ issue_tracker_sync() {
     local domain=$1 engine_python=python3 rc=0
     [[ -f "$ISSUE_TRACKER_SYNC" ]] || { log "[ISSUE-TRACKER] WARNING: missing $ISSUE_TRACKER_SYNC"; return 0; }
     # The engine needs the Google/OpenAI client closure of infra/docker/requirements-issue-tracker-engine.txt.
-    # Images built from the current Dockerfile install it into /opt/http-ztp/venv (older images lack
-    # httpx/openai); a native server uses the cabletracker venv of the user this cron runs as
-    # (python3 infra/deps.py install --target venv-cabletracker). Without either, python3 is used, the
-    # engine fails at import and the WARNING below records it.
+    # Container: the image installs it into /opt/http-ztp/venv. activate.py is image-coupled, so every Docker
+    # host must rebuild the image (deploy.sh build, with PyPI access) before it loads a release carrying it.
+    # Native: ~/.venvs/http/cabletracker of the user who runs 11-load.py (its switch-collection worker runs
+    # this script), created by that user with: python3 infra/deps.py install --target venv-cabletracker.
+    # That venv is used only when nobody else can change it: every directory from $HOME/.venvs down to bin
+    # and the resolved interpreter (and its directory) belong to this uid or root, are not group/other
+    # writable and no directory is a symlink. Otherwise python3 is used, the reason is logged once per run,
+    # and the engine fails at import (the WARNING below).
     if [[ -x /opt/http-ztp/venv/bin/python ]]; then
         engine_python=/opt/http-ztp/venv/bin/python
-    elif [[ -n ${HOME:-} && -x $HOME/.venvs/http/cabletracker/bin/python ]]; then
-        engine_python=$HOME/.venvs/http/cabletracker/bin/python
+    elif [[ -n ${HOME:-} && -e $HOME/.venvs/http/cabletracker/bin/python ]]; then
+        local venv_python=$HOME/.venvs/http/cabletracker/bin/python venv_reason="" venv_path resolved uid
+        uid=$(id -u)
+        resolved=$(readlink -f "$venv_python" 2>/dev/null) || resolved=""
+        for venv_path in "$HOME/.venvs" "$HOME/.venvs/http" "$HOME/.venvs/http/cabletracker" \
+                         "$HOME/.venvs/http/cabletracker/bin" "${resolved%/*}" "$resolved"; do
+            if [[ -z $venv_path || -L $venv_path ]] || [[ -z $(find "$venv_path" -maxdepth 0 \
+                    \( -user "$uid" -o -user 0 \) ! -perm -020 ! -perm -002 -print 2>/dev/null) ]]; then
+                venv_reason="${venv_path:-the interpreter} is a symlink, not owned by uid $uid or root, or group/other writable"
+                break
+            fi
+        done
+        [[ -z $venv_reason && ! -x $resolved ]] && venv_reason="$resolved is not executable"
+        if [[ -z $venv_reason ]]; then
+            engine_python=$venv_python
+        elif [[ -z ${ISSUE_TRACKER_VENV_NOTE:-} ]]; then
+            ISSUE_TRACKER_VENV_NOTE=logged
+            log "[ISSUE-TRACKER] WARNING: not using $venv_python ($venv_reason); the engine runs with python3"
+        fi
     fi
     python3 "$ISSUE_TRACKER_SYNC" --only "$domain" --engine-python "$engine_python" >/dev/null 2>&1 || rc=$?
     case "$rc" in

@@ -3458,8 +3458,9 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 风险与目标
 
-- 本机测试证明不了这些事：pip 在真实 CPython 3.12 上按哈希装齐 36 个分发；引擎模块在镜像 venv 里能真实导入；原生 venv 在 cron 用户下可用。
-- 在此之前构建的镜像没有 httpx/openai，引擎在导入阶段失败，cron 只记 WARNING。
+- 本机测试证明不了这些事：pip 在真实 CPython 3.12 上按哈希装齐 36 个分发；引擎模块在镜像 venv 里能真实导入；原生 venv 在执行 11-load.py 的用户下可用。
+- 每台 Docker 主机都必须在下一次 load 之前重建镜像：`activate.py` 与镜像耦合，并且这次改了它，引擎清单也是新增的耦合文件。旧镜像激活新 release 时会报 `image-coupled source is missing/differs … build a compatible image` 并拒绝，根本走不到 cron 记 WARNING 那一步。
+- 构建机要能访问 PyPI（或组织批准的镜像源）；第二阶段的离线 bundle 做好之前，没有离线构建路径。
 - 成功标准：新镜像构建通过引擎关卡；容器和原生两边的 `deps.py check` 都退出 0；下一轮 prod 采集的 `[ISSUE-TRACKER]` 行不再是导入失败。
 
 ### 前置条件与输入
@@ -3467,7 +3468,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - owner 书面授权的维护窗口：重建并替换镜像会重启容器内的服务。
 - 构建机能访问 PyPI，或组织批准的镜像源。
 - 当前精确源码树。记录现有 image ID、容器状态和 `cronjob.log` 末尾。
-- 原生一侧：知道哪个用户的 crontab 运行 `cron.sh`；该用户能执行 `python3 -m venv`（需要 `python3-venv`）。
+- 原生一侧：确认执行 11-load.py 的用户。`cron.sh` 由 load 启动的 switch-collection worker 运行，setup 和 load 都不安装 crontab。该用户能执行 `python3 -m venv`（需要 `python3-venv`）。
 
 ### 步骤
 
@@ -3476,7 +3477,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    - `/opt/http-ztp/venv/bin/python -c 'import googleapiclient, httpx, openai, socks'`；
    - `/opt/http-ztp/venv/bin/python infra/deps.py check --target container --json`，退出 0。
 3. 项目已启用 issue-tracker 且凭据就位时，执行 `python3 monitor/issue-tracker/issue-tracker-sync.py --precheck-only`：只做转换和格式预检，不写表。记录退出码。
-4. 原生 Ubuntu 24.04，以运行 cron 的那个用户（不是 root，不用 sudo）执行：
+4. 原生 Ubuntu 24.04，以执行 11-load.py 的用户执行（load 用 sudo 执行时这个用户是 root：用普通 sudo，不用 sudo -E）：
    - `python3 infra/deps.py install --target venv-cabletracker`，然后 `python3 infra/deps.py check --target venv-cabletracker`，退出 0；
    - `python3 infra/deps.py install --target venv-ibsw-upgrade`，然后确认 `upgrade.py` 自动切换到该 venv。
 5. 等下一轮 prod 采集，检查 `cronjob.log` 的 `[ISSUE-TRACKER]` 行。
@@ -3484,20 +3485,23 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 预期结果
 
 - 正向：步骤 1–5 全部如上。
-- 拒绝：用 root 执行 `deps.py install` 退出 2；在 Ubuntu 22.04（cp310）上执行 `install` 退出 2，并提示「planned for phase 2」。
-- 不允许的副作用：构建和 check 不读取、不打印任何凭据；`deps.py` 不写 `~/.venvs/http/` 以外的位置。
+- 拒绝：以 root 身份、但 HOME 不是 root 家目录（例如 `sudo -E`）执行 `deps.py install` 退出 2；在 Ubuntu 22.04（cp310）上执行 `install` 退出 2，并提示「planned for phase 2」；venv 只建了一半时 install 退出 1，报出要删除的目录和重跑命令，不删除任何东西。
+- 不允许的副作用：构建和 check 不读取、不打印任何凭据；`deps.py` 不写 `~/.venvs/http/` 以外的位置（pip 以 `-I --isolated --no-cache-dir` 运行，不读 `PIP_*` 和 pip.conf，不写 `~/.cache/pip`）。
 - 需要保存的证据：构建日志、新旧 image ID、两边 check 的 JSON 输出、每个 venv 的 `pip list --format=freeze`、`cronjob.log` 片段。
 
 ### 故障注入与清理
 
 - 在构建机的临时源码副本里改坏引擎清单的一个哈希：构建应在 pip 阶段失败。删除 openai 一行：构建应在 `verify-issue-tracker-engine-runtime` 失败。两种情况都不得产出可部署镜像。
 - 清理：保留旧镜像以便回滚。原生 venv 可以直接删除 `~/.venvs/http/cabletracker` 后重建。
-- 重复执行：venv 已存在时，`install` 只按哈希补装，再做一次 check。
+- 在没有 `python3-venv` 的主机上先执行一次 install：应失败，并报出要删除的目录；装好 `python3-venv`、按提示删除后重跑应成功。
+- 把 `~/.venvs/http` 改成组可写：下一轮 cron 应改用 `python3`，并在 cronjob.log 记一次原因。
+- 重复执行：venv 完整时，`install` 先确认 venv 里的 pip 能运行，再按哈希补装，最后做一次 check。
 
 ### 自动化状态
 
 - [x] 已加入 `test_cases/test_deps_table.py`、`test_cases/test_issue_tracker_engine_runtime.py`、`test_cases/test_deps_table_workflow.py`
 - [x] 修复前能够稳定失败（新模块在基线 4583161 上失败）
 - [x] 修复后通过（定向运行）
+- [x] 2026-10-24 复核修正（S1–S6）：先在 0545163 上用新测试复现失败，修复后定向运行通过
 - [ ] 已纳入全量 discovery（需正式本机 load 的全量证明，未执行）
 - [ ] 真实镜像重建与原生 venv 验证（本卡，NOT RUN）

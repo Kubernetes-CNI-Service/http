@@ -465,11 +465,44 @@ sync-code 和 tar upload 共同排除；只有无拓扑信息的 `container.env.
   httpx、openai、PySocks 及其闭包，共 36 个，CPython 3.12 Linux x86_64/aarch64。装完后
   `activate.py verify-issue-tracker-engine-runtime` 核对版本，并在 venv 内逐个导入引擎模块；任何一项
   失败，构建即失败。
-- 这份清单列在 `IMAGE_COUPLED_SOURCE_PATHS` 里，改动它必须重建镜像。在它之前构建的镜像没有
-  httpx/openai，`cron.sh` 的在线同步会在 cronjob.log 里记 WARNING。
+- **每台 Docker 主机都要重建镜像。** 这份清单和 `activate.py` 都列在 `IMAGE_COUPLED_SOURCE_PATHS` 里，
+  而引入这份清单的改动同时改了 `activate.py`。旧镜像激活新 release 时，`activate.py` 报
+  `image-coupled source is missing/differs … build a compatible image` 并拒绝；不会走到 cron 记 WARNING
+  那一步。所以下一次 load 之前，先在维护窗口里执行 `sudo ./infra/docker/deploy.sh build`。
+  - 构建机要能访问 PyPI（或组织批准的镜像源）：pip 在构建时下载这 36 个 wheel 中镜像里还没有的部分。
+    第二阶段的离线 bundle 做好之前，没有离线构建路径。
+  - 以后再改这份清单或 `activate.py`，同样要先重建镜像。
 - 全部依赖统一登记在 `infra/dependencies.json`。`python3 infra/deps.py check --target files` 核对各清单
   与表一致；在容器源码根目录执行 `/opt/http-ztp/venv/bin/python infra/deps.py check --target container`
   检查镜像 venv。表本身不是镜像耦合文件，改表不需要重建镜像。
+
+#### 原生服务器的两个 venv
+
+原生（Native）服务器不用镜像，精确版本的两套依赖装在用户家目录下的 venv 里。系统通用模块
+（PyYAML、Jinja2、openpyxl、pandas、XlsxWriter）仍由 `infra-setup.py` 用 apt 安装。
+
+| venv | 用途 | 位置 | 由谁安装 |
+|---|---|---|---|
+| `venv-cabletracker` | CableTracker 引擎（REQ7 在线同步） | `~/.venvs/http/cabletracker` | 执行 11-load.py 的用户。`cron.sh` 由 load 启动的 switch-collection worker 运行（setup 和 load 不装 crontab） |
+| `venv-ibsw-upgrade` | `upgrade.py` 的 SSH 依赖；F01 工具复用 | `~/.venvs/http/ibsw-upgrade` | 运行 `upgrade.py` 的用户 |
+
+```bash
+cd /var/www/html
+python3 infra/deps.py check                                # 原生默认：apt 包、系统模块、命令，加上已存在的 venv
+python3 infra/deps.py install --target venv-cabletracker   # 用执行 11-load.py 的同一个用户
+python3 infra/deps.py install --target venv-ibsw-upgrade   # 用运行 upgrade.py 的用户
+python3 infra/deps.py check --target venv-cabletracker --target venv-ibsw-upgrade
+```
+
+- 需要 Ubuntu 24.04（CPython 3.12）、`python3-venv`，以及能访问 PyPI。22.04 的 cp310 清单属于第二阶段，
+  在 22.04 上 install 会拒绝并提示 phase 2。
+- load 用 `sudo` 执行时，worker 以 root 运行：此时用普通 `sudo python3 infra/deps.py install …`，venv 建在
+  `/root/.venvs/http/`。install 只允许 root 装进 root 自己的家目录；`sudo -E` 保留了别人的 HOME，会被拒绝。
+- `cron.sh` 只在 `~/.venvs` 到解释器的每一级都属于当前用户或 root、且不可被组或其他人写时才使用这个 venv；
+  否则改用 `python3`，并在 cronjob.log 记一次原因。
+- pip 以 `-I --isolated --no-cache-dir` 运行，不读 `PIP_*` 环境变量和 pip.conf，也不写 `~/.cache/pip`。
+- 如果 venv 只建了一半（例如缺 `python3-venv` 时第一次 install 失败），install 会报出要删除的目录和重跑命令，
+  不会自动删除任何东西。
 
 ### 镜像上下文与 live 项目边界（H1–H4）
 

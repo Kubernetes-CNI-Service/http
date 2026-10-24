@@ -14,8 +14,11 @@ check    Compare one or more targets with the table and print one line per item;
          Without --target: darwin -> files + local-test; inside the container -> container;
          other Linux -> native plus each venv that exists for the current user.
 install  Create ~/.venvs/http/<name> for venv-ibsw-upgrade or venv-cabletracker of the current user
-         from the table's hashed requirements (pip --only-binary=:all: --no-deps --require-hashes),
-         then check it. Run it as the user who runs the consumer, never with sudo.
+         from the table's hashed requirements (pip -I --isolated --no-cache-dir --only-binary=:all:
+         --no-deps --require-hashes), then check it. Run it as the user who runs the consumer:
+         11-load.py (its worker runs cron.sh) for venv-cabletracker, upgrade.py for venv-ibsw-upgrade.
+         Root installs only into its own home (HOME must be root's home: plain sudo, not sudo -E).
+         A half-built venv is reported with the directory to remove; nothing is deleted.
 bundle   Phase 2 (offline apt + wheel bundle); not implemented yet.
 fmt      Rewrite infra/dependencies.json in its canonical JSON form.
 """
@@ -28,6 +31,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shutil
 import subprocess
@@ -749,11 +753,35 @@ def probe_platform(python: str) -> str:
     return f"{system}-cp{identity['version'].replace('.', '')}-{machine}"
 
 
+def root_home_problem() -> object:
+    """None, or why root must not install here: root installs only into its own home directory.
+
+    With sudo -E (or a kept HOME) root would create root-owned files under another user's home,
+    and cron.sh running as root would then refuse that venv anyway.
+    """
+    if os.geteuid() != 0:
+        return None
+    home = os.environ.get("HOME", "")
+    root_home = pwd.getpwuid(os.geteuid()).pw_dir
+    if home and os.path.realpath(home) == os.path.realpath(root_home):
+        return None
+    return (f"running as root with HOME={home or '(unset)'}: root installs only into its own home {root_home}. "
+            f"Run it as the user who runs 11-load.py (for venv-cabletracker) or upgrade.py (for "
+            f"venv-ibsw-upgrade); if that user is root, run it with HOME={root_home} (plain sudo, not sudo -E)")
+
+
+def half_built(venv: Path, target_name: str, problem: str) -> int:
+    print(f"[ERROR] {venv} is an incomplete venv: {problem}. Nothing was deleted. Remove it and rerun:\n"
+          f"  rm -rf {venv}\n"
+          f"  python3 infra/deps.py install --target {target_name}", file=sys.stderr)
+    return EXIT_PROBLEM
+
+
 def install(root: Path, table: dict, target_name: str, python: str, dry_run: bool) -> int:
     target = table["targets"][target_name]
-    if os.geteuid() == 0:
-        print("[ERROR] do not run install as root: the venv belongs to the user who runs its consumer "
-              "(cron.sh / upgrade.py); run it as that user without sudo", file=sys.stderr)
+    problem = root_home_problem()
+    if problem:
+        print(f"[ERROR] {problem}", file=sys.stderr)
         return EXIT_USAGE
     try:
         platform_name = probe_platform(python)
@@ -767,30 +795,59 @@ def install(root: Path, table: dict, target_name: str, python: str, dry_run: boo
               f"{', '.join(target['platforms'])}", file=sys.stderr)
         return EXIT_USAGE
     venv = venv_path(target)
+    venv_python = venv / "bin" / "python"
     requirements = root / target["requirements"]
-    commands = []
+    # -I: no PYTHON* environment, user site or cwd shadowing; --isolated: no PIP_* environment and no
+    # pip.conf; --no-cache-dir: nothing written to ~/.cache/pip. The hashes decide what is installed.
+    pip = [str(venv_python), "-I", "-m", "pip", "--isolated"]
+    create = None
     if (venv / "pyvenv.cfg").is_file():
-        pass
+        if not (venv_python.exists() and os.access(venv_python, os.X_OK)):
+            return half_built(venv, target_name, f"{venv_python} is missing or not executable")
+        if not dry_run:
+            try:
+                probe = subprocess.run(pip + ["--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT, text=True, timeout=120, check=False)
+                detail = (probe.stdout.strip().splitlines() or [""])[-1][:200]
+                usable = probe.returncode == 0
+            except (OSError, subprocess.SubprocessError) as exc:
+                detail, usable = exc.__class__.__name__, False
+            if not usable:
+                return half_built(venv, target_name, f"pip does not run in it ({detail})")
     elif venv.exists():
         print(f"[ERROR] {venv} exists but is not a venv; move it away first", file=sys.stderr)
         return EXIT_USAGE
     else:
-        create = [python, "-m", "venv"]
+        create = [python, "-I", "-m", "venv"]
         if target["system_site_packages"]:
             create.append("--system-site-packages")
-        commands.append(create + [str(venv)])
-    commands.append([str(venv / "bin" / "python"), "-m", "pip", "install", "--disable-pip-version-check",
-                     "--only-binary=:all:", "--no-deps", "--require-hashes", "-r", str(requirements)])
-    for command in commands:
+        create.append(str(venv))
+    install_command = pip + ["install", "--no-cache-dir", "--disable-pip-version-check", "--only-binary=:all:",
+                             "--no-deps", "--require-hashes", "-r", str(requirements)]
+    for command in ([create] if create else []) + [install_command]:
         print("[RUN] " + " ".join(command))
         if dry_run:
             continue
-        if command[1:3] == ["-m", "venv"]:
+        if command is create:
             venv.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
-        if result.returncode:
-            print(f"[ERROR] command failed with exit {result.returncode}", file=sys.stderr)
+        try:
+            code = subprocess.run(command, stdin=subprocess.DEVNULL, check=False).returncode
+        except OSError as exc:
+            code = exc.__class__.__name__
+        if not code:
+            continue
+        if command is create:
+            reason = (f"python -m venv failed ({code}); on Ubuntu install python3-venv first "
+                      f"(sudo apt-get install python3-venv)")
+            if venv.exists():
+                return half_built(venv, target_name, reason)
+            print(f"[ERROR] {reason}; then rerun: python3 infra/deps.py install --target {target_name}",
+                  file=sys.stderr)
             return EXIT_PROBLEM
+        print(f"[ERROR] pip install into {venv} failed ({code}); the venv was kept. Fix the cause shown above "
+              f"(for example PyPI access) and rerun: python3 infra/deps.py install --target {target_name}",
+              file=sys.stderr)
+        return EXIT_PROBLEM
     if dry_run:
         return EXIT_OK
     report = Report()
