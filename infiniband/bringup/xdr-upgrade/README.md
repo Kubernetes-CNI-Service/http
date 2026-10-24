@@ -25,15 +25,18 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
   - upgrading Q：每 30 秒 ping，每 2 分钟 SSH 读 boot_id 和脚本状态；
   - rebooting Q：每 15 秒 ping → TCP/22 → SSH 读 boot_id → nvued → `nv show system version`；
   - 第 5 步成功后交回主进程，安排验证。
-- **超时只算设备时间**：下发到就绪 60 分钟、upgrading Q 停留 30 分钟、就绪检查 10 分钟，都从下发起累计；
-  在本机排队的时间只记录，不计入。
+- **超时只算设备时间**：下发到就绪 60 分钟、upgrading Q 停留 30 分钟、就绪检查 15 分钟，都从下发起累计；
+  在本机排队的时间只记录，不计入。就绪检查按 2026-10-24 的 v1 日志放宽（最慢 718 秒，见 V2-DESIGN 第 11 节）。
+- **密码输错保护**：问到密码时（`--upgrade` 或 `--password`），先在第一台 TCP/22 有响应的设备上只用密码登录一次、
+  只执行 `true`，不写任何东西；被拒就重输，最多 3 次，第 3 次仍被拒退出（退出码 2），什么都没改。预检中若仍有设备
+  拒绝密码，整批 HOLD：不再启动新的预检，尚未预检的设备记 SKIPPED（`PASSWORD_REJECTED_HOLD`），汇总写明这些设备没有写入。
 - **进度**每 30 秒一块：`main` 显示未处理的事件数，`check`、`upgrade`、`probe`、`distrib` 各显示忙碌数、排队数和最长等待；
   另外列出停留过久的设备。
 - **防重复下发**：下发前在同一会话内复查。设备上还有升级步骤在跑记 BUSY；本次开机以来请求过安装记
   `PREVIOUS_INSTALL_PENDING`。两者都不下发，记 REVIEW_REQUIRED。发出启动命令前先写 `dispatch.json`（REQUESTED）。
 - **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
 - **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开。
-- **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD），75 另一个升级或初始化正在运行，130 中止。
+- **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD）或密码 3 次都被拒，75 另一个升级或初始化正在运行，130 中止。
 - **模块分层**（以后 nvl-sw 的配置和升级可以直接复用）：
   - 通用部分：`tools/fleet_engine.py`（主进程、worker 池、证据、进度）、`fleet_probe.py`、`fleet_distribution.py`、
     `fleet_link.py`、`fleet_ssh.py`、`fleet_fetch_helper.py`（交换机上的取包助手）；

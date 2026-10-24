@@ -16,7 +16,8 @@ goes back to upgrading Q; nvued or the CLI not ready retries the SSH step in 30 
 
 Limits, all measured from dispatch or from the first readiness check and never reset:
 the device deadline (60 min), the time in upgrading Q (30 min) and the readiness
-checks (10 min).
+checks (15 min: in the v1 CPLD log of 2026-10-24 the first SSH reach after the reboot
+to NVUE ready took up to 718 s, 7 of 57 switches over 600 s).
 
 A job that does not reboot (expect_reboot=False, e.g. a configuration step) is checked
 over SSH every `config_check` seconds and comes back READY as soon as its script exits 0
@@ -39,7 +40,7 @@ class Timings:
     ladder_retry: float = 30.0
     ssh_check: float = 120.0
     dwell: float = 1800.0
-    ladder_budget: float = 600.0
+    ladder_budget: float = 900.0
     deadline: float = 3600.0
     config_check: float = 15.0
 

@@ -5,6 +5,12 @@ are printed before any password is asked; --plan prechecks simulated switches wi
 writing them; --upgrade -y upgrades them through the same entry; invalid inventory rows
 are reported as SKIPPED; the run's evidence goes to xdr-upgrade-v2-logs and never holds
 the password.
+
+Mistyped password (field 2026-10-24, v1 parity): when a password is asked, one read-only
+password-only login on the first selected switch that answers TCP/22 checks it before the
+engine fans out; a refusal asks again, up to three attempts, and the third refusal exits
+with "nothing was changed". Switches that do not answer are skipped for this check; when
+none answers the run continues and the precheck reports them.
 """
 import importlib.util
 import io
@@ -23,7 +29,7 @@ import fleet_probe as probe  # noqa: E402
 import fleet_ssh as ssh  # noqa: E402
 import ibsw_v2_device as ib  # noqa: E402
 from ibsw_v2_switch_sim import LocalSwitch, SimFleet  # noqa: E402
-from test_ibsw_v2_device import SENTINEL  # noqa: E402
+from test_ibsw_v2_device import SENTINEL, TYPO  # noqa: E402
 
 FAST = probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05, ssh_check=0.3,
                      dwell=8.0, ladder_budget=4.0, deadline=15.0)
@@ -132,8 +138,24 @@ switches:
                        "--known-hosts", str(self.known_hosts), "--server-link", "1G", "--progress-seconds", "1"]
 
     def ops_factory(self, **kwargs):
-        return ib.LiveOps(**kwargs, connector=self.fleet.connector, ping_run=self.fleet.ping_run,
-                          tcp_probe=self.fleet.tcp, dir_for=self.fleet.dir_for)
+        return ib.LiveOps(**kwargs, connector=self.fleet.connector_for(kwargs["credentials"]),
+                          ping_run=self.fleet.ping_run, tcp_probe=self.fleet.tcp, dir_for=self.fleet.dir_for)
+
+    @staticmethod
+    def reader(*answers):
+        """password_reader typing `answers` in turn (the last one repeats); records every prompt."""
+        asked = []
+
+        def read(prompt):
+            asked.append(prompt)
+            return answers[min(len(asked), len(answers)) - 1]
+        return read, asked
+
+    def untouched(self, before):
+        for switch in self.switches:
+            self.assertEqual((switch.home / ".ssh/authorized_keys").read_bytes(), before[switch.hostname])
+            self.assertEqual([path.name for path in switch.home.iterdir() if path.name.startswith(".ibsw-")], [])
+            self.assertIn((switch.state / "version").read_text(), ("25.02.7002", "25.02.8008"))
 
     def run_dir(self):
         [run] = list((self.project / "99-output-ib_nvl/bringup/xdr-upgrade-v2-logs").iterdir())
@@ -174,6 +196,81 @@ switches:
         for path in self.run_dir().rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
+
+    # ------------------------------------------------------------ mistyped password (field 2026-10-24)
+    def test_a_refused_password_is_asked_again_before_the_fan_out(self):
+        read, asked = self.reader(TYPO, SENTINEL)
+        out = io.StringIO()
+        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
+                                ops_factory=self.ops_factory, timings=FAST)
+        text = out.getvalue()
+        self.assertEqual(asked, ["Switch password: "] * 2, text)
+        self.assertIn("Attempt 2/3", text)
+        self.assertEqual(self.fleet.password_logins[0], ("sw01", False), "checked on the first selected switch")
+        self.assertEqual([login for login in self.fleet.password_logins if not login[1]], [("sw01", False)],
+                         "the mistyped password was tried once, on one switch")
+        self.assertRegex(text, r"UPGRADED \(2\)[^\n]*\n  sw01\n  sw02", text)
+        self.assertEqual(code, 3, "sw09's inventory row is invalid, so the run is incomplete")
+        for path in self.run_dir().rglob("*"):
+            if path.is_file():
+                self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
+                self.assertNotIn(TYPO.encode(), path.read_bytes(), path)
+
+    def test_the_third_refusal_exits_without_touching_a_switch(self):
+        before = {switch.hostname: (switch.home / ".ssh/authorized_keys").read_bytes() for switch in self.switches}
+        read, asked = self.reader(TYPO)
+        out = io.StringIO()
+        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=read,
+                                ops_factory=self.ops_factory, timings=FAST)
+        text = out.getvalue()
+        self.assertEqual(asked, ["Switch password: "] * 3, text)
+        self.assertEqual(self.fleet.password_logins, [("sw01", False)] * 3, "three attempts, one switch, nothing else")
+        self.assertEqual(self.fleet.commands, [], "no command ran on any switch")
+        self.assertIn("nothing was changed", text)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(code, 2)
+        self.untouched(before)
+
+    def test_switches_not_answering_are_skipped_for_the_password_check(self):
+        first = self.switches[0].address
+        read, asked = self.reader(TYPO, SENTINEL)
+        out = io.StringIO()
+
+        def factory(**kwargs):
+            ops = self.ops_factory(**kwargs)
+            ops.tcp_probe = lambda address: address != first and self.fleet.tcp(address)
+            return ops
+        code = load_entry().run(self.common + ["--plan", "--password"], out=out, password_reader=read,
+                                ops_factory=factory)
+        text = out.getvalue()
+        self.assertEqual(asked, ["Switch password: "] * 2, text)
+        self.assertEqual(self.fleet.password_logins[:2], [("sw02", False), ("sw02", True)],
+                         "sw01 does not answer TCP/22, so sw02 is the first one checked")
+        self.assertTrue(all(accepted for _host, accepted in self.fleet.password_logins[2:]))
+        self.assertEqual(code, 3, text)
+
+    def test_when_no_switch_answers_the_run_continues_and_reports_them(self):
+        before = {switch.hostname: (switch.home / ".ssh/authorized_keys").read_bytes() for switch in self.switches}
+        read, asked = self.reader(TYPO)
+        out = io.StringIO()
+
+        def factory(**kwargs):
+            ops = self.ops_factory(**kwargs)
+            ops.tcp_probe = lambda address: False
+
+            def unreachable(device, method):
+                raise ssh.SshError("CONNECT_FAILED")
+            ops.connector = unreachable
+            return ops
+        code = load_entry().run(self.common + ["--plan", "--password"], out=out, password_reader=read,
+                                ops_factory=factory)
+        text = out.getvalue()
+        self.assertEqual(asked, ["Switch password: "], "nothing answered, so nothing refused the password")
+        self.assertEqual(self.fleet.password_logins, [])
+        for name in ("sw01", "sw02", "sw03"):
+            self.assertRegex(text, rf"SKIPPED \(4\)[^\n]*\n(?:  [^\n]*\n)*  {name}  UNREACHABLE_CONNECT_FAILED")
+        self.assertEqual(code, 3, text)
+        self.untouched(before)
 
 
 if __name__ == "__main__":

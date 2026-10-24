@@ -7,7 +7,7 @@ each OOB leaf with one server pull per queue and no holder rebooting while it se
 small packages pulled directly; in-flight cap; precheck classification; plan-only does
 not touch switches; stop, write-ahead failure, a job without reboot, multi-hop; the
 progress block showing every queue; and the single verification retry after a timed-out
-query (owner 2026-10-23).
+query (owner 2026-10-23); a switch refusing the password holds the prechecks (field 2026-10-24).
 """
 import hashlib
 import io
@@ -155,6 +155,8 @@ class FakeOps:
         behaviour = self.precheck_behaviour.get(device.hostname)
         if behaviour == "unreachable":
             raise SshError("CONNECT_FAILED")
+        if behaviour == "password-rejected":
+            raise SshError("PASSWORD_REJECTED")
         sim = self.sims[device.hostname]
         plan = self.plans[device.hostname]
         guard = ("PREVIOUS_INSTALL_PENDING", ".ibsw-x") if behaviour == "pending" else (None, None)
@@ -244,7 +246,7 @@ class QuickLink(link.LinkDecision):
 
 class World:
     def __init__(self, test, hosts, *, speed=1000, groups=None, needs=None, in_flight=32, versions=None,
-                 upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, **ops):
+                 upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, check_workers=None, **ops):
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
@@ -266,7 +268,8 @@ class World:
                                       groups=groups or {}, in_flight=in_flight, timings=FAST,
                                       progress_seconds=0.2, later_hop_batch_seconds=0.05,
                                       **({} if verify_retry_seconds is None
-                                         else {"verify_retry_seconds": verify_retry_seconds}))
+                                         else {"verify_retry_seconds": verify_retry_seconds}),
+                                      **({} if check_workers is None else {"check_workers": check_workers}))
         self.engine = engine.Engine(self.devices, self.family, self.ops, self.options,
                                     engine.Evidence(base / "run"), out=self.out)
 
@@ -407,6 +410,64 @@ class EngineTest(unittest.TestCase):
         sessions = world.out.getvalue().count("[DISTRIBUTE] os")
         self.assertEqual(sessions, 2, "each hop gets its own distribution round")
         self.assertEqual(world.ops.sims["h1"].version, "cfg")
+
+
+class PasswordHoldTest(unittest.TestCase):
+    """Field 2026-10-24 (v1 CPLD log): every precheck opened a password session, so one mistyped password
+    meant a failed password login on each of the ~118 switches that needed an upgrade. Contract: the first
+    PASSWORD_REJECTED from a precheck holds the batch; no further precheck starts (one already running
+    finishes), the switches not prechecked yet are SKIPPED with PASSWORD_REJECTED_HOLD, nothing is
+    transferred or dispatched, and the summary says the password was rejected and nothing was written to
+    those switches. The same password is never tried on another switch afterwards."""
+
+    def test_the_first_rejection_stops_the_remaining_prechecks(self):
+        hosts = [f"p{i}" for i in range(6)]
+        world = World(self, hosts, check_workers=1)
+        world.ops.precheck_behaviour["p2"] = "password-rejected"
+        results = world.run()
+        self.assertEqual(results["p2"], ("FAILED", "PASSWORD_REJECTED"))
+        for host in ("p3", "p4", "p5"):
+            self.assertEqual(results[host], ("SKIPPED", "PASSWORD_REJECTED_HOLD"), host)
+        self.assertEqual({results["p0"][0], results["p1"][0]}, {"NOT_EXECUTED"}, "prechecked, then held")
+        self.assertEqual([host for _t, host, _d in world.events("precheck")], ["p0", "p1", "p2"],
+                         "no precheck after the rejection")
+        self.assertEqual(world.events("fetch-start") + world.events("dispatch"), [])
+        self.assertIn("PASSWORD_REJECTED", world.report["hold"])
+        self.assertEqual(engine.exit_code(world.report), 2)
+        summary = engine.render_summary(world.report)
+        self.assertIn("password was rejected", summary)
+        self.assertIn("nothing was written", summary)
+
+    def test_a_precheck_already_running_finishes(self):
+        hosts = [f"p{i}" for i in range(5)]
+        world = World(self, hosts, check_workers=2)
+        world.ops.precheck_behaviour["p1"] = "password-rejected"
+        original = world.ops.precheck
+
+        def p0_still_running(device, **kwargs):
+            if device.hostname == "p0":                      # p0 is in flight when p1's rejection holds the batch
+                deadline = time.monotonic() + 5.0
+                while not world.engine.hold and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return original(device, **kwargs)
+        world.ops.precheck = p0_still_running
+        results = world.run()
+        self.assertEqual(results["p1"], ("FAILED", "PASSWORD_REJECTED"))
+        self.assertEqual(results["p0"][0], "NOT_EXECUTED", "its precheck finished; the hold stops the upgrade")
+        for host in ("p2", "p3", "p4"):
+            self.assertEqual(results[host], ("SKIPPED", "PASSWORD_REJECTED_HOLD"), host)
+        self.assertEqual(sorted(host for _t, host, _d in world.events("precheck")), ["p0", "p1"])
+        self.assertEqual(world.events("fetch-start") + world.events("dispatch"), [])
+        self.assertEqual(engine.exit_code(world.report), 2)
+
+    def test_other_precheck_failures_do_not_hold(self):
+        world = World(self, ["q0", "q1", "q2"], needs={host: {"os": [["os-2.bin"]]} for host in ("q0", "q1", "q2")},
+                      selected=("os",), check_workers=1)
+        world.ops.precheck_behaviour["q0"] = "unreachable"
+        results = world.run()
+        self.assertEqual(results["q0"], ("SKIPPED", "UNREACHABLE_CONNECT_FAILED"))
+        self.assertEqual((results["q1"], results["q2"]), (("UPGRADED", None), ("UPGRADED", None)))
+        self.assertIsNone(world.report["hold"])
 
 
 def ssh_error(code, repair_requested=False):

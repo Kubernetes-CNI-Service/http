@@ -6,7 +6,9 @@ ibsw_upgrade_observer.SSH_RUNTIME_PINS; a test keeps them equal): host keys pinn
 known_hosts (literal or OpenSSH-hashed entries, never trust on first use), the
 management key first and the switch password only when the key is rejected, commands
 bounded from the moment they are sent. Passwords and private keys never appear in a
-repr, an error or a result.
+repr, an error or a result. A rejected key is AUTH_REJECTED (the cue for the password
+fallback); a password the switch refuses is PASSWORD_REJECTED, so a mistyped password
+can stop a run before it is tried on other switches (field 2026-10-24).
 """
 from __future__ import annotations
 
@@ -44,7 +46,7 @@ class SshError(Exception):
     """Fixed reason codes only; never device text, secrets or SDK messages."""
 
     CODES = {"CONNECT_FAILED", "CONNECT_TIMEOUT", "HANDSHAKE_FAILED", "HOST_KEY_UNKNOWN", "HOST_KEY_MISMATCH",
-             "AUTH_REJECTED", "AUTH_TIMEOUT", "AUTH_TRANSPORT_LOST", "AUTH_UNKNOWN", "COMMAND_TIMEOUT",
+             "AUTH_REJECTED", "PASSWORD_REJECTED", "AUTH_TIMEOUT", "AUTH_TRANSPORT_LOST", "AUTH_UNKNOWN", "COMMAND_TIMEOUT",
              "COMMAND_INCOMPLETE", "OUTPUT_LIMIT", "CHANNEL_FAILED", "KEY_INVALID", "SDK_UNAVAILABLE"}
 
     def __init__(self, code):
@@ -317,7 +319,7 @@ def connect(address, pins, credentials, *, method="key", sock_factory=None):
             if message == "Authentication failed: transport shut down or saw EOF":
                 raise SshError("AUTH_TRANSPORT_LOST") from None
             if message == "Authentication failed." and transport.is_active():
-                raise SshError("AUTH_REJECTED") from None
+                raise SshError("PASSWORD_REJECTED" if method == "password" else "AUTH_REJECTED") from None
             raise SshError("AUTH_UNKNOWN") from None
         except (OSError, EOFError):
             raise SshError("AUTH_TRANSPORT_LOST") from None

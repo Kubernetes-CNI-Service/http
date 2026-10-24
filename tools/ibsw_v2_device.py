@@ -699,6 +699,8 @@ class LiveOps:
         return self._open(device, "password")
 
     def precheck(self, device, *, upgrade, staged_names=(), journal):
+        """Read-only check, then (upgrade) the access bootstrap. A refused password raises SshError
+        PASSWORD_REJECTED before anything is written; the engine then holds the other prechecks."""
         session, key_rejected = self._connect(device)
         with session:
             items = run_check(session, "precheck", self.dir_for(device), *staged_names)
@@ -799,12 +801,23 @@ class LiveOps:
         """Key first, password when the key is rejected (no restore while probing; review 15.5)."""
         return self._connect(device)
 
+    @staticmethod
+    def _probe_failure(error):
+        """A refused login stays auth_fail for the probes, whether the key or the fallback password was refused."""
+        return {"kind": "hostkey" if error.code == "HOST_KEY_MISMATCH" else
+                "auth_fail" if error.code in ("AUTH_REJECTED", "PASSWORD_REJECTED") else "connect_fail"}
+
+    def password_login(self, device):
+        """Check the typed switch password once: a password-only login that runs `true` and writes nothing.
+        Raises SshError, PASSWORD_REJECTED when the switch refuses the password (field 2026-10-24)."""
+        with self._password(device) as session:
+            session.run("true", timeout=ssh.COMMAND_SECONDS)
+
     def status(self, device, step, boot_before):
         try:
             session, _rejected = self._probe_session(device)
         except ssh.SshError as error:
-            return {"kind": "hostkey" if error.code == "HOST_KEY_MISMATCH" else
-                    "auth_fail" if error.code == "AUTH_REJECTED" else "connect_fail"}
+            return self._probe_failure(error)
         try:
             with session:
                 return status(session, step, boot_before)
@@ -815,8 +828,7 @@ class LiveOps:
         try:
             session, rejected = self._probe_session(device)
         except ssh.SshError as error:
-            return {"kind": "hostkey" if error.code == "HOST_KEY_MISMATCH" else
-                    "auth_fail" if error.code == "AUTH_REJECTED" else "connect_fail"}
+            return self._probe_failure(error)
         try:
             with session:
                 result = ladder(session, boot_before)

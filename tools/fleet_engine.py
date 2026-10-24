@@ -21,6 +21,11 @@ A verification that loses a query to COMMAND_TIMEOUT or CHANNEL_FAILED runs once
 step after `verify_retry_seconds`, kept as a main-loop timer (no worker waits), but only when
 the ops said that attempt had not requested a configuration repair: ops.verify sets
 `repair_requested` on the SshError it raises, and an error without it is not retried.
+
+A precheck that raises SshError PASSWORD_REJECTED holds the batch (field 2026-10-24): no
+precheck starts after it (one already running finishes), the switches not prechecked yet
+are SKIPPED with PASSWORD_REJECTED_HOLD and nothing is written to them; the engine never
+retries the password, and no switch prechecked after the refusal is offered it.
 """
 from __future__ import annotations
 
@@ -55,6 +60,8 @@ CATEGORIES = (
 IN_FLIGHT_STATES = {"DISPATCHING", "PROBING", "VERIFYING"}
 WAITING_STATES = {"READY", "NEED_STAGE", "STAGING", "STAGED", "WAIT_SLOT"}
 VERIFY_RETRY_CODES = {"COMMAND_TIMEOUT", "CHANNEL_FAILED"}   # one slow query, not a reboot (owner 2026-10-23)
+PASSWORD_HOLD = "PASSWORD_REJECTED_HOLD"                     # not prechecked after a refused password (2026-10-24)
+_PRECHECK_HELD = object()                                    # a precheck task that did not start
 
 
 @dataclass(frozen=True)
@@ -324,6 +331,8 @@ class Engine:
         self.packages, self.sessions, self.canary_queue = {}, [], []
         self.phase, self.hold, self.stopping, self.aborted = "precheck", None, False, False
         self.phase_blocked, self.canaries_passed = False, True
+        self.password_held = threading.Event()     # set by the check worker that saw PASSWORD_REJECTED
+        self.password_rejected_by = []
         self.started = self.clock()
         self.last_progress = self.started
         self.outstanding = 0
@@ -476,16 +485,33 @@ class Engine:
         journal = self.evidence.journal(dev.host)
 
         def task():
+            if self.password_held.is_set():         # a refused password: no further precheck starts
+                return _PRECHECK_HELD
             pinged = self.ops.ping(dev.device)
-            facts = self.ops.precheck(dev.device, upgrade=self.options.upgrade, staged_names=names, journal=journal)
+            try:
+                facts = self.ops.precheck(dev.device, upgrade=self.options.upgrade, staged_names=names,
+                                          journal=journal)
+            except SshError as error:
+                if error.code == "PASSWORD_REJECTED":
+                    self.password_held.set()        # here, before the main loop sees it: no task can slip through
+                raise
             facts["ping"] = pinged
             return facts
         return task
 
     def _on_precheck(self, dev, event):
+        if event.error is None and event.result is _PRECHECK_HELD:
+            return self._final(dev, "SKIPPED", PASSWORD_HOLD)
         if event.error is not None:
             error = event.error
             code = getattr(error, "code", None) or type(error).__name__
+            if isinstance(error, SshError) and error.code == "PASSWORD_REJECTED":
+                self.password_rejected_by.append(dev.host)
+                if not self.hold:
+                    self.hold = "PASSWORD_REJECTED"
+                    self.say(f"[HOLD] {dev.host} rejected the switch password; no new precheck starts (running "
+                             f"ones finish), no transfers or upgrades")
+                return self._final(dev, "FAILED", "PASSWORD_REJECTED")
             if isinstance(error, SshError) and error.code in ("CONNECT_FAILED", "CONNECT_TIMEOUT", "HANDSHAKE_FAILED"):
                 return self._final(dev, "SKIPPED", "UNREACHABLE_" + error.code)
             if getattr(error, "code", None):
@@ -984,7 +1010,7 @@ class Engine:
             rows.append(dict(hostname=issue.hostname, category="SKIPPED", reason=",".join(issue.reasons),
                              warnings=[], performed=[], canary=False))
         report = dict(family=self.family.name, run_id=self.options.run_id, hold=self.hold, stopped=self.stopping,
-                      aborted=self.aborted,
+                      aborted=self.aborted, password_rejected_by=list(self.password_rejected_by),
                       link=self.options.link.line(), counts=counts, devices=rows,
                       seconds=round(self.clock() - self.started, 1))
         self.evidence.write("run-report.json", report)
@@ -1013,5 +1039,10 @@ def render_summary(report):
             lines.append(f"  {row['hostname']}{extra}")
     if report.get("hold"):
         lines.append(f"HOLD: {report['hold']}")
+    if report.get("password_rejected_by"):
+        held = sum(1 for row in report["devices"] if row["reason"] == PASSWORD_HOLD)
+        lines.append(f"The switch password was rejected by {', '.join(report['password_rejected_by'])}; prechecks "
+                     f"stopped there and nothing was written to the {held} switch(es) marked {PASSWORD_HOLD}. "
+                     "Check the password and run again.")
     lines.append(f"elapsed {report['seconds']} s")
     return "\n".join(lines)

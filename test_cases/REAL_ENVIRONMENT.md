@@ -3430,6 +3430,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   2. 选 2–3 台用 `--devices` 做小批量 `--upgrade -y`：金丝雀先完成全部跳数；其余设备的镜像在金丝雀运行期间分发；探测按 upgrading Q 30 秒 ping、2 分钟 SSH，rebooting Q 15 秒 ping → TCP/22 → SSH boot_id → nvued → `nv show system version` 推进；验证通过后记 UPGRADED。
   3. 扩大到一个 OOB leaf 的全部交换机。
   4. ztp-server 是 1G 时：每个 OOB leaf 只从服务器拉一次，其余由同组持有者用 scp + 密码接力；持有者在服务期间不重启。
+  5. 密码输错（先确认账户锁定策略允许一次失败）：在 `--plan --password` 第一次故意输错一次，入口打印 `[AUTH] … Attempt 2/3`，
+     只有第一台响应 TCP/22 的设备的认证日志里有一次失败；再输入正确密码后继续。用以确认 NVOS sshd 的拒绝被识别为 PASSWORD_REJECTED。
 - 需要现场确认的事项（设计文档 15.15）：
   - `/home/admin` 在 OS 重启后是否保留，以及 CPLD、BIOS 重启后是否保留；
   - NVOS sshd 用 password 还是 keyboard-interactive；交换机上的 `scp -O` 和 `/usr/bin/python3` 是否可用；

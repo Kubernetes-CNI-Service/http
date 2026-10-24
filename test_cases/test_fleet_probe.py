@@ -4,6 +4,11 @@ upgrading Q: first ping at once, then every 30 s; no reply = rebooting, rebootin
 3 minutes; SSH check every 2 minutes. rebooting Q: ping every 15 s, TCP/22, one SSH
 session for boot_id + nvued + `nv show system version`. One action per switch, stale
 results ignored, limits measured from dispatch and never reset.
+
+Readiness budget (field 2026-10-24): in the v1 CPLD log, the first SSH reach after the
+reboot to NVUE ready took up to 718 s on 57 switches (7 over 600 s, none over 720 s, all
+upgraded), so the readiness checks get 15 minutes; the 30-minute dwell and the 60-minute
+device deadline stay (dispatch to NVUE ready was at most 1598 s).
 """
 import sys
 import unittest
@@ -147,12 +152,24 @@ class ProbeTest(unittest.TestCase):
         never_ready = Clock(self.tracker(), device(reboot_at=10, up_at=300, nvue_at=10**9))
         [handback] = never_ready.run(2000, step=5.0)
         self.assertEqual((handback.outcome, handback.reason), (probe.UNKNOWN, "NVUE_NOT_READY"))
-        self.assertEqual(never_ready.handback_times, [905.0], "10 minutes after the first readiness check at 300")
+        self.assertEqual(never_ready.handback_times, [1205.0], "15 minutes after the first readiness check at 300")
 
         never_up = Clock(self.tracker(deadline=1000), device(reboot_at=10))
         [handback] = never_up.run(2000, step=5.0)
         self.assertEqual((handback.outcome, handback.reason), (probe.UNKNOWN, "DEVICE_DEADLINE_EXCEEDED"))
         self.assertEqual(never_up.handback_times, [1005.0])
+
+    def test_default_limits_follow_the_v1_field_data(self):
+        timings = probe.Timings()
+        self.assertEqual((timings.ladder_budget, timings.dwell, timings.deadline), (900.0, 1800.0, 3600.0),
+                         "readiness checks 15 minutes (field 2026-10-24); dwell 30 and deadline 60 minutes unchanged")
+
+    def test_the_slowest_v1_nvue_start_is_ready_within_the_budget(self):
+        # First readiness check at 300 s; NVUE ready 718 s later, the slowest of 57 switches in the v1 log.
+        slowest = Clock(self.tracker(), device(reboot_at=10, up_at=300, nvue_at=300 + 718))
+        [handback] = slowest.run(2000, step=5.0)
+        self.assertEqual((handback.outcome, handback.reason), (probe.READY, "READY"))
+        self.assertEqual(slowest.handback_times, [1020.0], "the 30-second SSH retry that follows NVUE ready")
 
     def test_one_action_per_switch_and_stale_results_are_ignored(self):
         tracker = self.tracker()

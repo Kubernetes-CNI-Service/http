@@ -8,6 +8,9 @@ records the request; the next probe sees the switch go down, come back with a ne
 id and the new version, then nvued becomes ready. The key login is accepted only when the
 management key is in the switch's authorized_keys file, like a real sshd. `fail_command`
 makes the n-th matching command raise an SshError (a timed-out query) instead of running.
+`connector_for(credentials)` also checks the typed password like the switch's sshd and
+refuses a wrong one with PASSWORD_REJECTED (what tools/fleet_ssh.py raises); every
+password login is recorded in `password_logins`.
 """
 import json
 import os
@@ -327,14 +330,25 @@ class SimFleet:
         self.by_address = {switch.address: switch for switch in switches}
         self.http_root, self.key_base64 = http_root, key_base64
         self.commands, self.contexts = [], []
+        self.password_logins = []                               # (hostname, accepted) per checked password login
 
-    def connector(self, device, method):
+    def connector(self, device, method, *, password=None):
+        """password=None: the password is not checked (older tests); otherwise a wrong one is refused."""
         switch = self.switches[device.hostname]
         if switch.tick():
             raise ssh.SshError("CONNECT_FAILED")
         if method == "key" and not switch.key_allowed(self.key_base64):
             raise ssh.SshError("AUTH_REJECTED")
+        if method == "password" and password is not None:
+            accepted = password == switch.login_password
+            self.password_logins.append((switch.hostname, accepted))
+            if not accepted:
+                raise ssh.SshError("PASSWORD_REJECTED")
         return LocalSession(switch, self, method)
+
+    def connector_for(self, credentials):
+        """A connector(device, method) for LiveOps that checks the credentials' password."""
+        return lambda device, method: self.connector(device, method, password=credentials.password)
 
     def ping_run(self, argv, **_kwargs):
         switch = self.by_address[argv[-1]]

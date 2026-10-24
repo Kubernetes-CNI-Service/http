@@ -8,6 +8,12 @@ step and owned runner run with the local method, the reboot drops the key (resto
 after readiness), a lost configuration line is repaired before verification, and the
 password never reaches any evidence file. A verification that loses a query to a timeout
 tells the engine whether that attempt had already requested a repair (owner 2026-10-23).
+
+Mistyped password (field 2026-10-24): the switch refuses it with PASSWORD_REJECTED before
+any write, whether it was the fallback after a rejected key or the bootstrap session; a
+rejected key still falls back to the typed password; the probes keep reporting a refused
+login as auth_fail; the entry's password check logs in with the password only and runs
+nothing that writes.
 """
 import hashlib
 import json
@@ -28,6 +34,7 @@ from ibsw_upgrade_contract import InventoryDevice, load_global_text, normalize_u
 from ibsw_v2_switch_sim import LocalSwitch, SimFleet  # noqa: E402
 
 SENTINEL = "Sentinel-Fixture-Secret-31"
+TYPO = SENTINEL[:-2] + SENTINEL[-1] + SENTINEL[-2]       # the same password with two characters swapped
 BOOT_A, BOOT_B = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 
 
@@ -278,6 +285,56 @@ class LiveSwitchTest(unittest.TestCase):
         self.assertFalse(self.evidence_file("repair-requested.json").exists())
         verified = verify()
         self.assertEqual((verified["state"], verified["repaired"]), ("VERIFIED", False), verified)
+
+    # ------------------------------------------------------------ mistyped password (field 2026-10-24)
+    def typing(self, password):
+        """LiveOps whose simulated sshd checks the typed switch password."""
+        creds = ssh.Credentials("admin", self.key, ssh.fingerprint(self.key.asbytes()), password)
+        return ib.LiveOps(pins=ssh.HostPins(b""), credentials=creds, policy=self.policy, selected=("os",),
+                          run_id="r1", management_line=f"{self.key.get_name()} {self.key.get_base64()} mgmt\n".encode(),
+                          connector=self.fleet.connector_for(creds), ping_run=self.fleet.ping_run,
+                          tcp_probe=self.fleet.tcp, dir_for=self.fleet.dir_for)
+
+    def test_a_rejected_key_still_falls_back_to_the_typed_password(self):
+        result = self.typing(SENTINEL).precheck(self.device, upgrade=True, staged_names=[], journal=self.journal)
+        self.assertTrue(result["key_rejected"])
+        self.assertTrue(self.switch.key_allowed(self.key.get_base64()), "the password imported the management key")
+        self.assertTrue(self.fleet.password_logins)
+        self.assertTrue(all(accepted for _host, accepted in self.fleet.password_logins))
+
+    def test_a_mistyped_password_is_refused_before_any_write(self):
+        keys = self.switch.home / ".ssh/authorized_keys"
+        for key_installed in (False, True):
+            with self.subTest(key_installed=key_installed):
+                if key_installed:                          # key login works; the bootstrap session meets the typo
+                    keys.write_text(keys.read_text() + f"{self.key.get_name()} {self.key.get_base64()} mgmt\n")
+                before = keys.read_bytes()
+                with self.assertRaises(ssh.SshError) as caught:
+                    self.typing(TYPO).precheck(self.device, upgrade=True, staged_names=[], journal=self.journal)
+                self.assertEqual(caught.exception.code, "PASSWORD_REJECTED")
+                self.assertFalse(caught.exception.reboot_like)
+                self.assertNotIn(TYPO, str(caught.exception))
+                self.assertEqual(keys.read_bytes(), before, "nothing written to authorized_keys")
+                self.assertFalse(self.evidence_file("access-bootstrap.json").exists())
+                self.assertEqual([path.name for path in self.switch.home.iterdir() if path.name.startswith(".ibsw-")], [])
+
+    def test_probes_keep_reporting_a_refused_login_as_auth_fail(self):
+        ops = self.typing(TYPO)                            # the key is not authorized, the password is refused
+        self.assertEqual(ops.status(self.device, None, BOOT_A), {"kind": "auth_fail"})
+        self.assertEqual(ops.ladder(self.device, BOOT_A, backup=None, journal=self.journal), {"kind": "auth_fail"})
+
+    def test_the_password_check_logs_in_with_the_password_only_and_writes_nothing(self):
+        keys = (self.switch.home / ".ssh/authorized_keys").read_bytes()
+        self.typing(SENTINEL).password_login(self.device)
+        self.assertEqual(self.fleet.password_logins, [("sw01", True)])
+        self.assertEqual({(method, command) for _host, method, command in self.fleet.commands}, {("password", "true")},
+                         "a no-op over the password session, nothing else")
+        with self.assertRaises(ssh.SshError) as caught:
+            self.typing(TYPO).password_login(self.device)
+        self.assertEqual(caught.exception.code, "PASSWORD_REJECTED")
+        self.assertEqual(self.fleet.password_logins, [("sw01", True), ("sw01", False)])
+        self.assertEqual(len(self.fleet.commands), 1, "a refused login runs nothing")
+        self.assertEqual((self.switch.home / ".ssh/authorized_keys").read_bytes(), keys)
 
 
 if __name__ == "__main__":

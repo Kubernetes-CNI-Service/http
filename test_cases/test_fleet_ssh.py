@@ -156,8 +156,30 @@ class SshTest(unittest.TestCase):
         wrong = ssh.Credentials("admin", self.switch.client_key, None, "not-the-password")
         with self.assertRaises(ssh.SshError) as caught:
             ssh.connect_any(ADDRESS, self.pins, wrong, sock_factory=self.switch.socket)
-        self.assertEqual(caught.exception.code, "AUTH_REJECTED")
+        self.assertEqual(caught.exception.code, "PASSWORD_REJECTED",
+                         "the fallback password was refused (field 2026-10-24: its own code)")
         self.assertNotIn("not-the-password", str(caught.exception))
+        key_only = ssh.Credentials("admin", self.switch.client_key, None, None)
+        with self.assertRaises(ssh.SshError) as caught:
+            ssh.connect_any(ADDRESS, self.pins, key_only, sock_factory=self.switch.socket)
+        self.assertEqual(caught.exception.code, "AUTH_REJECTED", "a rejected key keeps AUTH_REJECTED")
+
+    def test_a_refused_password_is_password_rejected_and_never_reboot_like(self):
+        """Field 2026-10-24: a mistyped password must be told apart from a rejected key, and must not be
+        retried like a rebooting switch."""
+        typo = ssh.Credentials("admin", self.switch.client_key, None, PASSWORD + "x")
+        with self.assertRaises(ssh.SshError) as caught:
+            self.connect(creds=typo, method="password")
+        self.assertEqual(caught.exception.code, "PASSWORD_REJECTED")
+        self.assertFalse(caught.exception.reboot_like)
+        self.assertNotIn(PASSWORD, str(caught.exception))
+        self.assertIn("PASSWORD_REJECTED", ssh.SshError.CODES)
+        with self.connect(method="password") as session:
+            self.assertEqual(session.authentication, "password")
+        self.switch.accept_key = False
+        with self.assertRaises(ssh.SshError) as caught:
+            self.connect(method="key")
+        self.assertEqual(caught.exception.code, "AUTH_REJECTED", "the key path keeps its code")
 
     def test_host_keys_are_pinned_never_trusted_on_first_use(self):
         other = sdk().ECDSAKey.generate()

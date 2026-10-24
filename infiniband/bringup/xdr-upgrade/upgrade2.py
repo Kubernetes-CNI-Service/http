@@ -7,7 +7,9 @@ through two queues (ping, TCP/22, SSH boot_id, nvued, `nv show system version`),
 images distributed according to the ztp-server link (relay per OOB leaf below 10G,
 staggered direct pulls at 10G and above). Every package is staged in /home/admin and
 verified on the switch before installation. upgrade.py stays unchanged; read-only
-inspection remains `upgrade.py --inspect-only`.
+inspection remains `upgrade.py --inspect-only`. A typed switch password is checked once,
+with a password-only login that writes nothing, before any precheck; a refusal asks
+again, three attempts in all (field 2026-10-24).
 
   upgrade2.py --project <dir>                  plan only: precheck, link, groups (no writes)
   upgrade2.py --project <dir> --upgrade -y     upgrade
@@ -37,6 +39,8 @@ for _root in (REPOSITORY, TOOLS):
 
 COMPONENTS = ("os", "bios", "cpld")
 EXIT_BAD_INPUT, EXIT_BUSY = 2, 75
+PASSWORD_ATTEMPTS = 3                       # like upgrade.py: re-asked after an explicit refusal, three in all
+NOT_OFFERED = {"CONNECT_FAILED", "CONNECT_TIMEOUT", "HANDSHAKE_FAILED", "HOST_KEY_UNKNOWN", "HOST_KEY_MISMATCH"}
 
 
 def parser():
@@ -136,6 +140,24 @@ def _ask(prompt, reader):
     return value
 
 
+def _check_password(ops, devices, ssh):
+    """One password-only login running `true` on the first selected switch that answers TCP/22 (field
+    2026-10-24). Switches where the password could not be offered (no TCP/22, no SSH, host key not pinned
+    or different) are passed over. Returns (hostname or None, "ACCEPTED" | "PASSWORD_REJECTED" | other code |
+    "NO_SWITCH_ANSWERED")."""
+    for device in devices:
+        if not ops.tcp(device):
+            continue
+        try:
+            ops.password_login(device)
+        except ssh.SshError as error:
+            if error.code in NOT_OFFERED:
+                continue
+            return device.hostname, error.code
+        return device.hostname, "ACCEPTED"
+    return None, "NO_SWITCH_ANSWERED"
+
+
 def _run_directory(args, paths, run_id):
     if args.project:
         return Path(paths.project) / "99-output-ib_nvl" / "bringup" / "xdr-upgrade-v2-logs" / run_id
@@ -213,6 +235,35 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         scp_server = ib.ScpServer(args.mgmt_server, args.mgmt_user, args.mgmt_port, keys, scp_password)
     credentials = ssh.Credentials(args.user, key, key_fingerprint, password)
     pins = ssh.HostPins.load(args.known_hosts)
+    ops_arguments = dict(pins=pins, credentials=credentials, policy=policy, selected=selected,
+                         run_id=run_id, switch_dir=args.local_dir, force_health=args.force,
+                         management_line=Path(public).read_bytes().splitlines()[0] + b"\n",
+                         method=args.method, scp_server=scp_server)
+    make_ops = ops_factory or ib.LiveOps
+    ops = make_ops(**ops_arguments)
+    password_check = None
+    if password is not None:                # one check before the fan-out; v1 parity: three attempts
+        for attempt in range(1, PASSWORD_ATTEMPTS + 1):
+            host, verdict = _check_password(ops, devices, ssh)
+            password_check = dict(host=host, result=verdict, attempts=attempt)
+            if verdict != "PASSWORD_REJECTED":
+                break
+            if attempt == PASSWORD_ATTEMPTS:
+                print(f"[AUTH] {host} rejected the switch password {attempt} times; nothing was changed.", file=out)
+                return EXIT_BAD_INPUT
+            print(f"[AUTH] {host} rejected the switch password before any write; nothing was changed. "
+                  f"Attempt {attempt + 1}/{PASSWORD_ATTEMPTS}", file=out)
+            credentials = ssh.Credentials(args.user, key, key_fingerprint, _ask("Switch password: ", password_reader))
+            ops_arguments["credentials"] = credentials
+            ops = make_ops(**ops_arguments)
+        if verdict == "ACCEPTED":
+            print(f"[AUTH] switch password accepted by {host} (password-only login, nothing written)", file=out)
+        elif verdict == "NO_SWITCH_ANSWERED":
+            print("[AUTH] no selected switch answered on TCP/22; the password was not checked "
+                  "(the precheck reports the unreachable switches)", file=out)
+        else:
+            print(f"[AUTH] the password check on {host} was inconclusive ({verdict}); continuing, and a switch "
+                  "that rejects the password holds the prechecks", file=out)
     run_dir = _run_directory(args, paths, run_id)
     evidence = fleet_engine.Evidence(run_dir)
     evidence.write("plan.json", dict(
@@ -225,18 +276,13 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         blocked_inputs=[dict(hostname=item.hostname, reasons=list(item.reasons)) for item in snapshot.blocked_devices],
         link=dict(line=decision.line(), speed_mbps=decision.speed_mbps, source=decision.source, mode=decision.mode,
                   warnings=list(decision.warnings), layers=[layer.__dict__ for layer in decision.layers]),
-        groups=groups, key_fingerprint=key_fingerprint))
+        groups=groups, key_fingerprint=key_fingerprint, password_check=password_check))
     options = fleet_engine.Options(
         run_id=run_id, selected=selected, upgrade=bool(args.upgrade),
         link=decision, groups=groups, skip_canary=args.skip_canary, check_workers=args.check_workers,
         upgrade_workers=args.upgrade_workers, in_flight=args.in_flight, probe_workers=args.probe_workers,
         relay_fanout=args.relay_fanout, relay_transfers=args.relay_transfers, method=args.method,
         progress_seconds=args.progress_seconds, **({"timings": timings} if timings is not None else {}))
-    ops_arguments = dict(pins=pins, credentials=credentials, policy=policy, selected=selected,
-                         run_id=options.run_id, switch_dir=args.local_dir, force_health=args.force,
-                         management_line=Path(public).read_bytes().splitlines()[0] + b"\n",
-                         method=args.method, scp_server=scp_server)
-    ops = (ops_factory or ib.LiveOps)(**ops_arguments)
     engine = fleet_engine.Engine(devices, ib.IbFamily(policy), ops, options, evidence, out=out,
                                  blocked_inputs=snapshot.blocked_devices)
     interrupts = []
