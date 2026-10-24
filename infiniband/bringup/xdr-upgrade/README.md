@@ -22,7 +22,7 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
   再用 `local` 方法安装。`--method http|scp` 只决定交换机从 ztp-server 拉包的方式。
 - **主进程加三类 worker**：检查（预检、验证，验证优先）、升级（OS/BIOS/CPLD 各一池，脚本启动即交出设备）、
   探测。探测分两个队列：
-  - upgrading Q：每 30 秒 ping，每 2 分钟 SSH 读 boot_id 和脚本状态；
+  - upgrading Q：每 30 秒 ping，每 2 分钟 SSH 读 boot_id 和脚本状态；ping 不通 1 分钟后进入 rebooting Q；
   - rebooting Q：每 15 秒 ping → TCP/22 → SSH 读 boot_id → nvued → `nv show system version`；
   - 第 5 步成功后交回主进程，安排验证。
 - **超时只算设备时间**：下发到就绪 60 分钟、upgrading Q 停留 30 分钟、就绪检查 15 分钟，都从下发起累计；
@@ -34,6 +34,9 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
   另外列出停留过久的设备。
 - **防重复下发**：下发前在同一会话内复查。设备上还有升级步骤在跑记 BUSY；本次开机以来请求过安装记
   `PREVIOUS_INSTALL_PENDING`。两者都不下发，记 REVIEW_REQUIRED。发出启动命令前先写 `dispatch.json`（REQUESTED）。
+- **并发默认值**：检查 worker 16（只读），升级 worker 8，在途 32。
+- **汇总里的「MANAGEMENT KEY REJECTED」**：预检时管理公钥被拒的设备单独列出，只报告。不需要安装的设备公钥不会被改，
+  带 `--upgrade` 重跑也补不上，汇总给出 `ssh-copy-id -i <管理公钥> admin@<地址>`；`--plan` 没带 `--password` 时说明没有尝试密码。
 - **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
 - **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开。
 - **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD）或密码 3 次都被拒，75 另一个升级或初始化正在运行，130 中止。

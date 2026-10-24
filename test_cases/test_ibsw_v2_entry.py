@@ -58,6 +58,18 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(entry.run(["--method", "scp"], out=out), 2)
         self.assertIn("--method scp needs", out.getvalue())
 
+    def test_check_workers_default_to_sixteen_and_upgrade_limits_stay(self):
+        """O2 2026-10-24: 16 parallel prechecks/verifications (read-only SSH); upgrade workers 8, in-flight 32."""
+        entry = load_entry()
+        args = entry.parser().parse_args([])
+        self.assertEqual((args.check_workers, args.upgrade_workers, args.in_flight), (16, 8, 32))
+        self.assertRegex(" ".join(entry.parser().format_help().split()),
+                         r"--check-workers CHECK_WORKERS parallel prechecks and post-upgrade verifications "
+                         r"\(default: 16\)")
+        out = io.StringIO()
+        self.assertEqual(entry.run(["--check-workers", "33"], out=out), 2)
+        self.assertIn("--check-workers must be 1..32", out.getvalue())
+
     def test_the_same_runtime_guard_as_upgrade_py_and_initial_setup(self):
         entry = load_entry()
         import ib_bringup_runtime_guard as guard
@@ -196,6 +208,31 @@ switches:
         for path in self.run_dir().rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
+
+    def test_the_summary_lists_an_at_target_switch_whose_key_was_rejected(self):
+        """O3 2026-10-24: sw03 needs nothing, so no access bootstrap adds the key; the summary says so and how."""
+        sw03_keys = (self.switches[2].home / ".ssh/authorized_keys").read_bytes()
+        out = io.StringIO()
+        code = load_entry().run(self.common + ["--upgrade", "-y"], out=out, password_reader=lambda prompt: SENTINEL,
+                                ops_factory=self.ops_factory, timings=FAST)
+        text = out.getvalue()
+        self.assertEqual(code, 3, text)
+        section = text.split("MANAGEMENT KEY REJECTED", 1)[1]
+        self.assertIn("key was not changed", section)
+        self.assertIn(f"sw03  ssh-copy-id -i {self.public} admin@192.0.2.43", section)
+        self.assertEqual((self.switches[2].home / ".ssh/authorized_keys").read_bytes(), sw03_keys, "report only")
+        self.assertFalse(self.switches[2].key_allowed(self.key.get_base64()))
+
+    def test_plan_without_a_password_says_the_password_was_not_tried(self):
+        out = io.StringIO()
+        code = load_entry().run(self.common, out=out, password_reader=lambda prompt: SENTINEL,
+                                ops_factory=self.ops_factory)
+        text = out.getvalue()
+        self.assertEqual(code, 3, text)
+        section = text.split("MANAGEMENT KEY REJECTED", 1)[1]
+        self.assertIn("password was not tried", section)
+        for name in ("sw01", "sw02", "sw03"):
+            self.assertIn(f"  {name}", section)
 
     # ------------------------------------------------------------ mistyped password (field 2026-10-24)
     def test_a_refused_password_is_asked_again_before_the_fan_out(self):

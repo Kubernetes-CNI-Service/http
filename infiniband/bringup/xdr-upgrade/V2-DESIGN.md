@@ -114,7 +114,8 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 ## 6. 探测（owner 2026-10-23）
 
 - **upgrading Q**：交接后立即 ping，之后每 30 秒一次。一次探测发 3 个包，全丢才算失败；`ping` 本地出错不算重启。
-  失败后等 3 分钟进入 rebooting Q。每 2 分钟用 SSH 读 boot_id 和步骤状态：
+  失败后等 1 分钟进入 rebooting Q（原为 3 分钟；boot_id 没变会回到 upgrading Q，所以提前探测是安全的，见第 11 节）。
+  每 2 分钟用 SSH 读 boot_id 和步骤状态：
   - boot_id 变了：立即进入 rebooting Q；
   - 安装前失败：只按白名单判定，见下；
   - 请求安装后返回码非 0：只记警告，继续探测，验证通过仍记 UPGRADED；
@@ -184,6 +185,13 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
     `dispatch.json`、`before-<stage>.commands`、`timeline.jsonl`、`verify-<stage>.json`、`repair-*.json`。
 - 设备证据由该设备当前的执行者写，每台一把锁，没有跨设备锁；写盘先写临时文件，再 fsync 和改名。
 - 运行守卫与 v1、initial-setup 共用 `/tmp/http-ib-bringup.runtime.lock`。
+- **汇总里的「MANAGEMENT KEY REJECTED」**（2026-10-24）：预检时管理公钥被拒的设备单独列出，只报告、不写任何东西。
+  `run-report.json` 的 `key_rejected` 每台一行，`group` 取值：
+  - `NO_INSTALLATION`：不需要安装（AT_TARGET）。不做 access bootstrap，所以公钥没有改，带 `--upgrade` 重跑也不会补上；
+    汇总给出 `ssh-copy-id -i <管理公钥> <用户>@<地址>`，或以后的 access 修复工具；
+  - `PASSWORD_NOT_TRIED`：没有输入密码（`--plan` 未带 `--password`），密钥被拒后没有密码可回退，预检记 FAILED AUTH_REJECTED；
+    汇总提示带 `--password` 重跑；
+  - `OTHER`：其余（需要安装的设备由 `--upgrade` 的 access bootstrap 在安装前补上公钥），列出类别。
 - 启动时把文件描述符软上限提到 min(硬上限, 4096)。
 
 ## 9. 参数
@@ -195,7 +203,7 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 | `--server-link` | 自动检测 | 1G…400G |
 | `--method http\|scp` | http | 交换机从 ztp-server 拉包的方式 |
 | `--in-flight` | 32 | 下发到验证完之间的设备数 |
-| `--check-workers` / `--upgrade-workers` / `--probe-workers` | 8 / 8 / 16 | |
+| `--check-workers` / `--upgrade-workers` / `--probe-workers` | 16 / 8 / 16 | 检查只读 SSH，2026-10-24 起 16；升级 worker 和 `--in-flight` 不提高（同时重启很多 spine 是 fabric 风险） |
 | `--relay-fanout` / `--relay-transfers` | 4 / 32 | |
 | `--p2p` | 项目里的 p2p.xlsx | OOB 分组来源 |
 | `--local-dir` | /home/admin | 交换机上的包和步骤目录 |
@@ -211,13 +219,13 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 |---|---|
 | `test_fleet_link` | 分档公式；物理口；bond 各模式；带 veth 的 bridge；FDB；VLAN over bond；未知按 1G；多出口；覆盖 |
 | `test_fleet_distribution` | P2P 分组；48 台一组四轮且只拉一次服务器；新持有者立即服务；闸门上限与间隔；重试、退役、熔断；排空后放行；直拉错峰与轮转 |
-| `test_fleet_probe` | 安装中、首次 ping 失败、两次 ping 之间重启、误判打回不重置停留、各类状态、三个上限（默认 60/30/15 分钟）、v1 日志最慢的 718 秒 NVUE 就绪仍在上限内、过期结果、不重启作业 |
+| `test_fleet_probe` | 安装中、首次 ping 失败、两次 ping 之间重启、误判打回不重置停留、各类状态、三个上限（默认 60/30/15 分钟）、v1 日志最慢的 718 秒 NVUE 就绪仍在上限内、过期结果、不重启作业；ping 不通 1 分钟后进入 rebooting Q（停机 70 秒的设备比 3 分钟时早交回，boot_id 未变仍回 upgrading Q 且不交回） |
 | `test_fleet_ssh` | 进程内 paramiko 服务端：密钥、密码回退、主机密钥固定（含哈希条目、@revoked）、命令超时、与 v1 规则一致；密码被拒为 PASSWORD_REJECTED（不算类重启），密钥被拒仍为 AUTH_REJECTED |
-| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳；验证超时重试一次（默认 30 秒、等待期间检查池空闲；已请求修复、未说明、其他错误码和判定不通过都不重试；类重启错误仍回 rebooting Q）；预检密码被拒即 HOLD（之后不再启动预检、在跑的跑完、其余 SKIPPED PASSWORD_REJECTED_HOLD、汇总说明、其他预检失败不 HOLD） |
+| `test_fleet_engine` | 中性 Family + 模拟设备群：金丝雀先行、组内接力、持有者服务期间不重启、直拉、在途上限、预检分类、只出计划、写前记录失败 HOLD、停止、不重启作业和两跳；验证超时重试一次（默认 30 秒、等待期间检查池空闲；已请求修复、未说明、其他错误码和判定不通过都不重试；类重启错误仍回 rebooting Q）；预检密码被拒即 HOLD（之后不再启动预检、在跑的跑完、其余 SKIPPED PASSWORD_REJECTED_HOLD、汇总说明、其他预检失败不 HOLD）；检查 worker 默认 16、升级 worker 8、在途 32；汇总的密钥被拒清单（不需安装的给出 ssh-copy-id、没有密码的说明未尝试密码、只报告） |
 | `test_ibsw_v2_device_scripts` | 检查脚本（stdin 执行、读 stdin 的命令吃不掉脚本、步骤目录状态）；取包助手（HTTP 重试、内容不符、空间、目录不安全、scp 只用密码） |
 | `test_ibsw_v2_device` | 安装前失败白名单；BUSY/PENDING；规划与渲染；单台模拟交换机从预检到验证（导入密钥、真实 v1 组件脚本和 runner、重启丢密钥后恢复、修复缺失配置、证据无密码）；验证查询超时或通道失败时异常带 `repair_requested`（修复请求前为假、之后为真）；输错密码在任何写入前被拒（回退会话和导入会话两种）、密钥被拒仍回退到密码、探测仍报 auth_fail、密码校验只用密码登录且只跑 `true` |
 | `test_ibsw_v2_workflow` | 6 台模拟交换机、1G 接力、两跳 OS、v1 金丝雀规则、不可达与已在目标 |
-| `test_ibsw_v2_entry` | `--help`；参数检查；运行守卫；`--plan` 只读；经入口完整升级；证据无密码；输错一次重问后正常升级（错误密码只试一次、只在一台上）；三次都错退出且没碰任何设备；TCP/22 不通的设备不参与校验；没有设备响应时继续并报告不可达 |
+| `test_ibsw_v2_entry` | `--help`；参数检查；运行守卫；`--plan` 只读；经入口完整升级；证据无密码；输错一次重问后正常升级（错误密码只试一次、只在一台上）；三次都错退出且没碰任何设备；TCP/22 不通的设备不参与校验；没有设备响应时继续并报告不可达；`--check-workers` 默认 16、上限 32；已在目标但密钥被拒的设备在汇总里给出 ssh-copy-id 且公钥未被改动；`--plan` 不带密码时汇总说明未尝试密码 |
 
 模拟交换机（`test_cases/ibsw_v2_switch_sim.py`）真实执行检查脚本、取包助手、v1 组件脚本和 owned runner。
 `nv`、`curl`、`scp` 等由桩程序代替，安装后会模拟重启、换 boot_id、nvued 稍后就绪。`connector_for(凭据)`
@@ -251,3 +259,10 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
   CPLD 烧写到 WAIT_REBOOT 最长 672 s，30 分钟停留上限够用。两者都不变。
 - **密码**：第一轮升级有 118 台出现 CPLD 步骤记录。v2 原来的预检会在每台需要升级的设备上各开一个密码会话，
   一次输错就是这么多次失败登录；v1 在第一次明确拒绝时停下重问。由此加了入口的密码校验和引擎的 HOLD（第 4 节）。
+- **重启后等多久再探测**：WAIT_REBOOT 之后第一次 SSH 连上（第一个 CHECK_NVUED）两轮各 29 台，最早 67 s / 76 s，
+  中位 123 s / 114 s。rebooting Q 原来在 ping 不通 3 分钟后才开始，改为 1 分钟；ladder 的 ping 间隔 15 s 不变。
+- **检查并发**：v1 这几轮升级都用 `--parallel-limit 16`，预检候选 192 台。v2 的预检和验证都是只读 SSH，
+  检查 worker 默认改为 16；升级 worker 8、在途 32 不变。
+- **密钥被拒但不需要安装**：最后一轮（没有任何安装任务）第一次预检有 18 台管理公钥被拒，回退的密码也被拒
+  （PASSWORD_PREFLIGHT_REJECTED），v1 提示「Attempt 2/3」；重输密码后的第二次预检里这 18 台都通过，说明第一次是输错。
+  这些设备不需要安装，v1 和 v2 都不会去补它们的公钥，所以 v2 的汇总单独列出并给出修复方法（第 8 节）。

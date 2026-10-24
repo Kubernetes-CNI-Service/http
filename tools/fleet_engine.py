@@ -72,7 +72,7 @@ class Options:
     link: object                       # fleet_link.LinkDecision
     groups: dict                       # hostname -> OOB leaf
     skip_canary: bool = False
-    check_workers: int = 8
+    check_workers: int = 16           # read-only SSH (2026-10-24); upgrade workers and in-flight stay
     upgrade_workers: int = 8
     in_flight: int = 32
     probe_workers: int = 16
@@ -84,6 +84,7 @@ class Options:
     later_hop_batch_seconds: float = 60.0
     stall_fraction: float = 2 / 3
     verify_retry_seconds: float = 30.0
+    password_given: bool | None = None   # a switch password was typed; None: assume one exactly when upgrading
 
 
 @dataclass(frozen=True)
@@ -302,6 +303,8 @@ class Dev:
     need_since: float | None = None
     state_since: float = 0.0
     session: object = None
+    key_rejected: bool = False         # the management key was rejected in precheck (O3 2026-10-24)
+    password_not_tried: bool = False   # ... and no password was there to fall back to
 
     @property
     def host(self):
@@ -371,6 +374,10 @@ class Engine:
         while self.timers and self.timers[0][0] <= now:
             _due, _order, action = heapq.heappop(self.timers)
             action()
+
+    def _password_given(self):
+        given = self.options.password_given
+        return self.options.upgrade if given is None else given
 
     def _in_flight(self):
         return sum(1 for dev in self.devs.values() if dev.state in IN_FLIGHT_STATES or dev.holds_slot)
@@ -514,6 +521,8 @@ class Engine:
                 return self._final(dev, "FAILED", "PASSWORD_REJECTED")
             if isinstance(error, SshError) and error.code in ("CONNECT_FAILED", "CONNECT_TIMEOUT", "HANDSHAKE_FAILED"):
                 return self._final(dev, "SKIPPED", "UNREACHABLE_" + error.code)
+            if isinstance(error, SshError) and error.code == "AUTH_REJECTED":
+                dev.key_rejected, dev.password_not_tried = True, not self._password_given()
             if getattr(error, "code", None):
                 category = "REVIEW_REQUIRED" if code in ("HOST_KEY_MISMATCH", "HOST_KEY_UNKNOWN",
                                                          "DEVICE_IDENTITY_MISMATCH") else "FAILED"
@@ -523,6 +532,7 @@ class Engine:
             return self._final(dev, "FAILED", "PRECHECK_ERROR_" + type(error).__name__)
         result = event.result
         dev.facts, dev.plan, dev.backup, dev.health = result["facts"], result["plan"], result["backup"], result["health"]
+        dev.key_rejected = bool(result["key_rejected"])
         self.evidence.journal(dev.host)("precheck.json", dict(
             os_version=dev.facts.os_version, boot_id=dev.facts.boot_id, ping=result["ping"],
             plan=[dict(row) for row in dev.plan.rows], issues=list(dev.plan.issues), health=dev.health,
@@ -1009,9 +1019,13 @@ class Engine:
             counts["SKIPPED"] = counts.get("SKIPPED", 0) + 1
             rows.append(dict(hostname=issue.hostname, category="SKIPPED", reason=",".join(issue.reasons),
                              warnings=[], performed=[], canary=False))
+        key_rows = [dict(hostname=dev.host, address=dev.device.address, category=dev.category, reason=dev.reason,
+                         group="PASSWORD_NOT_TRIED" if dev.password_not_tried else
+                         "NO_INSTALLATION" if dev.category == "AT_TARGET" else "OTHER")
+                    for dev in sorted(self.devs.values(), key=lambda item: item.order) if dev.key_rejected]
         report = dict(family=self.family.name, run_id=self.options.run_id, hold=self.hold, stopped=self.stopping,
                       aborted=self.aborted, password_rejected_by=list(self.password_rejected_by),
-                      link=self.options.link.line(), counts=counts, devices=rows,
+                      key_rejected=key_rows, link=self.options.link.line(), counts=counts, devices=rows,
                       seconds=round(self.clock() - self.started, 1))
         self.evidence.write("run-report.json", report)
         return report
@@ -1026,7 +1040,7 @@ def exit_code(report):
     return 3 if bad else 0
 
 
-def render_summary(report):
+def render_summary(report, *, management_key=None, user=None):
     lines = ["", f"== {report.get('family', 'switch')} upgrade summary ==", report["link"]]
     for category, label in CATEGORIES:
         names = [row for row in report["devices"] if row["category"] == category]
@@ -1044,5 +1058,31 @@ def render_summary(report):
         lines.append(f"The switch password was rejected by {', '.join(report['password_rejected_by'])}; prechecks "
                      f"stopped there and nothing was written to the {held} switch(es) marked {PASSWORD_HOLD}. "
                      "Check the password and run again.")
+    lines += _key_rejected_lines(report.get("key_rejected") or [], management_key, user)
     lines.append(f"elapsed {report['seconds']} s")
     return "\n".join(lines)
+
+
+def _key_rejected_lines(rows, management_key, user):
+    """O3 2026-10-24: switches whose management key was rejected in precheck, listed only (nothing is written)."""
+    if not rows:
+        return []
+    lines = [f"MANAGEMENT KEY REJECTED in precheck ({len(rows)}): listed only, this changes nothing"]
+    groups = {name: [row for row in rows if row["group"] == name]
+              for name in ("NO_INSTALLATION", "PASSWORD_NOT_TRIED", "OTHER")}
+    if groups["NO_INSTALLATION"]:
+        lines.append("  needs no installation: the key was not changed (no access bootstrap runs, so an --upgrade run "
+                     "does not add it); add it with ssh-copy-id and the management public key, or a later "
+                     "access-repair tool:")
+        for row in groups["NO_INSTALLATION"]:
+            lines.append(f"    {row['hostname']}  ssh-copy-id -i {management_key or '<management public key>'} "
+                         f"{user or '<user>'}@{row['address']}")
+    if groups["PASSWORD_NOT_TRIED"]:
+        lines.append("  the password was not tried (no password was asked); run again with --password to precheck "
+                     "them with it:")
+        lines += [f"    {row['hostname']}" for row in groups["PASSWORD_NOT_TRIED"]]
+    if groups["OTHER"]:
+        lines.append("  the others: an --upgrade run adds the key in its access bootstrap before installing anything:")
+        lines += [f"    {row['hostname']}  {row['category']}" + (f" {row['reason']}" if row.get("reason") else "")
+                  for row in groups["OTHER"]]
+    return lines

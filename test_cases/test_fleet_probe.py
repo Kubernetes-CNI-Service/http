@@ -1,7 +1,7 @@
 """Fleet jobs (IB upgrade v2): reboot probing (owner 2026-10-23; review 15.4, 15.5, 15.12).
 
 upgrading Q: first ping at once, then every 30 s; no reply = rebooting, rebooting Q after
-3 minutes; SSH check every 2 minutes. rebooting Q: ping every 15 s, TCP/22, one SSH
+1 minute (O1 2026-10-24, was 3); SSH check every 2 minutes. rebooting Q: ping every 15 s, TCP/22, one SSH
 session for boot_id + nvued + `nv show system version`. One action per switch, stale
 results ignored, limits measured from dispatch and never reset.
 
@@ -9,6 +9,10 @@ Readiness budget (field 2026-10-24): in the v1 CPLD log, the first SSH reach aft
 reboot to NVUE ready took up to 718 s on 57 switches (7 over 600 s, none over 720 s, all
 upgraded), so the readiness checks get 15 minutes; the 30-minute dwell and the 60-minute
 device deadline stay (dispatch to NVUE ready was at most 1598 s).
+
+Reboot wait (O1, 2026-10-24): after v1's WAIT_REBOOT mark the switches answered SSH after
+68 s at the earliest, so rebooting Q starts 60 s after the failed ping instead of 180 s; a
+switch still on the same boot goes back to upgrading Q (boot_same), so probing early is safe.
 """
 import sys
 import unittest
@@ -92,9 +96,9 @@ class ProbeTest(unittest.TestCase):
         pings = clock.actions(probe.PING)
         self.assertEqual(pings[:4], [0.0, 30.0, 60.0, 90.0], "first ping at once, then every 30 s while installing")
         self.assertEqual(pings[4], 120.0)                            # 95 is down; the 120 ping finds it down
-        self.assertNotIn(150.0, pings, "3-minute wait before the ladder starts")
-        self.assertEqual(pings[5], 300.0, "rebooting Q starts 180 s after the failed ping")
-        self.assertEqual(pings[5:8], [300.0, 315.0, 330.0], "ladder pings every 15 s")
+        self.assertNotIn(150.0, pings, "1-minute wait before the ladder starts")
+        self.assertEqual(pings[5], 180.0, "rebooting Q starts 60 s after the failed ping")
+        self.assertEqual(pings[5:8], [180.0, 195.0, 210.0], "ladder pings every 15 s")
         self.assertEqual(clock.actions(probe.STATUS), [120.0], "one SSH check fell due while in upgrading Q")
         ladders = clock.actions(probe.LADDER)
         self.assertEqual(ladders[0], 405.0, "ping 405 replies, TCP and SSH follow in the same tick")
@@ -105,7 +109,7 @@ class ProbeTest(unittest.TestCase):
         clock = Clock(self.tracker(), device(reboot_at=0, up_at=200))
         [handback] = clock.run(400)
         self.assertEqual(handback.outcome, probe.READY)
-        self.assertEqual(clock.actions(probe.PING)[:2], [0.0, 180.0])
+        self.assertEqual(clock.actions(probe.PING)[:2], [0.0, 60.0])
 
     def test_a_reboot_between_two_pings_is_caught_by_the_ssh_check(self):
         clock = Clock(self.tracker(), device(reboot_at=31, up_at=55))   # down only between pings
@@ -125,10 +129,41 @@ class ProbeTest(unittest.TestCase):
             return {"kind": "boot_same", "boot_id": BOOT_A}
         clock = Clock(self.tracker(), pings)
         [handback] = clock.run(2000, step=5.0)
-        self.assertIn(210.0, clock.actions(probe.LADDER), "the ladder finds the same boot")
-        self.assertIn(240.0, clock.actions(probe.PING), "back to upgrading Q pings")
+        self.assertIn(90.0, clock.actions(probe.LADDER), "the ladder finds the same boot")
+        self.assertIn(120.0, clock.actions(probe.PING), "back to upgrading Q pings")
         self.assertEqual((handback.outcome, handback.reason), (probe.UNKNOWN, "REBOOT_NOT_OBSERVED"))
         self.assertEqual(clock.handback_times, [1805.0], "30 minutes from dispatch, not from the bounce")
+
+    def test_reboot_wait_is_one_minute_and_ladder_pings_stay_15_seconds(self):
+        timings = probe.Timings()
+        self.assertEqual((timings.reboot_wait, timings.ladder_ping), (60.0, 15.0))
+
+    def test_a_switch_back_70_seconds_after_going_down_is_ready_earlier(self):
+        def run(**timings):
+            clock = Clock(self.tracker(**timings), device(reboot_at=20, up_at=90))
+            [handback] = clock.run(600, step=5.0)
+            self.assertEqual((handback.outcome, handback.boot_id), (probe.READY, BOOT_B))
+            return clock.handback_times[0]
+        default, three_minutes = run(), run(reboot_wait=180.0)
+        self.assertEqual(default, 90.0, "the ping 60 s after the lost one finds it back; TCP and SSH follow")
+        self.assertEqual(three_minutes, 210.0)
+        self.assertLess(default, three_minutes)
+
+    def test_a_lost_ping_without_a_reboot_returns_to_upgrading_q_without_a_handback(self):
+        def bounce(host, action, now):
+            if action == probe.PING:
+                return "no_reply" if now == 30 else "reply"
+            if action == probe.TCP:
+                return True
+            if action == probe.STATUS:
+                return {"kind": "ok", "boot_id": BOOT_A, "outcome": "running"}
+            return {"kind": "boot_same", "boot_id": BOOT_A}
+        tracker = self.tracker()
+        clock = Clock(tracker, bounce)
+        self.assertEqual(clock.run(300, step=5.0), [], "no handback: the switch is still installing")
+        self.assertEqual(clock.actions(probe.LADDER), [90.0], "probed 60 s after the lost ping, same boot")
+        self.assertEqual(tracker.devices["sw01"].phase, probe.UPGRADING)
+        self.assertIn(120.0, clock.actions(probe.PING), "upgrading Q pings again")
 
     def test_status_outcomes(self):
         failed = Clock(self.tracker(), device(status=lambda now: {"kind": "ok", "boot_id": BOOT_A,

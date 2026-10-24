@@ -6,7 +6,8 @@ per switch at a time; a result whose token is stale is ignored.
 
 upgrading Q (right after the upgrade script started): ping at once and then every 30 s.
 A reply means the switch is still installing; no reply means it is rebooting, so it
-moves to rebooting Q three minutes later. Every two minutes an SSH check reads boot_id
+moves to rebooting Q one minute later (2026-10-24: v1 switches answered SSH 68 s after
+the reboot at the earliest; a switch still on the same boot goes back to upgrading Q). Every two minutes an SSH check reads boot_id
 and the script state, which catches a fast reboot between pings, a script that failed
 before installing, or a late hand-off.
 
@@ -35,7 +36,7 @@ READY, FAILED, UNKNOWN, REVIEW = "READY", "FAILED", "UNKNOWN", "REVIEW_REQUIRED"
 @dataclass(frozen=True)
 class Timings:
     upgrading_ping: float = 30.0
-    reboot_wait: float = 180.0
+    reboot_wait: float = 60.0
     ladder_ping: float = 15.0
     ladder_retry: float = 30.0
     ssh_check: float = 120.0

@@ -83,8 +83,8 @@ def parser():
     tune.add_argument("--server-link", choices=("1G", "2G", "10G", "20G", "25G", "40G", "50G", "100G", "200G", "400G"),
                       help="override the detected ztp-server link speed")
     tune.add_argument("--in-flight", type=int, default=32, help="switches between dispatch and verification (1-64)")
-    tune.add_argument("--check-workers", type=int, default=8,
-                      help="parallel prechecks and post-upgrade verifications (default: 8)")
+    tune.add_argument("--check-workers", type=int, default=16,
+                      help="parallel prechecks and post-upgrade verifications (default: 16)")
     tune.add_argument("--upgrade-workers", type=int, default=8,
                       help="parallel upgrade dispatches, per component (default: 8)")
     tune.add_argument("--probe-workers", type=int, default=16,
@@ -282,7 +282,8 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         link=decision, groups=groups, skip_canary=args.skip_canary, check_workers=args.check_workers,
         upgrade_workers=args.upgrade_workers, in_flight=args.in_flight, probe_workers=args.probe_workers,
         relay_fanout=args.relay_fanout, relay_transfers=args.relay_transfers, method=args.method,
-        progress_seconds=args.progress_seconds, **({"timings": timings} if timings is not None else {}))
+        progress_seconds=args.progress_seconds, password_given=password is not None,
+        **({"timings": timings} if timings is not None else {}))
     engine = fleet_engine.Engine(devices, ib.IbFamily(policy), ops, options, evidence, out=out,
                                  blocked_inputs=snapshot.blocked_devices)
     interrupts = []
@@ -299,7 +300,7 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     finally:
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
-    print(fleet_engine.render_summary(report), file=out)
+    print(fleet_engine.render_summary(report, management_key=str(public), user=args.user), file=out)
     print(f"evidence: {run_dir}", file=out)
     return fleet_engine.exit_code(report)
 

@@ -157,12 +157,14 @@ class FakeOps:
             raise SshError("CONNECT_FAILED")
         if behaviour == "password-rejected":
             raise SshError("PASSWORD_REJECTED")
+        if behaviour == "key-refused":                       # key rejected and no password to fall back to
+            raise SshError("AUTH_REJECTED")
         sim = self.sims[device.hostname]
         plan = self.plans[device.hostname]
         guard = ("PREVIOUS_INSTALL_PENDING", ".ibsw-x") if behaviour == "pending" else (None, None)
         return dict(facts=Facts(sim.version, sim.boot, dict(sim.files)), plan=plan,
                     health=dict(observed="PASS", reason=None, admitted=behaviour != "unhealthy"),
-                    guard=guard, backup=object() if upgrade else None, key_rejected=False)
+                    guard=guard, backup=object() if upgrade else None, key_rejected=behaviour == "key-rejected")
 
     def fetch(self, device, info, *, size, sha256, holder=None, url=None):
         source = holder.hostname if holder else "@server"
@@ -470,6 +472,46 @@ class PasswordHoldTest(unittest.TestCase):
         self.assertIsNone(world.report["hold"])
 
 
+class KeyRejectedSummaryTest(unittest.TestCase):
+    """O3 2026-10-24 (in the operator's last v1 run 18 switches rejected the management key while needing no
+    installation): the summary lists, in its own section, every switch whose management key was rejected in
+    precheck. One that needs no installation keeps a rejected key (no access bootstrap runs, so an --upgrade
+    run does not fix it): the summary says the key was not changed and how to add it (ssh-copy-id with the
+    management public key, or a later access-repair tool). A precheck without a password to fall back to says
+    the password was not tried. Report only: nothing is written for this."""
+
+    def section(self, world, **kwargs):
+        summary = engine.render_summary(world.report, **kwargs)
+        self.assertIn("MANAGEMENT KEY REJECTED", summary)
+        return summary.split("MANAGEMENT KEY REJECTED", 1)[1].split("elapsed ", 1)[0]
+
+    def test_a_switch_needing_no_installation_keeps_its_rejected_key_and_the_summary_says_how_to_fix_it(self):
+        needs = {"k0": {"os": []}, "k1": {"os": [["os-2.bin"]]}, "k2": {"os": []}}
+        world = World(self, ["k0", "k1", "k2"], needs=needs, selected=("os",))
+        world.ops.precheck_behaviour.update(k0="key-rejected", k1="key-rejected")
+        results = world.run()
+        self.assertEqual(results, {"k0": ("AT_TARGET", None), "k1": ("UPGRADED", None), "k2": ("AT_TARGET", None)})
+        groups = {row["hostname"]: row["group"] for row in world.report["key_rejected"]}
+        self.assertEqual(groups, {"k0": "NO_INSTALLATION", "k1": "OTHER"}, "k2's key worked: not listed")
+        section = self.section(world, management_key="/keys/mgmt.pub", user="admin")
+        self.assertIn("key was not changed", section)
+        self.assertIn("ssh-copy-id -i /keys/mgmt.pub admin@198.51.100.1", section, "k0's address")
+        self.assertNotIn("k2", section)
+        self.assertEqual([host for _t, host, _d in world.events("dispatch") + world.events("fetch-start")
+                          if host == "k0"], [], "report only: nothing is done to k0")
+        self.assertEqual(engine.exit_code(world.report), 0, "a listed key does not make the run incomplete")
+
+    def test_without_a_password_the_summary_says_it_was_not_tried(self):
+        world = World(self, ["k0", "k1"], upgrade=False)
+        world.ops.precheck_behaviour["k0"] = "key-refused"
+        results = world.run()
+        self.assertEqual(results["k0"], ("FAILED", "AUTH_REJECTED"))
+        self.assertEqual([(row["hostname"], row["group"]) for row in world.report["key_rejected"]],
+                         [("k0", "PASSWORD_NOT_TRIED")])
+        self.assertIn("password was not tried", self.section(world))
+        self.assertIsNone(world.report["hold"])
+
+
 def ssh_error(code, repair_requested=False):
     """An SshError as an ops.verify raises it. `repair_requested` tells whether that attempt already
     wrote repair-requested.json; None models an ops that does not say."""
@@ -507,6 +549,12 @@ class VerifyRetryTest(unittest.TestCase):
     def test_the_pause_is_thirty_seconds_by_default(self):
         options = engine.Options(run_id="r1", selected=("os",), upgrade=True, link=None, groups={})
         self.assertEqual(options.verify_retry_seconds, 30.0)
+
+    def test_sixteen_check_workers_by_default_and_the_upgrade_blast_radius_unchanged(self):
+        """O2 2026-10-24: prechecks and verifications are read-only SSH (v1 preflights ran 16 wide on 192
+        switches); upgrade workers stay 8 and in-flight stays 32 (many spines rebooting at once is a fabric risk)."""
+        options = engine.Options(run_id="r1", selected=("os",), upgrade=True, link=None, groups={})
+        self.assertEqual((options.check_workers, options.upgrade_workers, options.in_flight), (16, 8, 32))
 
     def test_a_timed_out_verification_runs_once_more_after_the_pause_and_passes(self):
         for code in ("COMMAND_TIMEOUT", "CHANNEL_FAILED"):
