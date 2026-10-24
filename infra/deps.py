@@ -19,7 +19,9 @@ install  Create ~/.venvs/http/<name> for venv-ibsw-upgrade or venv-cabletracker 
          11-load.py (its worker runs cron.sh) for venv-cabletracker, upgrade.py for venv-ibsw-upgrade.
          The base interpreter's platform selects the hashed list: a target's variant for that platform
          (venv-ibsw-upgrade on macOS cp39 arm64, the CLT /usr/bin/python3 of the formal full proof,
-         whose F01 SDK identity tests run in this venv), otherwise the target's own list.
+         whose F01 SDK identity tests run in this venv), otherwise the target's own list. An existing
+         venv is reused only when its interpreter is that same platform; check likewise requires the
+         venv's interpreter platform to be the target's and pyvenv.cfg to carry that variant's python.
          Root installs only into its own home (HOME must be root's home: plain sudo, not sudo -E).
          A half-built venv is reported with the directory to remove; nothing is deleted.
 bundle   Phase 2 (offline apt + wheel bundle); not implemented yet.
@@ -135,9 +137,13 @@ def venv_variant(target: dict, platform_name: str) -> tuple:
     return target["python"], target["requirements"]
 
 
-def venv_pythons(target: dict) -> list:
-    """Every python version a venv target can be built with (its own first)."""
-    return [target["python"]] + [variant["python"] for variant in target.get("variants", {}).values()]
+def interpreter_problem(python: Path) -> str:
+    """Why a venv's bin/python cannot run; a broken symlink names the base interpreter that is gone."""
+    if os.path.islink(python) and not python.exists():
+        return f"a broken symlink to {os.readlink(python)} (its base interpreter is gone)"
+    if not python.exists():
+        return "missing"
+    return "not executable"
 
 
 def validate_table(table: object) -> dict:
@@ -339,6 +345,10 @@ def parse_hashed(text: str) -> tuple:
     for raw in text.splitlines():
         match = re.match(r"^# wheel: (\S+\.whl) sha256:([0-9a-f]{64})$", raw.strip())
         if match:
+            # One wheel file is one PyPI upload: its filename names exactly one digest.
+            if match.group(1) in wheels:
+                problem = "has two digests" if wheels[match.group(1)] != match.group(2) else "is listed twice"
+                raise ValueError(f"wheel {match.group(1)} {problem}")
             wheels[match.group(1)] = match.group(2)
     return records, wheels
 
@@ -404,11 +414,25 @@ def check_requirement_file(root: Path, table: dict, relative: str, report: Repor
         elif version != table_version:
             problems += 1
             report.add(target, "mismatch", f"{relative}: {name}", f"file {version}, table {table_version}")
+    commented: dict = {}
     for filename, digest in sorted(wheels.items()):
         name = canonical(filename.split("-", 1)[0])
+        commented.setdefault(name, set()).add(digest)
         if name not in records or digest not in records[name][1]:
             problems += 1
             report.add(target, "mismatch", f"{relative}: {filename}", "wheel comment digest is not a hash of its record")
+        elif filename.split("-")[1] != records[name][0]:
+            problems += 1
+            report.add(target, "mismatch", f"{relative}: {filename}",
+                       f"wheel version differs from its record {name}=={records[name][0]}")
+    # The reverse direction: every hash of a record names its wheel file, so the per-file digest rule of
+    # check_files sees every pinned wheel.
+    for name, (_version, hashes) in sorted(records.items()):
+        uncommented = len(set(hashes) - commented.get(name, set()))
+        if uncommented:
+            problems += 1
+            report.add(target, "mismatch", f"{relative}: {name}",
+                       f"{uncommented} hash(es) without a '# wheel: <filename> sha256:<digest>' comment")
     if not problems:
         report.add(target, "ok", relative, f"{len(found)} distributions agree with set {row['set']}")
     return records, wheels
@@ -744,17 +768,30 @@ def check_venv_target(table: dict, target_name: str, report: Report, *, import_p
         report.add(target_name, "mismatch", "include-system-site-packages",
                    f"{cfg.get('include-system-site-packages')}, table {wanted_system}", f"recreate the venv: {fix}")
     version = cfg.get("version") or cfg.get("version_info") or ""
-    # The venv's own version selects the platform variant (each python appears once per target).
-    pythons = venv_pythons(target)
-    matched = [wanted for wanted in pythons if version == wanted or version.startswith(wanted + ".")]
-    if not matched:
-        report.add(target_name, "mismatch", "venv python", f"{version or 'unknown'}, table {' or '.join(pythons)}",
-                   f"recreate the venv with python{' or python'.join(pythons)}")
-    site_python = matched[0] if matched else target["python"]
     python = venv / "bin" / "python"
     if not (python.exists() and os.access(python, os.X_OK)):
-        report.add(target_name, "missing", f"{python}", "not executable", fix)
+        report.add(target_name, "missing", f"{python}", interpreter_problem(python), f"recreate the venv: {fix}")
         return
+    # The venv's own interpreter names the host platform (system, machine) and its version; that platform
+    # must be one of the target's, and pyvenv.cfg must carry the python of that platform's variant.
+    try:
+        venv_platform = probe_platform(str(python))
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+        report.add(target_name, "error", "venv python", f"cannot identify {python}: {exc}", f"recreate the venv: {fix}")
+        return
+    site_python = ".".join(version.split(".")[:2]) or target["python"]
+    if venv_platform not in target["platforms"]:
+        report.add(target_name, "mismatch", "venv python",
+                   f"its interpreter is {venv_platform} (pyvenv.cfg version {version or 'unknown'}), not a platform "
+                   f"of this target: {', '.join(target['platforms'])}", f"recreate the venv: {fix}")
+    else:
+        wanted = venv_variant(target, venv_platform)[0]
+        if not (version == wanted or version.startswith(wanted + ".")):
+            report.add(target_name, "mismatch", "venv python",
+                       f"pyvenv.cfg version {version or 'unknown'}, but {venv_platform} needs python {wanted}",
+                       f"recreate the venv: {fix}")
+        else:
+            site_python = wanted
     installed = venv_distributions(venv_site_packages(venv, site_python))
     problems = 0
     for name in target_distributions(table, target):
@@ -814,6 +851,7 @@ def run_check(root: Path, table: dict, targets: list) -> Report:
 
 
 def probe_platform(python: str) -> str:
+    """Table platform name (e.g. linux-cp312-x86_64, macos-cp39-arm64) of an interpreter, by running it."""
     result = subprocess.run([python, "-I", "-c", IDENTITY_PROBE], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60, check=False)
     if result.returncode:
@@ -881,7 +919,19 @@ def install(root: Path, table: dict, target_name: str, python: str, dry_run: boo
     create = None
     if (venv / "pyvenv.cfg").is_file():
         if not (venv_python.exists() and os.access(venv_python, os.X_OK)):
-            return half_built(venv, target_name, f"{venv_python} is missing or not executable")
+            return half_built(venv, target_name, f"{venv_python} is {interpreter_problem(venv_python)}")
+        # Never reuse a venv of another platform or python: its interpreter must be the selected variant's.
+        try:
+            existing = probe_platform(str(venv_python))
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+            return half_built(venv, target_name, f"its interpreter {venv_python} cannot be identified ({exc})")
+        if existing != platform_name:
+            print(f"[ERROR] {venv} holds a {existing} interpreter, but {python} is {platform_name}, which selects "
+                  f"{requirements_relative}; nothing was changed. Remove it and rerun with the interpreter you "
+                  f"want the venv built from:\n"
+                  f"  rm -rf {venv}\n"
+                  f"  python3 infra/deps.py install --target {target_name}", file=sys.stderr)
+            return EXIT_USAGE
         if not dry_run:
             try:
                 probe = subprocess.run(pip + ["--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

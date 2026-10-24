@@ -417,6 +417,20 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         success = "仅精确 ISSUE-0016 三项已知 FAIL、无其他失败或新增跳过时返回 0；不签发普通发布证明。"
         recovery = "报告不精确或路径不安全时停止验证；保留原始 FAIL，勿改断言或手工修改批准 ledger。"
         example = "PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH"
+    elif relative == "test_cases/f01_sdk_venv.py":
+        direct = "否；这是 F01 SDK 身份测试的路由助手，由测试模块导入，本身不含测试，不要当作 unittest 模块运行。"
+        environment = "全量证明解释器（macOS 为 /usr/bin/python3）加载；需要当前用户的 ~/.venvs/http/ibsw-upgrade。"
+        scenario = "非该 venv 的解释器运行带 @sdk_identity_test 的 F01 测试时，用该 venv 的解释器在子进程中运行同一测试 ID。"
+        prerequisite = "venv 由证明解释器建立（基解释器、版本、cache tag、机器架构一致），并能证明 F01 生产 SSH SDK 身份。"
+        syntax = "由测试模块导入：from test_cases.f01_sdk_venv import sdk_identity_test，并以 @sdk_identity_test 标记测试方法"
+        parameters = "无 CLI；装饰器作用于测试方法。"
+        inputs = "infra/dependencies.json 的 venv 路径、测试 ID、子进程的身份探针与结果行。"
+        outputs = "子进程恰好通过该测试时正常返回；否则令所在测试 FAIL 并给出安装命令，绝不 skip。"
+        success = "所在测试在 venv 子进程中恰好通过 1 个，且子进程解释器身份与证明解释器一致。"
+        recovery = ("按失败信息重建 venv：rm -rf ~/.venvs/http/ibsw-upgrade，再用证明解释器执行 "
+                    "python3 infra/deps.py install --target venv-ibsw-upgrade。")
+        example = ("PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v "
+                   "test_cases.test_deps_table_workflow.F01SdkVenvRoutingWorkflowTests  # 验证路由助手")
     elif is_test:
         direct = "是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。"
         environment = "canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。"

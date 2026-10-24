@@ -130,10 +130,12 @@ AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 
 
 macOS 使用哈希清单 `infra/requirements-ibsw-upgrade-macos-cp39.txt`（CPython 3.9、Apple Silicon
 arm64，版本与 Linux 清单相同），安装需要 PyPI 访问；Intel Mac 不受支持。需要该身份的 F01 测试由
-`test_cases/f01_sdk_venv.py` 的 `@sdk_identity_test` 标记：runner 本身是 venv 时照旧在进程内运行；
-否则用该 venv 的解释器在子进程中运行同一个测试 ID，断言不变，子进程必须先证明生产身份并恰好通过这
-一个测试。venv 缺失、不能证明身份或子进程有任何失败、错误、跳过时，测试失败并给出上述安装命令，
-绝不 skip。
+`test_cases/f01_sdk_venv.py` 的 `@sdk_identity_test` 标记：只有 runner 本身就是这个 venv 时才在进程内
+运行；否则用该 venv 的解释器在子进程中运行同一个测试 ID，断言不变。子进程必须先证明生产身份，并且
+必须就是证明解释器的 venv：base_prefix（realpath）、`sys.version_info[:3]`、
+`sys.implementation.cache_tag` 和 `platform.machine()` 都与父进程一致，然后恰好通过这一个测试。venv
+缺失、断链、不能证明身份、由其他基解释器创建，或子进程有任何失败、错误、跳过、超时时，测试失败并给出
+上述安装命令，绝不 skip；子进程在独立会话中运行，超时会杀掉整个进程组。
 
 manifest 校验还会直接加载并合并三份真实部署选择器：`sync-code.py` 的根目录同步选择、
 `infra/docker/activate.py` 的镜像源码选择，以及 `_package_common.py` 的归档源码选择。任一选择器

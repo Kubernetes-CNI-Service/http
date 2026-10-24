@@ -17,9 +17,12 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -167,6 +170,30 @@ ROUTED_F01_TESTS = {
 }
 
 
+class FakeChild:
+    """subprocess.Popen stand-in: records the call; replies (returncode, stdout, stderr) or times out once."""
+
+    def __init__(self, command, reply, recorded, **kwargs):
+        recorded.append((command, kwargs))
+        self.pid = 4242
+        self.returncode = None
+        self.reply = reply
+        self.stdout = self.stderr = None
+
+    def communicate(self, timeout=None):
+        if self.reply == "timeout":
+            self.reply = (None, "partial stdout", "partial stderr")
+            raise subprocess.TimeoutExpired("child", timeout)
+        self.returncode, stdout, stderr = self.reply
+        return stdout, stderr
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
 class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
     """infra/dependencies.json venv-ibsw-upgrade → test_cases/f01_sdk_venv.py → the F01 identity tests."""
 
@@ -188,36 +215,41 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         self.python.write_text("#!/bin/sh\nexit 99\n")
         self.python.chmod(0o755)
 
-    def run_routed(self, *, in_venv=False, replies=()):
-        """Run a decorated probe test; return (result, in-process calls, recorded child calls)."""
-        calls, recorded, replies = [], [], list(replies)
+    def run_routed(self, *, in_target_venv=False, replies=()):
+        """Run a decorated probe test; return (result, in-process calls, recorded child calls, killpg calls)."""
+        calls, recorded, killed, replies = [], [], [], list(replies)
 
         class Probe(unittest.TestCase):
             @f01_sdk_venv.sdk_identity_test
             def test_identity(inner):
                 calls.append(inner.id())
 
-        def fake_run(command, **kwargs):
-            recorded.append((command, kwargs))
-            returncode, output = replies.pop(0)
-            return subprocess.CompletedProcess(command, returncode, output)
+        def popen(command, **kwargs):
+            return FakeChild(command, replies.pop(0), recorded, **kwargs)
 
         result = unittest.TestResult()
-        with mock.patch.object(f01_sdk_venv, "current_interpreter_is_venv", return_value=in_venv), \
-                mock.patch.object(f01_sdk_venv.subprocess, "run", side_effect=fake_run):
+        with mock.patch.object(f01_sdk_venv, "runs_in_target_venv", return_value=in_target_venv), \
+                mock.patch.object(f01_sdk_venv.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(f01_sdk_venv.os, "killpg", side_effect=lambda pid, sig: killed.append((pid, sig))):
             Probe("test_identity").run(result)
         self.assertEqual([], replies, "every prepared child reply is consumed")
         self.assertEqual([], result.skipped, "the routing never skips")
-        return result, calls, recorded
+        return result, calls, recorded, killed
 
-    def probe_ok(self):
-        return 0, f01_sdk_venv.PROBE_PREFIX + json.dumps({"prefix": str(self.venv), "lock_sha256": "0" * 64})
+    def identity(self, **changes):
+        value = dict(f01_sdk_venv.interpreter_identity(), prefix=str(self.venv))
+        value.update(changes)
+        return value
 
-    def child(self, returncode=0, **counts):
-        summary = {"run": 1, "failures": 0, "errors": 0, "skipped": 0, "expected_failures": 0,
-                   "unexpected_successes": 0, "prefix": str(self.venv)}
+    def probe_ok(self, **changes):
+        value = dict(self.identity(**changes), lock_sha256="0" * 64)
+        return 0, "\n" + f01_sdk_venv.PROBE_PREFIX + json.dumps(value) + "\n", ""
+
+    def child(self, returncode=0, identity=None, **counts):
+        summary = dict(identity or self.identity(), run=1, failures=0, errors=0, skipped=0, expected_failures=0,
+                       unexpected_successes=0)
         summary.update(counts)
-        return returncode, "test_identity ... ok\n\nRan 1 test\n" + f01_sdk_venv.RESULT_PREFIX + json.dumps(summary)
+        return returncode, "\n" + f01_sdk_venv.RESULT_PREFIX + json.dumps(summary) + "\n", "test_identity ... ok\n"
 
     def failure(self, result) -> str:
         self.assertEqual(1, len(result.failures), result.errors)
@@ -237,56 +269,92 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
         self.assertEqual(["python3", "infra/deps.py", "install", "--target", f01_sdk_venv.TARGET],
                          f01_sdk_venv.INSTALL_COMMAND.split())
 
-    def test_missing_venv_fails_with_the_install_command_and_runs_nothing(self):
-        result, calls, recorded = self.run_routed()
-        message = self.failure(result)
-        self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
-        self.assertIn(str(self.venv), message)
-        self.assertEqual(([], []), (calls, recorded))
-
-    def test_inside_a_venv_the_test_runs_in_process_as_before(self):
-        result, calls, recorded = self.run_routed(in_venv=True)
+    def test_only_the_target_venv_itself_runs_the_test_in_process(self):
+        for prefix, expected in ((str(self.venv), True), (str(self.home / "other-venv"), False),
+                                 (sys.base_prefix, False)):
+            with self.subTest(prefix=prefix), mock.patch.object(f01_sdk_venv.sys, "prefix", prefix):
+                self.assertIs(expected, f01_sdk_venv.runs_in_target_venv())
+        result, calls, recorded, _killed = self.run_routed(in_target_venv=True)
         self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
         self.assertEqual(1, len(calls))
         self.assertTrue(calls[0].endswith(".Probe.test_identity"), calls)
         self.assertEqual([], recorded)
 
-    def test_outside_a_venv_the_same_test_id_runs_in_the_venv_interpreter(self):
+    def test_missing_or_broken_venv_fails_with_the_install_command_and_runs_nothing(self):
+        cases = {
+            "missing": (lambda: None, str(self.venv) + " is missing"),
+            "not a venv": (lambda: self.venv.mkdir(parents=True), "is not a venv"),
+            "broken symlink": (self.make_broken_venv, "broken symlink to " + str(self.home / "gone/bin/python3")),
+        }
+        for label, (prepare, words) in cases.items():
+            with self.subTest(case=label):
+                if self.venv.exists():
+                    shutil.rmtree(self.venv)
+                prepare()
+                result, calls, recorded, _killed = self.run_routed()
+                message = self.failure(result)
+                self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
+                self.assertIn(words, message)
+                self.assertEqual(([], []), (calls, recorded))
+
+    def make_broken_venv(self):
         self.make_venv()
-        result, calls, recorded = self.run_routed(replies=[self.probe_ok(), self.child()])
+        self.python.unlink()
+        self.python.symlink_to(self.home / "gone/bin/python3")
+
+    def test_outside_the_target_venv_the_same_test_id_runs_in_the_venv_interpreter(self):
+        self.make_venv()
+        result, calls, recorded, killed = self.run_routed(replies=[self.probe_ok(), self.child()])
         self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
         self.assertEqual([], calls, "the body runs in the child, not in this interpreter")
+        self.assertEqual([], killed)
         (probe, probe_kwargs), (child, child_kwargs) = recorded
         self.assertEqual([str(self.python), "-I", "-B", "-c", f01_sdk_venv.PROBE, str(ROOT)], probe)
         self.assertIn("_factory_sdk_identity()", f01_sdk_venv.PROBE)
         self.assertEqual([str(self.python), "-I", "-B", "-c", f01_sdk_venv.CHILD, str(ROOT)], child[:6])
         self.assertEqual(7, len(child))
         self.assertTrue(child[6].endswith(".Probe.test_identity"), child)
-        self.assertEqual(str(ROOT), child_kwargs["cwd"])
+        for kwargs in (probe_kwargs, child_kwargs):
+            self.assertEqual(str(ROOT), kwargs["cwd"])
+            self.assertEqual(subprocess.DEVNULL, kwargs["stdin"])
+            self.assertEqual((subprocess.PIPE, subprocess.PIPE), (kwargs["stdout"], kwargs["stderr"]))
+            self.assertEqual(("utf-8", "replace"), (kwargs["encoding"], kwargs["errors"]))
+            self.assertIs(True, kwargs["start_new_session"])
+            self.assertNotIn("text", kwargs)
+        self.assertIsNone(probe_kwargs["env"])
         self.assertEqual("1", child_kwargs["env"][f01_sdk_venv.CHILD_ENV])
-        self.assertEqual(subprocess.DEVNULL, child_kwargs["stdin"])
         self.assertNotIn(f01_sdk_venv.CHILD_ENV, os.environ)
         # The identity probe ran once for this interpreter; a second routed test reuses it.
-        _result, _calls, again = self.run_routed(replies=[self.child()])
+        _result, _calls, again, _killed = self.run_routed(replies=[self.child()])
         self.assertEqual(1, len(again))
 
-    def test_a_venv_without_the_identity_fails_with_the_install_command(self):
+    def test_a_venv_without_the_identity_or_of_another_interpreter_fails(self):
         self.make_venv()
-        reply = (1, "tools.ufm_bootstrap_auth_adapter.BootstrapAuthError: SSH SDK implementation identity is unproved")
-        for label, probe in (("refused", reply),
-                             ("other prefix", (0, f01_sdk_venv.PROBE_PREFIX + json.dumps({"prefix": "/elsewhere"}))),
-                             ("no result line", (0, "nothing"))):
+        mine = f01_sdk_venv.interpreter_identity()
+        probes = {
+            "refused": (1, "", "tools.ufm_bootstrap_auth_adapter.BootstrapAuthError: "
+                               "SSH SDK implementation identity is unproved\n"),
+            "other prefix": self.probe_ok(prefix="/elsewhere"),
+            "other base interpreter": self.probe_ok(base_prefix="/opt/other-python"),
+            "other version": self.probe_ok(version=mine["version"][:2] + [mine["version"][2] + 1]),
+            "other cache tag": self.probe_ok(cache_tag="cpython-312"),
+            "other machine": self.probe_ok(machine="x86_64" if mine["machine"] != "x86_64" else "arm64"),
+            "no result line": (0, "nothing", ""),
+            "glued result line": (0, "noise" + f01_sdk_venv.PROBE_PREFIX + json.dumps(self.identity()), ""),
+        }
+        for label, probe in probes.items():
             with self.subTest(probe=label):
                 f01_sdk_venv._PROBED.clear()
-                result, calls, recorded = self.run_routed(replies=[probe])
+                result, calls, recorded, _killed = self.run_routed(replies=[probe])
                 message = self.failure(result)
                 self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
-                self.assertIn("does not prove the F01 SDK identity", message)
+                self.assertIn("does not prove the F01 SDK identity on the proof interpreter", message)
                 self.assertEqual([], calls)
                 self.assertEqual(1, len(recorded), "the test child is not started")
 
-    def test_any_child_outcome_but_one_clean_pass_fails_the_test(self):
+    def test_any_child_outcome_but_one_clean_pass_on_the_proof_interpreter_fails(self):
         self.make_venv()
+        mine = f01_sdk_venv.interpreter_identity()
         outcomes = {
             "assertion failed": self.child(1, failures=1),
             "error": self.child(1, errors=1),
@@ -294,26 +362,66 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
             "nothing ran": self.child(0, run=0),
             "expected failure": self.child(0, expected_failures=1),
             "unexpected success": self.child(1, unexpected_successes=1),
-            "another prefix": (0, f01_sdk_venv.RESULT_PREFIX + json.dumps({
-                "run": 1, "failures": 0, "errors": 0, "skipped": 0, "expected_failures": 0,
-                "unexpected_successes": 0, "prefix": "/elsewhere"})),
-            "no result line": (0, "Ran 1 test\nOK\n"),
-            "killed": (-9, "test_identity ... "),
+            "another prefix": self.child(0, identity=self.identity(prefix="/elsewhere")),
+            "another base interpreter": self.child(0, identity=self.identity(base_prefix="/opt/other-python")),
+            "another version": self.child(0, identity=self.identity(version=[3, 12, 3] if mine["version"][:2] != [3, 12]
+                                                                    else [3, 9, 6])),
+            "no result line": (0, "Ran 1 test\nOK\n", ""),
+            "glued result line": (0, "partial" + f01_sdk_venv.RESULT_PREFIX + json.dumps(dict(
+                self.identity(), run=1, failures=0, errors=0, skipped=0, expected_failures=0,
+                unexpected_successes=0)), ""),
+            "killed": (-9, "", "test_identity ... "),
         }
         for label, reply in outcomes.items():
             with self.subTest(outcome=label):
-                result, calls, recorded = self.run_routed(replies=[self.probe_ok(), reply])
+                result, calls, recorded, _killed = self.run_routed(replies=[self.probe_ok(), reply])
                 f01_sdk_venv._PROBED.clear()
                 message = self.failure(result)
                 self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
-                self.assertIn(reply[1][-40:], message, "the child's own output is shown")
+                for part in reply[1:]:
+                    if part.strip():
+                        self.assertIn(part.strip()[-30:], message, "the child's own output is shown")
                 self.assertEqual([], calls)
 
-    def test_a_child_marker_outside_a_venv_fails_instead_of_recursing(self):
+    def test_a_child_timeout_kills_its_process_group_and_fails(self):
+        self.make_venv()
+        result, calls, recorded, killed = self.run_routed(replies=[self.probe_ok(), "timeout"])
+        message = self.failure(result)
+        self.assertEqual([(4242, signal.SIGKILL)], killed)
+        self.assertIn("timed out after", message)
+        self.assertIn("partial stderr", message)
+        self.assertEqual([], calls)
+
+    def test_timeout_kills_grandchildren_and_output_is_decoded_with_replacement(self):
+        """Real processes: the child's own child dies with it; undecodable bytes do not raise."""
+        with tempfile.TemporaryDirectory() as directory:
+            pidfile = Path(directory) / "grandchild.pid"
+            program = ("import subprocess, sys, time\n"
+                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                       "open(sys.argv[1], 'w').write(str(child.pid))\n"
+                       "sys.stdout.buffer.write(b'\\xff\\xfe before timeout\\n'); sys.stdout.flush()\n"
+                       "time.sleep(120)\n")
+            code, stdout, stderr = f01_sdk_venv._run([sys.executable, "-I", "-c", program, str(pidfile)], 5)
+            self.assertIsNone(code)
+            self.assertIn("timed out after 5 s", stderr)
+            self.assertIn("�", stdout)
+            self.assertIn("before timeout", stdout)
+            grandchild = int(pidfile.read_text())
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(grandchild, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.1)
+            else:
+                self.fail(f"grandchild {grandchild} survived the child's timeout")
+
+    def test_a_child_marker_outside_the_target_venv_fails_instead_of_recursing(self):
         self.make_venv()
         with mock.patch.dict(os.environ, {f01_sdk_venv.CHILD_ENV: "1"}):
-            result, calls, recorded = self.run_routed()
-        self.assertIn("is not a venv", self.failure(result))
+            result, calls, recorded, _killed = self.run_routed()
+        self.assertIn("is not " + str(self.venv), self.failure(result))
         self.assertEqual(([], []), (calls, recorded))
 
     def test_child_program_runs_exactly_the_named_test_and_reports_it(self):
@@ -323,12 +431,13 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
                                               ("test_cases.test_deps_table.NoSuchTests.test_none", 1,
                                                {"run": 1, "failures": 0, "errors": 1, "skipped": 0})):
             with self.subTest(test_id=test_id):
-                code, output = f01_sdk_venv._run(
+                code, stdout, stderr = f01_sdk_venv._run(
                     [sys.executable, "-I", "-B", "-c", f01_sdk_venv.CHILD, str(ROOT), test_id], 300)
-                self.assertEqual(returncode, code, output)
-                summary = f01_sdk_venv.tagged(output, f01_sdk_venv.RESULT_PREFIX)
-                self.assertEqual(expected, {key: summary[key] for key in expected}, output)
-                self.assertEqual(os.path.realpath(sys.prefix), os.path.realpath(summary["prefix"]))
+                self.assertEqual(returncode, code, stdout + stderr)
+                summary = f01_sdk_venv.tagged(stdout, f01_sdk_venv.RESULT_PREFIX)
+                self.assertEqual(expected, {key: summary[key] for key in expected}, stdout + stderr)
+                self.assertIsNone(f01_sdk_venv.identity_problem(summary, Path(sys.prefix)))
+                self.assertIn("Ran 1 test", stderr)
 
     def test_exactly_the_identity_tests_of_the_three_f01_modules_are_routed(self):
         for module_name, expected in ROUTED_F01_TESTS.items():

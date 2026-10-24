@@ -727,6 +727,24 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("JSON", helper["outputs"])
         self.assertNotIn("-m unittest -v test_cases.validation_unittest", helper["example"])
 
+    def test_f01_sdk_venv_helper_is_not_advertised_as_a_test_module(self):
+        # 2026-10-24: the helper holds no test; `python3 -m unittest test_cases.f01_sdk_venv` would run 0 tests.
+        updater = load_path("manual_f01_sdk_venv_helper", USER_MANUAL_SCRIPT)
+        profile = updater.script_profile(ROOT, "test_cases/f01_sdk_venv.py")
+        self.assertTrue(profile["direct"].startswith("否"))
+        self.assertIn("@sdk_identity_test", profile["syntax"])
+        self.assertIn("python3 infra/deps.py install --target venv-ibsw-upgrade", profile["recovery"])
+        self.assertIn("test_deps_table_workflow", profile["example"])
+        for field in ("syntax", "example"):
+            self.assertNotIn("-m unittest -v test_cases.f01_sdk_venv", profile[field])
+        rendered = updater.render_manual(ROOT)
+        match = re.search(r'<details[^>]*data-script-reference="test_cases/f01_sdk_venv\.py"[^>]*>(.*?)</details>',
+                          rendered, flags=re.DOTALL)
+        self.assertIsNotNone(match)
+        self.assertNotIn("-m unittest -v test_cases.f01_sdk_venv<", match.group(1))
+        self.assertEqual((ROOT / "user-manual.html").read_text(encoding="utf-8"), rendered,
+                         "generated manual must be current")
+
     def test_backup_bounded_peers_are_not_advertised_as_operator_clis(self):
         updater = load_path("manual_backup_fixed_peers", USER_MANUAL_SCRIPT)
         for relative in ("ztp/backup/_bounded_process.py",

@@ -150,7 +150,11 @@ while args and args[0] in ("-I", "-B", "-s", "-E"):
     args = args[1:]
 if args[:1] == ["-c"]:
     if args[1].startswith("# deps-identity"):
-        print(os.environ["FAKE_PY_IDENTITY"])
+        # A venv interpreter keeps the identity of the base it was created from (fake-identity.json beside
+        # its pyvenv.cfg); a base interpreter reports FAKE_PY_IDENTITY.
+        own = Path(__file__).resolve().parents[1] / "fake-identity.json"
+        print(own.read_text() if (own.parent / "pyvenv.cfg").is_file() and own.is_file()
+              else os.environ["FAKE_PY_IDENTITY"])
         sys.exit(0)
     if args[1].startswith("# deps-import-probe"):
         broken = [name for name in args[2:] if name in os.environ.get("FAKE_PY_IMPORT_FAIL", "").split()]
@@ -161,14 +165,17 @@ if args[:1] == ["-c"]:
     sys.exit(3)
 if args[:2] == ["-m", "venv"]:
     target = Path(args[-1])
-    # The created venv follows the identity this fake base interpreter reports (3.12 unless told otherwise).
-    version = json.loads(os.environ.get("FAKE_PY_IDENTITY") or '{"version": "3.12"}')["version"]
+    # The created venv follows the identity this fake base interpreter reports (Linux 3.12 unless told otherwise).
+    identity = os.environ.get("FAKE_PY_IDENTITY") or json.dumps(
+        {"implementation": "CPython", "system": "linux", "machine": "x86_64", "version": "3.12"})
+    version = json.loads(identity)["version"]
     site = target / ("lib/python%s/site-packages" % version)
     (target / "bin").mkdir(parents=True)
     site.mkdir(parents=True)
     system = "true" if "--system-site-packages" in args else "false"
     full = {"3.12": "3.12.3", "3.9": "3.9.6"}.get(version, version + ".0")
     (target / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = %s\nversion = %s\n" % (system, full))
+    (target / "fake-identity.json").write_text(identity)
     me = target / "bin/python"
     me.write_bytes(Path(__file__).read_bytes())
     me.chmod(0o755)
@@ -566,6 +573,38 @@ class CheckFilesTests(unittest.TestCase):
                                 and IBSW in row["detail"] and IBSW_MACOS in row["detail"] for row in problems),
                             problems)
 
+    def test_every_hash_names_one_wheel_file_and_one_file_names_one_digest(self):
+        """The cross-list wheel rule sees every pinned wheel only if each record hash has its '# wheel:' comment,
+        and a filename listed twice with two digests is a broken list, not a second wheel."""
+        macos, wheels, _header = parse_lock(ROOT / IBSW_MACOS)
+        paramiko_wheel = next(name for name in wheels if name.startswith("paramiko-"))
+        pyyaml_hash = macos["pyyaml"][1][0]
+        foreign = hashlib.sha256(b"uncommented foreign wheel").hexdigest()
+        cases = {
+            "hash without a comment": (
+                f"    --hash=sha256:{pyyaml_hash}\n",
+                f"    --hash=sha256:{pyyaml_hash} \\\n    --hash=sha256:{foreign}\n",
+                f"{IBSW_MACOS}: pyyaml", "without a '# wheel:"),
+            "one wheel file with two digests": (
+                f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n",
+                f"# wheel: {paramiko_wheel} sha256:{wheels[paramiko_wheel]}\n# wheel: {paramiko_wheel} sha256:{foreign}\n",
+                IBSW_MACOS, f"wheel {paramiko_wheel} has two digests"),
+            "wheel comment of another version": (
+                f"# wheel: {paramiko_wheel} sha256:",
+                f"# wheel: {paramiko_wheel.replace('-5.0.0-', '-5.0.1-')} sha256:",
+                f"{IBSW_MACOS}: {paramiko_wheel.replace('-5.0.0-', '-5.0.1-')}", "wheel version differs"),
+        }
+        for label, (old, new, item, detail) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = self.copy_tree(Path(directory))
+                path = root / IBSW_MACOS
+                text = path.read_text(encoding="ascii")
+                self.assertEqual(1, text.count(old), old)
+                path.write_text(text.replace(old, new), encoding="ascii")
+                problems = self.check(root)
+                self.assertTrue(any(row["item"] == item and detail in row["detail"] for row in problems),
+                                (label, problems))
+
     def write_table(self, root: Path, table: dict) -> None:
         (root / "infra/dependencies.json").write_bytes(
             (json.dumps(table, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii"))
@@ -668,15 +707,19 @@ class EnvironmentCheckTests(unittest.TestCase):
         optional = [row for row in rows if row["item"] == "apt apache2"]
         self.assertEqual("info", optional[0]["status"])
 
-    def make_venv(self, home: Path, target_name: str, python_version: str = "3.12", full: str = "3.12.3") -> Path:
+    def make_venv(self, home: Path, target_name: str, identity: str = LINUX_312, full: str = None) -> Path:
+        """A venv whose interpreter reports `identity`; pyvenv.cfg says `full` (default: that python)."""
         target = self.table["targets"][target_name]
         venv = home / target["path"][2:]
-        site = venv / f"lib/python{python_version}/site-packages"
+        python_version = json.loads(identity)["version"]
+        full = full or {"3.12": "3.12.3", "3.9": "3.9.6"}.get(python_version, python_version + ".0")
+        site = venv / f"lib/python{'.'.join(full.split('.')[:2])}/site-packages"
         site.mkdir(parents=True)
         (venv / "bin").mkdir()
         python = venv / "bin/python"
         python.write_text(FAKE_PYTHON.replace("{python}", sys.executable), encoding="utf-8")
         python.chmod(0o755)
+        (venv / "fake-identity.json").write_text(identity, encoding="utf-8")
         (venv / "pyvenv.cfg").write_text(f"home = /usr/bin\ninclude-system-site-packages = false\nversion = {full}\n",
                                          encoding="utf-8")
         for name in self.deps.target_distributions(self.table, target):
@@ -713,30 +756,66 @@ class EnvironmentCheckTests(unittest.TestCase):
             self.assertEqual({"python openai==2.48.0": "missing", "python httpx": "mismatch",
                               "python flask==3.0.0": "unexpected", "include-system-site-packages": "mismatch"}, rows)
 
-    def test_macos_cp39_ibsw_venv_is_checked_in_its_own_site_packages(self):
-        """The venv's own pyvenv.cfg version selects the platform variant: 3.9 is the macOS ibsw venv; a venv
-        whose version is not one the target lists is reported (and venv-cabletracker has no 3.9 variant)."""
+    def test_venv_check_selects_the_variant_by_interpreter_platform_and_pyvenv_version(self):
+        """The venv interpreter's own platform (host system and machine, its python) must be a platform of the
+        target, and pyvenv.cfg must carry that platform's python: 3.9 is valid for the ibsw venv only on
+        macOS arm64, 3.12 only on Linux; a version alone never selects a variant."""
+        def identity(system, machine, version):
+            return json.dumps({"implementation": "CPython", "system": system, "machine": machine, "version": version})
+        accepted = {
+            "macOS arm64 3.9 ibsw": ("venv-ibsw-upgrade", MACOS_39_ARM64, None),
+            "Linux x86_64 3.12 ibsw": ("venv-ibsw-upgrade", LINUX_312, None),
+            "Linux aarch64 3.12 ibsw": ("venv-ibsw-upgrade", identity("linux", "aarch64", "3.12"), None),
+        }
+        for label, (target, value, full) in accepted.items():
+            with self.subTest(accepted=label), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                self.make_venv(home, target, value, full)
+                report = self.venv_report(home, target)
+                self.assertTrue(report.ok, report.render())
+                items = {row["item"] for row in report.targets[target]}
+                self.assertIn("python paramiko==5.0.0", items)
+                self.assertIn("import probe", items)
+        refused = {
+            # (target, interpreter identity, pyvenv.cfg version, words of the detail)
+            "Linux 3.9 ibsw": ("venv-ibsw-upgrade", identity("linux", "x86_64", "3.9"), None,
+                               ("linux-cp39-x86_64", "not a platform")),
+            "macOS 3.12 ibsw": ("venv-ibsw-upgrade", identity("darwin", "arm64", "3.12"), None,
+                                ("macos-cp312-arm64", "not a platform")),
+            "macOS x86_64 3.9 ibsw": ("venv-ibsw-upgrade", identity("darwin", "x86_64", "3.9"), None,
+                                      ("macos-cp39-x86_64", "not a platform")),
+            "Linux 3.10 ibsw": ("venv-ibsw-upgrade", identity("linux", "x86_64", "3.10"), None,
+                                ("linux-cp310-x86_64", "not a platform")),
+            "macOS 3.9 cabletracker": ("venv-cabletracker", MACOS_39_ARM64, None,
+                                       ("macos-cp39-arm64", "not a platform")),
+            "macOS 3.9 interpreter, 3.12 pyvenv.cfg": ("venv-ibsw-upgrade", MACOS_39_ARM64, "3.12.3",
+                                                       ("3.12.3", "needs python 3.9")),
+            "Linux 3.12 interpreter, 3.9 pyvenv.cfg": ("venv-ibsw-upgrade", LINUX_312, "3.9.6",
+                                                       ("3.9.6", "needs python 3.12")),
+        }
+        for label, (target, value, full, words) in refused.items():
+            with self.subTest(refused=label), tempfile.TemporaryDirectory() as directory:
+                home = Path(directory)
+                self.make_venv(home, target, value, full)
+                report = self.venv_report(home, target)
+                self.assertFalse(report.ok, report.render())
+                mismatch = [row for row in report.targets[target] if row["item"] == "venv python"]
+                self.assertEqual(["mismatch"], [row["status"] for row in mismatch], report.render())
+                for word in words:
+                    self.assertIn(word, mismatch[0]["detail"])
+                self.assertIn("install --target " + target, mismatch[0]["fix"])
+
+    def test_venv_check_names_a_broken_interpreter_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
-            self.make_venv(home, "venv-ibsw-upgrade", "3.9", "3.9.6")
-            report = self.venv_report(home, "venv-ibsw-upgrade")
-            self.assertTrue(report.ok, report.render())
-            items = {row["item"] for row in report.targets["venv-ibsw-upgrade"]}
-            self.assertIn("python paramiko==5.0.0", items)
-            self.assertIn("import probe", items)
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            self.make_venv(home, "venv-ibsw-upgrade", "3.10", "3.10.12")
+            venv = self.make_venv(home, "venv-ibsw-upgrade", MACOS_39_ARM64)
+            (venv / "bin/python").unlink()
+            (venv / "bin/python").symlink_to(home / "vanished-base/bin/python3")
             rows = self.venv_report(home, "venv-ibsw-upgrade").targets["venv-ibsw-upgrade"]
-            mismatch = [row for row in rows if row["item"] == "venv python"]
-            self.assertEqual(["mismatch"], [row["status"] for row in mismatch])
-            self.assertIn("3.12", mismatch[0]["detail"])
-            self.assertIn("3.9", mismatch[0]["detail"])
-        with tempfile.TemporaryDirectory() as directory:
-            home = Path(directory)
-            self.make_venv(home, "venv-cabletracker", "3.9", "3.9.6")
-            rows = self.venv_report(home, "venv-cabletracker").targets["venv-cabletracker"]
-            self.assertIn(("venv python", "mismatch"), {(row["item"], row["status"]) for row in rows})
+            missing = [row for row in rows if row["item"] == str(venv / "bin/python")]
+            self.assertEqual(["missing"], [row["status"] for row in missing])
+            self.assertIn("broken symlink", missing[0]["detail"])
+            self.assertIn(str(home / "vanished-base/bin/python3"), missing[0]["detail"])
 
     def test_absent_venv_is_reported_with_the_install_command(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -855,6 +934,54 @@ class CommandLineTests(unittest.TestCase):
             self.assertEqual(0, dry.returncode, dry.stderr)
             self.assertIn("--require-hashes -r " + str(ROOT / IBSW_MACOS), dry.stdout)
             self.assertFalse((base / ".venvs").exists())
+
+    def test_install_refuses_an_existing_venv_of_another_platform_or_python(self):
+        """An existing venv is reused only when its interpreter is the platform the base selects; otherwise
+        install (and its dry run) stops before pip with the directory to remove, and changes nothing."""
+        cases = {
+            "Linux 3.12 venv, macOS 3.9 base": (LINUX_312, MACOS_39_ARM64, "linux-cp312-x86_64", "macos-cp39-arm64"),
+            "macOS 3.9 venv, Linux 3.12 base": (MACOS_39_ARM64, LINUX_312, "macos-cp39-arm64", "linux-cp312-x86_64"),
+        }
+        for label, (built, base, existing, selected) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                home = root / "home"
+                home.mkdir()
+                fake = write_fake_python(root)
+                first = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake),
+                                 env={"HOME": str(home), "FAKE_PY_IDENTITY": built})
+                self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+                venv = home / ".venvs/http/ibsw-upgrade"
+                before = {str(path.relative_to(venv)): path.read_bytes() for path in venv.rglob("*") if path.is_file()}
+                log = root / "argv.log"
+                for extra in ([], ["--dry-run"]):
+                    result = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake), *extra,
+                                      env={"HOME": str(home), "FAKE_PY_IDENTITY": base, "FAKE_PY_LOG": str(log)})
+                    self.assertEqual(2, result.returncode, result.stdout + result.stderr)
+                    for needle in (existing, selected, "rm -rf " + str(venv),
+                                   "python3 infra/deps.py install --target venv-ibsw-upgrade", "nothing was changed"):
+                        self.assertIn(needle, result.stderr)
+                    self.assertNotIn("[RUN]", result.stdout)
+                calls = [json.loads(line) for line in log.read_text().splitlines()]
+                self.assertEqual([], [call for call in calls if "pip" in call or "venv" in call[1:4]])
+                after = {str(path.relative_to(venv)): path.read_bytes() for path in venv.rglob("*") if path.is_file()}
+                self.assertEqual(before, after)
+
+    def test_install_names_a_broken_interpreter_symlink_and_deletes_nothing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = write_fake_python(root)
+            env = {"HOME": str(root), "FAKE_PY_IDENTITY": LINUX_312}
+            self.assertEqual(0, run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake),
+                                         env=env).returncode)
+            python = root / ".venvs/http/ibsw-upgrade/bin/python"
+            python.unlink()
+            python.symlink_to(root / "removed-base/bin/python3.12")
+            result = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake), env=env)
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("broken symlink to " + str(root / "removed-base/bin/python3.12"), result.stderr)
+            self.assertIn("rm -rf " + str(root / ".venvs/http/ibsw-upgrade"), result.stderr)
+            self.assertTrue(python.is_symlink())
 
     def test_probe_names_macos_machines_as_the_table_and_linux_arm64_as_aarch64(self):
         deps = load_deps()
