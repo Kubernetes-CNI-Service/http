@@ -118,6 +118,11 @@ class AlphaTests(unittest.TestCase):
             if mode == "ignored":
                 Path("ignored-out").mkdir(exist_ok=True)
                 Path("ignored-out/left.txt").write_text("left\\n", encoding="utf-8")
+            if mode == "ignored-source":
+                Path("ignored-out").mkdir(exist_ok=True)
+                Path("ignored-out/leak.py").write_text("LEAK = 1\\n", encoding="utf-8")
+            if mode == "ignored-remove":
+                Path("ignored-out/pre.txt").unlink()
             if mode == "tmpdir":
                 Path(tempfile.gettempdir(), "left-in-lane-tmp.txt").write_text("left\\n", encoding="utf-8")
             if mode == "tracked":
@@ -238,7 +243,36 @@ class EpsilonTests(unittest.TestCase):
 '''
 
 
-def fixture_plan(*, delta_lane="w0", same_lane=True, runtime_skips=None):
+MACHINE_SHARED_TEMPORARY_ROOTS = ("/tmp", "/var/tmp")
+
+
+def _inside_machine_shared_temporary_root(path):
+    real = os.path.realpath(path)
+    for shared in MACHINE_SHARED_TEMPORARY_ROOTS:
+        root = os.path.realpath(shared)
+        if real == root or real.startswith(root.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def _fixture_parent():
+    """Where the disposable fixture lives.
+
+    S0 (2026-10-24): a sharded run refuses lane roots below the machine-shared /tmp or
+    /var/tmp.  The fixture keeps its default place unless the operator's TMPDIR is
+    there; then (macOS only) it uses the per-user temporary directory instead, which
+    the sharded mode accepts.  Under a sharded outer run TMPDIR is already outside.
+    """
+    if not SHARDED_PLATFORM or not _inside_machine_shared_temporary_root(tempfile.gettempdir()):
+        return None
+    completed = subprocess.run(
+        ["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True,
+    )
+    return completed.stdout.strip() or None
+
+
+def fixture_plan(*, delta_lane="w0", same_lane=True, runtime_skips=None, leftover_allowlist=None):
     phase_a = [
         {"lane": "w0", "units": [ALPHA] + ([DELTA] if delta_lane == "w0" else [])},
         {"lane": "w1", "units": [f"{BETA}#0/2"] + ([DELTA] if delta_lane == "w1" else [])},
@@ -257,12 +291,14 @@ def fixture_plan(*, delta_lane="w0", same_lane=True, runtime_skips=None):
     }
     if runtime_skips is not None:
         plan["runtime_skips"] = runtime_skips
+    if leftover_allowlist is not None:
+        plan["leftover_allowlist"] = leftover_allowlist
     return plan
 
 
 class ShardFixture(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="shard-wf-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="shard-wf-", dir=_fixture_parent())
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
         # M1 (REVIEW-1): on BSD every directory created below inherits this group; give
@@ -290,7 +326,7 @@ class ShardFixture(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stderr.decode(errors="replace"))
         return result.stdout
 
-    def build(self, *, plan=None, extra_epsilon=False):
+    def build(self, *, plan=None, extra_epsilon=False, pre_ignored=False):
         self.write("test_cases/__init__.py", "")
         for relative in ("tools/project_contract.py", "test_cases/run_related_tests.py",
                          "requirements-container-top-level.lock"):
@@ -336,19 +372,22 @@ class ShardFixture(unittest.TestCase):
         self.git("config", "commit.gpgsign", "false")
         self.git("add", ".")
         self.git("commit", "--quiet", "-m", "independent shard fixture")
+        if pre_ignored:
+            # An ignored file the main checkout already holds (copied into every clone).
+            self.write("ignored-out/pre.txt", "kept by the operator\n")
 
     def next_paths(self):
         self.counter += 1
         return (self.base / f"evidence-{self.counter}",
                 self.base / f"markers-{self.counter}.jsonl")
 
-    def run_in_process(self, mode=""):
+    def run_in_process(self, mode="", *, temp_parent=None):
         evidence, markers = self.next_paths()
         environment = {"SHARD_FIXTURE_MODE": mode, "SHARD_FIXTURE_MARKERS": str(markers),
                        "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, environment), \
-                mock.patch.object(tempfile, "tempdir", str(self.lane_tmp_parent)), \
+                mock.patch.object(tempfile, "tempdir", str(temp_parent or self.lane_tmp_parent)), \
                 redirect_stdout(out), redirect_stderr(err):
             code = RUNNER.run_sharded_selection(
                 self.root, RUNNER.Selection(full_suite=True), False, evidence,
@@ -451,16 +490,52 @@ class FullShardWorkflowTests(ShardFixture):
         self.assertEqual("passed", audit["status"])
         self.assertFalse(str(evidence).startswith(str(self.root)))
 
-    def test_w2_failing_case_blocks_the_proof_and_the_quiet_phase(self):
+    def test_w2_failing_case_blocks_the_proof_but_the_quiet_phase_still_runs(self):
+        # S0 (2026-10-24): serial --all keeps running after a failing test.  A phase A
+        # whose only problems are test outcomes is not an isolation problem, so the quiet
+        # phase still runs alone after it; the run still fails and issues no proof.
         self.build()
         if not SHARDED_PLATFORM:
             self.assert_platform_refusal()
             return
-        markers = self.assert_failed(self.run_in_process("fail"), "non-success")
+        result = self.run_in_process("fail")
+        markers = self.assert_failed(result, "non-success")
+        audit = result[3]
         ids = {item["id"] for item in markers}
         self.assertIn(f"{ALPHA}.AlphaTests.test_a1", ids)
         self.assertNotIn(f"{ALPHA}.AlphaTests.test_a2", ids)
-        self.assertFalse({i for i in ids if EXPECTED_LANES.get(i) == "wq"})
+        quiet = [item for item in markers if EXPECTED_LANES.get(item["id"]) == "wq"]
+        parallel = [item for item in markers if EXPECTED_LANES.get(item["id"]) != "wq"]
+        self.assertEqual(
+            sorted(test_id for test_id, lane in EXPECTED_LANES.items() if lane == "wq"),
+            sorted(item["id"] for item in quiet),
+        )
+        self.assertGreaterEqual(min(item["start"] for item in quiet), max(item["end"] for item in parallel))
+        self.assertFalse(audit["phase_b_skipped"])
+        self.assertEqual([], audit["gate_problems"])
+        self.assertEqual(0, audit["lanes"]["wq"]["exit"])
+        self.assertEqual(
+            [f"{ALPHA}.AlphaTests.test_a2"], [item["id"] for item in audit["non_success"]],
+        )
+
+    def test_w2_isolation_problem_in_phase_a_still_skips_the_quiet_phase(self):
+        # A crash, a tracked-byte change or an untracked (non-ignored) leftover is an
+        # isolation or equivalence problem: phase B does not run after it.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        for mode, keyword in (("crash", "no finished record"), ("tracked", "tracked"),
+                              ("untracked", "untracked")):
+            with self.subTest(mode=mode):
+                result = self.run_in_process(mode)
+                markers = self.assert_failed(result, keyword)
+                audit = result[3]
+                self.assertTrue(audit["phase_b_skipped"])
+                self.assertTrue(
+                    any(keyword in problem for problem in audit["gate_problems"]), audit["gate_problems"],
+                )
+                self.assertFalse({item["id"] for item in markers if EXPECTED_LANES.get(item["id"]) == "wq"})
 
     def test_w2_cli_failure_leaves_the_ledger_and_require_full_unchanged(self):
         self.build()
@@ -496,14 +571,157 @@ class FullShardWorkflowTests(ShardFixture):
             return
         self.assert_failed(self.run_in_process("tracked"), "tracked")
 
-    def test_w2_untracked_ignored_and_tmpdir_leftovers_fail_closed(self):
+    def assert_leftover_audited_and_removed(self, result, kind, path):
+        code, evidence, _markers, audit, output = result
+        self.assertEqual(0, code, output)
+        self.assertEqual("passed", audit["status"])
+        self.assertEqual([], audit["problems"])
+        self.assertEqual(
+            {"paths": [path], "count": 1, "sha256": hashlib.sha256(path.encode("utf-8")).hexdigest()},
+            audit["lanes"]["w0"]["leftovers"][kind],
+        )
+        for lane in ("w1", "w2", "wq"):
+            self.assertNotIn(path, audit["lanes"][lane]["leftovers"][kind]["paths"])
+        self.assertFalse((evidence / "work").exists(), "lane checkouts are removed at cleanup")
+        self.assertFalse(Path(audit["lanes"]["w0"]["tmpdir"]).exists(), "lane TMPDIR is removed")
+
+    def test_w2_reviewed_ignored_leftover_is_audited_and_removed_not_blocking(self):
+        # S0 (2026-10-24): serial --all leaves ignored files in its checkout and never
+        # checks them, but every later serial test can see them, while a lane's stay in
+        # that lane.  An ignored leftover whose shape the plan reviewed as unobservable by
+        # other tests (leftover_allowlist) is listed, counted and hashed in the audit,
+        # removed with the lane at cleanup, and does not block.
+        self.build(plan=fixture_plan(leftover_allowlist={
+            "ignored-out/left.txt": "fixture-reviewed: no other fixture test reads it",
+        }))
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("ignored")
+        self.assert_leftover_audited_and_removed(result, "ignored", "ignored-out/left.txt")
+        self.assertEqual(0, result[3]["lanes"]["w0"]["leftovers"]["unreviewed"]["count"])
+
+    def test_w2_tmpdir_leftover_is_audited_and_removed_not_blocking(self):
+        # A lane TMPDIR is private to the lane; serial --all leaves its TMPDIR entries
+        # unchecked and no test of the suite lists or globs a temporary root (census).
         self.build()
         if not SHARDED_PLATFORM:
             self.assert_platform_refusal()
             return
-        for mode, keyword in (("untracked", "untracked"), ("ignored", "ignored"), ("tmpdir", "TMPDIR")):
-            with self.subTest(mode=mode):
-                self.assert_failed(self.run_in_process(mode), keyword)
+        self.assert_leftover_audited_and_removed(self.run_in_process("tmpdir"), "tmpdir", "left-in-lane-tmp.txt")
+
+    def assert_unreviewed_ignored_change(self, result, path):
+        markers = self.assert_failed(result, "leftover_allowlist")
+        audit = result[3]
+        self.assertTrue(
+            any("leftover_allowlist" in problem and path in problem for problem in audit["problems"]),
+            audit["problems"],
+        )
+        # It refuses the proof but is not an isolation gate: the quiet phase still runs.
+        self.assertEqual([], audit["gate_problems"])
+        self.assertFalse(audit["phase_b_skipped"])
+        self.assertEqual(
+            sorted(test_id for test_id, lane in EXPECTED_LANES.items() if lane == "wq"),
+            sorted(item["id"] for item in markers if EXPECTED_LANES.get(item["id"]) == "wq"),
+        )
+        self.assertIn(path, audit["lanes"]["w0"]["leftovers"]["unreviewed"]["paths"])
+
+    def test_w2_unreviewed_new_ignored_leftover_refuses_the_proof_but_not_the_quiet_phase(self):
+        # S0 review A1: serial shows an ignored leftover to every later test (S0/armG: the
+        # download-parent-red fixture trees' *.py are parsed by the quiesce workflow, which
+        # fails serially but passed in another lane).  Without a reviewed shape the proof
+        # is refused; it is not an isolation gate.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        self.assert_unreviewed_ignored_change(self.run_in_process("ignored"), "ignored-out/left.txt")
+
+    def test_w2_unreviewed_removal_of_an_existing_ignored_file_refuses_the_proof(self):
+        # Removing an ignored file the checkout already held hides it from later serial
+        # tests only; other lanes still see it.  Unreviewed, it refuses the proof.
+        self.build(pre_ignored=True)
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("ignored-remove")
+        self.assert_unreviewed_ignored_change(result, "ignored-out/pre.txt")
+        self.assertIn("ignored-out/pre.txt", result[3]["lanes"]["w0"]["leftovers"]["ignored_removed"]["paths"])
+
+    def test_w2_ignored_file_inside_the_serial_snapshot_fails_closed(self):
+        # Serial --all re-reads its source/test snapshot after the run and refuses approval
+        # when it changed; an ignored *.py on a production path is part of that snapshot.
+        # A lane checkout keeps that same predicate, so this ignored leftover still blocks.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("ignored-source")
+        self.assert_failed(result, "snapshot")
+        audit = result[3]
+        self.assertTrue(
+            any("snapshot" in problem and "ignored-out/leak.py" in problem for problem in audit["gate_problems"]),
+            audit["gate_problems"],
+        )
+        self.assertTrue(audit["phase_b_skipped"])
+        serial_ledger = self.base / "serial-ignored-source.json"
+        serial = self.cli("--approvals", str(serial_ledger), "--all", mode="ignored-source")
+        self.assertNotEqual(0, serial.returncode, serial.stdout + serial.stderr)
+        self.assertFalse(serial_ledger.exists())
+
+    def test_w2_lane_roots_inside_the_machine_shared_tmp_are_refused_before_any_lane(self):
+        # S0 root cause: lane TMPDIRs below /private/tmp share an ancestor that the suite's
+        # own tests write into while other lanes pin the stat of every ancestor.
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        shared = Path(tempfile.mkdtemp(prefix="shard-wf-shared-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, shared, True)
+        os.chown(shared, -1, os.getgid())
+        code, _evidence, markers, audit, output = self.run_in_process(temp_parent=shared)
+        self.assertEqual(1, code, output)
+        self.assertEqual([], markers)
+        self.assertTrue(
+            any("machine-shared temporary directory" in problem for problem in audit["problems"]),
+            audit["problems"],
+        )
+        self.assertEqual([], os.listdir(shared))
+
+    def test_w1_audit_records_lane_wall_clock_and_ancestor_drift(self):
+        self.build()
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        code, _evidence, _markers, audit, output = self.run_in_process()
+        self.assertEqual(0, code, output)
+        self.assertEqual("http-full-shard-audit/2", audit["schema"])
+        self.assertEqual([], audit["gate_problems"])
+        for name in ("w0", "w1", "w2", "wq"):
+            lane = audit["lanes"][name]
+            with self.subTest(lane=name):
+                for key in ("started_epoch", "lane_tests_started_epoch", "lane_finished_epoch",
+                            "ended_epoch", "wall_seconds", "prepare_seconds", "gate_seconds"):
+                    self.assertIsInstance(lane[key], (int, float), key)
+                self.assertLessEqual(lane["started_epoch"], lane["lane_tests_started_epoch"])
+                self.assertLessEqual(lane["lane_tests_started_epoch"], lane["lane_finished_epoch"])
+                self.assertLessEqual(lane["lane_finished_epoch"], lane["ended_epoch"])
+                self.assertEqual(lane["seconds"], lane["wall_seconds"])
+                self.assertGreaterEqual(lane["prepare_seconds"], 0)
+                self.assertGreaterEqual(lane["gate_seconds"], 0)
+        for label, names in (("a", ("w0", "w1", "w2")), ("b", ("wq",))):
+            self.assertLessEqual(
+                audit[f"phase_{label}_started_epoch"], min(audit["lanes"][n]["started_epoch"] for n in names),
+            )
+            self.assertGreaterEqual(
+                audit[f"phase_{label}_ended_epoch"], max(audit["lanes"][n]["ended_epoch"] for n in names),
+            )
+        self.assertLessEqual(audit["phase_a_ended_epoch"], audit["phase_b_started_epoch"])
+        self.assertIsInstance(audit["enumeration"]["prepare_seconds"], (int, float))
+        for phase in ("A", "B"):
+            self.assertEqual({"temp_parent", "work"}, set(audit["chain_drift"][phase]))
+            for drift in audit["chain_drift"][phase].values():
+                self.assertIsInstance(drift, list)
 
     def test_w2_detached_residual_process_fails_closed_and_is_reaped(self):
         self.build()

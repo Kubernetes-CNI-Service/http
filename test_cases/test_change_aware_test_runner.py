@@ -3520,5 +3520,301 @@ class FullShardReviewFixTests(unittest.TestCase):
         self.assertEqual(["/bin/ps", "/usr/sbin/lsof"], [argv[0] for argv in calls])
 
 
+class FullShardS0FixTests(unittest.TestCase):
+    """S0 (first real sharded run, 2026-10-24) fixes of the opt-in sharded full mode.
+
+    Expectations come from the S0 evidence and from the serial `--all` contract (what
+    the serial path runs, re-reads and refuses), not from the runner implementation.
+    """
+
+    SKIP_ROWS_SPEC = (
+        ("test_cases.test_a", [("A", ["test_1", "test_2"], False)]),
+        ("test_cases.test_b", [("B", ["test_1"], False), ("S", ["test_1", "test_2"], True)]),
+    )
+
+    def test_lane_roots_must_be_outside_the_machine_shared_temporary_directories(self):
+        # S0: every lane TMPDIR sat below /private/tmp.  The suite writes there directly
+        # (test_load_release_transaction creates /tmp/http-rt-*.noindex in each
+        # ReleaseTransactionTests.setUp) while other lanes run quiet-window checks that pin
+        # the stat of every ancestor directory from "/" (11-load escrow, b-xlsx_to_dot
+        # private workspace, monitor publication path).  Serial runs never overlap them.
+        self.assertEqual(("/tmp", "/var/tmp"), RUNNER.FULL_SHARD_SHARED_TEMP_ROOTS)
+        with tempfile.TemporaryDirectory(prefix="shard-shared-") as directory:
+            base = Path(directory).resolve()
+            shared, other, sibling = base / "shared", base / "other", base / "shared-sibling"
+            for path in (shared, other, sibling):
+                path.mkdir()
+            alias = base / "alias"
+            alias.symlink_to(shared)
+
+            def problems(path):
+                return RUNNER.full_shard_shared_temp_problems(
+                    {"lane temporary parent": path}, shared_roots=(str(shared),),
+                )
+
+            for inside in (shared, shared / "lane", alias / "lane"):
+                with self.subTest(inside=str(inside)):
+                    found = problems(inside)
+                    self.assertEqual(1, len(found), found)
+                    self.assertIn("machine-shared temporary directory", found[0])
+                    self.assertIn("lane temporary parent", found[0])
+            for outside in (other, other / "lane", sibling / "lane"):
+                with self.subTest(outside=str(outside)):
+                    self.assertEqual([], problems(outside))
+            # Second review C3: on a case-insensitive volume another spelling of the same
+            # directory is the same directory and must be refused as well.
+            respelled = Path(str(shared).swapcase())
+            if respelled.exists() and os.path.samefile(respelled, shared):
+                found = problems(respelled / "lane")
+                self.assertEqual(1, len(found), found)
+        # The real defaults refuse anything below /tmp (on macOS the /private/tmp alias
+        # target), judged by path whether or not it exists.
+        found = RUNNER.full_shard_shared_temp_problems(
+            {"evidence work directory": Path("/tmp/shard-s0-probe-never-created/work")},
+        )
+        self.assertEqual(1, len(found), found)
+        self.assertIn("evidence work directory", found[0])
+
+    def test_leftover_inventory_lists_counts_and_hashes_the_paths(self):
+        # S0: ignored files and lane-TMPDIR entries are recorded per lane (list, count,
+        # sha256 over the NUL-joined file-system bytes of the sorted list), not judged.
+        inventory = RUNNER.full_shard_inventory(["outputs/b.txt", ".deployment.lock", "a/c"])
+        self.assertEqual({
+            "paths": [".deployment.lock", "a/c", "outputs/b.txt"],
+            "count": 3,
+            "sha256": hashlib.sha256(b".deployment.lock\0a/c\0outputs/b.txt").hexdigest(),
+        }, inventory)
+        self.assertEqual(
+            {"paths": [], "count": 0, "sha256": hashlib.sha256(b"").hexdigest()},
+            RUNNER.full_shard_inventory([]),
+        )
+        undecodable = RUNNER.full_shard_inventory(["bad-\udcff-name"])
+        self.assertEqual(hashlib.sha256(b"bad-\xff-name").hexdigest(), undecodable["sha256"])
+
+    def test_plan_leftover_allowlist_is_reviewed_patterns_with_reasons(self):
+        # S0 review: a lane cannot see another lane's ignored files, while serial --all
+        # shows every later test the ignored files of earlier tests.  Only shapes reviewed
+        # as unobservable by other tests may change a lane checkout's ignored set without
+        # refusing the proof.  The key is optional; absent, every change refuses it.
+        RUNNER.validate_full_shard_plan(shard_plan())
+        RUNNER.validate_full_shard_plan(shard_plan(leftover_allowlist={
+            ".deployment.lock": "lock file, never read for content",
+            "outputs/test-diagnostics/collector-prefix-feedback-*": "retained fixture",
+        }))
+        for label, value in (
+            ("list", [".deployment.lock"]),
+            ("absolute", {"/tmp/x": "r"}),
+            ("parent component", {"outputs/../x": "r"}),
+            ("empty pattern", {"": "r"}),
+            ("blank reason", {"x.lock": " "}),
+            ("non-string reason", {"x.lock": 1}),
+            # Second review A5b: the first component must be literal, never a catch-all.
+            ("match everything", {"*": "r"}),
+            ("wildcard first component", {"*/x": "r"}),
+            ("character class first component", {"[o]utputs/x": "r"}),
+            ("single-character wildcard", {"?utputs/x": "r"}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(RUNNER.ImpactError, "full shard plan: leftover_allowlist"):
+                    RUNNER.validate_full_shard_plan(shard_plan(leftover_allowlist=value))
+
+    def test_unreviewed_leftovers_are_the_paths_no_allowlist_pattern_matches(self):
+        allowlist = {
+            ".deployment.lock": "r",
+            "outputs/test-diagnostics/collector-prefix-feedback-*": "r",
+        }
+        self.assertEqual(
+            ["DAY0-Prepare/x.py", "outputs/test-diagnostics/download-parent-red-ab12cd34/http/13-unload.py"],
+            RUNNER.full_shard_unreviewed_leftovers([
+                ".deployment.lock",
+                "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/bin/ssh",
+                "outputs/test-diagnostics/download-parent-red-ab12cd34/http/13-unload.py",
+                "DAY0-Prepare/x.py",
+            ], allowlist),
+        )
+        self.assertEqual([".Deployment.lock"], RUNNER.full_shard_unreviewed_leftovers([".Deployment.lock"], allowlist))
+        self.assertEqual(["a"], RUNNER.full_shard_unreviewed_leftovers(["a"], {}))
+        # Second review A5a: a file of a shape the suite's whole-checkout traversals or the
+        # serial source discovery read (*.py, *.sh, *.cgi, *.service, *.timer,
+        # 02-AIR-devices_config.csv) is never accepted, even inside a reviewed tree.
+        tree = "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/"
+        observed = [tree + name for name in (
+            "a.py", "test_b.py", "c.sh", "d.cgi", "e.service", "f.timer", "deep/02-AIR-devices_config.csv",
+        )]
+        self.assertEqual(
+            sorted(observed),
+            RUNNER.full_shard_unreviewed_leftovers([*observed, tree + "kept.csv", tree + "bin/ssh"], allowlist),
+        )
+
+    def test_real_plan_reviews_only_the_unobservable_s0_leftover_shapes(self):
+        # S0 and the serial armG run left the same 611 ignored files in four shapes.  Only
+        # the retained collector-prefix-feedback fixture tree is reviewed: no test reads it
+        # (whole-checkout traversals: quiesce workflow rglob("*.py"), test_case_repository
+        # os.walk for test_*.py, project_contracts rglob("02-AIR-devices_config.csv"),
+        # monitor watch runtime rglob("*.service"/"*.timer")).  The download-parent-red
+        # trees hold *.py the quiesce workflow parses (ROOTCAUSE G4: serial fails there).
+        # The two lock files are read through product packaging
+        # (test_upload_package_contract asserts monitor/.generate-monitor-html.lock is not
+        # packaged; serial creates it before that test, a lane may not): they are not
+        # reviewed, so a sharded run needs them to exist in the main checkout beforehand.
+        plan = RUNNER.load_full_shard_plan(ROOT)
+        allowlist = plan.get("leftover_allowlist")
+        self.assertEqual({"outputs/test-diagnostics/collector-prefix-feedback-*"}, set(allowlist))
+        self.assertTrue(all(isinstance(reason, str) and reason.strip() for reason in allowlist.values()))
+        unreviewed = [
+            ".deployment.lock", "monitor/.generate-monitor-html.lock",
+            "outputs/test-diagnostics/download-parent-red-26amxbnl/http/DAY0-Prepare/13-unload.py",
+        ]
+        self.assertEqual(unreviewed, RUNNER.full_shard_unreviewed_leftovers(unreviewed, allowlist))
+
+    def test_serial_post_run_check_of_a_checkout_restores_sys_path(self):
+        # Second review E1: the post-run check executes the checkout's deployment
+        # selectors in the coordinator; infra/docker/activate.py inserts its own
+        # directories into sys.path at import.  The check must leave sys.path as it was
+        # and return exactly the serial cycle's snapshot of that checkout.
+        before = list(sys.path)
+        checked = RUNNER._full_shard_serial_check(ROOT, ROOT, MANIFEST_PATH)
+        self.assertEqual(before, sys.path)
+        expected = RUNNER.snapshot_as_json(RUNNER.make_snapshot(
+            ROOT, MANIFEST_PATH, RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH),
+        ))
+        self.assertEqual(expected, checked)
+
+    def test_leftover_gate_turns_unexpected_errors_into_problems(self):
+        # Second review E2: an unexpected exception in a lane gate must become a recorded
+        # problem, never escape and skip the residue gate of the phase.
+        with tempfile.TemporaryDirectory(prefix="shard-gate-error-") as directory:
+            base = Path(directory).resolve()
+            (base / "lanes").mkdir()
+            lane = RUNNER._FullShardLane("w0", "A", base / "work", base / "lanes", base)
+            lane.tmpdir = base / "lane-tmp"
+            lane.tmpdir.mkdir()
+            with mock.patch.object(RUNNER, "_full_shard_tracked_digest", side_effect=RuntimeError("fixture boom")):
+                gate, proof_only, inventory = lane.leftover_gate({})
+            self.assertTrue(any("fixture boom" in problem for problem in gate), gate)
+            self.assertEqual([], proof_only)
+            self.assertEqual(0, inventory["tmpdir"]["count"])
+
+    def records(self, rows, outcomes, *, successful, finished=True, holders=()):
+        records = [{"event": "start", "canonical_sha256": "c" * 64, "count": len(rows),
+                    **RUNNER.full_shard_lane_identity()}]
+        for index, outcome in outcomes:
+            records.append({"event": "test", "index": index, "id": rows[index]["id"],
+                            "outcome": outcome, "seconds": 0.01})
+        records.extend(holders)
+        if finished:
+            records.append({"event": "finished", "tests_run": len(outcomes), "successful": successful})
+        return records
+
+    def merge(self, rows, assigned, records, exit_code, *, deadline=False):
+        return RUNNER.merge_full_shard_lane(
+            "w1", rows, assigned, records,
+            {"exit": exit_code, "seconds": 1.0, "deadline_exceeded": deadline},
+            identity=RUNNER.full_shard_lane_identity(), canonical_sha256="c" * 64,
+        )
+
+    def test_merge_separates_isolation_and_coverage_problems_from_test_outcomes(self):
+        # S0: serial --all runs every test even after a failure.  A lane whose only
+        # problems are test outcomes (consistent records, exit 1) reports no gate
+        # problem, so the quiet phase still runs; the run still fails without a proof.
+        rows = shard_rows(self.SKIP_ROWS_SPEC)
+        assigned = [0, 1, 2, 3, 4]
+        everything = [(index, "success") for index in assigned]
+        failed = self.merge(rows, assigned, self.records(
+            rows, [(0, "success"), (1, "failure"), (2, "error"), (3, "success"), (4, "success")],
+            successful=False,
+        ), 1)
+        self.assertTrue(failed["problems"])
+        self.assertEqual([], failed["gate_problems"])
+        # A setUpClass error: serial unittest does not run that class's tests either.
+        holder = {"event": "holder", "kind": "error", "description": "setUpClass (test_cases.test_b.S)"}
+        errored = self.merge(rows, assigned, self.records(
+            rows, [(0, "success"), (1, "success"), (2, "success")], successful=False, holders=[holder],
+        ), 1)
+        self.assertTrue(any("fixture error" in problem for problem in errored["problems"]))
+        self.assertEqual([], errored["gate_problems"])
+        self.assertEqual([3, 4], errored["errored"])
+        self.assertEqual([], RUNNER.full_shard_coverage_problems(5, {"w1": errored}))
+        gate_cases = {
+            "crash": (self.records(rows, everything[:2], successful=False, finished=False), -9, {}),
+            "exit 1 with a successful finished record": (
+                self.records(rows, everything, successful=True), 1, {}),
+            "failure with a successful finished record": (
+                self.records(rows, [(0, "failure"), *everything[1:]], successful=True), 1, {}),
+            "exit 0 with an unsuccessful finished record": (
+                self.records(rows, [(0, "failure"), *everything[1:]], successful=False), 0, {}),
+            "rows not executed": (self.records(rows, everything[:3], successful=True), 0, {}),
+            "error holder explains other rows only": (
+                self.records(rows, everything[:2], successful=False, holders=[holder]), 1, {}),
+            "deadline": (self.records(rows, everything, successful=True), -15, {"deadline": True}),
+            "fatal": (self.records(rows, [], successful=False, finished=False)
+                      + [{"event": "fatal", "reason": "x"}], 3, {}),
+            "duplicate": (self.records(rows, [*everything, (0, "success")], successful=True), 0, {}),
+        }
+        for label, (records, exit_code, extra) in gate_cases.items():
+            with self.subTest(label=label):
+                merged = self.merge(rows, assigned, records, exit_code, **extra)
+                self.assertTrue(merged["gate_problems"], merged["problems"])
+                self.assertTrue(set(merged["gate_problems"]) <= set(merged["problems"]))
+
+    def test_ancestor_chain_and_drift_name_each_changed_directory(self):
+        # S0 attribution: the audit records which ancestor of the lane temporary parent and
+        # of the lane work directory changed while a phase ran (it is not a gate).
+        with tempfile.TemporaryDirectory(prefix="shard-chain-") as directory:
+            top = Path(directory).resolve() / "top"
+            leaf = top / "leaf"
+            leaf.mkdir(parents=True)
+            chain = RUNNER.full_shard_chain(leaf)
+            self.assertEqual([str(path) for path in [*reversed(leaf.parents), leaf]],
+                             [path for path, _nine in chain])
+            self.assertEqual("/", chain[0][0])
+            self.assertTrue(all(isinstance(nine, list) and len(nine) == 9 for _path, nine in chain))
+            before = RUNNER.full_shard_chain(leaf)
+            (top / "sibling").mkdir()
+            after = RUNNER.full_shard_chain(leaf)
+            drifted = {item["path"] for item in RUNNER.full_shard_chain_drift(before, after)}
+            self.assertIn(str(top), drifted)
+            self.assertNotIn(str(leaf), drifted)
+        self.assertEqual(
+            [{"path": "/a", "before": [2], "after": [3]}, {"path": "/a/b", "before": None, "after": [4]}],
+            RUNNER.full_shard_chain_drift(
+                [["/", [1]], ["/a", [2]]], [["/", [1]], ["/a", [3]], ["/a/b", [4]]],
+            ),
+        )
+
+    def test_lane_wait_records_epochs_and_wall_seconds(self):
+        import time as time_module
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-c", "pass"], start_new_session=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(process.wait)
+        log = open(os.devnull, "wb")
+        self.addCleanup(log.close)
+        finished = RUNNER._full_shard_wait_lanes(
+            {"w0": (process, log, time_module.monotonic(), round(time_module.time(), 3))}, 9000, poll=0.05,
+        )
+        info = finished["w0"]
+        self.assertEqual(0, info["exit"])
+        self.assertEqual(info["seconds"], info["wall_seconds"])
+        self.assertGreaterEqual(info["wall_seconds"], 0)
+        self.assertLessEqual(info["started_epoch"], info["ended_epoch"])
+
+    def test_one_cycle_hands_its_manifest_path_to_the_sharded_run(self):
+        # Each lane checkout must pass the serial post-run check (manifest re-validation
+        # and snapshot), which needs the manifest path the serial cycle reads (--manifest).
+        with tempfile.TemporaryDirectory(prefix="shard-manifest-") as directory:
+            base = Path(directory).resolve()
+            args = RUNNER.parser().parse_args([
+                "--approvals", str(base / "approvals.json"), "--all", "--sharded", str(base / "evidence"),
+            ])
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()), \
+                    mock.patch.object(RUNNER, "run_sharded_selection", return_value=1) as run:
+                self.assertEqual(1, RUNNER._one_cycle(args)[0])
+            self.assertEqual(base / "evidence", run.call_args.args[3])
+            self.assertEqual(MANIFEST_PATH, run.call_args.kwargs["manifest_path"])
+            self.assertFalse((base / "approvals.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
