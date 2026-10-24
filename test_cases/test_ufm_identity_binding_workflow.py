@@ -405,50 +405,70 @@ class UfmIdentityBindingWorkflowTests(unittest.TestCase):
                              [argv[0] for argv in seen])
             self.assertFalse(destination.exists())
 
+    def _retrieval_runner(self, plan, payload, seen, copied, *, on_copy=None, host_after_copy=None,
+                          digest_after_copy=None):
+        """Synthetic SSH/scp service for one exact archive; once the copy ran, the node may answer with another
+        hostname and the remote archive with another digest. Unexpected commands are recorded on
+        runner.unexpected (a failure raised here could be turned into a refusal by the binding check)."""
+        digest = hashlib.sha256(payload).hexdigest()
+        unexpected: list[str] = []
+
+        def runner(argv):
+            seen.append(argv)
+            if argv[0] == "scp":
+                Path(argv[-1]).write_bytes(payload)
+                copied[0] = True
+                if on_copy is not None:
+                    on_copy()
+                return transport.CommandResult(0, "", "")
+            remote = argv[-1]
+            if remote == "hostname":
+                host = host_after_copy if copied[0] and host_after_copy else "EXAMPLE-UFM01"
+                return transport.CommandResult(0, host + "\n", "")
+            if "-j link show dev eno8303" in remote:
+                return transport.CommandResult(0, json.dumps([{
+                    "ifname": "eno8303", "address": NODES[0].management_mac,
+                }]), "")
+            if "-j address show dev eno8303" in remote:
+                return transport.CommandResult(0, json.dumps([{
+                    "ifname": "eno8303", "addr_info": [{
+                        "family": "inet", "local": NODES[0].address,
+                    }],
+                }]), "")
+            if "sha256sum" in remote:
+                value = digest_after_copy if copied[0] and digest_after_copy else digest
+                return transport.CommandResult(0, f"{value}  {plan.ufm_remote_path}\n", "")
+            if "test -f" in remote:
+                return transport.CommandResult(0, "", "")
+            unexpected.append(remote)
+            return transport.CommandResult(2, "", "unexpected synthetic command")
+
+        runner.unexpected = unexpected
+        return runner
+
     def test_producer_pinned_retrieval_reobserves_the_node_after_the_copy(self):
-        # Moved from the retired test_ufm_remote_producer_workflow (7d5518d:32-162, phases "stable" and
-        # "node-changed-during-copy"; REQ7 retirement batch 2, 2026-10-24). With an approved producer digest
-        # the formal caller observes the SSH node again after the exact copy, so a node that changed during
-        # the copy publishes nothing. The retired tools/ufm_remote_producer.py was the only caller with a digest.
+        # Moved from the retired test_ufm_remote_producer_workflow (7d5518d:32-162, phases "stable",
+        # "node-changed-during-copy" and "changed-after-copy"; REQ7 retirement batch 2, 2026-10-24). With an
+        # approved producer digest the formal caller hands the digest to the transport, which reads the remote
+        # digest again after the exact copy, and observes the SSH node again before publication; a node or an
+        # archive that changed during the copy publishes nothing. The retired tools/ufm_remote_producer.py was
+        # the only caller with a digest.
         plan = collection.collection_plan("iblinkinfo", RUN_ID)
         payload = _archive(b"synthetic-link-data\n")
         digest = hashlib.sha256(payload).hexdigest()
-        for phase in ("stable", "node-changed-during-copy"):
+        phases = {
+            "stable": {},
+            "node-changed-during-copy": {"host_after_copy": "EXAMPLE-UFM02"},
+            "digest-changed-after-copy": {"digest_after_copy": hashlib.sha256(b"replaced archive").hexdigest()},
+        }
+        for phase, change in phases.items():
             with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory).resolve()
                 lease, _known, jump, far, pin = make_site(root)
                 project = write_project(root)
                 seen: list[list[str]] = []
                 copied = [False]
-
-                def runner(argv, phase=phase):
-                    seen.append(argv)
-                    if argv[0] == "scp":
-                        Path(argv[-1]).write_bytes(payload)
-                        copied[0] = True
-                        return transport.CommandResult(0, "", "")
-                    remote = argv[-1]
-                    if remote == "hostname":
-                        moved = phase == "node-changed-during-copy" and copied[0]
-                        return transport.CommandResult(
-                            0, "EXAMPLE-UFM02\n" if moved else "EXAMPLE-UFM01\n", "")
-                    if "-j link show dev eno8303" in remote:
-                        return transport.CommandResult(0, json.dumps([{
-                            "ifname": "eno8303", "address": NODES[0].management_mac,
-                        }]), "")
-                    if "-j address show dev eno8303" in remote:
-                        return transport.CommandResult(0, json.dumps([{
-                            "ifname": "eno8303", "addr_info": [{
-                                "family": "inet", "local": NODES[0].address,
-                            }],
-                        }]), "")
-                    if "sha256sum" in remote:
-                        return transport.CommandResult(
-                            0, f"{digest}  {plan.ufm_remote_path}\n", "")
-                    if "test -f" in remote:
-                        return transport.CommandResult(0, "", "")
-                    self.fail(f"unexpected synthetic command: {remote}")
-
+                runner = self._retrieval_runner(plan, payload, seen, copied, **change)
                 destination = root / plan.archive_name
                 if phase == "stable":
                     self.assertEqual(destination, binding.retrieve_project_collection_archive(
@@ -457,9 +477,10 @@ class UfmIdentityBindingWorkflowTests(unittest.TestCase):
                         expected_sha256=digest,
                     ))
                     self.assertEqual(payload, destination.read_bytes())
-                    copy_index = [argv[0] for argv in seen].index("scp")
-                    self.assertIn("hostname", [argv[-1] for argv in seen[copy_index + 1:]],
-                                  "the node is observed again after the copy")
+                    after_copy = [argv[-1] for argv in seen[[argv[0] for argv in seen].index("scp") + 1:]]
+                    self.assertIn("hostname", after_copy, "the node is observed again after the copy")
+                    self.assertTrue(any("sha256sum" in command for command in after_copy),
+                                    "the remote digest is read again after the copy")
                 else:
                     with self.assertRaises((transport.TransportError, binding.IdentityBindingError)):
                         binding.retrieve_project_collection_archive(
@@ -467,8 +488,43 @@ class UfmIdentityBindingWorkflowTests(unittest.TestCase):
                             now=NOW, clock=lambda: NOW, runner=runner, timeout=10,
                             expected_sha256=digest,
                         )
-                    self.assertTrue(copied[0], "the copy ran; the re-observation refused it")
+                    self.assertTrue(copied[0], "the copy ran; a check after it refused publication")
                     self.assertFalse(destination.exists())
+                self.assertEqual([], runner.unexpected)
+
+    def test_formal_retrieval_rechecks_lease_and_host_pin_after_the_copy(self):
+        # Moved from the retired test_ufm_remote_producer_workflow (7d5518d:32-162, phases
+        # "lease-changed-during-copy" and "host-pin-changed-during-copy"; REQ7 retirement batch 2, review B1).
+        # Without a producer digest nothing re-observes the node, so the lease and known-hosts byte rechecks
+        # of the binding check before publication are the only guards after the copy.
+        plan = collection.collection_plan("iblinkinfo", RUN_ID)
+        payload = _archive(b"synthetic-link-data\n")
+        for phase in ("lease-changed-during-copy", "host-pin-changed-during-copy"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                lease, known, jump, far, pin = make_site(root)
+                project = write_project(root)
+                seen: list[list[str]] = []
+                copied = [False]
+
+                def change(phase=phase, lease=lease, known=known):
+                    if phase == "lease-changed-during-copy":
+                        lease.write_text("lease 192.0.2.21 { binding state free; }\n")
+                    else:
+                        known.write_text(known.read_text() + "# changed during copy\n")
+
+                runner = self._retrieval_runner(plan, payload, seen, copied, on_copy=change)
+                destination = root / plan.archive_name
+                with self.assertRaises((transport.TransportError, binding.IdentityBindingError)):
+                    binding.retrieve_project_collection_archive(
+                        project, lease, jump, far, pin, plan, destination,
+                        now=NOW, clock=lambda: NOW, runner=runner, timeout=10,
+                    )
+                self.assertTrue(copied[0], "the copy ran; the recheck before publication refused it")
+                self.assertFalse(destination.exists())
+                self.assertEqual([], [path.name for path in root.iterdir() if path.name.startswith(".ufm-")],
+                                 "no partial archive is left next to the destination")
+                self.assertEqual([], runner.unexpected)
 
 
 if __name__ == "__main__":
