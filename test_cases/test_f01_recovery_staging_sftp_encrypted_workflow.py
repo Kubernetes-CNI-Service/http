@@ -5,6 +5,8 @@ source holder, syntax child, signed KEX/admin key-auth, identity reads, SFTP
 packets and native cleanup are production. The local filesystem backend uses
 atomic no-overwrite link/unlink, never exists+overwrite rename. No script body.
 Prepared only: this method needs the root's exclusive crypto/child window.
+It proves the production F01 SDK identity, so outside a venv it runs unchanged
+in the venv-ibsw-upgrade child (test_cases/f01_sdk_venv.py).
 """
 import contextlib
 import hashlib
@@ -26,6 +28,7 @@ from tools import ufm_deployment_staging_owner as owner
 from tools import ufm_deployment_script_builder as builder
 from tools import ufm_bootstrap_auth_adapter as auth
 from test_cases import test_f01_recovery_stage_script_builder as site_fixture
+from test_cases.f01_sdk_venv import sdk_identity_test
 import paramiko
 
 IDENTITY = ["hostname", "ip -j link show dev eno8303", "ip -j address show dev eno8303"]
@@ -277,6 +280,7 @@ class F01DeploymentStagingSftpEncryptedWorkflowTests(unittest.TestCase):
         cls.management_key = paramiko.ECDSAKey.generate(bits=256)
         cls.laptop_key = paramiko.ECDSAKey.generate(bits=256)
 
+    @sdk_identity_test
     def test_actual_original_source_signed_sftp_normal_existing_and_interrupted_local_staging(self):
         self.assertEqual(HOME_PROBE, shlex.join(api._HOME_UID_ARGV))
         for scenario in ("normal", "existing", "interrupted"):

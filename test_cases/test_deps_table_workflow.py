@@ -4,12 +4,15 @@ Scenarios across real scripts: deps.py installs the cabletracker venv (fake base
 HOME, no network) and cron.sh's real issue_tracker_sync() then selects it; the image build installs
 the engine list before activate.py's engine gate and couples that list to the image; the table's
 venv paths are the ones cron.sh and upgrade.py use; the files check of every hard-coded copy is
-green on the repository; the new files travel with sync/upload/image.
+green on the repository; the new files travel with sync/upload/image. The F01 SDK identity tests
+run in the table's venv-ibsw-upgrade when the full proof's /usr/bin/python3 is not a venv, and
+fail (never skip) with the deps.py install command when that venv cannot prove the identity.
 """
 
 from __future__ import annotations
 
 import html
+import importlib
 import json
 import os
 from pathlib import Path
@@ -18,7 +21,9 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
+from test_cases import f01_sdk_venv
 from test_cases.module_loader import load_script
 from test_cases.test_deps_table import LINUX_312, RETIRED_LISTS, run_deps, write_fake_python
 from test_cases.test_issue_tracker_engine_runtime import CONTAINER_PYTHON, cron_function
@@ -27,8 +32,9 @@ from test_cases.test_issue_tracker_engine_runtime import CONTAINER_PYTHON, cron_
 ROOT = Path(__file__).resolve().parents[1]
 ENGINE = "infra/docker/requirements-issue-tracker-engine.txt"
 IBSW = "infra/requirements-ibsw-upgrade.txt"
+IBSW_MACOS = "infra/requirements-ibsw-upgrade-macos-cp39.txt"
 TABLE = "infra/dependencies.json"
-NEW_FILES = ("infra/deps.py", TABLE, ENGINE, IBSW)
+NEW_FILES = ("infra/deps.py", TABLE, ENGINE, IBSW, IBSW_MACOS)
 INSTALL = ("/opt/http-ztp/venv/bin/python -m pip install --only-binary=:all: --no-deps --require-hashes "
            "-r /opt/http-ztp/source-tree/")
 GATE = "/opt/http-ztp/venv/bin/python /opt/http-ztp/source-tree/infra/docker/activate.py "
@@ -96,6 +102,7 @@ class DependencyTableWorkflowTests(unittest.TestCase):
         # force an image rebuild.
         self.assertNotIn(TABLE, activate.IMAGE_COUPLED_SOURCE_PATHS)
         self.assertNotIn(IBSW, activate.IMAGE_COUPLED_SOURCE_PATHS)
+        self.assertNotIn(IBSW_MACOS, activate.IMAGE_COUPLED_SOURCE_PATHS)
         image_paths = set(activate.image_source_paths(ROOT))
         for relative in NEW_FILES:
             self.assertIn(relative, image_paths)
@@ -127,7 +134,7 @@ class DependencyTableWorkflowTests(unittest.TestCase):
             "tools/f01_ssh_dependency_identity.py::_PINS",
             "infiniband/bringup/xdr-upgrade/upgrade.py::_RUNTIME_VENV_PATHS",
             "DAY0-Prepare/11-load.py::MACOS_GENERATION_MODULES",
-            ENGINE, IBSW,
+            ENGINE, IBSW, IBSW_MACOS,
         ):
             self.assertIn(expected, items)
 
@@ -141,6 +148,201 @@ class DependencyTableWorkflowTests(unittest.TestCase):
             self.assertEqual("production", path_disposition(relative), relative)
             self.assertIsNone(transfer_exclude_reason(Path(relative)), relative)
         self.assertTrue(os.access(ROOT / "infra/deps.py", os.X_OK))
+
+
+# The F01 tests that reach the production SDK identity (tools/ufm_bootstrap_auth_adapter.py::
+# _factory_sdk_identity via _direct_sdk_identity) without replacing it; every other test of these modules
+# refuses before that check and keeps running in-process.
+ROUTED_F01_TESTS = {
+    "test_cases.test_f01_recovery_project_key_backup_durable_workflow": {
+        "F01ProjectKeyBackupDurableWorkflowTests.test_real_new_password_backup_pull_fsync_apply_and_failed_local_fsync_never_applies",
+    },
+    "test_cases.test_f01_recovery_staging_owner": {
+        "F01DeploymentStagingOwnerInputWorkflowTests.test_actual_project_builder_held_original_key_pin_deadline_and_close_do_not_issue_permission",
+        "F01DeploymentStagingIssuanceDirectTests.test_cleanup_operator_interrupt_outprioritizes_ordinary_primary_in_both_owned_finally",
+    },
+    "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow": {
+        "F01DeploymentStagingSftpEncryptedWorkflowTests.test_actual_original_source_signed_sftp_normal_existing_and_interrupted_local_staging",
+    },
+}
+
+
+class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
+    """infra/dependencies.json venv-ibsw-upgrade → test_cases/f01_sdk_venv.py → the F01 identity tests."""
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory(prefix="f01-sdk-venv-")
+        self.addCleanup(self.directory.cleanup)
+        self.home = Path(self.directory.name)
+        self.venv = self.home / ".venvs/http/ibsw-upgrade"
+        self.python = self.venv / "bin/python"
+        for patcher in (mock.patch.dict(os.environ, {"HOME": str(self.home)}),
+                        mock.patch.dict(f01_sdk_venv._PROBED, clear=True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        os.environ.pop(f01_sdk_venv.CHILD_ENV, None)
+
+    def make_venv(self):
+        (self.venv / "bin").mkdir(parents=True)
+        (self.venv / "pyvenv.cfg").write_text("include-system-site-packages = false\nversion = 3.9.6\n")
+        self.python.write_text("#!/bin/sh\nexit 99\n")
+        self.python.chmod(0o755)
+
+    def run_routed(self, *, in_venv=False, replies=()):
+        """Run a decorated probe test; return (result, in-process calls, recorded child calls)."""
+        calls, recorded, replies = [], [], list(replies)
+
+        class Probe(unittest.TestCase):
+            @f01_sdk_venv.sdk_identity_test
+            def test_identity(inner):
+                calls.append(inner.id())
+
+        def fake_run(command, **kwargs):
+            recorded.append((command, kwargs))
+            returncode, output = replies.pop(0)
+            return subprocess.CompletedProcess(command, returncode, output)
+
+        result = unittest.TestResult()
+        with mock.patch.object(f01_sdk_venv, "current_interpreter_is_venv", return_value=in_venv), \
+                mock.patch.object(f01_sdk_venv.subprocess, "run", side_effect=fake_run):
+            Probe("test_identity").run(result)
+        self.assertEqual([], replies, "every prepared child reply is consumed")
+        self.assertEqual([], result.skipped, "the routing never skips")
+        return result, calls, recorded
+
+    def probe_ok(self):
+        return 0, f01_sdk_venv.PROBE_PREFIX + json.dumps({"prefix": str(self.venv), "lock_sha256": "0" * 64})
+
+    def child(self, returncode=0, **counts):
+        summary = {"run": 1, "failures": 0, "errors": 0, "skipped": 0, "expected_failures": 0,
+                   "unexpected_successes": 0, "prefix": str(self.venv)}
+        summary.update(counts)
+        return returncode, "test_identity ... ok\n\nRan 1 test\n" + f01_sdk_venv.RESULT_PREFIX + json.dumps(summary)
+
+    def failure(self, result) -> str:
+        self.assertEqual(1, len(result.failures), result.errors)
+        self.assertEqual([], result.errors)
+        return result.failures[0][1]
+
+    def test_helper_uses_the_table_venv_and_the_deps_install_command(self):
+        deps = load_script("deps_workflow_f01_routing", ROOT / "infra/deps.py")
+        table = deps.load_table(ROOT)
+        target = table["targets"][f01_sdk_venv.TARGET]
+        self.assertEqual("venv", target["kind"])
+        self.assertIn("tools/ufm_bootstrap_auth_adapter.py", target["consumers"])
+        self.assertEqual(deps.venv_path(target), f01_sdk_venv.venv_path())
+        self.assertEqual(self.venv, f01_sdk_venv.venv_path())
+        self.assertEqual(deps.venv_variant(target, "macos-cp39-arm64"), ("3.9", IBSW_MACOS))
+        self.assertIn(f01_sdk_venv.INSTALL_COMMAND, target["installed_by"])
+        self.assertEqual(["python3", "infra/deps.py", "install", "--target", f01_sdk_venv.TARGET],
+                         f01_sdk_venv.INSTALL_COMMAND.split())
+
+    def test_missing_venv_fails_with_the_install_command_and_runs_nothing(self):
+        result, calls, recorded = self.run_routed()
+        message = self.failure(result)
+        self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
+        self.assertIn(str(self.venv), message)
+        self.assertEqual(([], []), (calls, recorded))
+
+    def test_inside_a_venv_the_test_runs_in_process_as_before(self):
+        result, calls, recorded = self.run_routed(in_venv=True)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual(1, len(calls))
+        self.assertTrue(calls[0].endswith(".Probe.test_identity"), calls)
+        self.assertEqual([], recorded)
+
+    def test_outside_a_venv_the_same_test_id_runs_in_the_venv_interpreter(self):
+        self.make_venv()
+        result, calls, recorded = self.run_routed(replies=[self.probe_ok(), self.child()])
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        self.assertEqual([], calls, "the body runs in the child, not in this interpreter")
+        (probe, probe_kwargs), (child, child_kwargs) = recorded
+        self.assertEqual([str(self.python), "-I", "-B", "-c", f01_sdk_venv.PROBE, str(ROOT)], probe)
+        self.assertIn("_factory_sdk_identity()", f01_sdk_venv.PROBE)
+        self.assertEqual([str(self.python), "-I", "-B", "-c", f01_sdk_venv.CHILD, str(ROOT)], child[:6])
+        self.assertEqual(7, len(child))
+        self.assertTrue(child[6].endswith(".Probe.test_identity"), child)
+        self.assertEqual(str(ROOT), child_kwargs["cwd"])
+        self.assertEqual("1", child_kwargs["env"][f01_sdk_venv.CHILD_ENV])
+        self.assertEqual(subprocess.DEVNULL, child_kwargs["stdin"])
+        self.assertNotIn(f01_sdk_venv.CHILD_ENV, os.environ)
+        # The identity probe ran once for this interpreter; a second routed test reuses it.
+        _result, _calls, again = self.run_routed(replies=[self.child()])
+        self.assertEqual(1, len(again))
+
+    def test_a_venv_without_the_identity_fails_with_the_install_command(self):
+        self.make_venv()
+        reply = (1, "tools.ufm_bootstrap_auth_adapter.BootstrapAuthError: SSH SDK implementation identity is unproved")
+        for label, probe in (("refused", reply),
+                             ("other prefix", (0, f01_sdk_venv.PROBE_PREFIX + json.dumps({"prefix": "/elsewhere"}))),
+                             ("no result line", (0, "nothing"))):
+            with self.subTest(probe=label):
+                f01_sdk_venv._PROBED.clear()
+                result, calls, recorded = self.run_routed(replies=[probe])
+                message = self.failure(result)
+                self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
+                self.assertIn("does not prove the F01 SDK identity", message)
+                self.assertEqual([], calls)
+                self.assertEqual(1, len(recorded), "the test child is not started")
+
+    def test_any_child_outcome_but_one_clean_pass_fails_the_test(self):
+        self.make_venv()
+        outcomes = {
+            "assertion failed": self.child(1, failures=1),
+            "error": self.child(1, errors=1),
+            "skipped": self.child(0, skipped=1),
+            "nothing ran": self.child(0, run=0),
+            "expected failure": self.child(0, expected_failures=1),
+            "unexpected success": self.child(1, unexpected_successes=1),
+            "another prefix": (0, f01_sdk_venv.RESULT_PREFIX + json.dumps({
+                "run": 1, "failures": 0, "errors": 0, "skipped": 0, "expected_failures": 0,
+                "unexpected_successes": 0, "prefix": "/elsewhere"})),
+            "no result line": (0, "Ran 1 test\nOK\n"),
+            "killed": (-9, "test_identity ... "),
+        }
+        for label, reply in outcomes.items():
+            with self.subTest(outcome=label):
+                result, calls, recorded = self.run_routed(replies=[self.probe_ok(), reply])
+                f01_sdk_venv._PROBED.clear()
+                message = self.failure(result)
+                self.assertIn(f01_sdk_venv.INSTALL_COMMAND, message)
+                self.assertIn(reply[1][-40:], message, "the child's own output is shown")
+                self.assertEqual([], calls)
+
+    def test_a_child_marker_outside_a_venv_fails_instead_of_recursing(self):
+        self.make_venv()
+        with mock.patch.dict(os.environ, {f01_sdk_venv.CHILD_ENV: "1"}):
+            result, calls, recorded = self.run_routed()
+        self.assertIn("is not a venv", self.failure(result))
+        self.assertEqual(([], []), (calls, recorded))
+
+    def test_child_program_runs_exactly_the_named_test_and_reports_it(self):
+        """The real child program under this interpreter: one passing test, and an unknown id as an error."""
+        passing = "test_cases.test_deps_table.TableContractTests.test_table_is_canonical_ascii_json_with_one_version_per_distribution"
+        for test_id, returncode, expected in ((passing, 0, {"run": 1, "failures": 0, "errors": 0, "skipped": 0}),
+                                              ("test_cases.test_deps_table.NoSuchTests.test_none", 1,
+                                               {"run": 1, "failures": 0, "errors": 1, "skipped": 0})):
+            with self.subTest(test_id=test_id):
+                code, output = f01_sdk_venv._run(
+                    [sys.executable, "-I", "-B", "-c", f01_sdk_venv.CHILD, str(ROOT), test_id], 300)
+                self.assertEqual(returncode, code, output)
+                summary = f01_sdk_venv.tagged(output, f01_sdk_venv.RESULT_PREFIX)
+                self.assertEqual(expected, {key: summary[key] for key in expected}, output)
+                self.assertEqual(os.path.realpath(sys.prefix), os.path.realpath(summary["prefix"]))
+
+    def test_exactly_the_identity_tests_of_the_three_f01_modules_are_routed(self):
+        for module_name, expected in ROUTED_F01_TESTS.items():
+            with self.subTest(module=module_name):
+                module = importlib.import_module(module_name)
+                routed = set()
+                for class_name, value in vars(module).items():
+                    if isinstance(value, type) and issubclass(value, unittest.TestCase) \
+                            and value.__module__ == module_name:
+                        for name, member in vars(value).items():
+                            if name.startswith("test") and getattr(member, "f01_sdk_venv_routed", False):
+                                self.assertTrue(callable(getattr(member, "__wrapped__", None)))
+                                routed.add(f"{class_name}.{name}")
+                self.assertEqual(expected, routed)
 
 
 def section(text: str, heading: str) -> str:
@@ -194,6 +396,18 @@ class DependencyDocumentationTests(unittest.TestCase):
         self.assertNotIn("在此之前构建的镜像没有 httpx/openai，引擎在导入阶段失败，cron 只记 WARNING", self.card)
         self.assertNotIn("older images lack", self.cron)
         self.assertIn("rebuild", self.cron)
+
+    def test_full_proof_machine_needs_the_ibsw_venv_built_with_the_clt_python(self):
+        # Owner 2026-10-24: /usr/bin/python3 runs the formal proof, so its F01 SDK identity tests need the venv.
+        readme = (ROOT / "test_cases/README.md").read_text(encoding="utf-8")
+        for label, text in (("test_cases README", readme), ("user manual", manual_hand_written())):
+            for phrase in ("/usr/bin/python3 infra/deps.py install --target venv-ibsw-upgrade",
+                           "/usr/bin/python3 infra/deps.py check --target venv-ibsw-upgrade",
+                           IBSW_MACOS, "PyPI", "arm64", "全量证明"):
+                with self.subTest(document=label, phrase=phrase):
+                    self.assertIn(phrase, text)
+        for phrase in ("~/.venvs/http/ibsw-upgrade", "test_cases/f01_sdk_venv.py", "@sdk_identity_test", "绝不 skip"):
+            self.assertIn(phrase, readme)
 
     def test_manual_and_docker_readme_carry_the_native_venv_steps(self):
         # S6: the hand-written part of the user manual, not only the generated catalog.

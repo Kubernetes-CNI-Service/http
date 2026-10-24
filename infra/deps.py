@@ -17,6 +17,9 @@ install  Create ~/.venvs/http/<name> for venv-ibsw-upgrade or venv-cabletracker 
          from the table's hashed requirements (pip -I --isolated --no-cache-dir --only-binary=:all:
          --no-deps --require-hashes), then check it. Run it as the user who runs the consumer:
          11-load.py (its worker runs cron.sh) for venv-cabletracker, upgrade.py for venv-ibsw-upgrade.
+         The base interpreter's platform selects the hashed list: a target's variant for that platform
+         (venv-ibsw-upgrade on macOS cp39 arm64, the CLT /usr/bin/python3 of the formal full proof,
+         whose F01 SDK identity tests run in this venv), otherwise the target's own list.
          Root installs only into its own home (HOME must be root's home: plain sudo, not sudo -E).
          A half-built venv is reported with the directory to remove; nothing is deleted.
 bundle   Phase 2 (offline apt + wheel bundle); not implemented yet.
@@ -93,6 +96,50 @@ def _string_list(value: object, label: str) -> list:
     return value
 
 
+def _validate_venv_variants(target_name: str, row: dict, files: dict) -> None:
+    """Every platform of a venv target has one hashed list covering it and a matching cpXY python.
+
+    `variants` maps a platform to {python, requirements} that replace the target's own pair there; the
+    variant lists pin the same set, and each python appears once so a venv's version selects its variant.
+    """
+    _require(isinstance(row.get("python"), str) and row["python"], f"venv target {target_name} needs a python")
+    target_platforms = row.get("platforms", [])
+    variants = row.get("variants", {})
+    _require(isinstance(variants, dict), f"venv target {target_name} variants must be an object")
+    own_set = files[row["requirements"]]["set"]
+    pythons = [row["python"]]
+    for platform_name, variant in variants.items():
+        label = f"venv target {target_name} variant {platform_name}"
+        _require(platform_name in target_platforms, f"{label} is not one of its platforms")
+        _require(isinstance(variant, dict) and set(variant) == {"python", "requirements"}
+                 and isinstance(variant["python"], str) and variant["python"], f"{label} needs python and requirements")
+        _require(variant["requirements"] in files and files[variant["requirements"]]["format"] == "hashed",
+                 f"{label} needs a hashed requirements file from requirement_files")
+        _require(files[variant["requirements"]]["set"] == own_set,
+                 f"{label} list has set {files[variant['requirements']]['set']}, the target's list has set {own_set}")
+        _require(variant["python"] not in pythons, f"{label} repeats python {variant['python']}")
+        pythons.append(variant["python"])
+    for platform_name in target_platforms:
+        python, requirements = venv_variant(row, platform_name)
+        _require(platform_name in files[requirements].get("platforms", []),
+                 f"venv target {target_name}: {requirements} does not cover platform {platform_name}")
+        _require(f"-cp{python.replace('.', '')}-" in f"-{platform_name}-",
+                 f"venv target {target_name}: python {python} does not match platform {platform_name}")
+
+
+def venv_variant(target: dict, platform_name: str) -> tuple:
+    """(python, requirements) of a venv target on one platform: its variant there, else its own pair."""
+    variant = target.get("variants", {}).get(platform_name)
+    if variant:
+        return variant["python"], variant["requirements"]
+    return target["python"], target["requirements"]
+
+
+def venv_pythons(target: dict) -> list:
+    """Every python version a venv target can be built with (its own first)."""
+    return [target["python"]] + [variant["python"] for variant in target.get("variants", {}).values()]
+
+
 def validate_table(table: object) -> dict:
     _require(isinstance(table, dict), "table must be an object")
     _require(table.get("schema_version") == 1, "schema_version must be 1")
@@ -120,6 +167,8 @@ def validate_table(table: object) -> dict:
     commands = table.get("commands")
     _require(isinstance(commands, dict) and all(isinstance(v, str) for v in commands.values()),
              "commands must map command -> apt package")
+    platforms = table.get("platforms")
+    _require(isinstance(platforms, dict) and platforms, "platforms missing")
     files = table.get("requirement_files")
     _require(isinstance(files, dict) and files, "requirement_files missing")
     for path, row in files.items():
@@ -127,9 +176,13 @@ def validate_table(table: object) -> dict:
         _require(row.get("format") in FILE_FORMATS, f"requirement file {path} has an unknown format")
         for name in _string_list(row.get("unpinned", []), f"requirement file {path} unpinned"):
             _require(name in sets[row["set"]]["distributions"], f"requirement file {path} unpinned {name} not in its set")
+        if row["format"] == "hashed" or "platforms" in row:
+            # A hashed list pins the wheels of exactly these platforms; lists are compared per platform.
+            covered = _string_list(row.get("platforms"), f"requirement file {path} platforms")
+            _require(bool(covered), f"requirement file {path} platforms must not be empty")
+            for platform_name in covered:
+                _require(platform_name in platforms, f"requirement file {path} names unknown platform {platform_name}")
     _require(isinstance(table.get("not_dependency_lists", {}), dict), "not_dependency_lists must be an object")
-    platforms = table.get("platforms")
-    _require(isinstance(platforms, dict) and platforms, "platforms missing")
     targets = table.get("targets")
     _require(isinstance(targets, dict) and targets, "targets missing")
     for target_name, row in targets.items():
@@ -153,6 +206,7 @@ def validate_table(table: object) -> dict:
                      f"venv target {target_name} needs a hashed requirements file from requirement_files")
             _require(isinstance(row.get("system_site_packages"), bool),
                      f"venv target {target_name} needs system_site_packages")
+            _validate_venv_variants(target_name, row, files)
     copies = table.get("code_copies")
     _require(isinstance(copies, list), "code_copies must be a list")
     for index, row in enumerate(copies):
@@ -308,7 +362,8 @@ def _version_key(version: str) -> tuple:
     return tuple(int(part) if part.isdigit() else part for part in re.split(r"[.]", version))
 
 
-def check_requirement_file(root: Path, table: dict, relative: str, report: Report, target: str) -> dict:
+def check_requirement_file(root: Path, table: dict, relative: str, report: Report, target: str) -> tuple:
+    """Report one list against the table; return its hashed (records, wheel comments), empty otherwise."""
     row = table["requirement_files"][relative]
     expected = table["python_sets"][row["set"]]["distributions"]
     versions = table["python_distributions"]
@@ -317,7 +372,7 @@ def check_requirement_file(root: Path, table: dict, relative: str, report: Repor
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         report.add(target, "missing", relative, f"cannot read: {exc.__class__.__name__}")
-        return {}
+        return {}, {}
     try:
         if row["format"] == "hashed":
             records, wheels = parse_hashed(text)
@@ -327,7 +382,7 @@ def check_requirement_file(root: Path, table: dict, relative: str, report: Repor
             found = parse_simple(text, "==" if row["format"] == "pins" else ">=")
     except ValueError as exc:
         report.add(target, "error", relative, f"cannot parse: {exc}")
-        return {}
+        return {}, {}
     problems = 0
     for name in sorted(set(expected) - set(found)):
         problems += 1
@@ -356,7 +411,7 @@ def check_requirement_file(root: Path, table: dict, relative: str, report: Repor
             report.add(target, "mismatch", f"{relative}: {filename}", "wheel comment digest is not a hash of its record")
     if not problems:
         report.add(target, "ok", relative, f"{len(found)} distributions agree with set {row['set']}")
-    return records
+    return records, wheels
 
 
 # --------------------------------------------------------------------------- code copies
@@ -481,20 +536,34 @@ def check_code_copy(root: Path, table: dict, row: dict, report: Report, target: 
 
 
 def check_files(root: Path, table: dict, report: Report, target: str = "files") -> None:
-    """Every referenced list and hard-coded copy agrees with the table; hashed lists agree with each other."""
+    """Every referenced list and hard-coded copy agrees with the table; hashed lists agree with each other.
+
+    Two hashed lists that share a platform pin the same wheel hashes for the same name==version; lists of
+    disjoint platforms (Linux cp312 and macOS cp39) pin different wheels, but one wheel file (for example a
+    py3-none-any wheel) carries one digest in every list.
+    """
     hashed: dict = {}
     for relative in table["requirement_files"]:
-        records = check_requirement_file(root, table, relative, report, target)
-        if table["requirement_files"][relative]["format"] == "hashed":
-            hashed[relative] = records
+        records, wheels = check_requirement_file(root, table, relative, report, target)
+        row = table["requirement_files"][relative]
+        if row["format"] == "hashed":
+            hashed[relative] = (records, wheels, set(row["platforms"]))
     seen: dict = {}
-    for relative, records in hashed.items():
+    seen_wheels: dict = {}
+    for relative, (records, wheels, platforms) in hashed.items():
         for name, (version, hashes) in records.items():
             key = (name, version)
-            if key in seen and seen[key][1] != hashes:
+            other = next((first for first, first_platforms, first_hashes in seen.get(key, [])
+                          if first_platforms & platforms and first_hashes != hashes), None)
+            if other is not None:
                 report.add(target, "mismatch", f"{name}=={version}",
-                           f"{relative} and {seen[key][0]} pin different wheel hashes")
-            seen.setdefault(key, (relative, hashes))
+                           f"{relative} and {other} pin different wheel hashes")
+            seen.setdefault(key, []).append((relative, platforms, hashes))
+        for filename, digest in sorted(wheels.items()):
+            first, first_digest = seen_wheels.setdefault(filename, (relative, digest))
+            if first_digest != digest:
+                report.add(target, "mismatch", filename,
+                           f"wheel digest differs between {first} and {relative}")
     for row in table["code_copies"]:
         check_code_copy(root, table, row, report, target)
 
@@ -675,14 +744,18 @@ def check_venv_target(table: dict, target_name: str, report: Report, *, import_p
         report.add(target_name, "mismatch", "include-system-site-packages",
                    f"{cfg.get('include-system-site-packages')}, table {wanted_system}", f"recreate the venv: {fix}")
     version = cfg.get("version") or cfg.get("version_info") or ""
-    if not (version == target["python"] or version.startswith(target["python"] + ".")):
-        report.add(target_name, "mismatch", "venv python", f"{version or 'unknown'}, table {target['python']}",
-                   f"recreate the venv with python{target['python']}")
+    # The venv's own version selects the platform variant (each python appears once per target).
+    pythons = venv_pythons(target)
+    matched = [wanted for wanted in pythons if version == wanted or version.startswith(wanted + ".")]
+    if not matched:
+        report.add(target_name, "mismatch", "venv python", f"{version or 'unknown'}, table {' or '.join(pythons)}",
+                   f"recreate the venv with python{' or python'.join(pythons)}")
+    site_python = matched[0] if matched else target["python"]
     python = venv / "bin" / "python"
     if not (python.exists() and os.access(python, os.X_OK)):
         report.add(target_name, "missing", f"{python}", "not executable", fix)
         return
-    installed = venv_distributions(venv_site_packages(venv, target["python"]))
+    installed = venv_distributions(venv_site_packages(venv, site_python))
     problems = 0
     for name in target_distributions(table, target):
         expected = table["python_distributions"][name]["version"]
@@ -746,10 +819,14 @@ def probe_platform(python: str) -> str:
     if result.returncode:
         raise RuntimeError(f"cannot run {python}")
     identity = json.loads(result.stdout)
-    machine = {"amd64": "x86_64", "arm64": "aarch64"}.get(identity["machine"].lower(), identity["machine"].lower())
+    machine = identity["machine"].lower()
     if identity["implementation"] != "CPython":
         raise RuntimeError(f"{python} is {identity['implementation']}, not CPython")
     system = "linux" if identity["system"].startswith("linux") else ("macos" if identity["system"] == "darwin" else identity["system"])
+    # Linux names ARM aarch64 (wheel tags manylinux_*_aarch64); macOS names it arm64 (macosx_*_arm64).
+    machine = {"amd64": "x86_64"}.get(machine, machine)
+    if system == "linux":
+        machine = {"arm64": "aarch64"}.get(machine, machine)
     return f"{system}-cp{identity['version'].replace('.', '')}-{machine}"
 
 
@@ -796,7 +873,8 @@ def install(root: Path, table: dict, target_name: str, python: str, dry_run: boo
         return EXIT_USAGE
     venv = venv_path(target)
     venv_python = venv / "bin" / "python"
-    requirements = root / target["requirements"]
+    _python_version, requirements_relative = venv_variant(target, platform_name)
+    requirements = root / requirements_relative
     # -I: no PYTHON* environment, user site or cwd shadowing; --isolated: no PIP_* environment and no
     # pip.conf; --no-cache-dir: nothing written to ~/.cache/pip. The hashes decide what is installed.
     pip = [str(venv_python), "-I", "-m", "pip", "--isolated"]

@@ -32,6 +32,10 @@ DEPS_PATH = ROOT / "infra/deps.py"
 TABLE_PATH = ROOT / "infra/dependencies.json"
 ENGINE = "infra/docker/requirements-issue-tracker-engine.txt"
 IBSW = "infra/requirements-ibsw-upgrade.txt"
+# Owner 2026-10-24: the formal full proof runs on the CLT /usr/bin/python3 (CPython 3.9, macOS arm64); its F01 SDK
+# identity tests need venv-ibsw-upgrade there, so the ibsw set also has a macOS cp39 arm64 hashed list.
+IBSW_MACOS = "infra/requirements-ibsw-upgrade-macos-cp39.txt"
+LINUX_CP312 = ["linux-cp312-x86_64", "linux-cp312-aarch64"]
 # Retired in REQ7 retirement step 3b (2026-10-24) with requirements-req7-online.txt; the image installs only
 # the engine list now, which keeps the retired lock's 20 distributions byte for byte.
 RETIRED_LISTS = ("infra/docker/requirements-req7-cable-sync.txt", "infra/docker/requirements-req7-online.txt")
@@ -157,10 +161,14 @@ if args[:1] == ["-c"]:
     sys.exit(3)
 if args[:2] == ["-m", "venv"]:
     target = Path(args[-1])
+    # The created venv follows the identity this fake base interpreter reports (3.12 unless told otherwise).
+    version = json.loads(os.environ.get("FAKE_PY_IDENTITY") or '{"version": "3.12"}')["version"]
+    site = target / ("lib/python%s/site-packages" % version)
     (target / "bin").mkdir(parents=True)
-    (target / "lib/python3.12/site-packages").mkdir(parents=True)
+    site.mkdir(parents=True)
     system = "true" if "--system-site-packages" in args else "false"
-    (target / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = %s\nversion = 3.12.3\n" % system)
+    full = {"3.12": "3.12.3", "3.9": "3.9.6"}.get(version, version + ".0")
+    (target / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = %s\nversion = %s\n" % (system, full))
     me = target / "bin/python"
     me.write_bytes(Path(__file__).read_bytes())
     me.chmod(0o755)
@@ -168,13 +176,14 @@ if args[:2] == ["-m", "venv"]:
         # Debian/Ubuntu without python3-venv: pyvenv.cfg and bin/python exist, ensurepip failed.
         print("The virtual environment was not created successfully because ensurepip is not available.")
         sys.exit(1)
-    info = target / "lib/python3.12/site-packages/pip-24.0.dist-info"
+    info = site / "pip-24.0.dist-info"
     info.mkdir()
     (info / "METADATA").write_text("Name: pip\nVersion: 24.0\n\n")
     sys.exit(0)
 if args[:2] == ["-m", "pip"]:
     venv = Path(__file__).resolve().parents[1]
-    site = venv / "lib/python3.12/site-packages"
+    sites = sorted(venv.glob("lib/python*/site-packages"))
+    site = sites[0] if len(sites) == 1 else venv / "lib/python3.12/site-packages"
     rest = [arg for arg in args[2:] if arg != "--isolated"]
     if not (site / "pip-24.0.dist-info").is_dir():
         print("%s: No module named pip" % __file__)
@@ -196,6 +205,7 @@ sys.exit(4)
 '''
 
 LINUX_312 = json.dumps({"implementation": "CPython", "system": "linux", "machine": "x86_64", "version": "3.12"})
+MACOS_39_ARM64 = json.dumps({"implementation": "CPython", "system": "darwin", "machine": "arm64", "version": "3.9"})
 
 
 def write_fake_python(directory: Path) -> Path:
@@ -236,7 +246,23 @@ class TableContractTests(unittest.TestCase):
         for name in ("venv-ibsw-upgrade", "venv-cabletracker"):
             self.assertIs(False, targets[name]["system_site_packages"])
             self.assertEqual("3.12", targets[name]["python"])
-            self.assertEqual(["linux-cp312-x86_64", "linux-cp312-aarch64"], targets[name]["platforms"])
+        self.assertEqual(LINUX_CP312, targets["venv-cabletracker"]["platforms"])
+        self.assertNotIn("variants", targets["venv-cabletracker"])
+        # Owner 2026-10-24: the formal proof interpreter is the CLT /usr/bin/python3 (3.9, macOS arm64); the F01
+        # SDK identity tests run in venv-ibsw-upgrade there, built from its own macOS cp39 hashed list. Only
+        # arm64: no Intel Mac can verify an x86_64 list.
+        ibsw = targets["venv-ibsw-upgrade"]
+        self.assertEqual(LINUX_CP312 + ["macos-cp39-arm64"], ibsw["platforms"])
+        self.assertEqual(IBSW, ibsw["requirements"])
+        self.assertEqual({"macos-cp39-arm64": {"python": "3.9", "requirements": IBSW_MACOS}}, ibsw["variants"])
+        self.assertNotIn("macos-cp39-x86_64", self.table["platforms"])
+        self.assertEqual("supported", self.table["platforms"]["macos-cp39-arm64"]["status"])
+        files = self.table["requirement_files"]
+        self.assertEqual({"format": "hashed", "set": "ibsw-upgrade", "platforms": ["macos-cp39-arm64"]}, files[IBSW_MACOS])
+        for relative in (IBSW, ENGINE, CONTAINER_LOCK):
+            self.assertEqual(LINUX_CP312, files[relative]["platforms"], relative)
+        self.assertEqual({ENGINE, IBSW, IBSW_MACOS, CONTAINER_LOCK},
+                         {path for path, row in files.items() if row["format"] == "hashed"})
         # F01 reuses the ibsw-upgrade venv, which therefore carries PyYAML.
         self.assertIn("tools/ufm_bootstrap_auth_adapter.py", targets["venv-ibsw-upgrade"]["consumers"])
         self.assertIn("pyyaml", self.table["python_sets"]["ibsw-upgrade"]["distributions"])
@@ -339,7 +365,7 @@ class TableContractTests(unittest.TestCase):
                        if path and pattern.search(path) and path_disposition(path) == "production")
         registered = set(self.table["requirement_files"]) | set(self.table["not_dependency_lists"])
         self.assertEqual([], [path for path in found if path not in registered])
-        self.assertTrue({ENGINE, IBSW, CONTAINER_LOCK, XDR} <= set(found))
+        self.assertTrue({ENGINE, IBSW, IBSW_MACOS, CONTAINER_LOCK, XDR} <= set(found))
         self.assertEqual(set(), set(RETIRED_LISTS) & (set(found) | registered))
 
 
@@ -403,8 +429,43 @@ class HashedListTests(unittest.TestCase):
         self.assertEqual({"paramiko", "bcrypt", "invoke", "pynacl", "pyyaml", "cryptography", "cffi",
                           "pycparser", "typing-extensions"}, set(ibsw))
 
+    def test_ibsw_macos_list_pins_the_linux_versions_with_cp39_arm64_wheels(self):
+        """One wheel per distribution, installable by CPython 3.9 on every Apple Silicon macOS (11+); the
+        versions are the Linux list's, and a pure wheel is the same PyPI file in both lists."""
+        macos = self.assert_hash_locked(IBSW_MACOS)
+        linux = self.assert_hash_locked(IBSW)
+        _records, macos_wheels, header = parse_lock(ROOT / IBSW_MACOS)
+        _records, linux_wheels, _header = parse_lock(ROOT / IBSW)
+        self.assertIn("CPython 3.9 macOS arm64", header)
+        self.assertEqual({name: record[0] for name, record in linux.items()},
+                         {name: record[0] for name, record in macos.items()})
+        self.assertEqual(len(macos), len(macos_wheels))
+        self.assertEqual({name: 1 for name in macos},
+                         {name: len(record[1]) for name, record in macos.items()})
+        platform_specific = 0
+        for wheel, digest in sorted(macos_wheels.items()):
+            with self.subTest(wheel=wheel):
+                _name, _version, python_tag, abi_tag, platform_tag = wheel[:-len(".whl")].split("-")
+                if platform_tag == "any":
+                    self.assertEqual(("py3", "none"), (python_tag, abi_tag))
+                    self.assertEqual(linux_wheels.get(wheel), digest, "a pure wheel is one file on PyPI")
+                    continue
+                platform_specific += 1
+                if abi_tag == "abi3":
+                    self.assertRegex(python_tag, r"^cp3[2-9]$")
+                else:
+                    self.assertEqual(("cp39", "cp39"), (python_tag, abi_tag))
+                match = re.fullmatch(r"macosx_([0-9]+)_([0-9]+)_(arm64|universal2)", platform_tag)
+                self.assertIsNotNone(match, platform_tag)
+                release = (int(match.group(1)), int(match.group(2)))
+                self.assertLessEqual(release, (11, 0), "must install on macOS 11, the first Apple Silicon release")
+                if match.group(3) == "arm64":
+                    self.assertEqual((11, 0), release)
+                self.assertNotIn(digest, set(linux_wheels.values()))
+        self.assertEqual(5, platform_specific)  # bcrypt, cffi, cryptography, pynacl, pyyaml
+
     def test_neither_new_list_uses_the_lock_suffix_excluded_by_transport(self):
-        for relative in (ENGINE, IBSW):
+        for relative in (ENGINE, IBSW, IBSW_MACOS):
             self.assertFalse(relative.endswith(".lock"), relative)
             self.assertTrue(relative.startswith("infra/"), relative)
 
@@ -446,6 +507,7 @@ class CheckFilesTests(unittest.TestCase):
                                                          r"    --hash=sha256:[0-9a-f]{64}\n"), "", "pysocks"),
             "dev unexpected": ("requirements-dev.txt", "XlsxWriter==3.2.9\n", "XlsxWriter==3.2.9\nrequests==2.32.5\n", "requests"),
             "f01 version": ("requirements-f01-ssh.lock", "paramiko==5.0.0", "paramiko==5.0.1", "paramiko"),
+            "macos ibsw version": (IBSW_MACOS, "pyyaml==6.0.3", "pyyaml==6.0.4", "pyyaml"),
             "observer pins": ("tools/ibsw_upgrade_observer.py", '("paramiko", "5.0.0")', '("paramiko", "5.0.1")', "SSH_RUNTIME_PINS"),
             "infra-setup apt": ("infra/infra-setup.py", '"arping", "jq")', '"arping")', "COMMON_PACKAGES"),
             "upgrade venv path": ("infiniband/bringup/xdr-upgrade/upgrade.py", "'~/.venvs/http/ibsw-upgrade'", "'~/.venvs/http/other'", "_RUNTIME_VENV_PATHS"),
@@ -481,6 +543,68 @@ class CheckFilesTests(unittest.TestCase):
             problems = self.check(root)
             self.assertTrue(any(row["item"] == "cryptography==50.0.1" and "different wheel hashes" in row["detail"]
                                 for row in problems), problems)
+
+    def test_lists_of_other_platforms_differ_by_wheel_but_never_for_the_same_wheel_file(self):
+        """The macOS list shares no platform with the Linux lists, so its own pyyaml/cffi/cryptography wheels are
+        not a drift; but the same wheel file (a pure wheel) must carry one digest in every list."""
+        report = self.deps.Report()
+        self.deps.check_files(ROOT, self.table, report)
+        self.assertEqual([], [row for row in report.targets["files"] if row["status"] != "ok"])
+        macos, _wheels, _header = parse_lock(ROOT / IBSW_MACOS)
+        linux, _wheels, _header = parse_lock(ROOT / IBSW)
+        self.assertNotEqual(set(linux["pyyaml"][1]), set(macos["pyyaml"][1]))
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_tree(Path(directory))
+            path = root / IBSW_MACOS
+            old = macos["paramiko"][1][0]
+            new = hashlib.sha256(b"foreign pure wheel").hexdigest()
+            text = path.read_text(encoding="ascii")
+            self.assertEqual(2, text.count(old))  # the wheel comment and the hash option
+            path.write_text(text.replace(old, new), encoding="ascii")
+            problems = self.check(root)
+            self.assertTrue(any(row["item"] == "paramiko-5.0.0-py3-none-any.whl" and "digest" in row["detail"]
+                                and IBSW in row["detail"] and IBSW_MACOS in row["detail"] for row in problems),
+                            problems)
+
+    def write_table(self, root: Path, table: dict) -> None:
+        (root / "infra/dependencies.json").write_bytes(
+            (json.dumps(table, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii"))
+
+    def test_hashed_lists_and_venv_variants_name_the_platforms_they_cover(self):
+        broken = {
+            "hashed list without platforms":
+                (lambda t: t["requirement_files"][IBSW_MACOS].pop("platforms"),
+                 "requirement file infra/requirements-ibsw-upgrade-macos-cp39.txt platforms must be a list"),
+            "hashed list with an unknown platform":
+                (lambda t: t["requirement_files"][IBSW_MACOS].update(platforms=["macos-cp39-x86_64"]),
+                 "names unknown platform macos-cp39-x86_64"),
+            "variant list does not cover its platform":
+                (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(requirements=IBSW),
+                 "infra/requirements-ibsw-upgrade.txt does not cover platform macos-cp39-arm64"),
+            "variant repeats the target's python":
+                (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(python="3.12"),
+                 "variant macos-cp39-arm64 repeats python 3.12"),
+            "variant python does not match its platform":
+                (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(python="3.10"),
+                 "python 3.10 does not match platform macos-cp39-arm64"),
+            "variant outside the target platforms":
+                (lambda t: t["targets"]["venv-ibsw-upgrade"]["platforms"].remove("macos-cp39-arm64"),
+                 "variant macos-cp39-arm64 is not one of its platforms"),
+            "variant list of another set":
+                (lambda t: t["targets"]["venv-ibsw-upgrade"]["variants"]["macos-cp39-arm64"].update(requirements=ENGINE),
+                 "list has set issue-tracker-engine, the target's list has set ibsw-upgrade"),
+            "platform without a list":
+                (lambda t: t["targets"]["venv-cabletracker"]["platforms"].append("macos-cp39-arm64"),
+                 "requirements-issue-tracker-engine.txt does not cover platform macos-cp39-arm64"),
+        }
+        for label, (change, message) in broken.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                root = self.copy_tree(Path(directory))
+                table = json.loads(TABLE_PATH.read_text(encoding="ascii"))
+                change(table)
+                self.write_table(root, table)
+                with self.assertRaisesRegex(self.deps.TableError, message):
+                    self.deps.load_table(root)
 
     def test_missing_list_and_invalid_table_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -544,16 +668,16 @@ class EnvironmentCheckTests(unittest.TestCase):
         optional = [row for row in rows if row["item"] == "apt apache2"]
         self.assertEqual("info", optional[0]["status"])
 
-    def make_venv(self, home: Path, target_name: str) -> Path:
+    def make_venv(self, home: Path, target_name: str, python_version: str = "3.12", full: str = "3.12.3") -> Path:
         target = self.table["targets"][target_name]
         venv = home / target["path"][2:]
-        site = venv / "lib/python3.12/site-packages"
+        site = venv / f"lib/python{python_version}/site-packages"
         site.mkdir(parents=True)
         (venv / "bin").mkdir()
         python = venv / "bin/python"
         python.write_text(FAKE_PYTHON.replace("{python}", sys.executable), encoding="utf-8")
         python.chmod(0o755)
-        (venv / "pyvenv.cfg").write_text("home = /usr/bin\ninclude-system-site-packages = false\nversion = 3.12.3\n",
+        (venv / "pyvenv.cfg").write_text(f"home = /usr/bin\ninclude-system-site-packages = false\nversion = {full}\n",
                                          encoding="utf-8")
         for name in self.deps.target_distributions(self.table, target):
             info = site / f"{name.replace('-', '_')}-{self.versions[name]}.dist-info"
@@ -588,6 +712,31 @@ class EnvironmentCheckTests(unittest.TestCase):
                     if row["status"] != "ok"}
             self.assertEqual({"python openai==2.48.0": "missing", "python httpx": "mismatch",
                               "python flask==3.0.0": "unexpected", "include-system-site-packages": "mismatch"}, rows)
+
+    def test_macos_cp39_ibsw_venv_is_checked_in_its_own_site_packages(self):
+        """The venv's own pyvenv.cfg version selects the platform variant: 3.9 is the macOS ibsw venv; a venv
+        whose version is not one the target lists is reported (and venv-cabletracker has no 3.9 variant)."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.make_venv(home, "venv-ibsw-upgrade", "3.9", "3.9.6")
+            report = self.venv_report(home, "venv-ibsw-upgrade")
+            self.assertTrue(report.ok, report.render())
+            items = {row["item"] for row in report.targets["venv-ibsw-upgrade"]}
+            self.assertIn("python paramiko==5.0.0", items)
+            self.assertIn("import probe", items)
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.make_venv(home, "venv-ibsw-upgrade", "3.10", "3.10.12")
+            rows = self.venv_report(home, "venv-ibsw-upgrade").targets["venv-ibsw-upgrade"]
+            mismatch = [row for row in rows if row["item"] == "venv python"]
+            self.assertEqual(["mismatch"], [row["status"] for row in mismatch])
+            self.assertIn("3.12", mismatch[0]["detail"])
+            self.assertIn("3.9", mismatch[0]["detail"])
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            self.make_venv(home, "venv-cabletracker", "3.9", "3.9.6")
+            rows = self.venv_report(home, "venv-cabletracker").targets["venv-cabletracker"]
+            self.assertIn(("venv python", "mismatch"), {(row["item"], row["status"]) for row in rows})
 
     def test_absent_venv_is_reported_with_the_install_command(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -645,16 +794,22 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(real_before, real.exists() and sorted(os.listdir(real)))
 
     def test_install_refuses_planned_or_foreign_platforms_and_non_venv_paths(self):
+        def identity(system, machine, version):
+            return json.dumps({"implementation": "CPython", "system": system, "machine": machine, "version": version})
         identities = {
-            "planned": (json.dumps({"implementation": "CPython", "system": "linux", "machine": "aarch64", "version": "3.10"}), "phase 2"),
-            "macos": (json.dumps({"implementation": "CPython", "system": "darwin", "machine": "arm64", "version": "3.9"}), "not supported"),
+            "planned": ("venv-ibsw-upgrade", identity("linux", "aarch64", "3.10"), "phase 2"),
+            # macOS cp39 arm64 is a venv-ibsw-upgrade platform only (owner 2026-10-24); Intel Macs and other
+            # Python versions on macOS are not.
+            "macos cabletracker": ("venv-cabletracker", MACOS_39_ARM64, "not supported"),
+            "macos x86_64": ("venv-ibsw-upgrade", identity("darwin", "x86_64", "3.9"), "not supported"),
+            "macos cp312": ("venv-ibsw-upgrade", identity("darwin", "arm64", "3.12"), "not supported"),
         }
-        for label, (identity, message) in identities.items():
+        for label, (target, value, message) in identities.items():
             with self.subTest(platform=label), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
                 fake = write_fake_python(base)
-                result = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake),
-                                  env={"HOME": str(base), "FAKE_PY_IDENTITY": identity})
+                result = run_deps("install", "--target", target, "--python", str(fake),
+                                  env={"HOME": str(base), "FAKE_PY_IDENTITY": value})
                 self.assertEqual(2, result.returncode)
                 self.assertIn(message, result.stderr)
                 self.assertFalse((base / ".venvs").exists())
@@ -666,6 +821,58 @@ class CommandLineTests(unittest.TestCase):
                               env={"HOME": str(base), "FAKE_PY_IDENTITY": LINUX_312})
             self.assertEqual(2, result.returncode)
             self.assertIn("not a venv", result.stderr)
+
+    def test_install_on_macos_cp39_arm64_uses_the_macos_hashed_list(self):
+        """The CLT /usr/bin/python3 (CPython 3.9, darwin arm64) builds venv-ibsw-upgrade from the macOS list with
+        the same isolated, hash-enforcing pip; the result checks green and a dry run names the same list."""
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            home = base / "home"
+            home.mkdir()
+            fake = write_fake_python(base)
+            log = base / "argv.log"
+            env = {"HOME": str(home), "FAKE_PY_IDENTITY": MACOS_39_ARM64, "FAKE_PY_LOG": str(log)}
+            result = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake), env=env)
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            venv = home / ".venvs/http/ibsw-upgrade"
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            create = [call for call in calls if "venv" in call[1:4]]
+            self.assertEqual([[str(fake), "-I", "-m", "venv", str(venv)]], create)
+            pip = [call for call in calls if "install" in call and "-m" in call and "pip" in call]
+            self.assertEqual([[str(venv / "bin/python"), "-I", "-m", "pip", "--isolated", "install", "--no-cache-dir",
+                               "--disable-pip-version-check", "--only-binary=:all:", "--no-deps", "--require-hashes",
+                               "-r", str(ROOT / IBSW_MACOS)]], pip)
+            self.assertIn("version = 3.9.6", (venv / "pyvenv.cfg").read_text())
+            site = venv / "lib/python3.9/site-packages"
+            installed = {norm(path.name.split("-")[0]) for path in site.glob("*.dist-info")}
+            self.assertEqual({"pip", "paramiko", "bcrypt", "invoke", "pynacl", "pyyaml", "cryptography", "cffi",
+                              "pycparser", "typing-extensions"}, installed)
+            self.assertIn("== venv-ibsw-upgrade: OK", result.stdout)
+            again = run_deps("check", "--target", "venv-ibsw-upgrade", env=env)
+            self.assertEqual(0, again.returncode, again.stdout)
+            dry = run_deps("install", "--target", "venv-ibsw-upgrade", "--python", str(fake), "--dry-run",
+                           env=dict(env, HOME=str(base)))
+            self.assertEqual(0, dry.returncode, dry.stderr)
+            self.assertIn("--require-hashes -r " + str(ROOT / IBSW_MACOS), dry.stdout)
+            self.assertFalse((base / ".venvs").exists())
+
+    def test_probe_names_macos_machines_as_the_table_and_linux_arm64_as_aarch64(self):
+        deps = load_deps()
+        cases = {
+            ("darwin", "arm64", "3.9"): "macos-cp39-arm64",
+            ("darwin", "x86_64", "3.9"): "macos-cp39-x86_64",
+            ("linux", "aarch64", "3.12"): "linux-cp312-aarch64",
+            ("linux", "arm64", "3.12"): "linux-cp312-aarch64",
+            ("linux", "AMD64", "3.12"): "linux-cp312-x86_64",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            fake = write_fake_python(Path(directory))
+            for (system, machine, version), expected in cases.items():
+                identity = json.dumps({"implementation": "CPython", "system": system, "machine": machine,
+                                       "version": version})
+                with self.subTest(system=system, machine=machine), \
+                        mock.patch.dict(os.environ, {"FAKE_PY_IDENTITY": identity}):
+                    self.assertEqual(expected, deps.probe_platform(str(fake)))
 
     def test_half_built_venv_names_the_directory_to_remove_and_deletes_nothing(self):
         """S4: a venv left by a failed creation (no python3-venv), one whose pip is unusable, or one

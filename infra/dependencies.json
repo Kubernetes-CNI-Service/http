@@ -295,7 +295,7 @@
       "status": "supported"
     },
     "macos-cp39-arm64": {
-      "note": "local-test: CLT /usr/bin/python3 user site",
+      "note": "local-test: CLT /usr/bin/python3 user site; venv-ibsw-upgrade: the formal full proof's F01 SDK identity tests run in that venv (owner 2026-10-24)",
       "status": "supported"
     }
   },
@@ -797,14 +797,33 @@
     },
     "infra/docker/requirements-issue-tracker-engine.txt": {
       "format": "hashed",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
       "set": "issue-tracker-engine"
+    },
+    "infra/requirements-ibsw-upgrade-macos-cp39.txt": {
+      "format": "hashed",
+      "platforms": [
+        "macos-cp39-arm64"
+      ],
+      "set": "ibsw-upgrade"
     },
     "infra/requirements-ibsw-upgrade.txt": {
       "format": "hashed",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
       "set": "ibsw-upgrade"
     },
     "requirements-container-top-level.lock": {
       "format": "hashed",
+      "platforms": [
+        "linux-cp312-x86_64",
+        "linux-cp312-aarch64"
+      ],
       "set": "toplevel-5"
     },
     "requirements-dev.txt": {
@@ -981,19 +1000,26 @@
         "infiniband/bringup/xdr-upgrade/upgrade.py",
         "tools/ufm_bootstrap_auth_adapter.py"
       ],
-      "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (as the user who runs upgrade.py; root only with HOME = root's home, never sudo -E)",
+      "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (as the user who runs upgrade.py; root only with HOME = root's home, never sudo -E; on the macOS full-proof machine: /usr/bin/python3, as the user who runs the formal load / full proof)",
       "kind": "venv",
       "path": "~/.venvs/http/ibsw-upgrade",
       "platforms": [
         "linux-cp312-x86_64",
-        "linux-cp312-aarch64"
+        "linux-cp312-aarch64",
+        "macos-cp39-arm64"
       ],
       "python": "3.12",
       "python_sets": [
         "ibsw-upgrade"
       ],
       "requirements": "infra/requirements-ibsw-upgrade.txt",
-      "system_site_packages": false
+      "system_site_packages": false,
+      "variants": {
+        "macos-cp39-arm64": {
+          "python": "3.9",
+          "requirements": "infra/requirements-ibsw-upgrade-macos-cp39.txt"
+        }
+      }
     }
   }
 }

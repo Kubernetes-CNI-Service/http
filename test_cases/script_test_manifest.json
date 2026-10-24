@@ -608,7 +608,9 @@
     "monitor/issue-tracker/engine.lock.json",
     "infra/dependencies.json",
     "infra/docker/requirements-issue-tracker-engine.txt",
-    "infra/requirements-ibsw-upgrade.txt"
+    "infra/requirements-ibsw-upgrade.txt",
+    "infra/requirements-ibsw-upgrade-macos-cp39.txt",
+    "test_cases/f01_sdk_venv.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -3522,7 +3524,11 @@
       "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow", "test_cases.test_issue_tracker_engine_runtime", "test_cases.test_ztp_container_runtime", "test_cases.test_change_aware_test_runner"]
     },
     {
-      "paths": ["user-manual.html", "infra/docker/README.md", "monitor/issue-tracker/README.md", "test_cases/REAL_ENVIRONMENT.md"],
+      "paths": ["infra/requirements-ibsw-upgrade-macos-cp39.txt", "test_cases/f01_sdk_venv.py"],
+      "tests": ["test_cases.test_deps_table", "test_cases.test_deps_table_workflow", "test_cases.test_f01_recovery_project_key_backup_durable_workflow", "test_cases.test_f01_recovery_staging_owner", "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow"]
+    },
+    {
+      "paths": ["user-manual.html", "infra/docker/README.md", "monitor/issue-tracker/README.md", "test_cases/REAL_ENVIRONMENT.md", "test_cases/README.md"],
       "tests": ["test_cases.test_deps_table_workflow"]
     },
     {

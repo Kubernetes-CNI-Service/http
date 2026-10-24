@@ -118,6 +118,23 @@ AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 
 `sync-code`、`tar-for-upload --deploy` 和正式部署。runner 只负责选测、执行及成功后的批准哈希
 更新，绝不会根据实现自动重写断言；禁止通过弱化、跳过或删除测试来接受失败。
 
+全量证明机器的前置条件：本机 macOS 的正式全量证明用 `/usr/bin/python3`（CLT 3.9，owner
+2026-10-24 决定）运行，它不是 venv；而 F01 的生产 SSH SDK 身份检查
+（`tools/f01_ssh_dependency_identity.py`，保持不变）只在隔离 venv 中成立。因此运行正式 load／全量
+测试的用户必须先有自己的 `~/.venvs/http/ibsw-upgrade`，在仓库根目录执行一次：
+
+```bash
+/usr/bin/python3 infra/deps.py install --target venv-ibsw-upgrade
+/usr/bin/python3 infra/deps.py check --target venv-ibsw-upgrade
+```
+
+macOS 使用哈希清单 `infra/requirements-ibsw-upgrade-macos-cp39.txt`（CPython 3.9、Apple Silicon
+arm64，版本与 Linux 清单相同），安装需要 PyPI 访问；Intel Mac 不受支持。需要该身份的 F01 测试由
+`test_cases/f01_sdk_venv.py` 的 `@sdk_identity_test` 标记：runner 本身是 venv 时照旧在进程内运行；
+否则用该 venv 的解释器在子进程中运行同一个测试 ID，断言不变，子进程必须先证明生产身份并恰好通过这
+一个测试。venv 缺失、不能证明身份或子进程有任何失败、错误、跳过时，测试失败并给出上述安装命令，
+绝不 skip。
+
 manifest 校验还会直接加载并合并三份真实部署选择器：`sync-code.py` 的根目录同步选择、
 `infra/docker/activate.py` 的镜像源码选择，以及 `_package_common.py` 的归档源码选择。任一选择器
 缺失、无法加载或返回非法路径属于配置错误；成功选择出的路径若不在 `scripts` 与

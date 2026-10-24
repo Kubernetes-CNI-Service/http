@@ -2,6 +2,8 @@
 
 The positive workflow proves source/key/pin admission and real original FD close,
 not native KEX, SFTP staging, remote inode identity or any execution permission.
+The two tests that reach the production F01 SDK identity run unchanged in the
+venv-ibsw-upgrade child when the runner is not a venv (test_cases/f01_sdk_venv.py).
 """
 import contextlib
 import fcntl
@@ -18,6 +20,7 @@ from unittest import mock
 
 import paramiko
 from test_cases import test_f01_recovery_stage_script_builder as fixture
+from test_cases.f01_sdk_venv import sdk_identity_test
 
 SUBJECT = "tools.ufm_deployment_staging_owner"
 
@@ -103,6 +106,7 @@ class F01DeploymentStagingOwnerDirectTests(unittest.TestCase):
                                      (os.fstat(held.script_fd).st_dev, os.fstat(held.script_fd).st_ino))
 
 class F01DeploymentStagingOwnerInputWorkflowTests(unittest.TestCase):
+    @sdk_identity_test
     def test_actual_project_builder_held_original_key_pin_deadline_and_close_do_not_issue_permission(self):
         api = subject(self)
         from tools import ufm_bootstrap_auth_adapter as auth
@@ -242,6 +246,7 @@ class F01DeploymentStagingIssuanceDirectTests(unittest.TestCase):
                         held.__dict__.clear()
                         held.__dict__.update(original_fields)
 
+    @sdk_identity_test
     def test_cleanup_operator_interrupt_outprioritizes_ordinary_primary_in_both_owned_finally(self):
         api = subject(self)
         from tools import ufm_bootstrap_auth_adapter as auth

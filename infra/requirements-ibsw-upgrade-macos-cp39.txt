@@ -1,0 +1,28 @@
+# ibsw-upgrade venv v1, macOS: CPython 3.9 macOS arm64 (CLT /usr/bin/python3); wheels only; pip --only-binary=:all: --no-deps --require-hashes. Table: infra/dependencies.json.
+# wheel: bcrypt-5.0.0-cp39-abi3-macosx_10_12_universal2.whl sha256:0c418ca99fd47e9c59a301744d63328f17798b5947b0f791e9af3c1c499c2d0a
+bcrypt==5.0.0 \
+    --hash=sha256:0c418ca99fd47e9c59a301744d63328f17798b5947b0f791e9af3c1c499c2d0a
+# wheel: cffi-2.0.0-cp39-cp39-macosx_11_0_arm64.whl sha256:de8dad4425a6ca6e4e5e297b27b5c824ecc7581910bf9aee86cb6835e6812aa7
+cffi==2.0.0 \
+    --hash=sha256:de8dad4425a6ca6e4e5e297b27b5c824ecc7581910bf9aee86cb6835e6812aa7
+# wheel: cryptography-50.0.1-cp39-abi3-macosx_11_0_arm64.whl sha256:ca83d00d9e69cd5eb63f2e69c3a5a59e0cecae5ae14c6ae0b35830fe3b37bad0
+cryptography==50.0.1 \
+    --hash=sha256:ca83d00d9e69cd5eb63f2e69c3a5a59e0cecae5ae14c6ae0b35830fe3b37bad0
+# wheel: invoke-2.2.1-py3-none-any.whl sha256:2413bc441b376e5cd3f55bb5d364f973ad8bdd7bf87e53c79de3c11bf3feecc8
+invoke==2.2.1 \
+    --hash=sha256:2413bc441b376e5cd3f55bb5d364f973ad8bdd7bf87e53c79de3c11bf3feecc8
+# wheel: paramiko-5.0.0-py3-none-any.whl sha256:b7044611c30140d9a75261653210e2002977b71a0497ff3ba0d98d7edbf62f7c
+paramiko==5.0.0 \
+    --hash=sha256:b7044611c30140d9a75261653210e2002977b71a0497ff3ba0d98d7edbf62f7c
+# wheel: pycparser-2.23-py3-none-any.whl sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
+pycparser==2.23 \
+    --hash=sha256:e5c6e8d3fbad53479cab09ac03729e0a9faf2bee3db8208a550daf5af81a5934
+# wheel: pynacl-1.6.2-cp38-abi3-macosx_10_10_universal2.whl sha256:c949ea47e4206af7c8f604b8278093b674f7c79ed0d4719cc836902bf4517465
+pynacl==1.6.2 \
+    --hash=sha256:c949ea47e4206af7c8f604b8278093b674f7c79ed0d4719cc836902bf4517465
+# wheel: pyyaml-6.0.3-cp39-cp39-macosx_11_0_arm64.whl sha256:c3355370a2c156cffb25e876646f149d5d68f5e0a3ce86a5084dd0b64a994917
+pyyaml==6.0.3 \
+    --hash=sha256:c3355370a2c156cffb25e876646f149d5d68f5e0a3ce86a5084dd0b64a994917
+# wheel: typing_extensions-4.16.0-py3-none-any.whl sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8

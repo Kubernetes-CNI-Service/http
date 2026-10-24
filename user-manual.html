@@ -456,7 +456,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>738</strong> 个受维护文件</span>
+          <span><strong>740</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -599,7 +599,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infra" data-nav-title="infra/ 文件" class="catalog-group">
-          <summary><code>infra/</code> — 32 个文件</summary>
+          <summary><code>infra/</code> — 33 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infra/apache-publication-boundary/README.md"><td><code>infra/apache-publication-boundary/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：Apache 静态发布边界与信任模型。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infra/check_infra.py"><td><code>infra/check_infra.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Collect infra execution logs and health status from CSV server devices。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -630,6 +630,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infra/infra-setup.py"><td><code>infra/infra-setup.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Prepare an Ubuntu 22.04/24.04 infra host: management server (--mgmt) or deployed client。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/infra-setup.sh"><td><code>infra/infra-setup.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-setup.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/infra-teardown.sh"><td><code>infra/infra-teardown.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>属于“Native 基础设施与 Docker/Supervisor 运行时”的 infra-teardown.sh；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infra/requirements-ibsw-upgrade-macos-cp39.txt"><td><code>infra/requirements-ibsw-upgrade-macos-cp39.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：ibsw-upgrade venv v1, macOS: CPython 3.9 macOS arm64 (CLT /usr/bin/python3); wheels only; pip --only-binary=:all: --no-deps --require-hashes. Table: infra/dependencies.json。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/requirements-ibsw-upgrade.txt"><td><code>infra/requirements-ibsw-upgrade.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：ibsw-upgrade venv v1: CPython 3.12 Linux aarch64/x86_64; wheels only; pip --only-binary=:all: --no-deps --require-hashes. Table: infra/dependencies.json。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/ubuntu24_host.py"><td><code>infra/ubuntu24_host.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Ubuntu 24.04 host configuration shared by server types (server_ufm now, server_mgmt later)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infra/ufm_jump_transport.py"><td><code>infra/ufm_jump_transport.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Closed, key-only jump transport primitives for UFM orchestration。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -702,7 +703,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 405 个文件</summary>
+          <summary><code>test_cases/</code> — 406 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -710,6 +711,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/REAL_ENVIRONMENT.md"><td><code>test_cases/REAL_ENVIRONMENT.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>无法在本机安全自动化的 VM、AIR、Docker、服务和物理设备验收案例。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/__init__.py"><td><code>test_cases/__init__.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Canonical executable regression and integration test case package。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/audit_public_tree.py"><td><code>test_cases/audit_public_tree.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fail closed when a Git publication candidate crosses the public boundary。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/f01_sdk_venv.py"><td><code>test_cases/f01_sdk_venv.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>F01 SDK identity tests run on the venv-ibsw-upgrade interpreter when the runner is not a venv。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/fixtures/bounded_inner_fd_fixture.py"><td><code>test_cases/fixtures/bounded_inner_fd_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>NOT RUN. Fixed local command fixture, never an SSH/device executable。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt"><td><code>test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：!/usr/bin/env python3。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt"><td><code>test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>文档：!/usr/bin/env python3。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1385,7 +1387,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>570</strong> 个脚本型文件</span>
+          <span><strong>571</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -2512,7 +2514,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 383 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 384 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -2548,6 +2550,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.audit_public_tree</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/f01_sdk_venv.py" class="script-reference">
+          <summary><code>test_cases/f01_sdk_venv.py</code> — F01 SDK identity tests run on the venv-ibsw-upgrade interpreter when the runner is not a venv。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>F01 SDK identity tests run on the venv-ibsw-upgrade interpreter when the runner is not a venv。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.f01_sdk_venv</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.f01_sdk_venv</code></pre></div>
         </details>
         <details data-script-reference="test_cases/fixtures/bounded_inner_fd_fixture.py" class="script-reference">
           <summary><code>test_cases/fixtures/bounded_inner_fd_fixture.py</code> — NOT RUN. Fixed local command fixture, never an SSH/device executable。</summary>
@@ -11951,6 +11971,10 @@ python3 infra/deps.py install --target venv-cabletracker   # 执行 11-load.py �
 python3 infra/deps.py install --target venv-ibsw-upgrade   # 运行 upgrade.py 的用户
 python3 infra/deps.py check --target venv-cabletracker --target venv-ibsw-upgrade</code></pre>
         <p>需要 Ubuntu 24.04（CPython 3.12）、<code>python3-venv</code> 和 PyPI 访问；22.04 属于第二阶段，install 会拒绝。load 用 <code>sudo</code> 执行时这个用户是 root：用普通 <code>sudo</code> 执行 install，venv 建在 <code>/root/.venvs/http/</code>；<code>sudo -E</code> 会保留别人的 HOME，install 拒绝执行。venv 只建了一半时，install 报出要删除的目录和重跑命令，不会自动删除。<code>cron.sh</code> 只在 venv 的每一级目录和解释器都属于当前用户或 root、且不可被组或其他人写时才用它，否则改用 <code>python3</code> 并在 cronjob.log 记一次原因。Docker 后端不用这两个 venv：镜像自带引擎依赖，改动后每台 Docker 主机都要先执行 <code>deploy.sh build</code> 重建镜像再 load，详见 <code>infra/docker/README.md</code>。</p>
+        <p>本机 macOS 的正式全量证明（<code>/usr/bin/python3</code>，CLT 3.9）同样需要 <code>venv-ibsw-upgrade</code>：F01 的 SSH SDK 身份只在隔离 venv 中成立，需要它的 F01 测试改用这个 venv 的解释器在子进程中运行原测试；venv 缺失或不能证明身份时这些测试失败并提示安装命令，不会跳过。由执行正式 load／全量测试的 macOS 用户在仓库根目录执行一次：</p>
+        <pre><code>/usr/bin/python3 infra/deps.py install --target venv-ibsw-upgrade
+/usr/bin/python3 infra/deps.py check --target venv-ibsw-upgrade</code></pre>
+        <p>macOS 用哈希清单 <code>infra/requirements-ibsw-upgrade-macos-cp39.txt</code>（CPython 3.9、Apple Silicon arm64，版本与 Linux 清单相同），需要 PyPI 访问；Intel Mac 不受支持。</p>
       </div>
 
       <section id="v2-scenario-docker" data-chapter>

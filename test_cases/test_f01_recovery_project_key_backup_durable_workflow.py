@@ -5,11 +5,14 @@ The fixed production live entry is implemented; this native workflow is still
 PREPARED / ACTUAL NOT RUN. The original entry-absence evidence remains only
 structural RED. Root schedules actual execution and any missing native premise
 continues to be setup ERROR, not a substitute for a genuine behavior result.
+The entry proves the production F01 SDK identity, so outside a venv the test
+runs unchanged in the venv-ibsw-upgrade child (test_cases/f01_sdk_venv.py).
 """
 import contextlib,hashlib,os,queue,socket,stat,tempfile,threading,time,unittest
 from pathlib import Path
 from unittest import mock
 import paramiko
+from test_cases.f01_sdk_venv import sdk_identity_test
 from tools import ufm_bootstrap_auth_adapter as auth
 from test_cases.test_f01_recovery_project_key_install_bash_workflow import _original_owned_bash
 from test_cases import test_f01_recovery_stage_script_builder as site
@@ -202,6 +205,7 @@ def actual_key_peer(test,host_key,management_key,home,authentication,events,api_
             else:raise KeyWorkflowPremiseError("actual key-peer fixture failed") from errors[0]
 
 class F01ProjectKeyBackupDurableWorkflowTests(unittest.TestCase):
+    @sdk_identity_test
     def test_real_new_password_backup_pull_fsync_apply_and_failed_local_fsync_never_applies(self):
         entry=getattr(auth,"establish_project_direct_management_key_access",None)
         if not callable(entry):

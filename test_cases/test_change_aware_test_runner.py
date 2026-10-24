@@ -1046,6 +1046,9 @@ class ImpactManifestTests(unittest.TestCase):
                 "infra/dependencies.json",
                 "infra/docker/requirements-issue-tracker-engine.txt",
                 "infra/requirements-ibsw-upgrade.txt",
+                # 2026-10-24: macOS cp39 arm64 list of venv-ibsw-upgrade and the F01 SDK venv routing helper.
+                "infra/requirements-ibsw-upgrade-macos-cp39.txt",
+                "test_cases/f01_sdk_venv.py",
             ],
             manifest["tracked_support"],
         )
