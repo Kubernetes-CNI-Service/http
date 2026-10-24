@@ -6,22 +6,24 @@
 上述是原始集成基准，不包含全部后续修复。固定布局、缓存模板／runner 门及
 固定 registry 的 imported-object 身份修复已于 2026-10-20 随 `f7456dd` 进入主树。
 接收方须按该提交、后续工作列表及下列闭包逐文件核对，不能仅 checkout 原始基准
-便当作已经继承；这些修复不启用 SCP，也不构成设备或发布验收。精确 SHA、命令和本地证据登记在主树
-`outputs/req19-local-evidence-20261007/ROOT-IBSW-FIXED-LAYOUT-MAIN-LANDED-20261020.json`；
+便当作已经继承；这些修复不启用 SCP，也不构成设备或发布验收。精确 SHA、命令和本地证据登记在本机证据目录
+`req19-local-evidence-20261007` 的 `ROOT-IBSW-FIXED-LAYOUT-MAIN-LANDED-20261020.json`。该目录原在本机检出的
+`outputs/` 下，从未纳入仓库（`.gitignore` 排除 `/outputs/`），2026-10-24 owner 清理时已移出检出目录；
+本文下面提到的收据和 SSH 环境都在该目录里，不随仓库分发。
 下列旧收据各自保留其原始代码与测试 epoch，不追认为当前整树证明。
 此前逐步修复的历史记录见
-`outputs/req19-local-evidence-20261007/ROOT-H-CONTAINMENT-MEMO-IB-LAYOUT-V4-20261019.json`。
+`ROOT-H-CONTAINMENT-MEMO-IB-LAYOUT-V4-20261019.json`。
 随后 cached executor 原 runner 绑定修复及本轮证据另见
-`outputs/req19-local-evidence-20261007/ROOT-H-LITERAL-FORMS-IB-CACHED-RUNNER-20261019.json`。
+`ROOT-H-LITERAL-FORMS-IB-CACHED-RUNNER-20261019.json`。
 固定 registry 的 transitive cached-object 身份修复另见
-`outputs/req19-local-evidence-20261007/ROOT-H-EXPRESSION-IB-TRANSITIVE-CACHE-20261020.json`；
+`ROOT-H-EXPRESSION-IB-TRANSITIVE-CACHE-20261020.json`；
 包含真实 canonical/flat alias 正控、混合来源初始 RED 和原组件工作流回归。
 范围选择／known-hosts 及三个历史流程的 IO 夹具一致性修复另见
-`outputs/req19-local-evidence-20261007/ROOT-H-COMPREHENSION-IB-IO-COHERENCE-20261020.json`。
+`ROOT-H-COMPREHENSION-IB-IO-COHERENCE-20261020.json`。
 NVOS 历史观察／派发前失败的 IO 夹具接线，以及新增测试的精确 discovery 登记见
-`outputs/req19-local-evidence-20261007/ROOT-H-OWNED-BOUNDARIES-IB-LEGACY-COMPAT-20261020.json`。
+`ROOT-H-OWNED-BOUNDARIES-IB-LEGACY-COMPAT-20261020.json`。
 当前入口下三组件／金丝雀／未选状态隔离，以及 OS 链与固件 OS 前置的五项原流程证据见
-`outputs/req19-local-evidence-20261007/ROOT-IBSW-CURRENT-COMPONENT-WORKFLOWS-PY312-20261020.json`。
+`ROOT-IBSW-CURRENT-COMPONENT-WORKFLOWS-PY312-20261020.json`。
 
 IBSW 2.25 的原 HTTP-only 入口、共享运行锁和本地测试已集成进 http 主树。
 本交接新增的 native SCP 合同只在同批生产、来源 oracle、测试和 manifest 经审定落地后
@@ -242,7 +244,7 @@ REQ7 最终完成发行/冷成功仍 OPEN，F01/UFM 开发 STOP；这不是两�
 
 本机保留三个原工作流的定向证据：未重启保持 UNKNOWN、退出记录缺失后真实验证、
 不可信退出记录不作为验证依据；后两项仍断言仅安装一次，缺失记录案例另断言零配置 patch。
-收据为 `outputs/req19-local-evidence-20261007/ROOT-IBSW-OWNED-EXIT-UNCERTAINTY-20261020.json`。
+收据为 `ROOT-IBSW-OWNED-EXIT-UNCERTAINTY-20261020.json`。
 设备 IO 与 boot 变化由原夹具模拟，不是实际设备重启、真实 SSH、断电、完整模块或 full 证明；
 接收方仍须在自己的精确代码和环境上验证。三个案例也不证明可选退出文件探测分支已执行。
 
@@ -251,10 +253,10 @@ REQ7 最终完成发行/冷成功仍 OPEN，F01/UFM 开发 STOP；这不是两�
 新增 `test_ibsw225_delayed_owned_exit_witness.py` 被动委托原 IO，独立要求两次缺失及
 前后均无全局请求 lease，之后仍须完整 live 验证、仅安装一次，不要求成功读取退出文件。
 它不提供真实 boot 字节见证或设备证明；本地初始失败、夹具修正与定向复验另见
-`outputs/req19-local-evidence-20261007/ROOT-IBSW-DELAYED-PROBE-REACHABILITY-20261020.json`。
+`ROOT-IBSW-DELAYED-PROBE-REACHABILITY-20261020.json`。
 
 九目标并发原工作流另有本地定向收据
-`outputs/req19-local-evidence-20261007/ROOT-IBSW-NINE-TARGET-OWNED-CHILD-20261020.json`。
+`ROOT-IBSW-NINE-TARGET-OWNED-CHILD-20261020.json`。
 原案例在该收据绑定的夹具及 585 项源码／监督脚本快照上单独运行，1 项 PASS，27.581 秒；
 生产时钟、期限及原断言未改，外层 60 秒诊断预算未触发超时或强制终止。
 原断言确认配置 5 个 in-flight、9 个模拟目标 COMPLETE 及 canary 先派发，
@@ -280,8 +282,8 @@ python3.12 -m venv /absolute/ibsw-test-venv
 依赖版本和来源；不要宣称九包全部锁定。Paramiko 版本涉及受检查的内部接口，不随意升级。
 验证整个 http 测试库还需要其他开发依赖，单独的 SSH 环境不等于完整测试环境。
 
-交出方可复核的既有 SSH 环境为
-`/Users/joeyyang/Desktop/http/outputs/req19-local-evidence-20261007/f01-env-recovery-20261017.niMetv/venv/bin/python3.12`。
+交出方可复核的既有 SSH 环境在同一证据目录下：
+`f01-env-recovery-20261017.niMetv/venv/bin/python3.12`（随该目录移出检出目录）。
 这只是本机历史路径，不是接收方运行前提。不要复制 venv 后声称解释器/二进制依赖可移植。
 不要让裸 `python3` 静默选中系统 Python 3.9：现有未选状态哨兵使用
 `Path.stat(follow_symlinks=False)`。本轮 3.9 在该夹具行即 TypeError；保留失败原件，
@@ -295,8 +297,8 @@ python3.12 -m venv /absolute/ibsw-test-venv
 组件选择、受管外层成功/失败和共享 guard 等接线也已进入上述交接基准。
 
 交出方历史定向记录包括：受管成功/失败流程、仅选 CPLD 对其他状态零访问、
-SFTP 新增八项及原相关八项测试。完整收据在主树
-`outputs/req19-local-evidence-20261007/`：
+SFTP 新增八项及原相关八项测试。完整收据在上述本机证据目录
+`req19-local-evidence-20261007`（不在仓库内）：
 
 - `ROOT-CONTINUOUS-PARALLEL-LOCAL-CLOSURE-20261019.json`
 - `ROOT-IBSW-SFTP-OWNED-CLIENT-INTERRUPTION-LANDED-20261019.json`

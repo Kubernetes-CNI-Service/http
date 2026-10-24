@@ -48,12 +48,12 @@
   - `monitor/switch-collection-worker.py` 按固定槽位调用（`tools/project_contract.py:58-71` 的 `COLLECTION_CYCLE_SOURCE_SLOTS`）。
   - worker 传给 `cron.sh` 的目标计划形状是封闭的 `{eth, spx, ib, nv, dynamic_identities}`（`cron.sh:1852`、worker :3006）。
 - **现有的 UFM 相关实现**：
-  - D-70 采集合同 `tools/ufm_collection_contract.py:22-83`：
+  - D-70 采集合同 `tools/ufm_collection_contract.py:22-83`（2026-10-24 补注：模块保留，现在只有 F01 的 `infra/ufm_jump_transport.py::retrieve_collection_archive` 导入它；用它生产归档的 `tools/ufm_collection_agent.py`、`tools/ufm_remote_producer.py` 已在退役第 2 批删除，见第 16 节）：
     - ibdiagnet 的固定参数和在 UFM 上的路径：`/var/tmp/ibdiagnet2`、`/opt/ufm/files`、`/root/monitor/ibdiagnet`；
     - 归档名 `ibdiagnet2_<run-id>.tar.gz`；
     - run-id 格式为 `YYYYMMDD-HHMM-(prod|air)-<16 位 hex>`。
-  - `infiniband/prod` 槽位里有可选的 iblinkinfo 采集：需要 root 记录 `/var/lib/http-ztp-container/ib-producer-authority/<key>.json` 才会执行（worker :2856-2900）。
-  - `monitor.html` 已有 UFM 标签页，只显示经过校验的回执（`generate-monitor-html.py:1966-2033`）。
+  - `infiniband/prod` 槽位里有可选的 iblinkinfo 采集：需要 root 记录 `/var/lib/http-ztp-container/ib-producer-authority/<key>.json` 才会执行（worker :2856-2900）（2026-10-24 补注：这条采集和 root 授权记录检查已在退役第 2 批删除，见第 16 节）。
+  - `monitor.html` 已有 UFM 标签页，只显示经过校验的回执（`generate-monitor-html.py:1966-2033`）（2026-10-24 补注：UFM 标签页和证据面板已在退役第 2 批删除，见第 16 节）。
   - **目前没有任何实现在监控 UFM 服务器本身的状态**（服务、版本、HA、IPMI、磁盘等）。
 
 ## 4. 流程
@@ -93,7 +93,7 @@ UFM ibdiagnet 启动 → IB link（sw-link，等 180 秒）→ UFM ibdiagnet 取
 - **worker 路径（页面触发的自动采集）也采 UFM**（owner 2026-10-21 选 A）。
   - worker 冻结的目标计划从 5 个键扩为 6 个键：`{eth, spx, ib, nv, dynamic_identities, ufm}`。`ufm` 只在 infiniband 槽位非空，内容是冻结清单中的 `server_ufm` 行（`名称|eth0_ip`，按清单顺序；没有 eth0_ip 的行跳过）。
   - worker（`_collection_target_plan_matches_sources`）按冻结清单逐行核对 `ufm`，多一行、少一行、改了 IP 都拒绝；其它槽位的 `ufm` 必须为空。
-  - v2 证据生成（`collection_v2_emitter.py`）和 REQ7 的 IB 周期读取（`collection_ib_cycle_binding.py::rebuild_ib_target_plan`）用同样的 6 键形状。UFM 仍不计入 planned/succeeded。
+  - v2 证据生成（`collection_v2_emitter.py`）和 REQ7 的 IB 周期读取（`collection_ib_cycle_binding.py::rebuild_ib_target_plan`）用同样的 6 键形状。UFM 仍不计入 planned/succeeded。（2026-10-24 补注：REQ7 的 IB 周期读取已随旧 REQ7 链在退役第 1 批删除，见第 16 节。）
   - 更正（2026-10-21）：此前 worker 路径不调用 `parse_csv_hosts`，UFM 目标文件始终为空，实际是静默不采；原先写的「会记一行说明」不成立。
   - 12-ztp-monitor 的完成交接走直接调用（`bash infiniband/cron.sh`，见 `12-ztp-monitor.py:4968-4986`），同样会采集 UFM。
 - `server_ufm` 行没有 `eth0_ip` 时只跳过这台 UFM（stderr 提示），不再让整个 IB 车道的 CSV 解析失败。
@@ -255,7 +255,7 @@ docker exec ufm /opt/ufm/opensm/sbin/iblinkinfo > /root/monitor/iblinkinfo/iblin
 
 ## 9. run-id 说明
 
-run-id 是部署服务器为**每一次** ibdiagnet 采集生成的唯一编号，来自 D-70 合同（`tools/ufm_collection_contract.py:20、47-57`）。
+run-id 是部署服务器为**每一次** ibdiagnet 采集生成的唯一编号，来自 D-70 合同（`tools/ufm_collection_contract.py:20、47-57`）（2026-10-24 补注：格式沿用该合同；现在由 `cron.sh` 自己生成，即 `UFM_IBDIAG_RUN_ID`，不调用该模块，见第 16 节）。
 
 - **格式**：`YYYYMMDD-HHMM-<环境>-<16 位十六进制随机数>`，例如 `20261021-0322-prod-3f9c0a1b2c3d4e5f`。
   - 时间是部署服务器发起采集时的 UTC 时间，精确到分钟；
@@ -733,8 +733,8 @@ docker exec ufm ls /var/tmp/ibdiagnet2/
 | 3. setup/unsetup/打包（codex） | 沙箱从未跑通 setup | **打通的头号阻断**：setup 要认 `server_ufm`/`server_mgmt`，并建好 14.3 的链接（如采用分目录，再加 `ufm-iblinkinfo`）。没有这些链接，`cron.sh` 的 UFM 阶段直接报 ERROR |
 | 4. 采集（`cron.sh` + `ufm-info.sh` + `ufm-ibdiagnet.sh`） | info、HA（经 VIP）、ibdiagnet/iblinkinfo 都已接入；等待、失败计数与降级、命名、不用 docker cp、保留 3 天（含 99-output-p2p）、日志统一轮转、兼容 failover、所有归档和 CSV 先写 .part 再改名，都已按 owner 2026-10-22 的答复实现 | 磁盘：ibdiagnet 每份约 100 MB，10 分钟一轮时一天约 14 GB，3 天（当天原样加两个每日包）约 43 GB；每日包对已压缩的 .tgz 几乎没有压缩效果 |
 | 5. 分析（`infiniband/monitor/post-collect.py`） | ibdiagnet 和 iblinkinfo 都能分析；报告用 provenance 核对；写收据；端到端测试通过 | 无 |
-| 6. 页面（`generate-monitor-html.py`） | UFM Servers 在 IB 组最上面；IB Link Validation 显示最新报告和收据里的「哪一轮、哪台 UFM、是否降级」；owner 2026-10-22：不做单独的 UFM 页 | 页面 `import` 了 D-70 的 `tools.ufm_collection_pipeline`（第 59 行）和 UFM 证据面板，由 codex 废弃 D-70 时一并删除（已写进给 codex 的对接文档） |
-| 7. REQ7（codex） | http `c250d17`：IB 数据只来自 D-70 自己的采集（worker 周期派生的 run_id、`99-output-ufm/runs/<run_id>/<node>/`、只认 iblinkinfo、归档成员必须叫 `artifact`、`ufm-collection-v1` 收据）；CVT 必须在不是链接的 `P2P/output-p2p/` 下；冻结计划没有 `ufm` | 与我们的数据源完全不对接。D-70 废弃后，REQ7 要改读我们的数据：由我们给出稳定约定（目录、命名、收据、报告和 provenance、CVT 位置），codex 改 REQ7。CVT 位置与 owner 定的 `99-output-p2p` 冲突，需 owner 与 codex 一起定 |
+| 6. 页面（`generate-monitor-html.py`） | UFM Servers 在 IB 组最上面；IB Link Validation 显示最新报告和收据里的「哪一轮、哪台 UFM、是否降级」；owner 2026-10-22：不做单独的 UFM 页 | 页面 `import` 了 D-70 的 `tools.ufm_collection_pipeline`（第 59 行）和 UFM 证据面板，由 codex 废弃 D-70 时一并删除（已写进给 codex 的对接文档）。2026-10-24 补注：已在退役第 2 批删除，见第 16 节 |
+| 7. REQ7（codex） | http `c250d17`：IB 数据只来自 D-70 自己的采集（worker 周期派生的 run_id、`99-output-ufm/runs/<run_id>/<node>/`、只认 iblinkinfo、归档成员必须叫 `artifact`、`ufm-collection-v1` 收据）；CVT 必须在不是链接的 `P2P/output-p2p/` 下；冻结计划没有 `ufm` | 与我们的数据源完全不对接。D-70 废弃后，REQ7 要改读我们的数据：由我们给出稳定约定（目录、命名、收据、报告和 provenance、CVT 位置），codex 改 REQ7。CVT 位置与 owner 定的 `99-output-p2p` 冲突，需 owner 与 codex 一起定。2026-10-24 补注：旧 REQ7 与 D-70 已退役；新 REQ7（`monitor/issue-tracker/issue-tracker-sync.py`）直接读本线的 `99-output-monitor/infiniband/ufm-ibdiagnet`，见第 16 节 |
 | 8. load 生成 CVT | 已做（转换器以 `--expect-p2p-sha256` 自校验） | 第二步（父 release 绑定、提交前复核）待决定 |
 | 9. 回归 http 树 | 文档逐文件列明 | 45 个文件已与 http 分歧，需三方合并；http 今天又有多次 REQ7 提交（HEAD `c250d17`）|
 
@@ -748,10 +748,10 @@ owner 2026-10-22：「把落地代码合入 http，然后开始和 REQ7 对接�
 |---|---|---|
 | 采集 | `ethernet/monitor/cron.sh`（`ufm_run_record_write`、v2 emitter 参数） | 本轮写了运行记录时，调用 emitter 带 `--ufm-run-record <记录>` |
 | 绑定 | `monitor/collection_ufm_run_binding.py::derive_ufm_run_roles`（新增） | 只在「运行记录的 `cycle` 就是本周期、`outcome=ok`、`analysis=ok`」时绑定；逐个重读记录、`.done`、输入、报告、报告 provenance、收据、CVT 七个文件，名字与 SHA 层层对上，并用 `ib_topology_provenance.read_report_provenance` 重放报告与 CVT。路径一律是解析后的真实路径（`DAY0-Prepare/<项目>/…`），不穿过 setup 链接；项目由 `project_key` 核对 |
-| emitter | `monitor/collection_v2_emitter.py::build_result`、`publish` | 能绑定时，IB slot 的证据为 3 个基础角色 + 7 个 UFM 角色，信封多一个 `ufm_run_binding`（run_id、node、kind、degraded、运行记录与收据的 SHA、CVT SHA）。**不能绑定时只写一行 stderr，IB slot 照常只有 3 个基础角色**——UFM 的问题（失败、跳过、不是本周期、模块缺失）都不改变交换机结果。与 D-70 的 `ib_analysis_binding` 互斥 |
+| emitter | `monitor/collection_v2_emitter.py::build_result`、`publish` | 能绑定时，IB slot 的证据为 3 个基础角色 + 7 个 UFM 角色，信封多一个 `ufm_run_binding`（run_id、node、kind、degraded、运行记录与收据的 SHA、CVT SHA）。**不能绑定时只写一行 stderr，IB slot 照常只有 3 个基础角色**——UFM 的问题（失败、跳过、不是本周期、模块缺失）都不改变交换机结果。与 D-70 的 `ib_analysis_binding` 互斥。2026-10-24 补注：`ib_analysis_binding` 已随 D-70 在退役第 2 批删除 |
 | worker | `monitor/switch-collection-worker.py::_collection_slot_artifacts_match`、`_collection_validate_artifact_roles` | 信封带 `ufm_run_binding` 时，用同一个模块从文件重放，一致才接受，不信任信封 |
-| REQ7 周期读取 | `monitor/collection_ib_cycle_binding.py::inspect_completed_ib_cycle_roles` | 新分支：重放后返回 `IbCycleRoleSource`（报告路径与 SHA、CVT SHA；`attestation_sha256` 位置放运行记录的 SHA），读前读后各重放一次 |
-| REQ7 报告读取 | `monitor/issue_tracker_ib_runtime.py::read_completed_ib_cycle_report` | 报告在项目 `99-output-p2p/` 时，`recorded_at_utc` 取自 run-id 的 UTC 分钟 |
+| REQ7 周期读取 | `monitor/collection_ib_cycle_binding.py::inspect_completed_ib_cycle_roles` | 新分支：重放后返回 `IbCycleRoleSource`（报告路径与 SHA、CVT SHA；`attestation_sha256` 位置放运行记录的 SHA），读前读后各重放一次。2026-10-24 补注：该模块已在退役第 1 批删除 |
+| REQ7 报告读取 | `monitor/issue_tracker_ib_runtime.py::read_completed_ib_cycle_report` | 报告在项目 `99-output-p2p/` 时，`recorded_at_utc` 取自 run-id 的 UTC 分钟。2026-10-24 补注：该模块已在退役第 1 批删除 |
 
 **测试**：
 - `test_collection_ufm_run_binding`（direct，10 个）：正例、iblinkinfo 降级、经 setup 链接给出的记录、非本周期/失败/其他项目/不在采集目录、字节变化、收据不符、provenance 指向别的输入、重放篡改与穿链接、air 周期。
@@ -762,8 +762,27 @@ owner 2026-10-22：「把落地代码合入 http，然后开始和 REQ7 对接�
 - 变异：删掉 cycle 检查、outcome 检查、provenance 输入检查、重放比较、emitter 绑定、worker 重放、读取分支、run-id 取时，各自都让上述测试变红。
 
 **不在 R1、仍待处理**：
-1. 在线 Cable 链 `monitor/issue_tracker_publish_runtime.py::_cable_hold_cycle_roles` 仍只认 D-70（授权文件、9 角色）——R2。
-2. 退役 D-70：页面的 `tools.ufm_collection_pipeline` import 与 UFM 证据面板、`collection_ib_producer`、`monitor/99-output-ufm` 链接、`tools/ufm_collection_*`；`tools/ufm_collection_pipeline.py` 里被 REQ7 其他模块借用的持有 FD 辅助函数要先迁出——R3。
-3. **待 owner 决定**：REQ7 的三面板资格目前是合在一起算的（`issue_tracker_stage_l_consumer.py::qualify_prod_stage_l`），IB 缺报告时 Switch、Eth 面板也一起 HOLD。是否改为按面板各自资格。
-4. 跨午夜的 K 窗口：前一天的输入与报告被打进每日包后，旧周期重放失败，该窗口 IB HOLD（fail closed），每天一次、约 K 个周期；之后再加「散文件 + 每日包按 SHA 查」。
-5. ~~已知旧问题~~ 已修（R0，2026-10-23）：旧的证据读取一律拒绝路径上的符号链接，而 setup 把 `<网络>/monitor/<输出目录>` 建成了指向项目的链接。实测（`collection_v2_emitter.regular_member` 探针）：经链接的路径被拒「traverses a symlink」，真实路径被拒「location is invalid」——真实管理服务器上 worker 每个 slot 的 v2 证据都会发布失败，REQ7 拿不到任何周期。修法：`tools/project_contract.py::setup_collection_link_hop` 只放行 setup 的采集输出链接本身（文本恰为 `../../DAY0-Prepare/<项目>/99-output-monitor/<网络>/<输出目录>`，目标沿途都是真实目录），emitter `regular_member`、worker `_collection_artifact_path`、REQ7 `issue_tracker_switch_runtime._safe_child` 都改用它，其它链接仍一律拒绝；证据字节仍由 SHA 绑定。测试 `test_setup_collection_link_evidence_workflow`（判定的放行/拒绝、三处读取、真实 emitter 与 completion 经链接完成并重放），5 个变异都让它变红。在线 Cable 链（R2）里的同类读取尚未改。
+1. 在线 Cable 链 `monitor/issue_tracker_publish_runtime.py::_cable_hold_cycle_roles` 仍只认 D-70（授权文件、9 角色）——R2。**2026-10-24：不再需要**，旧在线 Cable 链已在退役第 1 批删除（第 16 节）。
+2. 退役 D-70：页面的 `tools.ufm_collection_pipeline` import 与 UFM 证据面板、`collection_ib_producer`、`monitor/99-output-ufm` 链接、`tools/ufm_collection_*`；`tools/ufm_collection_pipeline.py` 里被 REQ7 其他模块借用的持有 FD 辅助函数要先迁出——R3。**2026-10-24：已完成**（退役第 2 批，第 16 节）；`tools/ufm_collection_contract.py` 因 F01 仍导入而保留，`monitor/99-output-ufm` 链接没有读写者，留作单独清理。
+3. **待 owner 决定**：REQ7 的三面板资格目前是合在一起算的（`issue_tracker_stage_l_consumer.py::qualify_prod_stage_l`），IB 缺报告时 Switch、Eth 面板也一起 HOLD。是否改为按面板各自资格。2026-10-24：旧 REQ7 已退役，`issue_tracker_stage_l_consumer.py` 已删除，此问题不再适用。
+4. 跨午夜的 K 窗口：前一天的输入与报告被打进每日包后，旧周期重放失败，该窗口 IB HOLD（fail closed），每天一次、约 K 个周期；之后再加「散文件 + 每日包按 SHA 查」。2026-10-24：K 窗口重放属于旧 REQ7 链，已随第 1 批删除，不再适用。
+5. ~~已知旧问题~~ 已修（R0，2026-10-23）：旧的证据读取一律拒绝路径上的符号链接，而 setup 把 `<网络>/monitor/<输出目录>` 建成了指向项目的链接。实测（`collection_v2_emitter.regular_member` 探针）：经链接的路径被拒「traverses a symlink」，真实路径被拒「location is invalid」——真实管理服务器上 worker 每个 slot 的 v2 证据都会发布失败，REQ7 拿不到任何周期。修法：`tools/project_contract.py::setup_collection_link_hop` 只放行 setup 的采集输出链接本身（文本恰为 `../../DAY0-Prepare/<项目>/99-output-monitor/<网络>/<输出目录>`，目标沿途都是真实目录），emitter `regular_member`、worker `_collection_artifact_path`、REQ7 `issue_tracker_switch_runtime._safe_child` 都改用它，其它链接仍一律拒绝；证据字节仍由 SHA 绑定。测试 `test_setup_collection_link_evidence_workflow`（判定的放行/拒绝、三处读取、真实 emitter 与 completion 经链接完成并重放），5 个变异都让它变红。在线 Cable 链（R2）里的同类读取尚未改。2026-10-24 补注：在线 Cable 链和 `issue_tracker_switch_runtime.py` 已在退役第 1 批删除，上一句不再适用；`setup_collection_link_hop` 仍由 emitter 和 worker 使用。
+
+## 16. 旧 REQ7/D-70 退役（2026-10-24）
+
+REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-sync.py` 调用 CableTracker 引擎实现（owner 2026-10-23），IB 数据直接读本线的 `99-output-monitor/infiniband/ufm-ibdiagnet`。旧 codex REQ7 链和 D-70 分三批删除，第 4 批只改文档。前面各节中注明日期的段落是当时的记录，保持原样；仍按现状描述旧链的句子已加「2026-10-24 补注」。
+
+| 批次 | 提交 | 删除的内容 |
+|---|---|---|
+| 第 1 批：旧 REQ7 在线／Stage L 链 | `b9ded67`、`0c5bf8f` | 67 个 `monitor/issue_tracker_*.py`（保留 `issue_tracker_activity_source.py`、`issue_tracker_cycle_source.py`）、`monitor/issue-tracker-control.cgi`、`monitor/collection_ib_cycle_binding.py`，以及这条链的测试和夹具。第 15 节表中的「REQ7 周期读取」「REQ7 报告读取」两行随之删除；「不在 R1、仍待处理」的第 1、3、4 项（R2 的 `_cable_hold_cycle_roles`、三面板合算的 `qualify_prod_stage_l`、跨午夜的 K 窗口重放）都属于旧链，不再适用 |
+| 第 2 批：D-70 | `51dec8b`、`563cb76` | `monitor/collection_ib_producer.py`、`tools/ufm_collection_agent.py`、`tools/ufm_collection_pipeline.py`、`tools/ufm_remote_producer.py` 及 9 个测试；worker 的 `ib_analysis` 分支和 root 授权记录（`ib-producer-authority`）检查，emitter 的九角色发布和 `ib_analysis_binding`，页面的 UFM 证据面板和 UFM 标签页。即第 15 节的 R3 |
+| 第 3b 批：旧依赖锁与合同 | `925f417`、`082811d` | `infra/docker/requirements-req7-online.txt`、`infra/docker/requirements-req7-cable-sync.txt`、两份 policy、`tools/req7_dependency_contract.py`、`tools/req7_cable_dependency_contract.py` 及 7 个测试。镜像只装 TOPLEVEL-5 和 `infra/docker/requirements-issue-tracker-engine.txt`（36 个分发），由 `activate.py verify-issue-tracker-engine-runtime` 逐文件检查。每台 Docker 主机都要重建镜像，见 `test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-DEPS-ENGINE-IMAGE-001` 和 `TC-REAL-DEPS-ENGINE-IMAGE-FLEET-001` |
+
+保留的部分：
+
+- R1 不变（第 15 节）：`monitor/collection_ufm_run_binding.py`，emitter 的 `ufm_run_binding`（3 个基础角色加 7 个 UFM 角色），worker 从文件重放核验。测试是 `test_collection_ufm_run_binding` 和 `test_ufm_req7_ib_cycle_workflow`；后者在第 1 批改为核对绑定重放和完成记录，不再调用已删除的 REQ7 读取端。
+- `monitor/issue_tracker_activity_source.py`：ETH 活动证据，`post-collect.py`、`analyze_lldp.py`、emitter 和 worker 仍在用。`monitor/issue_tracker_cycle_source.py`：几个保留测试用它读取已完成周期。
+- `tools/ufm_collection_contract.py`：F01 的 `infra/ufm_jump_transport.py::retrieve_collection_archive` 仍导入它；`tools/ufm_remote_producer.py` 删除后，这条取回链在生产中已没有调用者。
+- `ztp/config/ib_topology_provenance.py` 的独立读取路径。借用旧 REQ7 和 D-70 读取范围的分支已在第 1、2 批删除。
+- `monitor/99-output-ufm` 链接和 `<项目>/99-output-ufm` 目录仍由 setup/unsetup 建立和拆除，但已没有读写者。删除它们要改字节钉住的 `tools/project_contract.py`、`DAY0-Prepare/01-a-setup.py` 的 `OUTPUT_DIRS` 和三个 dockerignore，留作单独的改动。
+- worker 不再写 `issue-tracker-online.status.json`、`issue-tracker-stage-l.status.json`；已部署主机上留下的旧文件没有读者。控制 CGI 对 `view=issue_tracker_online`、`view=issue_tracker_stage_l` 返回 400。
