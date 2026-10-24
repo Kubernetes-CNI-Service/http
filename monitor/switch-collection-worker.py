@@ -1965,17 +1965,11 @@ def _collection_validate_artifact_roles(
         return False
     roles = evidence["roles"]
     activity = context is not None and "activity" in context
-    ib_analysis = context is not None and "ib_analysis" in context
-    if activity and ib_analysis:
-        return False
-    if ufm_run_binding is not None and (context is None or activity or ib_analysis):
+    if ufm_run_binding is not None and (context is None or activity):
         return False
     expected_roles = [*_COLLECTION_ARTIFACT_ROLES]
     if activity:
         expected_roles.append("activity_observation")
-    if ib_analysis:
-        from monitor.collection_ib_producer import IB_ROLE_NAMES
-        expected_roles.extend(IB_ROLE_NAMES)
     if ufm_run_binding is not None:
         from monitor.collection_ufm_run_binding import UFM_RUN_ROLE_NAMES
         expected_roles.extend(UFM_RUN_ROLE_NAMES)
@@ -2083,20 +2077,6 @@ def _collection_validate_artifact_roles(
             expected_evidence_sha256=fourth["sha256"],
             expected_cycle_binding=binding,
         )
-    if ib_analysis:
-        from monitor.collection_ib_producer import (
-            IbProducerHold, validate_ib_completion_attestation,
-        )
-        if slot != "infiniband/prod" or area != "infiniband":
-            return False
-        try:
-            verified_ib_roles = validate_ib_completion_attestation(
-                context["identity"], context["ib_analysis"], http_root=root,
-            )
-        except IbProducerHold:
-            return False
-        if verified_ib_roles != roles[3:]:
-            return False
     if ufm_run_binding is not None:
         # REQ7 R1: the emitter bound this cycle's UFM run; replay it from the files, never trust it.
         from monitor.collection_ufm_run_binding import (
@@ -2155,9 +2135,6 @@ def _collection_slot_artifacts_match(
             expected_envelope_keys.add("runtime_input_hashes")
             if "activity" in context:
                 expected_envelope_keys.add("activity_context_sha256")
-            if "ib_analysis" in context:
-                expected_envelope_keys.add("ib_analysis_context_sha256")
-                expected_envelope_keys.add("ib_analysis_binding")
             if not _collection_target_plan_matches_sources(
                 context, inventory_content, child["source_slot"]
             ) or not _collection_runtime_snapshots_match(context, inventory_path):
@@ -2181,16 +2158,6 @@ def _collection_slot_artifacts_match(
                 expected_envelope["activity_context_sha256"] = hashlib.sha256(
                     _canonical_json_line(context)
                 ).hexdigest()
-            if "ib_analysis" in context:
-                expected_envelope["ib_analysis_context_sha256"] = hashlib.sha256(
-                    _canonical_json_line(context)
-                ).hexdigest()
-                expected_envelope["ib_analysis_binding"] = {
-                    key: context["ib_analysis"][key] for key in (
-                        "run_id", "node", "authority_sha256",
-                        "expected_topology_sha256", "attestation_sha256",
-                    )
-                }
         if ufm_run_binding is not None:
             expected_envelope["ufm_run_binding"] = ufm_run_binding
         if identity_envelope != expected_envelope:
@@ -2625,53 +2592,6 @@ def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
             "runtime_input_hashes": hashes}
 
 
-def _collection_ib_authority_installed(identity: dict[str, object]) -> bool:
-    """Only a root-installed record opts an ordinary IB collection into analysis."""
-    authority_path = (
-        Path("/var/lib/http-ztp-container/ib-producer-authority")
-        / f"{identity['project_key']}.json"
-    )
-    try:
-        authority_path.lstat()
-    except OSError:
-        return False
-    return True
-
-
-def _collection_prepare_ib_analysis(
-    identity: dict[str, object], slot: str,
-) -> tuple[dict[str, object] | None, object | None]:
-    """Mint extra IB evidence from protected worker inputs, never child data."""
-    if slot != "infiniband/prod":
-        return None, None
-    try:
-        project_root = Path(active_project_identity(HTTP_ROOT))
-    except CollectionGateError:
-        return None, None
-    # An ordinary three-role collection must not import optional analyzer or
-    # transport dependencies. A present, even unsafe, record is checked below.
-    if not _collection_ib_authority_installed(identity):
-        return None, None
-    from monitor.collection_ib_producer import (
-        IbProducerHold, load_ib_producer_authority,
-        produce_worker_ib_analysis, recheck_ib_producer_authority,
-    )
-    try:
-        snapshot = load_ib_producer_authority(
-            project_key=identity["project_key"], project_root=project_root,
-        )
-        binding = produce_worker_ib_analysis(
-            identity, project_root=project_root, http_root=HTTP_ROOT,
-        )
-        if binding["authority_sha256"] != snapshot.sha256:
-            raise IbProducerHold("IB producer used another protected authority")
-        recheck_ib_producer_authority(snapshot)
-        return binding, snapshot
-    except (IbProducerHold, CollectionGateError):
-        # Base switch collection can still run, while Stage L remains HOLD.
-        return None, None
-
-
 def run_collection_slots(
     identity: object,
     *,
@@ -2707,7 +2627,6 @@ def run_collection_slots(
         empty_result = {"returncode": 1, "stdout": "", "stderr": ""}
         evidence_result = empty_result
         context = None
-        ib_authority_snapshot = None
         cron_lock_fd = None
         try:
             script = next(
@@ -2785,11 +2704,6 @@ def run_collection_slots(
                 activity = _collection_snapshot_activity_sources(slot, bindings)
                 if activity is not None:
                     context["activity"] = activity
-                ib_analysis, ib_authority_snapshot = _collection_prepare_ib_analysis(
-                    validated_identity, slot,
-                )
-                if ib_analysis is not None:
-                    context["ib_analysis"] = ib_analysis
                 with tempfile.TemporaryFile(mode="w+b") as context_file:
                     context_file.write(_canonical_json_line(context))
                     context_file.flush()
@@ -2849,18 +2763,6 @@ def run_collection_slots(
                     validated_identity,
                 ))
                 continue
-            if ib_authority_snapshot is not None:
-                from monitor.collection_ib_producer import (
-                    IbProducerHold, recheck_ib_producer_authority,
-                )
-                try:
-                    recheck_ib_producer_authority(ib_authority_snapshot)
-                except IbProducerHold:
-                    outcomes.append(_collection_slot_wrapper(
-                        slot, "artifact_mismatch", None, process_result,
-                        validated_identity,
-                    ))
-                    continue
             outcomes.append(_collection_slot_wrapper(
                 slot, "accepted", child, process_result, validated_identity
             ))

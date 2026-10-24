@@ -58,8 +58,6 @@ from project_contract import (
 )
 from ztp.dynamic_air_inventory import dynamic_air_devices
 from ztp.config_sync_authority import monitor_observation_allows_completion
-from tools.ufm_collection_pipeline import validated_receipts as validated_ufm_receipts
-from tools.ufm_collection_contract import CollectionError, collection_plan as ufm_collection_plan
 from tools.log_rotation import rotate as rotate_log_file
 
 # ── 路径配置 ──────────────────────────────────────────────────────────────────
@@ -2145,78 +2143,6 @@ def load_topology_validation(directory: Path, network: str, scope: str = "all") 
         "sources": source_labels,
         "downloads": downloads,
     }
-
-
-def _render_ufm_evidence_panel(project_root: Path, scope: str,
-                               candidate: dict[str, str] | None = None) -> str:
-    """Render verified public receipts plus at most one private pipeline candidate."""
-    environments = ("air", "prod") if scope == "all" else (scope,)
-    rows: list[str] = []
-    for environment in environments:
-        if environment not in {"air", "prod"}:
-            continue
-        receipts = list(validated_ufm_receipts(project_root, environment))
-        if candidate is not None and f"-{environment}-" in candidate["run_id"]:
-            if any(item["run_id"] == candidate["run_id"]
-                   and item["node"] == candidate["node"] for item in receipts):
-                raise ValueError("UFM candidate is already publicly verified")
-            receipts.append(candidate)
-            receipts.sort(key=lambda item: item["node"])
-            receipts.sort(key=lambda item: item["run_id"], reverse=True)
-        for receipt in receipts[:20]:
-            rows.append(
-                '<tr><td>' + escape("AIR" if environment == "air" else "Production")
-                + '</td><td>' + escape(receipt["node"])
-                + '</td><td>' + escape(receipt["run_id"])
-                + '</td><td>' + escape(receipt["kind"])
-                + '</td><td>' + escape(receipt["report_sha256"][:16])
-                + '</td></tr>'
-            )
-    body = (
-        '<table><thead><tr><th>环境</th><th>节点</th><th>运行 ID</th>'
-        '<th>采集</th><th>报告 SHA-256 前缀</th></tr></thead><tbody>'
-        + "".join(rows) + '</tbody></table>'
-        if rows else '<p>未知（没有已验证的 UFM 采集回执）</p>'
-    )
-    return '<div id="panel-ufm" class="panel"><section id="ufm-collection-panel" ' \
-        'class="ufm-evidence"><h2>UFM 独立证据</h2>' + body + '</section></div>'
-
-
-def render_ufm_evidence_panel(project_root: Path, scope: str = "all") -> str:
-    """Show only public, digest-bound UFM receipts; never preview candidates."""
-    return _render_ufm_evidence_panel(project_root, scope)
-
-
-def render_ufm_candidate_panel(project_root: Path, scope: str,
-                               candidate: dict[str, str]) -> str:
-    """Prepare a private panel preview; this does not publish a receipt.
-
-    Only the held pipeline can attest the candidate's source bytes. A caller
-    must not present this provisional HTML as public completion evidence.
-    """
-    keys = {"schema", "status", "kind", "run_id", "node", "archive",
-            "archive_sha256", "report", "report_sha256", "report_provenance_sha256"}
-    if (type(candidate) is not dict or set(candidate) != keys
-            or any(type(value) is not str for value in candidate.values())
-            or candidate["schema"] != "ufm-collection-v1"
-            or candidate["status"] != "success"
-            or candidate["kind"] not in {"iblinkinfo", "ibdiagnet"}
-            or scope not in {"air", "prod"}
-            or f"-{scope}-" not in candidate["run_id"]
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,62}", candidate["node"]) is None
-            or any(re.fullmatch(r"[0-9a-f]{64}", candidate[key]) is None
-                   for key in ("archive_sha256", "report_sha256",
-                               "report_provenance_sha256"))):
-        raise ValueError("UFM panel candidate is not a canonical private receipt")
-    try:
-        plan = ufm_collection_plan(candidate["kind"], candidate["run_id"])
-    except CollectionError:
-        raise ValueError("UFM panel candidate has an invalid run ID") from None
-    report_prefix = "iblinkinfo" if plan.kind == "iblinkinfo" else "ibdiagnet2"
-    if (candidate["archive"] != plan.archive_name
-            or candidate["report"] != f"{report_prefix}_{plan.run_id}-topology-validation.xlsx"):
-        raise ValueError("UFM panel candidate has mismatched artifact names")
-    return _render_ufm_evidence_panel(project_root, scope, dict(candidate))
 
 
 def render_topology_tables(
@@ -4934,7 +4860,6 @@ def build_html(
     ethernet_diagram: dict,
     air_diagram: dict,
     ztp_status: dict,
-    ufm_panel: str = "",
 ) -> str:
     gen_time      = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
     spx_ts_str    = spx_latest_ts.strftime("%Y-%m-%d %H:%M") if spx_latest_ts else "—"
@@ -5875,7 +5800,6 @@ tr.grp-hidden {{ display: none; }}
   <button class="tab"        onclick="switchTab('nvl')">NVLink Monitor</button>
   <button class="tab"        onclick="switchTab('p2p')">Ethernet Diagram</button>
   <button class="tab"        onclick="switchTab('air')">AIR Diagram</button>
-  <button class="tab"        onclick="switchTab('ufm')">UFM</button>
 </div>
 
 <!-- ═══ Tab 1: 交换机状态 ═══ -->
@@ -6140,10 +6064,9 @@ tr.grp-hidden {{ display: none; }}
 {infiniband_topology_panel}
 {ethernet_diagram_panel}
 {air_diagram_panel}
-{ufm_panel}
 <script>
 // ── Auto-Refresh（两个 Status + 三个 Monitor 页面）──────────────────────────
-const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];
+const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air'];
 const AUTO_REFRESH_TABS = new Set(['ztp','eth','spx','ibl','nvl']);
 const AUTO_REFRESH_KEY = 'network-monitor:auto-refresh';
 const ACTIVE_TAB_KEY = 'network-monitor:active-tab';
@@ -9112,7 +9035,6 @@ def _generate_monitor_html(scope: str = "all") -> None:
         ethernet_diagram,
         air_diagram,
         ztp_status,
-        render_ufm_evidence_panel(BASE_DIR, scope),
     )
     atomic_write_text(OUTPUT, html)
     log(f"完成 → {OUTPUT}  ({len(html):,} 字节)")

@@ -5800,20 +5800,22 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
         tabs = source.split('<div id="tabs">', 1)[1].split("</div>", 1)[0]
         tab_ids = re.findall(r"switchTab\('([^']+)'\)", tabs)
         labels = re.findall(r">([^<]+)</button>", tabs)
+        # REQ7 retirement batch 2 (2026-10-24): the UFM tab showed only the retired D-70 evidence panel
+        # (owner 2026-10-22: no separate UFM page; UFM servers are shown in Switch Status).
         self.assertEqual(
-            ["ztp", "eth", "etop", "spx", "itop", "ibl", "nvl", "p2p", "air", "ufm"],
+            ["ztp", "eth", "etop", "spx", "itop", "ibl", "nvl", "p2p", "air"],
             tab_ids,
         )
         self.assertEqual(
             [
                 "ZTP Status", "Switch Status", "Eth Link Validation",
                 "SPX Link Monitor", "IB Link Validation", "IB Link Monitor",
-                "NVLink Monitor", "Ethernet Diagram", "AIR Diagram", "UFM",
+                "NVLink Monitor", "Ethernet Diagram", "AIR Diagram",
             ],
             labels,
         )
         self.assertIn(
-            "const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air','ufm'];",
+            "const TAB_NAMES = ['ztp','eth','etop','spx','itop','ibl','nvl','p2p','air'];",
             source,
         )
 

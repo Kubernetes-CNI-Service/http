@@ -202,6 +202,56 @@ class UfmLinkContractTest(unittest.TestCase):
             self.assertEqual(text, AUDIT.SETUP_RUNTIME_BRIDGES[name][0])
 
 
+class SetupUfmOutputLinkTest(unittest.TestCase):
+    """setup still makes <project>/99-output-ufm and its monitor/99-output-ufm link, and never replaces an
+    operator-owned regular path there.
+
+    Moved from the retired test_ufm_collection_pipeline_workflow (7d5518d:566-607; REQ7 retirement batch 2,
+    2026-10-24). The D-70 evidence panel that read the link is gone; the link and directory stay (setup and
+    unsetup keep them symmetric; their removal is a separate change). At 7d5518d the deleted file held the
+    only test calling setup's _make_link on an existing regular path."""
+
+    def test_setup_maps_the_project_ufm_output_directory_to_its_monitor_link(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "project"
+            project.mkdir()
+            self.assertIn("99-output-ufm", SETUP.OUTPUT_DIRS)
+            (project / "99-output-ufm").mkdir()
+            http = root / "http"
+            (http / "monitor").mkdir(parents=True)
+            with mock.patch.object(SETUP, "HTTP_BASE", str(http)):
+                pairs = SETUP._monitor_link_paths(str(project))
+                self.assertIn((str(http / "monitor" / "99-output-ufm"),
+                               str(project / "99-output-ufm")), pairs)
+                self.assertIn(str(http / "monitor" / "99-output-ufm"),
+                              SETUP._collect_expected_links(str(project)))
+
+    def test_setup_existing_regular_monitor_path_is_never_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "legacy-project"
+            project.mkdir()
+            http = root / "http"
+            monitor = http / "monitor"
+            monitor.mkdir(parents=True)
+            occupied = monitor / "99-output-ufm"
+            occupied.write_text("operator-owned marker", encoding="utf-8")
+            with mock.patch.object(SETUP, "HTTP_BASE", str(http)), mock.patch.object(
+                SETUP, "_DRY_RUN", False
+            ), mock.patch.object(SETUP, "_LINK_ERRORS", 0), redirect_stdout(io.StringIO()):
+                link, target = next(
+                    pair for pair in SETUP._monitor_link_paths(str(project))
+                    if pair[0] == str(occupied)
+                )
+                self.assertEqual(str(occupied), link)
+                self.assertEqual(str(project / "99-output-ufm"), target)
+                self.assertEqual("error", SETUP._make_link(link, target))
+                self.assertEqual(1, SETUP._LINK_ERRORS)
+            self.assertEqual("operator-owned marker", occupied.read_text(encoding="utf-8"))
+            self.assertFalse((project / "99-output-ufm").exists())
+
+
 class SetupInventoryAcceptsServerTypesTest(unittest.TestCase):
     """Owner 2026-10-19: server_ufm uses only the first 7 columns; server_mgmt is the new name of server."""
 

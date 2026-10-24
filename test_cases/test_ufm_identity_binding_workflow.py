@@ -405,6 +405,71 @@ class UfmIdentityBindingWorkflowTests(unittest.TestCase):
                              [argv[0] for argv in seen])
             self.assertFalse(destination.exists())
 
+    def test_producer_pinned_retrieval_reobserves_the_node_after_the_copy(self):
+        # Moved from the retired test_ufm_remote_producer_workflow (7d5518d:32-162, phases "stable" and
+        # "node-changed-during-copy"; REQ7 retirement batch 2, 2026-10-24). With an approved producer digest
+        # the formal caller observes the SSH node again after the exact copy, so a node that changed during
+        # the copy publishes nothing. The retired tools/ufm_remote_producer.py was the only caller with a digest.
+        plan = collection.collection_plan("iblinkinfo", RUN_ID)
+        payload = _archive(b"synthetic-link-data\n")
+        digest = hashlib.sha256(payload).hexdigest()
+        for phase in ("stable", "node-changed-during-copy"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                lease, _known, jump, far, pin = make_site(root)
+                project = write_project(root)
+                seen: list[list[str]] = []
+                copied = [False]
+
+                def runner(argv, phase=phase):
+                    seen.append(argv)
+                    if argv[0] == "scp":
+                        Path(argv[-1]).write_bytes(payload)
+                        copied[0] = True
+                        return transport.CommandResult(0, "", "")
+                    remote = argv[-1]
+                    if remote == "hostname":
+                        moved = phase == "node-changed-during-copy" and copied[0]
+                        return transport.CommandResult(
+                            0, "EXAMPLE-UFM02\n" if moved else "EXAMPLE-UFM01\n", "")
+                    if "-j link show dev eno8303" in remote:
+                        return transport.CommandResult(0, json.dumps([{
+                            "ifname": "eno8303", "address": NODES[0].management_mac,
+                        }]), "")
+                    if "-j address show dev eno8303" in remote:
+                        return transport.CommandResult(0, json.dumps([{
+                            "ifname": "eno8303", "addr_info": [{
+                                "family": "inet", "local": NODES[0].address,
+                            }],
+                        }]), "")
+                    if "sha256sum" in remote:
+                        return transport.CommandResult(
+                            0, f"{digest}  {plan.ufm_remote_path}\n", "")
+                    if "test -f" in remote:
+                        return transport.CommandResult(0, "", "")
+                    self.fail(f"unexpected synthetic command: {remote}")
+
+                destination = root / plan.archive_name
+                if phase == "stable":
+                    self.assertEqual(destination, binding.retrieve_project_collection_archive(
+                        project, lease, jump, far, pin, plan, destination,
+                        now=NOW, clock=lambda: NOW, runner=runner, timeout=10,
+                        expected_sha256=digest,
+                    ))
+                    self.assertEqual(payload, destination.read_bytes())
+                    copy_index = [argv[0] for argv in seen].index("scp")
+                    self.assertIn("hostname", [argv[-1] for argv in seen[copy_index + 1:]],
+                                  "the node is observed again after the copy")
+                else:
+                    with self.assertRaises((transport.TransportError, binding.IdentityBindingError)):
+                        binding.retrieve_project_collection_archive(
+                            project, lease, jump, far, pin, plan, destination,
+                            now=NOW, clock=lambda: NOW, runner=runner, timeout=10,
+                            expected_sha256=digest,
+                        )
+                    self.assertTrue(copied[0], "the copy ran; the re-observation refused it")
+                    self.assertFalse(destination.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

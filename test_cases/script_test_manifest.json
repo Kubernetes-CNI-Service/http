@@ -239,7 +239,9 @@
         "test_cases.test_log_rotation",
         "test_cases.test_collection_archive",
         "test_cases.test_monitor_legacy_tracker_retirement",
-        "test_cases.test_monitor_legacy_tracker_retirement_workflow"
+        "test_cases.test_monitor_legacy_tracker_retirement_workflow",
+        "test_cases.test_collection_d70_retirement",
+        "test_cases.test_collection_d70_retirement_workflow"
       ]
     },
     {
@@ -304,21 +306,12 @@
         "test_cases.test_f01_initial_setup_entry",
         "test_cases.test_ufm_input_contract",
         "test_cases.test_ufm_collection_contract",
-        "test_cases.test_ufm_collection_agent",
-        "test_cases.test_ufm_local_archive_workflow",
         "test_cases.test_ufm_jump_transport",
         "test_cases.test_ufm_jump_transport_workflow",
         "test_cases.test_ufm_identity_binding",
         "test_cases.test_ufm_collection_archive_retrieval",
         "test_cases.test_f01_identity_read_cleanup_priority",
-        "test_cases.test_ufm_identity_binding_workflow",
-        "test_cases.test_ufm_remote_producer",
-        "test_cases.test_ufm_remote_producer_workflow",
-        "test_cases.test_ufm_collection_pipeline",
-        "test_cases.test_ufm_collection_pipeline_workflow",
-        "test_cases.test_ufm_ibdiagnet_pipeline",
-        "test_cases.test_ufm_ibdiagnet_pipeline_workflow",
-        "test_cases.test_collection_ib_producer"
+        "test_cases.test_ufm_identity_binding_workflow"
       ]
     },
     {
@@ -675,7 +668,6 @@
     "monitor/issue_tracker_cycle_source.py": "monitor/issue_tracker_cycle_source.py",
     "monitor/issue_tracker_activity_source.py": "monitor/issue_tracker_activity_source.py",
     "monitor/collection_ufm_run_binding.py": "monitor/collection_ufm_run_binding.py",
-    "monitor/collection_ib_producer.py": "monitor/collection_ib_producer.py",
     "monitor/generate-monitor-html.py": "monitor/generate-monitor-html.py",
     "monitor/manual-ztp-control.cgi": "monitor/manual-ztp-control.cgi",
     "monitor/manual-ztp-worker.py": "monitor/manual-ztp-worker.py",
@@ -772,10 +764,7 @@
     "tools/ufm_input_contract.py": "tools/ufm_input_contract.py",
     "tools/ufm-discover.py": "tools/ufm-discover.py",
     "tools/ufm_collection_contract.py": "tools/ufm_collection_contract.py",
-    "tools/ufm_collection_agent.py": "tools/ufm_collection_agent.py",
-    "tools/ufm_collection_pipeline.py": "tools/ufm_collection_pipeline.py",
     "tools/ufm_identity_binding.py": "tools/ufm_identity_binding.py",
-    "tools/ufm_remote_producer.py": "tools/ufm_remote_producer.py",
     "tools/ssh_key_preparation.py": "tools/ssh_key_preparation.py",
     "tools/sync-code.py": "tools/sync-code.py",
     "tools/tar-for-download.py": "tools/tar-for-download.py",
@@ -1459,8 +1448,7 @@
         "ztp/config/ib_topology_provenance.py"
       ],
       "tests": [
-        "test_cases.test_req7_ib_provenance",
-        "test_cases.test_ufm_collection_pipeline"
+        "test_cases.test_req7_ib_provenance"
       ]
     },
     {
@@ -1565,15 +1553,6 @@
       ]
     },
     {
-      "id": "ufm_collection_agent_direct",
-      "paths": [
-        "tools/ufm_collection_agent.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_collection_agent"
-      ]
-    },
-    {
       "id": "ufm_jump_transport_direct",
       "paths": [
         "infra/ufm_jump_transport.py"
@@ -1590,25 +1569,6 @@
       "tests": [
         "test_cases.test_ufm_identity_binding",
         "test_cases.test_f01_identity_read_cleanup_priority"
-      ]
-    },
-    {
-      "id": "ufm_remote_producer_direct",
-      "paths": [
-        "tools/ufm_remote_producer.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_remote_producer"
-      ]
-    },
-    {
-      "id": "ufm_collection_pipeline_direct",
-      "paths": [
-        "tools/ufm_collection_pipeline.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_collection_pipeline",
-        "test_cases.test_ufm_ibdiagnet_pipeline"
       ]
     },
     {
@@ -1722,15 +1682,6 @@
       ]
     },
     {
-      "id": "collection_ib_producer_direct",
-      "paths": [
-        "monitor/collection_ib_producer.py"
-      ],
-      "tests": [
-        "test_cases.test_collection_ib_producer"
-      ]
-    },
-    {
       "id": "issue_tracker_cycle_source",
       "paths": [
         "monitor/issue_tracker_cycle_source.py"
@@ -1833,6 +1784,19 @@
       "tests": [
         "test_cases.test_monitor_legacy_tracker_retirement",
         "test_cases.test_monitor_legacy_tracker_retirement_workflow"
+      ]
+    },
+    {
+      "id": "collection_d70_retirement_direct",
+      "paths": [
+        "monitor/switch-collection-worker.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/generate-monitor-html.py",
+        "ztp/config/ib_topology_provenance.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_d70_retirement",
+        "test_cases.test_collection_d70_retirement_workflow"
       ]
     },
     {
@@ -3072,16 +3036,6 @@
       ]
     },
     {
-      "id": "ufm_local_archive_contract_agent",
-      "members": [
-        "tools/ufm_collection_contract.py",
-        "tools/ufm_collection_agent.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_local_archive_workflow"
-      ]
-    },
-    {
       "id": "ufm_jump_transport_day0_typed_argv_boundary",
       "members": [
         "infra/ufm_jump_transport.py",
@@ -3160,33 +3114,6 @@
         "test_cases.test_ufm_identity_binding_workflow",
         "test_cases.test_f01_identity_read_cleanup_priority",
         "test_cases.test_ufm_collection_archive_retrieval"
-      ]
-    },
-    {
-      "id": "ufm_remote_producer_pinned_retrieval",
-      "members": [
-        "tools/ufm_remote_producer.py",
-        "tools/ufm_identity_binding.py",
-        "tools/ufm_collection_agent.py",
-        "tools/ufm_collection_contract.py",
-        "infra/ufm_jump_transport.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_remote_producer_workflow"
-      ]
-    },
-    {
-      "id": "ufm_collection_pipeline_analyzer_receipt",
-      "members": [
-        "tools/ufm_collection_pipeline.py",
-        "ztp/config/ib_topology_provenance.py",
-        "tools/ufm_collection_contract.py",
-        "tools/ufm_collection_agent.py",
-        "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py"
-      ],
-      "tests": [
-        "test_cases.test_ufm_collection_pipeline_workflow",
-        "test_cases.test_ufm_ibdiagnet_pipeline_workflow"
       ]
     },
     {
@@ -3417,6 +3344,18 @@
       "tests": [
         "test_cases.test_monitor_legacy_tracker_retirement_workflow",
         "test_cases.test_monitor_legacy_tracker_retirement"
+      ]
+    },
+    {
+      "id": "collection_d70_retirement_cycle",
+      "members": [
+        "monitor/switch-collection-worker.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/collection_v2_emitter.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_d70_retirement_workflow",
+        "test_cases.test_collection_d70_retirement"
       ]
     },
     {

@@ -18,7 +18,6 @@ class CollectionError(ValueError):
 
 
 _RUN_ID_RE = re.compile(r"^([0-9]{8}-[0-9]{4})-(prod|air)-([0-9a-f]{16})$")
-_NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
 _IBDIAGNET_ARGV = (
     "/opt/ufm/opensm/bin/ibdiagnet", "--sc", "--extended_speeds", "all",
     "-P", "all=1", "--pm_per_lane", "--get_cable_info",
@@ -339,11 +338,3 @@ def publish_local_archive(plan: CollectionPlan, source: Path, destination_dir: P
                 os.close(part_fd)
             os.close(source_fd)
             os.close(destination_fd)
-
-
-def project_copy_path(project: Path, plan: CollectionPlan, node: str) -> Path:
-    project = _absolute_path(project, label="project root")
-    _validated_plan(plan)
-    if type(node) is not str or not _NODE_RE.fullmatch(node):
-        raise CollectionError("invalid UFM collection node or plan")
-    return project / "99-output-ufm" / "runs" / plan.run_id / node / plan.archive_name

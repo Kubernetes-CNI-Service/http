@@ -32,51 +32,17 @@ class IbCvtProvenanceDirectTests(unittest.TestCase):
                     provenance._regular_digest(source)
             self.assertEqual([], attempts)
 
-    def test_regular_digest_borrows_live_ancestors_without_reopening_each_read(self):
-        from tools import ufm_collection_pipeline as pipeline
-        from ztp.config import ib_topology_provenance as provenance
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve(); source = root / 'independent-input'
-            source.write_bytes(b'independent input bytes')
-            expected = hashlib.sha256(b'independent input bytes').hexdigest()
-            real_open = os.open; opened = []
-            def opening(path, flags, *args, **kwargs):
-                descriptor = real_open(path, flags, *args, **kwargs)
-                opened.append(descriptor); return descriptor
-            with mock.patch.object(provenance.os, 'open', side_effect=opening):
-                with pipeline._hold_reusable_directory_reads():
-                    for _ in range(32): self.assertEqual(expected, provenance._regular_digest(source))
-                self.assertEqual(len(root.parts) + 32, len(opened),
-                    'each original ancestor opens once; each actual file read still opens its own FD')
-
-    def test_regular_digest_scope_does_not_reuse_old_content_after_inplace_write(self):
-        from tools import ufm_collection_pipeline as pipeline
+    def test_regular_digest_does_not_reuse_old_content_after_inplace_write(self):
+        # Kept from the D-70 pipeline-scope variant (REQ7 retirement batch 2, 2026-10-24): the borrowing
+        # scope is gone, the retained standalone digest must still hash the current bytes every time.
         from ztp.config import ib_topology_provenance as provenance
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve(); source = root / 'independent-input'
             source.write_bytes(b'original'); before = source.stat()
-            with pipeline._hold_reusable_directory_reads():
-                self.assertEqual(hashlib.sha256(b'original').hexdigest(), provenance._regular_digest(source))
-                source.write_bytes(b'modified'); os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
-                self.assertEqual(before.st_ino, source.stat().st_ino)
-                self.assertEqual(hashlib.sha256(b'modified').hexdigest(), provenance._regular_digest(source))
-
-    def test_regular_digest_borrow_refuses_same_leaf_after_original_parent_rebind(self):
-        from tools import ufm_collection_pipeline as pipeline
-        from ztp.config import ib_topology_provenance as provenance
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve(); parent = root / 'parent'; parent.mkdir()
-            source = parent / 'independent-input'; source.write_bytes(b'original')
-            original = source.stat().st_ino; reached = []
-            with self.assertRaises(pipeline.PipelineError):
-                with pipeline._hold_reusable_directory_reads():
-                    self.assertEqual(hashlib.sha256(b'original').hexdigest(), provenance._regular_digest(source))
-                    moved = root / 'moved'; parent.rename(moved); parent.mkdir()
-                    (moved / source.name).rename(source)
-                    self.assertEqual(original, source.stat().st_ino)
-                    with self.assertRaises(provenance.ProvenanceError): provenance._regular_digest(source)
-                    reached.append(True)
-            self.assertEqual([True], reached)
+            self.assertEqual(hashlib.sha256(b'original').hexdigest(), provenance._regular_digest(source))
+            source.write_bytes(b'modified'); os.utime(source, ns=(before.st_atime_ns, before.st_mtime_ns))
+            self.assertEqual(before.st_ino, source.stat().st_ino)
+            self.assertEqual(hashlib.sha256(b'modified').hexdigest(), provenance._regular_digest(source))
 
     def test_diagnostic_cvt_cannot_replace_day0_project_authority(self):
         source = ROOT / "ztp/config/nvos/template/P2P/p2p-to-validation.py"

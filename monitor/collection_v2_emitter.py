@@ -121,10 +121,7 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
         "target_plan", "target_plan_sha256", "air_dynamic_rows",
         "prod_runtime_rows", "runtime_input_hashes"
     })
-    optional_shapes = (
-        *shapes, *(shape | {"activity"} for shape in shapes),
-        *(shape | {"ib_analysis"} for shape in shapes),
-    )
+    optional_shapes = (*shapes, *(shape | {"activity"} for shape in shapes))
     if not isinstance(context, dict) or set(context) not in optional_shapes:
         raise ValueError("worker context shape is invalid")
     identity = validate_collection_cycle_identity(context["identity"])
@@ -258,23 +255,14 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
         })
     elif activity_path is not None:
         raise ValueError("unexpected Ethernet activity sidecar")
-    ib_analysis = context.get("ib_analysis")
-    if ib_analysis is not None:
-        if slot != "infiniband/prod" or activity_binding is not None:
-            raise ValueError("IB analysis is outside prod IB slot")
-        from monitor.collection_ib_producer import validate_ib_completion_attestation
-        roles.extend(validate_ib_completion_attestation(
-            identity, ib_analysis, http_root=ROOT,
-        ))
     # REQ7 R1 (2026-10-23): the cron.sh UFM lane's run record binds its IB analysis to this cycle only
     # when the record names this cycle and the run succeeded; otherwise the slot keeps its base roles,
     # because a UFM problem never changes the switch result (infiniband/monitor/UFM-MONITOR.md 15).
     ufm_binding = None
     ufm_record = getattr(args, "ufm_run_record", None)
     if ufm_record is not None:
-        if slot != "infiniband/prod" or ib_analysis is not None:
-            print("UFM IB analysis not bound: only a prod IB slot without D-70 analysis binds it",
-                  file=sys.stderr)
+        if slot != "infiniband/prod":
+            print("UFM IB analysis not bound: only a prod IB slot binds it", file=sys.stderr)
         else:
             try:
                 from monitor.collection_ufm_run_binding import UfmRunBindingHold, derive_ufm_run_roles
@@ -300,14 +288,6 @@ def build_result(args: argparse.Namespace) -> tuple[dict, bytes, bytes, Path]:
         envelope_body["runtime_input_hashes"] = context["runtime_input_hashes"]
     if activity_binding is not None:
         envelope_body["activity_context_sha256"] = activity_binding["context_sha256"]
-    if ib_analysis is not None:
-        envelope_body["ib_analysis_context_sha256"] = digest(canonical(context))["sha256"]
-        envelope_body["ib_analysis_binding"] = {
-            key: ib_analysis[key] for key in (
-                "run_id", "node", "authority_sha256", "expected_topology_sha256",
-                "attestation_sha256",
-            )
-        }
     if ufm_binding is not None:
         envelope_body["ufm_run_binding"] = ufm_binding
     envelope = canonical(envelope_body)
@@ -428,20 +408,6 @@ def publish(sidecar_dir: Path, evidence: bytes, envelope: bytes) -> None:
                                "size_bytes": role["size_bytes"]}:
                 raise ValueError("Ethernet activity sidecar changed before publication")
             members.append(("activity-observation.json", raw))
-        elif len(roles) == 9:
-            from monitor.collection_ib_producer import (
-                IB_ROLE_NAMES, validate_ib_completion_attestation,
-            )
-            if [item.get("role") for item in roles[3:]] != list(IB_ROLE_NAMES):
-                raise ValueError("IB analysis roles are not exact")
-            bound_envelope = json.loads(envelope)
-            metadata = bound_envelope.get("ib_analysis_binding")
-            if not isinstance(metadata, dict):
-                raise ValueError("IB analysis binding is missing from envelope")
-            binding = {**metadata, "roles": roles[3:]}
-            validate_ib_completion_attestation(
-                bound_envelope["identity"], binding, http_root=ROOT,
-            )
         elif len(roles) == 10:
             from monitor.collection_ufm_run_binding import validate_ufm_run_binding
             bound_envelope = json.loads(envelope)

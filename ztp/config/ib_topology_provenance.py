@@ -12,7 +12,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import sys
 from contextlib import contextmanager
 from typing import Mapping
 from xml.etree import ElementTree as ET
@@ -49,19 +48,6 @@ def _bound_parent(path: Path):
     directory_flag = getattr(os, "O_DIRECTORY", 0)
     if not nofollow or not directory_flag:
         raise ProvenanceError("IB provenance requires no-follow directory access")
-    # The native original-replay boundary may already hold these ancestors.
-    # Borrow only that actual live module scope, never a caller verifier or a
-    # cached digest. Standalone producers retain the original access contract.
-    pipeline = sys.modules.get('tools.ufm_collection_pipeline')
-    held = getattr(pipeline, '_HELD_DIRECTORY_READS', None)
-    if held is not None and held.get() is not None:
-        try:
-            with pipeline._hold_real_dir_chain(directory) as (parent_fd, verify, _):
-                yield parent_fd
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, ProvenanceError): raise
-            raise ProvenanceError('original source ancestry cannot be verified') from exc
-        return
     try:
         before = directory.lstat()
         if not stat.S_ISDIR(before.st_mode):
@@ -87,49 +73,26 @@ def _bound_parent(path: Path):
 
 @contextmanager
 def _bound_source_file(path, parent_fd):
-    pipeline=sys.modules.get('tools.ufm_collection_pipeline')
-    scope=getattr(pipeline,'_HELD_SOURCE_READS',None)
-    if scope is not None and scope.get() is not None:
-        try:
-            with pipeline._borrow_current_source_file(path,parent_fd) as fd:
-                yield fd,True
-        except (OSError,ValueError) as exc:
-            if isinstance(exc,ProvenanceError):raise
-            raise ProvenanceError('original source file cannot be verified') from exc
-        return
     fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW,dir_fd=parent_fd)
-    try:yield fd,False
+    try:yield fd
     finally:os.close(fd)
 
 
 @contextmanager
 def _bound_digest_originals(path):
-    pipeline = sys.modules.get('tools.ufm_collection_pipeline')
-    scope = getattr(pipeline, '_HELD_SOURCE_READS', None)
-    if scope is not None and scope.get() is not None:
-        try:
-            with pipeline._borrow_current_source_originals(path) as (parent_fd, source_fd):
-                before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
-                if not stat.S_ISREG(before_name.st_mode):
-                    raise ProvenanceError(f"source is not a regular file: {path}")
-                yield parent_fd, source_fd, True, before_name
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, ProvenanceError): raise
-            raise ProvenanceError('original digest source cannot be verified') from exc
-        return
     with _bound_parent(path) as parent_fd:
         # Preserve the ordinary pre-open type check: opening a FIFO first
-        # could block. The fused original-file acquisition is scope-only.
+        # could block.
         before_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
         if not stat.S_ISREG(before_name.st_mode):
             raise ProvenanceError(f"source is not a regular file: {path}")
-        with _bound_source_file(path, parent_fd) as (source_fd, borrowed):
-            yield parent_fd, source_fd, borrowed, before_name
+        with _bound_source_file(path, parent_fd) as source_fd:
+            yield parent_fd, source_fd, before_name
 
 
 def _regular_digest(path: Path) -> str:
     try:
-        with _bound_digest_originals(path) as (parent_fd, source_fd, borrowed, before_name):
+        with _bound_digest_originals(path) as (parent_fd, source_fd, before_name):
             nofollow = getattr(os, "O_NOFOLLOW", 0)
             before_fd = os.fstat(source_fd)
             if (before_name.st_dev, before_name.st_ino) != (
@@ -137,16 +100,12 @@ def _regular_digest(path: Path) -> str:
             ):
                 raise ProvenanceError(f"source changed before read: {path}")
             digest = hashlib.sha256()
-            offset=0
             while True:
-                # pread does not share/rewind the held original's offset.
-                # Every invocation still hashes the actual current bytes.
-                chunk = (os.pread(source_fd,1024*1024,offset) if borrowed
-                         else os.read(source_fd,1024*1024))
+                # Every invocation hashes the actual current bytes.
+                chunk = os.read(source_fd,1024*1024)
                 if not chunk:
                     break
                 digest.update(chunk)
-                offset+=len(chunk)
             after_fd = os.fstat(source_fd)
             after_name = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
             for after in (after_fd, after_name):

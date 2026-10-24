@@ -111,10 +111,8 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
                 check=False, env=env,
             )
             self.assertEqual(0, validation.returncode, validation.stderr)
-            from tools import ufm_collection_pipeline as pipeline
-            with pipeline._hold_reusable_directory_reads():
-                record = read_report_provenance(report)
-                self.assertEqual(record, read_report_provenance(report))
+            record = read_report_provenance(report)
+            self.assertEqual(record, read_report_provenance(report))
             self.assertEqual(
                 hashlib.sha256(cvt.read_bytes()).hexdigest(),
                 record["expected_topology_sha256"],
@@ -122,9 +120,8 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
             old_time = cvt.stat().st_mtime_ns
             cvt.write_bytes(cvt.read_bytes() + b"changed")
             os.utime(cvt, ns=(old_time, old_time))
-            with pipeline._hold_reusable_directory_reads():
-                with self.assertRaises(ProvenanceError):
-                    read_report_provenance(report)
+            with self.assertRaises(ProvenanceError):
+                read_report_provenance(report)
             batch = subprocess.run(
                 [sys.executable, "-B", str(ANALYZER), str(root)],
                 cwd=root, text=True, stdout=subprocess.PIPE,
