@@ -125,6 +125,8 @@ from project_contract import (
     service_url,
     validate_cumulus_dns_domain,
     validate_dhcp_subnet_placements,
+    validate_device_config_method,
+    resolve_device_config_method,
     validate_service_endpoint,
     validate_ztp_url_prefix,
 )
@@ -209,7 +211,13 @@ SHARED_ARTIFACT_RECEIPT_MAX_ENTRIES = 10_000
 SHARED_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024 * 1024
 VALID_TYPES = {
     "eth", "eth_spx", "spx", "ib", "nvl", "server", "air", "eth_jump",
+    "server_mgmt", "server_ufm",
 }
+# Server rows are never switches (owner 2026-10-19..22): server_mgmt is the new
+# spelling of server (deployed by infra/); server_ufm is a UFM appliance that
+# fills only the first seven columns and is handled by
+# infiniband/bringup/ufm-setup-upgrade and the monitor, never by this load.
+SERVER_TYPES = frozenset({"server", "server_mgmt", "server_ufm"})
 BOOTSTRAP_BY_ROLE = {
     "air_oobofoob": "ztp-bootstrap_oobofoob.sh",
     "air_oob": "ztp-bootstrap_oob.sh",
@@ -2778,6 +2786,7 @@ class ProjectInputs:
     deployment_scope: str = "all"
     switch_scope: str = "all"
     source_identities: dict[str, str] | None = None
+    device_methods: dict[str, str] | None = None
     effective_devices_file: Path | None = None
     effective_devices_sha256: str | None = None
 
@@ -3818,6 +3827,7 @@ def apply_subnet_service_ips(
 def load_device_types(
     path: Path, schema_version: int = GLOBAL_SCHEMA_VERSION,
     switch_scope: str = "all",
+    methods_out: dict[str, str] | None = None,
 ) -> frozenset[str]:
     selected_scope = str(switch_scope or "").strip().casefold()
     if selected_scope not in SWITCH_SCOPE_TYPES:
@@ -3841,7 +3851,11 @@ def load_device_types(
             for required in ("hostname", "type", "template", "eth0_ip"):
                 if required not in fields:
                     raise LoadError(f"devices_config.csv 缺少列：{required}")
+            if fields.count("config_method") > 1:
+                raise LoadError("devices_config.csv config_method 列重复")
+            method_index = fields.index("config_method") if "config_method" in fields else None
             types: set[str] = set()
+            methods: dict[str, str] = {}
             seen_hostnames: set[str] = set()
             seen_eth0_addr: dict[str, tuple[int, str]] = {}
             seen_eth0_mac: dict[str, tuple[int, str]] = {}
@@ -3876,6 +3890,30 @@ def load_device_types(
                 seen_hostnames.add(hostname_key)
                 if kind not in VALID_TYPES:
                     raise LoadError(f"devices_config.csv 第 {lineno} 行 type={kind!r} 无效")
+                # server_ufm leaves every column after eth0_mac empty and has no
+                # executor in this repo, so (like eth_jump) it declares no method.
+                if kind == "server_ufm":
+                    pass
+                elif method_index is not None:
+                    if len(row) <= method_index:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} config_method 列缺失"
+                        )
+                    try:
+                        method = validate_device_config_method(kind, row[method_index])
+                    except ValueError as exc:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
+                        ) from exc
+                elif kind != "eth_jump":
+                    try:
+                        method = resolve_device_config_method(kind)
+                    except ValueError as exc:
+                        raise LoadError(
+                            f"devices_config.csv 第 {lineno} 行 {hostname} {exc}"
+                        ) from exc
+                if kind not in {"eth_jump", "server_ufm"}:
+                    methods[hostname_key] = method
                 selected_kind = (
                     selected_scope == "all"
                     or kind in SWITCH_SCOPE_TYPES[selected_scope]
@@ -3950,6 +3988,9 @@ def load_device_types(
         raise LoadError(f"devices_config.csv 不是有效 UTF-8：{exc}") from exc
     if rows == 0:
         raise LoadError("devices_config.csv 没有设备记录")
+    if methods_out is not None:
+        methods_out.clear()
+        methods_out.update(methods)
     return frozenset(types)
 
 
@@ -22296,6 +22337,7 @@ def validate_inputs(
         )
     validation_errors = []
     device_types: frozenset[str] = frozenset()
+    device_methods: dict[str, str] = {}
     p2p_file = project / (args.p2p_file or "p2p.xlsx")
     air_topology_policy = None
     mini_devices_file = None
@@ -22317,6 +22359,7 @@ def validate_inputs(
     try:
         device_types = load_device_types(
             devices_file, settings.schema_version, switch_scope=switch_scope,
+            methods_out=device_methods,
         )
     except LoadError as exc:
         validation_errors.append(str(exc))
@@ -22364,6 +22407,7 @@ def validate_inputs(
         subnet_file=subnet_file,
         p2p_file=p2p_file,
         device_types=device_types,
+        device_methods=device_methods,
         pubkeys=(),
         settings=settings,
         air_topology_policy=air_topology_policy,
