@@ -240,10 +240,21 @@ UID 拥有、单链接、非符号链接的普通 `0600` 文件。不要把密�
 输入字节改变后重新评估。所有 CSV IB 完成时仅移除本工具拥有的 cron 行及凭据，保留
 其他 crontab 内容；项目 `02-unsetup.py` 也负责清理本工具持有的 watch 状态。
 安装、自动完成时删除以及 `02-unsetup.py` 清理都会读写**整个当前用户的 crontab**。
+每次替换前会在项目锁内连续读取两次；若字节发生变化就会在写入前失败并保留现状，
+用于发现正在活动但不使用项目锁的同 UID 写者。
 操作前须由该 UID 的调度负责人盘点并保证其他所有 crontab 写者在每次读到写完成的
 整个区间完全静默，包含未来无 TTY 自动完成的时刻；无法持续保证时不得启用或清理
 watch，应停止并保留证据。`auto-crontab.lock` 仅串行化本项目的写者，不能阻止其他
-不使用该锁的进程；事后重读也不能恢复曾被并发覆盖的未知任务。
+不使用该锁的进程；两次稳定读取也不是 compare-and-swap，不能消除第二次读取与写入
+之间的竞态，事后重读也不能恢复曾被并发覆盖的未知任务。
+`--auto` 只能在管理服务器上运行。若本机被识别为 P2P 中的本地 OOB Leaf，脚本在提示
+任何口令（Initial NVOS 口令或 Ethernet 密码）、采集 OOB 状态、访问 IB 或读写 crontab
+之前失败，并给出包含 `management server` 的专门诊断。Leaf 上从不安装 watch，因此这一
+拒绝不执行 watch 暂停，也不创建或修改该主机的 crontab、`auto-crontab.lock`、
+`auto-watch.state` 或 `auto.env`；其他 `--auto` 早期失败仍按原规则先暂停本项目自有
+watch 再报告。Leaf 判定来自本机 hostname/FQDN 与 CSV Ethernet 行的匹配，或
+`--local-ethernet-hostname`；若管理服务器被误判为 Leaf（例如误加了该参数），它已有的
+本项目 watch 不会被这次拒绝暂停，需要去掉误判原因后重新运行，或按 unsetup 流程处理。
 任何真实 cron、OOB 或 IB 行为仍须按 `test_cases/REAL_ENVIRONMENT.md` 的
 `TC-REAL-REQ10C-AUTO-001` 由 owner 授权并留证；本地测试不等于真实验收。
 

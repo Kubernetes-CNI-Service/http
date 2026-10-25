@@ -6822,7 +6822,6 @@ def _guarded_main():
         return 75 if exc.code == "ALREADY_RUNNING" else 2
 
 
-
 if __name__ == "__main__":
     if sys.argv[1:] == ["--_verify-password"]:
         raise SystemExit(_password_hash_worker())
