@@ -172,6 +172,7 @@
         "test_cases.test_initial_setup_main_caller_precommit",
         "test_cases.test_initial_setup_main_profile_custody",
         "test_cases.test_initial_setup_managed_merge_contract",
+        "test_cases.test_initial_setup_managed_neutral_source",
         "test_cases.test_initial_setup_management_network",
         "test_cases.test_initial_setup_management_stage_roles",
         "test_cases.test_initial_setup_network_diagnostics",
@@ -1936,7 +1937,8 @@
         "test_cases.test_ibsw225_runtime_guard_exception_priority",
         "test_cases.test_ibsw225_initializer_report_finally_direct",
         "test_cases.test_ibsw225_initializer_help_guard",
-        "test_cases.test_initial_setup_managed_merge_contract"
+        "test_cases.test_initial_setup_managed_merge_contract",
+        "test_cases.test_initial_setup_managed_neutral_source"
       ]
     },
     {
