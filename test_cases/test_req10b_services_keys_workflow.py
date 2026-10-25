@@ -6,6 +6,7 @@ import base64
 from contextlib import ExitStack
 from contextlib import contextmanager
 from contextlib import redirect_stdout
+import dataclasses
 import hashlib
 import inspect
 import io
@@ -772,6 +773,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                      "interface_oper_status", "fdb_port_for_interface", "neighbor_for_port", "interface_vrf",
                                      "run_on_ib", "verify_management_key_possession", "observe_managed_initial_configuration"):
                             setattr(module, name, getattr(self.initial, name))
+                        boundary = module.run_on_ib
+
+                        def fresh_session_result(*args, **kwargs):
+                            # The strict management path checks the exact SessionResult type of
+                            # the module it runs in; the device answer is re-expressed in the
+                            # fresh leaf's own type with every field unchanged.
+                            result = boundary(*args, **kwargs)
+                            if type(result) is self.initial.SessionResult:
+                                result = module.SessionResult(**dataclasses.asdict(result))
+                            return result
+                        module.run_on_ib = fresh_session_result
                         if managed_strict is not None:
                             # Present-global strict path of the fresh leaf: the same PUBLIC
                             # adapter replaces only its private phase transport (I18).
