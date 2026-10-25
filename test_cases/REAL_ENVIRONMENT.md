@@ -2080,6 +2080,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 步骤与预期：先让只读发现入口以一台及两台合成当前 DHCP lease 绑定 UFM CSV 与 `servers.ufm`，仅输出 `discovery_only`，明确 `ssh_identity_verified=false`、`license_mac_verified=false`、`vip_configured=false`；重分配、过期、重复、截断租约与无效 YAML/CSV 均非零拒绝且无 JSON 产品。随后在隔离节点副本运行本地 contract（`tools/ufm_collection_contract.py` 的 `publish_local_archive`），核对唯一单文件归档、成员/路径/mode/摘要与不变输入；篡改暂存、符号链接/祖先改绑、重复 run-id 和中断必须无外部写入、不出现最终归档名。
 - 证据、清理与风险：保留脱敏精确命令/退出码、拒绝类别、归档前后 SHA 与 inode、外部哨兵身份、权限、目录前后清单、writer 静默和快照回滚比对；只删除本卡隔离产物或恢复 VM 快照。若权限/静默/来源/恢复证据缺失，保持 OPEN。此卡不替代独立 SSH host pin/current lease/安装态 attestation。
 
+## TC-REAL-UFM-REMOTE-SOURCE-001 — UFM 管理身份、钉扎传输与归档取回（2026-10-24 删减）
+
+- Case ID：`TC-REAL-UFM-REMOTE-SOURCE-001`；类型：real-environment / remote-identity / pinned-transport；状态：**BLOCKED / NOT RUN / REAL_ENV REQUIRED**。2026-10-24 REQ7/D-70 退役后删减：远端 producer 及其测试已在 `51dec8b` 删除，本卡只保留仍在仓库中的钉扎跳板、身份观测和归档取回核对。取回链（`infra/ufm_jump_transport.py::retrieve_collection_archive`，`tools/ufm_identity_binding.py::retrieve_bound_collection_archive`、`::retrieve_project_collection_archive`）目前没有生产调用者，因此保持 BLOCKED；出现生产调用者时必须重新登记本卡。跳板和身份的现场部分另见 `TC-F01-UFM-INITIAL-SETUP-DEVICE-20261019`。本地先决为 `test_cases.test_ufm_jump_transport`、`test_cases.test_ufm_jump_transport_workflow`、`test_cases.test_ufm_identity_binding`、`test_cases.test_ufm_identity_binding_workflow`、`test_cases.test_ufm_collection_archive_retrieval` 全部 GREEN；合成 runner 的 GREEN 不是远端实证。
+- 前置条件：另获 owner 对可丢弃 UFM VM、跳板与管理网的逐节点、逐命令授权；目前无此授权，不得执行真实 SSH/SCP。先由独立渠道批准准确 known_hosts SHA 和真实主机密钥、当期 DHCP lease/CSV/global、远端写者静默、备份/快照及回滚负责人；记录候选 HEAD/tree、全量证明、所有输入和输出 dev/ino/mode/size/SHA，不向公开日志写凭据或客户地址。
+- 步骤与预期：只在授权范围以 key-only、`StrictHostKeyChecking=yes` 经固定跳板观测准确 hostname/management MAC/IP；重分配、过期/截断 lease、变更钉扎密钥或项目输入必须在任何取回之前拒绝。对一份已存在的远端归档取回一次，验证远端文件在拉取前、后 SHA 一致，本地归档及身份重新验证一致。远端源变化、中断、半成品、路径改绑、目标并发占用必须无成功 receipt、无外部写入；不重试未知结果。
+- 证据、清理与风险：保存脱敏 argv/exit、独立 host-pin 来源、lease/SSH 前后摘要、远端前后及本地归档 SHA、负例拒绝、写者静默、节点和目录身份、快照恢复核验。只在批准的可丢弃节点清理本卡产物并核对前像；不写生产 UFM、live 项目或真实 crontab。授权或任一物理证据缺失仍为 BLOCKED/NOT RUN；本卡即使完成，也只证明归档取回链路本身。
+
 ## TC-F01-UFM-INITIAL-SETUP-DEVICE-20261019
 
 - 类型：real-environment；状态：NOT RUN / NOT DEPLOYED。

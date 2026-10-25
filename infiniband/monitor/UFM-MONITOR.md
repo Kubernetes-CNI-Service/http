@@ -774,7 +774,7 @@ REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-syn
 
 | 批次 | 提交 | 删除的内容 |
 |---|---|---|
-| 第 1 批：旧 REQ7 在线／Stage L 链 | `b9ded67`、`0c5bf8f` | 67 个 `monitor/issue_tracker_*.py`（保留 `issue_tracker_activity_source.py`、`issue_tracker_cycle_source.py`）、`monitor/issue-tracker-control.cgi`、`monitor/collection_ib_cycle_binding.py`，以及这条链的测试和夹具。第 15 节表中的「REQ7 周期读取」「REQ7 报告读取」两行随之删除；「不在 R1、仍待处理」的第 1、3、4 项（R2 的 `_cable_hold_cycle_roles`、三面板合算的 `qualify_prod_stage_l`、跨午夜的 K 窗口重放）都属于旧链，不再适用 |
+| 第 1 批：旧 REQ7 在线／Stage L 链 | `b9ded67`、`0c5bf8f` | 67 个 `monitor/issue_tracker_*.py`（保留 `issue_tracker_activity_source.py`、`issue_tracker_cycle_source.py`）、`monitor/issue-tracker-control.cgi`、`monitor/collection_ib_cycle_binding.py`，以及这条链的测试和夹具。第 15 节表中「REQ7 周期读取」「REQ7 报告读取」两行所列的读取模块随之删除（两行本身保留，已加 2026-10-24 补注）；「不在 R1、仍待处理」的第 1、3、4 项（R2 的 `_cable_hold_cycle_roles`、三面板合算的 `qualify_prod_stage_l`、跨午夜的 K 窗口重放）都属于旧链，不再适用 |
 | 第 2 批：D-70 | `51dec8b`、`563cb76` | `monitor/collection_ib_producer.py`、`tools/ufm_collection_agent.py`、`tools/ufm_collection_pipeline.py`、`tools/ufm_remote_producer.py` 及 9 个测试；worker 的 `ib_analysis` 分支和 root 授权记录（`ib-producer-authority`）检查，emitter 的九角色发布和 `ib_analysis_binding`，页面的 UFM 证据面板和 UFM 标签页。即第 15 节的 R3 |
 | 第 3b 批：旧依赖锁与合同 | `925f417`、`082811d` | `infra/docker/requirements-req7-online.txt`、`infra/docker/requirements-req7-cable-sync.txt`、两份 policy、`tools/req7_dependency_contract.py`、`tools/req7_cable_dependency_contract.py` 及 7 个测试。镜像只装 TOPLEVEL-5 和 `infra/docker/requirements-issue-tracker-engine.txt`（36 个分发），由 `activate.py verify-issue-tracker-engine-runtime` 逐文件检查。每台 Docker 主机都要重建镜像，见 `test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-DEPS-ENGINE-IMAGE-001` 和 `TC-REAL-DEPS-ENGINE-IMAGE-FLEET-001` |
 
