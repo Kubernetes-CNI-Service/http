@@ -104,6 +104,8 @@ class TransferMethodSelectorTests(unittest.TestCase):
                 FIXTURE.app._parse_cli(('--method','https'))
 
     def test_real_child_pty_enter_and_actual_fifteen_second_timeout_choose_http(self):
+        import yaml
+        yaml_root = Path(yaml.__file__).resolve().parents[1]
         self.selector()
         repository = Path(importlib.import_module('test_cases').__file__).resolve().parent.parent
         for enter in (True, False):
@@ -114,8 +116,12 @@ class TransferMethodSelectorTests(unittest.TestCase):
                 transcript = bytearray()
                 sent = False
                 try:
+                    # HOME is private, so the user site is not visible; on the formal CLT
+                    # interpreter PyYAML (tools/project_contract.py) lives only there, so the
+                    # child gets exactly that dependency directory after the repository.
                     environment = dict(PATH='/usr/bin:/bin', HOME=str(root), TMPDIR=str(root),
-                                       LC_ALL='C', PYTHONPATH=str(repository), PYTHONDONTWRITEBYTECODE='1')
+                                       LC_ALL='C', PYTHONDONTWRITEBYTECODE='1',
+                                       PYTHONPATH=os.pathsep.join((str(repository), str(yaml_root))))
                     process = subprocess.Popen([sys.executable,'-B','-c',CHILD,str(root)],
                         cwd=repository, env=environment, stdin=slave, stdout=slave, stderr=slave,
                         close_fds=True)
