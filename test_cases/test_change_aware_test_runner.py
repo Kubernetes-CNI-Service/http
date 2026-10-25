@@ -3634,16 +3634,38 @@ class FullShardS0FixTests(unittest.TestCase):
         )
         self.assertEqual([".Deployment.lock"], RUNNER.full_shard_unreviewed_leftovers([".Deployment.lock"], allowlist))
         self.assertEqual(["a"], RUNNER.full_shard_unreviewed_leftovers(["a"], {}))
-        # Second review A5a: a file of a shape the suite's whole-checkout traversals or the
-        # serial source discovery read (*.py, *.sh, *.cgi, *.service, *.timer,
-        # 02-AIR-devices_config.csv) is never accepted, even inside a reviewed tree.
-        tree = "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/"
-        observed = [tree + name for name in (
-            "a.py", "test_b.py", "c.sh", "d.cgi", "e.service", "f.timer", "deep/02-AIR-devices_config.csv",
-        )]
+        # Second review A5a, scoped by F6 (integration, after batch A): a file of a shape the
+        # suite's whole-checkout traversals or the serial source discovery read (*.py, *.sh,
+        # *.cgi, *.service, *.timer, 02-AIR-devices_config.csv) is never accepted outside the
+        # runner's non-source roots, even inside a reviewed tree.
+        names = ("a.py", "test_b.py", "c.sh", "d.cgi", "e.service", "f.timer", "deep/02-AIR-devices_config.csv")
+        source_tree = "DAY0-Prepare/scratch-65y3krn9/"
+        observed = [source_tree + name for name in names]
         self.assertEqual(
             sorted(observed),
-            RUNNER.full_shard_unreviewed_leftovers([*observed, tree + "kept.csv", tree + "bin/ssh"], allowlist),
+            RUNNER.full_shard_unreviewed_leftovers(
+                [*observed, source_tree + "kept.csv"], {"DAY0-Prepare/scratch-*": "r"},
+            ),
+        )
+        self.assertEqual(
+            ["monitor/x/a.py"], RUNNER.full_shard_unreviewed_leftovers(["monitor/x/a.py"], {"monitor/x/*": "r"}),
+        )
+        # Inside the non-source roots (outputs/, .codex*, .agents: the serial source discovery
+        # skips them and, after batch A, no test-side whole-checkout walk enters them) a
+        # reviewed pattern accepts those shapes too ...
+        tree = "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/"
+        under_outputs = [tree + name for name in names]
+        self.assertEqual(
+            [], RUNNER.full_shard_unreviewed_leftovers([*under_outputs, tree + "kept.csv", tree + "bin/ssh"], allowlist),
+        )
+        for root in (".codex_tmp-ab12/", ".codex/", ".agents/"):
+            with self.subTest(root=root):
+                self.assertEqual(
+                    [], RUNNER.full_shard_unreviewed_leftovers([root + "x/a.py"], {root + "x/*": "r"}),
+                )
+        # ... but only a reviewed one: an unmatched path there stays unreviewed.
+        self.assertEqual(
+            ["outputs/elsewhere/a.py"], RUNNER.full_shard_unreviewed_leftovers(["outputs/elsewhere/a.py"], allowlist),
         )
 
     def test_real_plan_reviews_only_the_unobservable_s0_leftover_shapes(self):

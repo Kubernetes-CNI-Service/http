@@ -123,6 +123,9 @@ class AlphaTests(unittest.TestCase):
                 Path("ignored-out/leak.py").write_text("LEAK = 1\\n", encoding="utf-8")
             if mode == "ignored-remove":
                 Path("ignored-out/pre.txt").unlink()
+            if mode == "outputs-source":
+                Path("outputs/diag").mkdir(parents=True, exist_ok=True)
+                Path("outputs/diag/retained.py").write_text("RETAINED = 1\\n", encoding="utf-8")
             if mode == "tmpdir":
                 Path(tempfile.gettempdir(), "left-in-lane-tmp.txt").write_text("left\\n", encoding="utf-8")
             if mode == "tracked":
@@ -342,7 +345,8 @@ class ShardFixture(unittest.TestCase):
         for name, source in modules.items():
             self.write(name.replace(".", "/") + ".py", source)
         self.write("README.txt", "fixture\n")
-        self.write(".gitignore", "ignored-out/\n__pycache__/\n")
+        # outputs/ is ignored as in the real repository (a runner non-source root).
+        self.write(".gitignore", "ignored-out/\n__pycache__/\noutputs/\n")
         self.plan_bytes = (json.dumps(plan or fixture_plan(), indent=1) + "\n").encode("utf-8")
         self.write("test_cases/full_shard_plan.json", self.plan_bytes)
         scripts = {p: p for p in ("tools/project_contract.py", "tools/sync-code.py",
@@ -636,6 +640,21 @@ class FullShardWorkflowTests(ShardFixture):
             self.assert_platform_refusal()
             return
         self.assert_unreviewed_ignored_change(self.run_in_process("ignored"), "ignored-out/left.txt")
+
+    def test_w2_reviewed_source_shaped_leftover_under_outputs_is_audited_not_blocking(self):
+        # F6 (integration, after batch A): below the runner's non-source roots (outputs/
+        # here) a *.py leftover is not read by the serial source discovery nor, after A, by
+        # any test-side whole-checkout walk; once its shape is reviewed it is audited and
+        # removed like any other reviewed leftover.  The lane's serial post-run check passes.
+        self.build(plan=fixture_plan(leftover_allowlist={
+            "outputs/diag/*": "fixture-reviewed: no fixture test reads outputs/",
+        }))
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        result = self.run_in_process("outputs-source")
+        self.assert_leftover_audited_and_removed(result, "ignored", "outputs/diag/retained.py")
+        self.assertEqual(0, result[3]["lanes"]["w0"]["leftovers"]["unreviewed"]["count"])
 
     def test_w2_unreviewed_removal_of_an_existing_ignored_file_refuses_the_proof(self):
         # Removing an ignored file the checkout already held hides it from later serial
