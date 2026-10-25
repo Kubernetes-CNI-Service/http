@@ -162,6 +162,10 @@ def generation_parser(branch):
         dest="switch_scope",
         help="只生成指定设备族；ETH 分支仅接受 eth，NVOS 分支接受 ib 或 nvl",
     )
+    parser.add_argument(
+        "--presentation-context", choices=("standalone", "load-parent"),
+        default="standalone", help="仅操作说明上下文；不改变校验、发布或服务权限",
+    )
     if branch == "eth":
         parser.add_argument("--csv", dest="csv_file", help="读取指定设备 CSV，而非项目默认文件")
         parser.add_argument("--verify", action="store_true", help="校验生成结果与参考配置的差异")
@@ -8013,8 +8017,16 @@ def _generate_all_ib(target=None, *, switch_scope="all"):
     return total_gen
 
 
-def _production_handoff_rows(row):
-    """Describe the preview/production boundary after standalone generation."""
+def _production_handoff_rows(row, *, presentation_context="standalone"):
+    """Narration only: no validation, publication or service authority."""
+    if presentation_context == "load-parent":
+        return [
+            row(),
+            row("生成阶段完成；父 load 将继续 MAC 发布、release 校验与服务门禁"),
+            row("无需另开终端手工发布或重跑 load。"),
+        ]
+    if presentation_context != "standalone":
+        raise ValueError("unsupported presentation context")
     return [
         row(),
         row("2. 本独立生成流程仅用于隔离开发预览，不激活生产发布或服务"),
@@ -8032,7 +8044,7 @@ def _production_handoff_rows(row):
     ]
 
 
-def _print_info_block_ib():
+def _print_info_block_ib(*, presentation_context="standalone"):
     ts = _TS
     W  = 72
 
@@ -8056,12 +8068,27 @@ def _print_info_block_ib():
     elif generated_kinds:
         publish_steps.append(row(f"   完成后直接发布 {ts}-{generated_kinds[0]}/"))
 
+    if presentation_context == "load-parent":
+        lines = [
+            "╔" + "═" * W + "╗",
+            row(f"已生成 {len(generated_kinds)} 个输出目录"),
+            *[row(f"   template/99-output-ib_nvl/{ts}-{kind}/")
+              for kind in generated_kinds],
+            *_production_handoff_rows(row, presentation_context=presentation_context),
+            "╚" + "═" * W + "╝",
+        ]
+        print("\n" + "\n".join(lines) + "\n")
+        return
     lines = [
         "╔" + "═" * W + "╗",
         row("后续操作步骤"),
         "╠" + "═" * W + "╣",
         row("1. 执行共用 d-hostname2mac.py 生成 MAC 链接并完成发布"),
-        row("   （在 nvos/ 目录下执行；两个目录放在同一条命令中）："),
+        row(f"   已生成 {len(generated_kinds)} 个输出目录"),
+        row("   （在 nvos/ 目录下执行；"
+            + ("两个目录放在同一条命令中" if len(generated_kinds) == 2
+               else "一个目录作为命令参数" if len(generated_kinds) == 1
+               else "当前没有生成目录") + "）："),
         *publish_steps,
         row("   并原子更新 99-output-ib_nvl/latest；未完成时保留上一版本"),
         *_production_handoff_rows(row),
@@ -8070,7 +8097,7 @@ def _print_info_block_ib():
     print("\n" + "\n".join(lines) + "\n")
 
 
-def eth_followup_text(ts, *, has_patch, target=None):
+def eth_followup_text(ts, *, has_patch, target=None, presentation_context="standalone"):
     """Render an actionable next step without offering an impossible publish."""
     width = 72
 
@@ -8097,6 +8124,12 @@ def eth_followup_text(ts, *, has_patch, target=None):
         ])
         return "\n" + "\n".join(lines) + "\n"
 
+    if presentation_context == "load-parent":
+        lines.extend([
+            *_production_handoff_rows(row, presentation_context=presentation_context),
+            "╚" + "═" * width + "╝",
+        ])
+        return "\n" + "\n".join(lines) + "\n"
     lines.extend([
         row("1. 执行 d-hostname2mac.py 生成 MAC 软链接并发布"),
         row("   （在 cumulus/ 目录下执行）："),
@@ -8157,6 +8190,7 @@ if __name__ == "__main__":
 
             print(eth_followup_text(
                 ts, has_patch=has_patch, target=target,
+                presentation_context=parsed.presentation_context,
             ))
 
     else:
@@ -8168,4 +8202,4 @@ if __name__ == "__main__":
             target=target, switch_scope=parsed.switch_scope or "all",
         )
         if n > 0:
-            _print_info_block_ib()
+            _print_info_block_ib(presentation_context=parsed.presentation_context)
