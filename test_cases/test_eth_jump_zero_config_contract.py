@@ -53,6 +53,12 @@ DIAGNOSTICS = load_script(
 )
 
 
+INITIAL = load_script(
+    "i19_inventory_initial",
+    ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+)
+
+
 DEVICE_HEADER = (
     "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
     "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
@@ -84,6 +90,50 @@ def jump_row(*, template: str = "NA", field: str | None = None) -> list[str]:
 def write_devices(path: Path, rows: list[list[str]]) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
         csv.writer(stream).writerows((DEVICE_HEADER, *rows))
+
+
+def public_ib_row():
+    row = [""] * len(DEVICE_HEADER)
+    row[:7] = [
+        "EXAMPLE-IB01", "ib", "NA", "198.51.100.2", "24",
+        "198.51.100.1", "02:00:00:00:00:02",
+    ]
+    return row
+
+
+def public_jump_row(*, populated=False):
+    row = [""] * len(DEVICE_HEADER)
+    row[:3] = ["EXAMPLE-JUMP01", "eth_jump", ""]
+    if populated:
+        # Not a real template. Admission/rendering must not try to read it.
+        row[:7] = [
+            "EXAMPLE-JUMP01", "eth_jump", "INVENTORY-ONLY-NOT-A-TEMPLATE",
+            "192.0.2.10", "24", "192.0.2.1", "02:00:00:00:00:10",
+        ]
+        values = {
+            "eth1_ip": "192.0.2.20", "eth1_gw": "192.0.2.1",
+            "eth1_mac": "02:00:00:00:00:20", "lo_ip": "203.0.113.10/32",
+            "vrf_default": "inventory-vrf", "vlan_id": "100/200",
+            "svi_ip": "203.0.113.1", "vrr_ip": "203.0.113.254",
+            "vrr_mac": "02:00:00:00:01:fe", "vlan_ports": "swp1-2",
+            "bgp_asn": "65010", "bgp_ports": "swp3", "bond_ports": "bond4-5",
+            "bond_type": "localbond", "bond_mac": "02:00:00:00:02:10",
+            "peerlink_ports": "swp49-50", "vrl": "false",
+            "evpn_vrf": "inventory-evpn", "evpn_l3vni": "10010",
+            "evpn_l3vlan": "1010", "dhcp_relay": "false",
+            "evpn_l2vni": "10200", "evpn_l2vlan": "200",
+        }
+        for index, field in enumerate(DEVICE_HEADER):
+            if field in values:
+                row[index] = values[field]
+            elif field == "netmask":
+                row[index] = "24"
+    return row
+
+
+def write_inventory(path, jump):
+    write_devices(path, [public_ib_row(), jump])
+
 
 
 class EthJumpZeroConfigContractTests(unittest.TestCase):
@@ -354,6 +404,70 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             DIAGNOSTICS.DiagnosticError, "not unique in current prod report",
         ):
             DIAGNOSTICS.select_devices(report, ["EXAMPLE-JUMP01"], "prod")
+
+
+    def test_normal_transit_types_do_not_gain_optional_login_address(self):
+        for kind in ("eth", "eth_spx", "spx", "ethernet"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as name:
+                path = Path(name) / "02-devices_config.csv"
+                ordinary = public_jump_row()
+                ordinary[1] = kind
+                write_inventory(path, ordinary)
+                with self.assertRaisesRegex(INITIAL.SetupError, "login address is required"):
+                    INITIAL.load_devices(path)
+
+
+    def test_inventory_without_endpoint_refuses_remote_transport_before_io(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "02-devices_config.csv"
+            write_inventory(path, public_jump_row())
+            _ib, transit = INITIAL.load_devices(path)
+            device = transit["example-jump01"]
+            with self.assertRaisesRegex(INITIAL.SetupError, "login address"):
+                INITIAL.outer_ssh_command(device, "cumulus", ["hostname"], 3)
+            # Existing explicit local mode does not require a remote endpoint.
+            self.assertEqual(
+                ["hostname"],
+                INITIAL.outer_ssh_command(device, "cumulus", ["hostname"], 3, local=True),
+            )
+
+
+    def test_empty_endpoint_guard_is_independent_of_inventory_admission(self):
+        jump = INITIAL.Device("EXAMPLE-JUMP01", "eth_jump", "", "", "", "", "", "")
+        ib = INITIAL.Device(
+            "EXAMPLE-IB01", "ib", "198.51.100.2", "198.51.100.2/24",
+            "198.51.100.1", "02:00:00:00:00:02", "", "",
+        )
+        target = INITIAL.Target(ib, jump, "swp7", "eth0")
+        neighbor = INITIAL.Neighbor("fe80::1", "swp7", "02:11:22:33:44:55")
+        calls = (
+            ("outer", lambda: INITIAL.outer_ssh_command(jump, "cumulus", ["hostname"], 3)),
+            ("ethernet", lambda: INITIAL.run_on_ethernet(jump, "cumulus", "PUBLIC", ["hostname"], 3)),
+            ("nested", lambda: INITIAL.run_on_ib(
+                target, neighbor, "cumulus", "PUBLIC", "admin", "PUBLIC", 3,
+                ["nv", "config", "show"],
+            )),
+            ("ipv4", lambda: INITIAL.verify_ipv4_login(
+                target, "default", "cumulus", "PUBLIC", "admin", 3,
+            )),
+        )
+        for label, invoke in calls:
+            with self.subTest(caller=label), mock.patch.object(
+                INITIAL, "interactive_run", return_value=INITIAL.SessionResult("", 0),
+            ) as interactive, mock.patch.object(
+                INITIAL, "ethernet_responder", wraps=INITIAL.ethernet_responder,
+            ) as responder, mock.patch.object(
+                INITIAL, "NestedResponder", wraps=INITIAL.NestedResponder,
+            ) as nested:
+                with self.assertRaisesRegex(INITIAL.SetupError, "login address"):
+                    invoke()
+                interactive.assert_not_called()
+                responder.assert_not_called()
+                nested.assert_not_called()
+        self.assertEqual(
+            ["hostname"],
+            INITIAL.outer_ssh_command(jump, "cumulus", ["hostname"], 3, local=True),
+        )
 
 
 if __name__ == "__main__":
