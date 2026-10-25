@@ -1028,15 +1028,122 @@ _ETH_JUMP_CONFIG_ONLY_FIELDS = frozenset({
 })
 
 
-def _eth_jump_configuration_intent(header, row):
-    conflicts = set()
-    for index, field in enumerate(header):
-        if field in _ETH_JUMP_CONFIG_ONLY_FIELDS and not _vna(row[index]):
-            conflicts.add(field)
-    template_index = header.index("template")
-    if not _vna(row[template_index]):
-        conflicts.add("template")
-    return tuple(sorted(conflicts))
+def _eth_jump_inventory_errors(fields, row, is_na, *, skip_indices=(), schema_version=None):
+    """Check supplied inventory cells without deriving configuration or doing IO.
+
+    ``None`` is the standalone initial reader's schema-independent metadata
+    mode: recognize only existing v1/v2 lexical spellings, not either dialect's
+    configuration completeness. Setup/load pass their declared schema version.
+    """
+    errors = []
+    totals = {field: fields.count(field) for field in fields}
+    occurrences = {}
+
+    def numeric_selector(value, maximum, *, native=False):
+        if value.casefold().endswith("/native"):
+            if not native or not re.fullmatch(r"[0-9]+", value[:-7]):
+                return False
+            value = value[:-7]
+        for token in re.split(r"[/,]", value):
+            match = re.fullmatch(r"([0-9]+)(?:-([0-9]+))?", token.strip())
+            if match is None:
+                return False
+            start = int(match.group(1))
+            end = int(match.group(2) or start)
+            if not 1 <= start <= end <= maximum:
+                return False
+        return True
+
+    def port_selector(value, *, bond=False, peerlink=False):
+        for group in value.split("|" if bond else "/"):
+            if not group.strip():
+                return False
+            for token in group.split("/"):
+                token = token.strip()
+                if not peerlink and (
+                    token == "peerlink.4094"
+                    or re.fullmatch(r"(?:bond[0-9]+)+", token)
+                    or (schema_version in (None, 2)
+                        and re.fullmatch(r"bond[0-9]+(?:b[0-9]+)+", token))
+                ):
+                    continue
+                prefix = "bond" if bond else "swp"
+                pattern = (
+                    r"([1-9][0-9]*)(?:-([1-9][0-9]*))?" if peerlink else
+                    r"([0-9]+)(?:-([0-9]+))?(?:s([0-9]+)(?:-([0-9]+))?)?"
+                )
+                match = re.fullmatch(prefix + pattern, token)
+                if match is None:
+                    return False
+                if int(match.group(2) or match.group(1)) < int(match.group(1)):
+                    return False
+                if not peerlink and match.group(3) is not None:
+                    if int(match.group(4) or match.group(3)) < int(match.group(3)):
+                        return False
+        return True
+
+    for index, field in enumerate(fields):
+        occurrence = occurrences.get(field, 0) + 1
+        occurrences[field] = occurrence
+        if index in skip_indices:
+            continue
+        value = str(row[index] or "").strip() if index < len(row) else ""
+        if is_na(value):
+            continue
+        label = field if totals[field] == 1 else f"{field}[{occurrence}]"
+        valid = True
+        try:
+            if field in {"eth0_ip", "eth1_ip", "eth0_gw", "eth1_gw"}:
+                ipaddress.IPv4Address(value)
+            elif field in {"lo_ip", "svi_ip", "vrr_ip"}:
+                ipaddress.ip_interface(value)
+            elif field == "netmask":
+                if value.isdigit():
+                    valid = 1 <= int(value) <= 32
+                else:
+                    valid = str(ipaddress.IPv4Network("0.0.0.0/" + value).netmask) == value
+            elif field == "bond_mac":
+                valid = all(
+                    is_na(token.strip()) or bool(re.fullmatch(
+                        r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|"
+                        r"(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}", token.strip(),
+                    ))
+                    for token in value.split("|")
+                )
+            elif field in {"eth0_mac", "eth1_mac", "vrr_mac"}:
+                valid = bool(re.fullmatch(
+                    r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}|"
+                    r"(?:[0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}", value,
+                ))
+            elif field in {"vlan_id", "evpn_l3vlan", "evpn_l2vlan"}:
+                valid = numeric_selector(
+                    value, 4094,
+                    native=(schema_version in (None, 2)
+                            and field in {"vlan_id", "evpn_l2vlan"}),
+                )
+            elif field in {"evpn_l3vni", "evpn_l2vni"}:
+                valid = numeric_selector(value, 16777215)
+            elif field == "bgp_asn":
+                valid = 1 <= int(value) <= 4294967295
+            elif field in {"bgp_ports", "vlan_ports", "peerlink_ports", "bond_ports"}:
+                valid = port_selector(
+                    value, bond=(field == "bond_ports"),
+                    peerlink=(field == "peerlink_ports"),
+                )
+            elif field == "bond_type":
+                allowed = {"localbond", "mlag", "mlagbond", "evpn_multihoming"}
+                if schema_version in (None, 2):
+                    allowed |= {"local", "evpn"}
+                valid = all(token.strip().casefold() in allowed for token in value.split("|"))
+            elif field == "vrl":
+                valid = value.casefold() in {"false", "0", "no", "n", "true", "1", "yes", "y"}
+            # template, VRF labels and relay server-group selectors remain
+            # inventory text: no template/global lookup or companion inference.
+        except (ValueError, TypeError, OverflowError):
+            valid = False
+        if not valid:
+            errors.append(f"{label}={value!r} 无效")
+    return tuple(errors)
 
 
 _V2_PEERLINK_PORT_TOKEN_RE = re.compile(
@@ -2158,19 +2265,19 @@ def _validate_eth_csv(path):
                         pass  # 各设备类型分支负责输出更具体的格式错误。
 
                 if is_jump:
-                    conflicts = _eth_jump_configuration_intent(h_lower, row)
-                    if conflicts:
-                        e(
-                            row_n, hn,
-                            "type=eth_jump 字段 " + ", ".join(conflicts)
-                            + " 与零配置意图冲突",
-                        )
-                    try:
-                        ipaddress.IPv4Address(eth0_ip_raw)
-                    except ValueError:
-                        e(row_n, hn, f"eth0_ip 无效（eth_jump 必填 IPv4）：'{eth0_ip_raw}'")
+                    for message in _eth_jump_inventory_errors(
+                        h_lower, row, _vna,
+                        skip_indices=(_COL_ETH0_IP, _COL_ETH0_NM, _COL_ETH0_GW, _COL_ETH0_MAC),
+                        schema_version=schema_version,
+                    ):
+                        e(row_n, hn, message)
+                    if not _vna(eth0_ip_raw):
+                        try:
+                            ipaddress.IPv4Address(eth0_ip_raw)
+                        except ValueError:
+                            e(row_n, hn, f"eth0_ip 无效：'{eth0_ip_raw}'")
                     if not _vna(eth0_nm) and not _valid_mask(eth0_nm):
-                        e(row_n, hn, f"netmask(eth0) 无效：'{eth0_nm}'")
+                        e(row_n, hn, f"netmask[1] 无效：'{eth0_nm}'")
                     if not _vna(eth0_gw) and not _valid_ip(eth0_gw):
                         e(row_n, hn, f"eth0_gw 无效：'{eth0_gw}'")
                     if not _vna(eth0_mac):
