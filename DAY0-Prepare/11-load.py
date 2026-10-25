@@ -3295,8 +3295,8 @@ def _require_subnet_input_file(path: Path) -> os.stat_result:
         metadata = path.lstat()
     except OSError as exc:
         raise LoadError(f"缺少 02-dhcp-subnet_config.csv：{exc}") from exc
-    if not stat.S_ISREG(metadata.st_mode):
-        raise LoadError("02-dhcp-subnet_config.csv 必须是非软链接普通文件")
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise LoadError("02-dhcp-subnet_config.csv 必须是非软链接 single-link 普通文件")
     if metadata.st_size == 0:
         raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
     return metadata
@@ -3313,9 +3313,9 @@ def _open_subnet_input_file(path: Path):
             path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
         )
         opened = os.fstat(descriptor)
-        if (not stat.S_ISREG(opened.st_mode)
+        if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
                 or (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino)):
-            raise LoadError("02-dhcp-subnet_config.csv 在检查后被替换或不是普通文件")
+            raise LoadError("02-dhcp-subnet_config.csv 在检查后被替换或不是 single-link 普通文件")
         if opened.st_size == 0:
             raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
         stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
@@ -3326,6 +3326,31 @@ def _open_subnet_input_file(path: Path):
     finally:
         if descriptor >= 0:
             os.close(descriptor)
+
+
+def _subnet_source_token(path: Path) -> tuple[object, ...]:
+    """Bind the current CSV bytes and inode across LOAD validation phases."""
+    with _open_subnet_input_file(path) as stream:
+        before = os.fstat(stream.fileno())
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.buffer.read(1024 * 1024), b""):
+            digest.update(block)
+        after = os.fstat(stream.fileno())
+        try:
+            current = path.lstat()
+        except OSError as exc:
+            raise LoadError(f"DHCP subnet CSV 来源在读取中消失：{exc}") from exc
+    fields = lambda value: (
+        value.st_dev, value.st_ino, value.st_size,
+        value.st_mtime_ns, value.st_ctime_ns,
+    )
+    if (
+        not stat.S_ISREG(after.st_mode) or after.st_nlink != 1
+        or not stat.S_ISREG(current.st_mode) or current.st_nlink != 1
+        or fields(before) != fields(after) or fields(before) != fields(current)
+    ):
+        raise LoadError("DHCP subnet CSV 来源身份在哈希期间变化")
+    return (*fields(before), digest.hexdigest())
 
 
 def project_air_topology_policy(project: Path) -> Path | None:
@@ -3609,6 +3634,8 @@ def load_global(
         except ValueError as exc:
             raise LoadError(str(exc)) from exc
     ztp_enabled = _enabled(ztp.get("status"), "common.mgmt.ztp.status")
+    if not dhcp_enabled and ztp_enabled:
+        raise LoadError("DHCP disabled + ZTP enabled 是非法组合")
     prefix = _validate_ztp_prefix(ztp.get("ztp_url_prefix"))
     # service_ip is intentionally not part of global.yaml. It is derived from
     # the declarative endpoint fields in 02-dhcp-subnet_config.csv.
@@ -4065,7 +4092,7 @@ def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
                 if not settings.ztp_enabled:
                     raise LoadError(
                         f"DHCP subnet CSV 第 {lineno} 行启用了平台 ZTP，"
-                        "但全局 ZTP disabled"
+                        "但 global ZTP disabled"
                     )
             rows.append((lineno, row))
     try:
@@ -4074,8 +4101,8 @@ def validate_subnet_file(path: Path, settings: GlobalSettings) -> None:
         raise LoadError(str(exc)) from exc
     if not rows and settings.dhcp_enabled:
         raise LoadError("02-dhcp-subnet_config.csv 没有 subnet 记录")
-    if rows and not settings.dhcp_enabled:
-        raise LoadError("DHCP disabled 时不能包含 subnet 记录")
+    # DEV 2848e52 (agreed 2026-10-25): with DHCP disabled, fully validated rows may still
+    # describe an external DHCP service; plan_local_dhcp_runtime authorizes no listener.
     if settings.ztp_enabled and rows and not active_ztp_rows:
         raise LoadError("全局 ZTP enabled 但没有启用 ZTP 的 endpoint 行")
 
@@ -14977,9 +15004,6 @@ def validate_dhcp_output_sources(mappings: dict[Path, Path]) -> None:
         conf_source.with_name("dhcp-release-manifest.json"),
         "DHCP release manifest",
     )
-    selected = manifest.get("switch_scope")
-    if selected not in {"eth", "ib", "nvl"}:
-        raise LoadError("零字节 DHCP host 仅允许在单一 switch scope 下保留")
     counts = manifest.get("counts")
     declarations = (
         counts.get("host_declarations_by_family")
@@ -15000,12 +15024,25 @@ def validate_dhcp_output_sources(mappings: dict[Path, Path]) -> None:
         expected_hash = item.get("sha256") if isinstance(item, dict) else None
         if expected_hash != _sha256_path(source):
             raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
+    # DEV ad0baea: every family's host declarations must equal the child receipt's exact
+    # count, and an empty include is admitted only when that count is 0 (any scope).
+    host_declaration = re.compile(
+        rb"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$"
+    )
+    for source in mappings:
+        family = {
+            "dhcpd_eth.hosts": "eth", "dhcpd_ib.hosts": "ib", "dhcpd_nvl.hosts": "nvl",
+        }.get(source.name)
+        if family is not None and (
+            len(host_declaration.findall(source.read_bytes())) != declarations[family]
+        ):
+            raise LoadError(f"DHCP 空 hosts 子收据或内容不一致：{source.name}")
     for source in empty_hosts:
         family = source.name.removeprefix("dhcpd_").removesuffix(".hosts")
-        if family == selected or declarations[family] != 0:
+        if declarations[family] != 0:
             raise LoadError(
-                f"DHCP 输出 {source.name} 大小为 0，但本轮拥有该 family "
-                "或 manifest 声明了 host；请准备真实内容后再次执行 load"
+                f"DHCP 输出 {source.name} 大小为 0，但 manifest 声明了 host；"
+                "请准备真实内容后再次执行 load"
             )
 
 
@@ -17632,11 +17669,50 @@ def validate_and_publish_release(
         output_hashes = dhcp.get("outputs")
         if not isinstance(output_hashes, dict):
             raise LoadError("DHCP release manifest 缺少 outputs hash")
+        counts = dhcp.get("counts")
+        family_counts = (counts.get("host_declarations_by_family")
+                         if isinstance(counts, dict) else None)
+        legacy_nonempty = counts is None or (
+            isinstance(counts, dict)
+            and "host_declarations_by_family" not in counts
+        )
+        if not legacy_nonempty and (
+            not isinstance(family_counts, dict)
+            or set(family_counts) != {"eth", "ib", "nvl"}
+            or any(type(value) is not int or value < 0
+                   for value in family_counts.values())
+        ):
+            raise LoadError("DHCP release host_declarations_by_family 无效")
+        host_declaration = re.compile(
+            rb"(?m)^\s*host\s+[A-Za-z0-9][A-Za-z0-9._-]*\s*\{\s*$"
+        )
         for source in dhcp_file_mappings(dhcp_source):
             item = output_hashes.get(source.name)
             expected_hash = item.get("sha256") if isinstance(item, dict) else None
-            if expected_hash != _sha256_path(source):
+            family = {
+                "dhcpd_eth.hosts": "eth",
+                "dhcpd_ib.hosts": "ib",
+                "dhcpd_nvl.hosts": "nvl",
+            }.get(source.name)
+            if family is None:
+                actual_hash = _sha256_path(source)
+            else:
+                host_bytes = source.read_bytes()
+                actual_hash = hashlib.sha256(host_bytes).hexdigest()
+            if expected_hash != actual_hash:
                 raise LoadError(f"DHCP release 输出 hash 漂移：{source.name}")
+            if family is not None:
+                if legacy_nonempty:
+                    if not host_bytes:
+                        raise LoadError(
+                            f"DHCP release {source.name} 无计数证明且内容为空"
+                        )
+                    continue
+                actual_count = len(host_declaration.findall(host_bytes))
+                if actual_count != family_counts[family]:
+                    raise LoadError(
+                        f"DHCP release {source.name} host count 与当前内容不一致"
+                    )
         components["dhcp"] = {
             "release_id": str(dhcp["release_id"]),
             "manifest_sha256": _sha256_path(dhcp_path),
@@ -22444,7 +22520,11 @@ def validate_inputs(
     except LoadError as exc:
         validation_errors.append(str(exc))
     try:
+        subnet_source_before = _subnet_source_token(subnet_file)
         validate_subnet_file(subnet_file, settings)
+        subnet_source_after = _subnet_source_token(subnet_file)
+        if subnet_source_after != subnet_source_before:
+            raise LoadError("DHCP subnet source changed after validation")
     except LoadError as exc:
         validation_errors.append(str(exc))
     # P2P selection may migrate a legacy workbook.  An invalid subnet must
@@ -22542,6 +22622,11 @@ def validate_inputs(
             ),
         }.items()
     }
+    if (
+        source_identities["subnet"] != subnet_source_after[-1]
+        or _subnet_source_token(subnet_file) != subnet_source_after
+    ):
+        raise LoadError("DHCP subnet source changed before release prewrite admission")
     provisional_inputs = replace(
         provisional_inputs, source_identities=source_identities,
     )
