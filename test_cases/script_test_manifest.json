@@ -13,6 +13,7 @@
       "description": "仓库入口、测试治理、公开边界和文档目录合同",
       "tests": [
         "test_cases.test_runner_preflight",
+        "test_cases.test_module_loader_contract",
         "test_cases.test_all_script_entrypoints",
         "test_cases.test_change_aware_test_runner",
         "test_cases.test_documentation_catalog",
@@ -30,7 +31,8 @@
         "test_cases.test_public_publication_v3_overlap",
         "test_cases.test_deps_table",
         "test_cases.test_deps_table_workflow",
-        "test_cases.test_issue_tracker_engine_runtime"
+        "test_cases.test_issue_tracker_engine_runtime",
+        "test_cases.test_private_public_fixture_input"
       ]
     },
     {
@@ -147,7 +149,40 @@
         "test_cases.test_ufm_setup_upgrade",
         "test_cases.test_ufm_setup_upgrade_workflow",
         "test_cases.test_setup_ufm_links_workflow",
-        "test_cases.test_ufm_ha_status_parity"
+        "test_cases.test_ufm_ha_status_parity",
+        "test_cases.test_initial_setup_authorized_key_quoted_options",
+        "test_cases.test_initial_setup_authorized_key_shell_workflow",
+        "test_cases.test_initial_setup_auto_credentials_writer",
+        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
+        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow",
+        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
+        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
+        "test_cases.test_initial_setup_auto_policy_fact",
+        "test_cases.test_initial_setup_auto_watch_pause",
+        "test_cases.test_initial_setup_bare_expiry_readonly",
+        "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
+        "test_cases.test_initial_setup_cache_admission_output",
+        "test_cases.test_initial_setup_explicit_consumer_context",
+        "test_cases.test_initial_setup_handoff_transport",
+        "test_cases.test_initial_setup_handoff_transport_workflow",
+        "test_cases.test_initial_setup_ib_phase_protocol",
+        "test_cases.test_initial_setup_initial_closed_facts",
+        "test_cases.test_initial_setup_key_receipt_consumer",
+        "test_cases.test_initial_setup_key_receipt_workflow",
+        "test_cases.test_initial_setup_main_caller_precommit",
+        "test_cases.test_initial_setup_main_profile_custody",
+        "test_cases.test_initial_setup_managed_merge_contract",
+        "test_cases.test_initial_setup_management_network",
+        "test_cases.test_initial_setup_management_stage_roles",
+        "test_cases.test_initial_setup_network_diagnostics",
+        "test_cases.test_initial_setup_ntp_membership",
+        "test_cases.test_initial_setup_nvos_argv",
+        "test_cases.test_initial_setup_pending_diff",
+        "test_cases.test_initial_setup_pty_cleanup",
+        "test_cases.test_initial_setup_selfcontained_neutral",
+        "test_cases.test_initial_setup_target_credentials_workflow",
+        "test_cases.test_initial_setup_target_outcome_summary",
+        "test_cases.test_initial_setup_target_password_policy"
       ]
     },
     {
@@ -463,6 +498,7 @@
     "test_cases/REAL_ENVIRONMENT.md",
     "test_cases/monitor_authority_root_warden.py",
     "test_cases/monitor_authority_source_guard.py",
+    "test_cases/private_public_fixture_input.py",
     "test_cases/public_project_fixture.py",
     "test_cases/splitter_profile_fixture.py",
     "test_cases/module_loader.py",
@@ -610,7 +646,8 @@
     "infra/docker/requirements-issue-tracker-engine.txt",
     "infra/requirements-ibsw-upgrade.txt",
     "infra/requirements-ibsw-upgrade-macos-cp39.txt",
-    "test_cases/f01_sdk_venv.py"
+    "test_cases/f01_sdk_venv.py",
+    "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -1303,6 +1340,7 @@
     {
       "id": "eth_jump_zero_config",
       "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
         "DAY0-Prepare/01-a-setup.py",
         "DAY0-Prepare/11-load.py",
         "DAY0-Prepare/12-ztp-monitor.py",
@@ -1897,7 +1935,8 @@
         "test_cases.test_ibsw225_http_initializer_guard_protocol",
         "test_cases.test_ibsw225_runtime_guard_exception_priority",
         "test_cases.test_ibsw225_initializer_report_finally_direct",
-        "test_cases.test_ibsw225_initializer_help_guard"
+        "test_cases.test_ibsw225_initializer_help_guard",
+        "test_cases.test_initial_setup_managed_merge_contract"
       ]
     },
     {
@@ -2059,6 +2098,52 @@
       "tests": [
         "test_cases.test_issue_tracker_sync",
         "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_handoff_transport_core",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_handoff_transport",
+        "test_cases.test_initial_setup_pty_cleanup",
+        "test_cases.test_initial_setup_authorized_key_quoted_options",
+        "test_cases.test_initial_setup_target_password_policy",
+        "test_cases.test_initial_setup_authorized_key_shell_workflow",
+        "test_cases.test_initial_setup_nvos_argv",
+        "test_cases.test_initial_setup_ntp_membership",
+        "test_cases.test_initial_setup_pending_diff",
+        "test_cases.test_initial_setup_ib_phase_protocol",
+        "test_cases.test_initial_setup_bare_expiry_readonly",
+        "test_cases.test_initial_setup_key_receipt_consumer",
+        "test_cases.test_initial_setup_management_stage_roles",
+        "test_cases.test_initial_setup_management_network",
+        "test_cases.test_initial_setup_initial_closed_facts",
+        "test_cases.test_initial_setup_explicit_consumer_context",
+        "test_cases.test_initial_setup_main_caller_precommit",
+        "test_cases.test_initial_setup_main_profile_custody",
+        "test_cases.test_initial_setup_network_diagnostics",
+        "test_cases.test_initial_setup_cache_admission_output",
+        "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
+        "test_cases.test_initial_setup_auto_watch_pause",
+        "test_cases.test_initial_setup_auto_credentials_writer",
+        "test_cases.test_initial_setup_auto_policy_fact",
+        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
+        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
+        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
+        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow",
+        "test_cases.test_initial_setup_target_outcome_summary"
+      ]
+    },
+    {
+      "id": "initial_setup_selfcontained_neutral_authority",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_selfcontained_neutral"
       ]
     }
   ],
@@ -2288,7 +2373,10 @@
         "DAY0-Prepare/11-load.py"
       ],
       "tests": [
-        "test_cases.test_req10b_services_keys_workflow"
+        "test_cases.test_req10b_services_keys_workflow",
+        "test_cases.test_initial_setup_authorized_key_shell_workflow",
+        "test_cases.test_initial_setup_key_receipt_workflow",
+        "test_cases.test_initial_setup_managed_merge_contract"
       ]
     },
     {
@@ -2350,6 +2438,7 @@
     {
       "id": "eth_jump_phase_c_zero_config",
       "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
         "DAY0-Prepare/01-a-setup.py",
         "DAY0-Prepare/11-load.py",
         "DAY0-Prepare/12-ztp-monitor.py",
@@ -3516,6 +3605,61 @@
         "test_cases.test_switch_status_workflow",
         "test_cases.test_switch_status"
       ]
+    },
+    {
+      "id": "initial_target_credentials_main_auto_lifecycle",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/nvos/template/90-c2-generate_configs.py",
+        "DAY0-Prepare/02-unsetup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_target_credentials_workflow",
+        "test_cases.test_initial_setup_main_caller_precommit",
+        "test_cases.test_initial_setup_main_profile_custody",
+        "test_cases.test_initial_setup_network_diagnostics",
+        "test_cases.test_initial_setup_cache_admission_output",
+        "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
+        "test_cases.test_initial_setup_auto_watch_pause",
+        "test_cases.test_initial_setup_auto_credentials_writer",
+        "test_cases.test_initial_setup_auto_policy_fact",
+        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
+        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
+        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
+        "test_cases.test_initial_setup_bare_expiry_readonly",
+        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_handoff_real_reader_transport",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_handoff_transport_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_selfcontained_c2_p1_neutral_profile",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_selfcontained_neutral"
+      ]
+    },
+    {
+      "id": "initial_setup_target_outcome_c2_p1_manual_reporting",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_target_outcome_summary"
+      ]
     }
   ],
   "path_rules": [
@@ -3576,6 +3720,7 @@
         "test_cases/module_loader.py"
       ],
       "tests": [
+        "test_cases.test_module_loader_contract",
         "test_cases.test_image_context_safety",
         "test_cases.test_air_link_endpoint_contract",
         "test_cases.test_flow_release_platform_matrix",
@@ -4205,6 +4350,27 @@
       "tests": [
         "test_cases.test_issue_tracker_sync",
         "test_cases.test_issue_tracker_sync_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/private_public_fixture_input.py",
+        "test_cases/test_private_public_fixture_input.py"
+      ],
+      "tests": [
+        "test_cases.test_private_public_fixture_input",
+        "test_cases.test_initial_setup_handoff_transport",
+        "test_cases.test_initial_setup_pending_diff",
+        "test_cases.test_ztp_release_core_review",
+        "test_cases.test_initial_setup_cache_admission_mode_auto_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_selfcontained_neutral"
       ]
     }
   ]
