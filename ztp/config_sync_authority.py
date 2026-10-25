@@ -152,7 +152,11 @@ class ManagedInitialMethodCycle:
             os.close(descriptor)
 
     def _neutral_image(self):
-        """The managed tool root is the only infra-neutral.conf source; no fallback lookup."""
+        """The managed tool root is the only infra-neutral.conf source; no fallback lookup.
+
+        File identity uses this cycle's held-input rules; the content grammar is the
+        leaf's own self-contained reader, run between two identical held images.
+        """
         path = self.tool_input_root / "infra-neutral.conf"
         try:
             info = os.lstat(path)
@@ -160,7 +164,14 @@ class ManagedInitialMethodCycle:
             raise AuthorityError("managed initial neutral service authority is unavailable") from exc
         if not stat.S_ISREG(info.st_mode):
             raise AuthorityError("managed initial neutral service authority must be a regular non-symlink file")
-        return self._image(path)
+        image = self._image(path)
+        try:
+            self.initial._neutral_services(self.tool_input_root)
+        except Exception as exc:
+            raise AuthorityError("managed initial neutral service authority is invalid") from exc
+        if self._image(path) != image:
+            raise AuthorityError("managed initial input changed during held read")
+        return image
 
     def admit_paths(self, inputs, outputs):
         """Validate the managed leaf's scope before it creates any output."""
