@@ -221,3 +221,269 @@ class DeferredDhcpCandidateDirectTests(unittest.TestCase):
             self.assertTrue(injected)
             self.assertEqual(before, flat_snapshot(fixture))
             self.assertEqual([], list(foreign.iterdir()))
+
+
+def bound(fixture: ScopedDhcpFixture):
+    """The module bindings ScopedDhcpFixture.execute applies, for direct calls."""
+    return mock.patch.multiple(
+        DHCP,
+        HTTP_ROOT=str(fixture.root),
+        SCRIPT_DIR=str(fixture.dhcp),
+        OUTPUT_ETH=str(fixture.outputs["eth"]),
+        OUTPUT_IB=str(fixture.outputs["ib"]),
+        OUTPUT_NVL=str(fixture.outputs["nvl"]),
+        OUTPUT_CONF=str(fixture.outputs["conf"]),
+        OUTPUT_MANIFEST=str(fixture.outputs["manifest"]),
+        GLOBAL_YAML=str(fixture.global_file),
+    )
+
+
+def identity(path: Path):
+    info = path.lstat()
+    return info.st_dev, info.st_ino
+
+
+class DevCandidateGuaranteeTests(unittest.TestCase):
+    """DEV ad4bc3c candidate guarantees carried onto --candidate-dir (T+).
+
+    G10, G15 and #11 keep the assertions of the DEV methods named in each
+    test, changing only the call form (--candidate-output-dir next to the
+    flat outputs becomes the LOAD-owned project candidate).  G14 has no DEV
+    test; its expectation is DEV c1's rule that the candidate directory's
+    owner equals the effective uid (exit 2, nothing written).
+    """
+
+    def test_c1_private_candidate_flag_rejects_foreign_directory_before_writes(self):
+        # DEV test_load_release_transaction::ReleaseTransactionTests::
+        # test_c1_private_candidate_flag_rejects_foreign_directory_before_writes
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-foreign-") as name:
+            fixture, _project, _output, candidate = private_project(Path(name))
+            public = fixture.outputs["conf"]
+            for foreign_name in (".load-dhcp-foreign", ".load-dhcp-candidate-foreign01"):
+                with self.subTest(foreign=foreign_name):
+                    foreign = fixture.root / foreign_name
+                    foreign.mkdir(mode=0o700)
+                    before = (public.stat().st_ino, public.read_bytes())
+                    with self.assertRaises(SystemExit) as caught:
+                        fixture.execute([
+                            "c1-generate_dhcp.py", "-y",
+                            "--candidate-dir", str(foreign),
+                        ])
+                    self.assertEqual(2, caught.exception.code)
+                    self.assertEqual(before, (public.stat().st_ino, public.read_bytes()))
+                    self.assertEqual([], list(foreign.iterdir()))
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_generator_candidate_option_targets_protected_sibling_before_inputs(self):
+        # DEV test_req22_runtime_contract::Req22RuntimeInputTests::
+        # test_generator_candidate_option_targets_protected_sibling_before_inputs
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-inputs-") as name:
+            fixture, project, output, candidate = private_project(Path(name))
+            public = fixture.outputs["conf"]
+            accepted = public.read_bytes()
+            (project / "02-subnet_config.csv").unlink()
+            with self.assertRaises(SystemExit) as caught:
+                fixture.execute([
+                    "c1-generate_dhcp.py", "-y", "--candidate-dir", str(candidate),
+                ])
+            self.assertEqual(1, caught.exception.code)
+            self.assertEqual(accepted, public.read_bytes())
+            self.assertEqual([], list(candidate.iterdir()))
+            # DEV's witness that the candidate was checked before the first
+            # input was its OUTPUT_* rebinding.  T+ never rebinds the flat
+            # outputs, so the witness is the exit status: with the same
+            # missing input, an unprotected candidate is refused first (2).
+            permissive = output / ".load-dhcp-candidate-permissive"
+            permissive.mkdir()
+            permissive.chmod(0o755)
+            with self.assertRaises(SystemExit) as caught:
+                fixture.execute([
+                    "c1-generate_dhcp.py", "-y", "--candidate-dir", str(permissive),
+                ])
+            self.assertEqual(2, caught.exception.code)
+            self.assertEqual(accepted, public.read_bytes())
+            self.assertEqual([], list(permissive.iterdir()))
+
+    def test_invalid_candidate_directories_exit_2_before_reading_inputs(self):
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-exit2-") as name:
+            fixture, project, output, candidate = private_project(Path(name))
+            before = flat_snapshot(fixture)
+            outside = fixture.root / "outside"
+            outside.mkdir(mode=0o700)
+            permissive = output / ".load-dhcp-candidate-permissive"
+            permissive.mkdir()
+            permissive.chmod(0o755)
+            occupied = output / ".load-dhcp-candidate-occupied"
+            occupied.mkdir(mode=0o700)
+            (occupied / "sentinel").write_bytes(b"do not replace")
+            alias = output / ".load-dhcp-candidate-alias0000"
+            alias.symlink_to(outside, target_is_directory=True)
+            absent = output / ".load-dhcp-candidate-absent00"
+            cases = {
+                label: ["c1-generate_dhcp.py", "-y", "--candidate-dir", str(path)]
+                for label, path in (
+                    ("outside", outside), ("permissive", permissive),
+                    ("occupied", occupied), ("alias", alias),
+                    ("project", project), ("absent", absent),
+                )
+            }
+            cases["relative"] = [
+                "c1-generate_dhcp.py", "-y", "--candidate-dir",
+                ".load-dhcp-candidate-0123456789abcdef",
+            ]
+            cases["missing-value"] = ["c1-generate_dhcp.py", "-y", "--candidate-dir"]
+            unread = AssertionError("the candidate gate must precede every input read")
+            for label, argv in cases.items():
+                with self.subTest(case=label), \
+                        mock.patch.object(DHCP, "load_project_global", side_effect=unread), \
+                        mock.patch.object(DHCP, "load_subnet_csv", side_effect=unread), \
+                        mock.patch.object(DHCP, "load_csv", side_effect=unread):
+                    with self.assertRaises(SystemExit) as caught:
+                        fixture.execute(argv)
+                    self.assertEqual(2, caught.exception.code)
+                    self.assertEqual(before, flat_snapshot(fixture))
+            self.assertEqual(b"do not replace", (occupied / "sentinel").read_bytes())
+            self.assertEqual([], list(outside.iterdir()))
+            self.assertEqual([], list(permissive.iterdir()))
+            self.assertFalse(absent.exists())
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_candidate_owned_by_another_user_is_refused_before_writes(self):
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-owner-") as name:
+            fixture, _project, _output, candidate = private_project(Path(name))
+            before = flat_snapshot(fixture)
+            other_uid = candidate.lstat().st_uid + 1
+            with mock.patch.object(DHCP.os, "geteuid", return_value=other_uid):
+                with self.assertRaises(SystemExit) as caught:
+                    fixture.execute([
+                        "c1-generate_dhcp.py", "-y", "--switch", "ib",
+                        "--candidate-dir", str(candidate),
+                    ])
+            self.assertEqual(2, caught.exception.code)
+            self.assertEqual(before, flat_snapshot(fixture))
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_held_candidate_rechecks_owner_before_first_write(self):
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-held-owner-") as name:
+            fixture, _project, _output, candidate = private_project(Path(name))
+            other_uid = candidate.lstat().st_uid + 1
+            with bound(fixture), mock.patch.object(
+                DHCP.os, "geteuid", return_value=other_uid,
+            ):
+                with self.assertRaises((OSError, ValueError)):
+                    with DHCP._held_private_candidate(str(candidate)):
+                        self.fail("a foreign-owned candidate must not be held for writing")
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_candidate_prior_hosts_copy_rejects_source_rebind_before_open(self):
+        # DEV test_load_release_transaction::ReleaseTransactionTests::
+        # test_deferred_dhcp_copy_rejects_source_rebind_before_open
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-copy-rebind-") as name:
+            fixture, _project, output, candidate = private_project(Path(name))
+            source = output / "dhcpd_eth.hosts"
+            previous = source.lstat()
+            alternate = source.with_name("dhcpd_eth.hosts.alternate")
+            alternate.write_bytes(b"X" * previous.st_size)
+            os.utime(alternate, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+            destination = candidate / source.name
+            output_identity = identity(output)
+            open_file = os.open
+            rebound = False
+
+            def swap_before_open(path, *args, **kwargs):
+                nonlocal rebound
+                directory = kwargs.get("dir_fd")
+                if (not rebound and os.fspath(path) == source.name
+                        and directory is not None):
+                    held = os.fstat(directory)
+                    if (held.st_dev, held.st_ino) == output_identity:
+                        rebound = True
+                        os.replace(alternate, source)
+                return open_file(path, *args, **kwargs)
+
+            with mock.patch.object(DHCP.os, "open", side_effect=swap_before_open):
+                with self.assertRaisesRegex(OSError, "changed before copy"):
+                    fixture.execute([
+                        "c1-generate_dhcp.py", "-y", "--switch", "ib",
+                        "--candidate-dir", str(candidate),
+                    ])
+            self.assertTrue(rebound)
+            self.assertFalse(destination.exists())
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def _read_hook(self, source: Path, mutate):
+        read = os.read
+        source_identity = identity(source)
+        state = {"mutated": False}
+
+        def mutate_after_first_read(fd, size):
+            data = read(fd, size)
+            if not state["mutated"] and data:
+                held = os.fstat(fd)
+                if (held.st_dev, held.st_ino) == source_identity:
+                    state["mutated"] = True
+                    mutate()
+            return data
+
+        return mutate_after_first_read, state
+
+    def test_candidate_prior_hosts_copy_rejects_growth_during_read(self):
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-copy-grow-") as name:
+            fixture, _project, output, candidate = private_project(Path(name))
+            source = output / "dhcpd_eth.hosts"
+
+            def grow():
+                with open(source, "ab") as stream:
+                    stream.write(b"# appended while the generator was reading\n")
+
+            hook, state = self._read_hook(source, grow)
+            with mock.patch.object(DHCP.os, "read", side_effect=hook):
+                with self.assertRaisesRegex(OSError, "grew during copy"):
+                    fixture.execute([
+                        "c1-generate_dhcp.py", "-y", "--switch", "ib",
+                        "--candidate-dir", str(candidate),
+                    ])
+            self.assertTrue(state["mutated"])
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_candidate_prior_hosts_copy_rejects_same_size_rewrite_during_read(self):
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-copy-rewrite-") as name:
+            fixture, _project, output, candidate = private_project(Path(name))
+            source = output / "dhcpd_eth.hosts"
+            previous = source.lstat()
+
+            def rewrite_in_place():
+                with open(source, "r+b") as stream:
+                    stream.write(b"X" * previous.st_size)
+                os.utime(source, ns=(previous.st_atime_ns, previous.st_mtime_ns))
+
+            hook, state = self._read_hook(source, rewrite_in_place)
+            with mock.patch.object(DHCP.os, "read", side_effect=hook):
+                with self.assertRaisesRegex(OSError, "changed during copy"):
+                    fixture.execute([
+                        "c1-generate_dhcp.py", "-y", "--switch", "ib",
+                        "--candidate-dir", str(candidate),
+                    ])
+            self.assertTrue(state["mutated"])
+            self.assertEqual([], list(candidate.iterdir()))
+
+    def test_candidate_prior_hosts_copy_rejects_unsafe_source_before_open(self):
+        limit = 128 * 1024 * 1024
+        # A symlinked flat file is refused earlier by the project binding of
+        # the five flat outputs (exit 2), so only reader-level shapes remain.
+        for kind in ("oversized", "hard-linked"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(
+                prefix="dhcp-deferred-copy-unsafe-",
+            ) as name:
+                fixture, _project, output, candidate = private_project(Path(name))
+                source = output / "dhcpd_eth.hosts"
+                if kind == "oversized":
+                    os.truncate(source, limit + 1)
+                else:
+                    os.link(source, fixture.root / "second-name.hosts")
+                with self.assertRaisesRegex(OSError, "unsafe prior DHCP output"):
+                    fixture.execute([
+                        "c1-generate_dhcp.py", "-y", "--switch", "ib",
+                        "--candidate-dir", str(candidate),
+                    ])
+                self.assertEqual([], list(candidate.iterdir()))
