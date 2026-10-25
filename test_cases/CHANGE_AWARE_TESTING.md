@@ -297,9 +297,9 @@ cat-file」来自实现者的静态模型 `devC09-work/w1_model.out`，对应 d1
 这类失败先查负载，不放宽阈值、不改超时。对比：原实现每次 W1 约 1948 次单读，每次都有 1 秒硬
 超时。C09 让 P 族的硬性超时假红变少，风险转成这些用例的计数失败。
 
-证据位置（仓库外）：lab 链 `/Users/joeyyang/Desktop/claude-merge-test/lab-trees/http-perf-670-c09fix`
+证据位置（仓库外）：lab 链 `<http-test lab tree http-perf-670-c09fix>`
 （f0570a3→874f3f5→d2fb233→d31a2a0）；提案 `http-perf-runs/proposals/PROP-02-c09.md`；serve 字节
-重建与移植脚本、W1 模型在 `/Users/joeyyang/Desktop/claude-merge-test/step1.noindex/devC09-work/`，
+重建与移植脚本、W1 模型在 `<http-test C09 work directory devC09-work>/`，
 修正轮的脚本在其 `fix/` 子目录。重建用两个独立口径：钉住的生成脚本在内存中重放，以及独立重写
 同一组替换。两者逐字节一致，输入与输出都等于 PREP pin：serve_e_ov
 `859f601d0e598d7b01b20ae84bc31da7b14f9c0ba83a06a0d15a2fe2324b5951`，serve_f_wf
@@ -332,12 +332,11 @@ W1 本身会执行 `tools/update-user-manual.py --check`。本文件的改动在
 
 ### 2026-10-09 再审与候选判定
 
-> 合入 DEV 注（2026-10-25）：本小节原文是 http-test 树（TEST）上的判定记录，表中读数、日志与 SHA256 都是 http-test 的历史证据，DEV 没有运行这些测试。表中「已落地」指 TEST 树：在 DEV，「精确 proof 复用」与 pre-push 门没有随本批合入（随 11-load 批另行裁定），macOS load 仍按 AGENTS.md 现行合同执行全量测试；本批合入 DEV 的是 invocation-local catalog（M04）、Git 不可变对象批量读取（M03）与 collection worker 早退出唤醒（M02）。
+> 合入 DEV 注（2026-10-25）：本小节原文是 http-test 树（TEST）上的判定记录，表中读数、日志与 SHA256 都是 http-test 的历史证据，DEV 没有运行这些测试。表中「已落地」指 TEST 树：在 DEV，「精确 proof 复用」与 pre-push 门没有随本批合入（随 11-load 批另行裁定），macOS load 仍按 AGENTS.md 现行合同执行全量测试；本批合入 DEV 的是 invocation-local catalog（M04）、Git 不可变对象批量读取（M03）与 collection worker 早退出唤醒（M02）。表中「纯编译结果缓存」一行的 module_loader 部分（`_compile_source` 的 `lru_cache(maxsize=8)` 与 `_ExactSourceLoader`）随 initial-setup 批合入，本合并树已含（`test_cases/module_loader.py`）。TEST 的 validation-only 逐案例计时接口（9ef98fa）没有合入 DEV，本表不列。
 
 再次核对的执行链为：真实部署选择器/完整 manifest → 源码、测试与 support snapshot
 → 选测/环境/只读 Git 与 loopback preflight → 原 canonical unittest discovery
 → 成功后重读 manifest/snapshot → 环境复核 → 原子 ledger 发布及发布后复核/失败回滚。
-macOS load 仅对 check 的 4/5 运行一次 full；sync/package/pre-push 仅复核现有证明。
 每个重核边界有独立的漂移/失败合同，不能把同一次读取跨测试或提交边界复用。
 
 | 候选 | 同工作量证据或边界 | 本轮决定 |
@@ -354,7 +353,6 @@ macOS load 仅对 check 的 4/5 运行一次 full；sync/package/pre-push 仅复
 | 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
 | 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
 | 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格 |
-| 可选逐案例计时与只读 profile | 现有 validation-only 计时是观测能力，不是加速；普通 proof 路径、结果与精确例外不变 | 保留现有接口；不能把计时/采样诊断冒充正式优化或通过 |
 
 这不是对 full 总耗时的同比承诺。最近普通正式基线为 5,578 tests / 8,816.975 秒 /
 OK (skipped=5)，而新候选增加独立测试；整体比较须列出版本、工作量与运行条件变化，
@@ -476,6 +474,8 @@ paths 后才比较同环境工作量，未更改测试预期或安装依赖。�
 
 ### 2026-09-29 第二轮：collection worker 的结束唤醒
 
+> 合入 DEV 注（2026-10-25）：本小节的计时文件、耗时与收益都是 http-test 的历史证据，DEV 没有运行这些测试；DEV 上的验证见合并窗口记录。
+
 完整计时文件 `/tmp/http-full-timings-20260929-codex-test-dba95de.jsonl` 中，
 `test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.
 test_all_scope_order_and_every_slot_echo_mutation_fail_closed` 耗时 163.011 秒。
@@ -555,7 +555,7 @@ RED 在只含测试的提交 `9c7fd30` 上运行：7 个新用例单独运行 Ra
 整模块 Ran 35 / OK，日志 `p1d-green/00-green-handoff-module-treeB.log`，SHA256
 `dacaff478500bf25aa385f0b79364ecb117e73adac07be74ee64835b8978ba78`；`test_eth_activity_cycle_handoff_workflow`
 Ran 1 / OK，日志 `p1d-green/01-green-eth-activity-treeB.log`，SHA256
-`34c462953f466637f0378e8651e861224498bb85b53f7deb88d3525baca4c918`。日志位于 `/Users/joeyyang/Desktop/claude-merge-test/step1.noindex/devHO7-evidence`（仓库外）。这些运行使用
+`34c462953f466637f0378e8651e861224498bb85b53f7deb88d3525baca4c918`。日志位于 `<http-test HO-7 evidence directory devHO7-evidence>`（仓库外）。这些运行使用
 CLT Python 3.9.6、`-B -m unittest -b -v`、私有 TMPDIR 和每步新建的空 0700 `PYTHONPYCACHEPREFIX`；
 运行期间另一个 full 在跑（load 6–16），所以只作正确性证据，不作计时。收益量值目前只有 lab 读数
 （PROP-04：确认复跑 E2 = 1.032 s/run，n=24，已扣 warm；原读数 0.819 s/run，n=12；按每次 full
