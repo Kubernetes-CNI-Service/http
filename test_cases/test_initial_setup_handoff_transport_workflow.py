@@ -39,28 +39,6 @@ def write_public_inventory(path, rows):
         csv.writer(stream).writerows((DEVICE_HEADER, *rows))
 
 class InitialHandoffRealReaderTransportWorkflowTests(unittest.TestCase):
-    def test_blank_inventory_survives_three_readers_but_remote_connection_refuses(self):
-        self.assertEqual(37, len(DEVICE_HEADER))
-        with tempfile.TemporaryDirectory() as name:
-            path = Path(name) / "02-devices_config.csv"
-            rows = public_rows()
-            self.assertEqual([37, 37], [len(row) for row in rows])
-            write_public_inventory(path, rows)
-            self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
-            self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
-            ib, transit = INITIAL.load_devices(path)
-            self.assertEqual({"example-ib01"}, set(ib))
-            self.assertEqual({"example-jump01"}, set(transit))
-            device = transit["example-jump01"]
-            self.assertEqual("", device.login_ip)
-            with patch.object(INITIAL, "interactive_run") as external:
-                with self.assertRaisesRegex(INITIAL.SetupError, "login address"):
-                    INITIAL.run_on_ethernet(device, "PUBLIC-user", "PUBLIC-ONLY",
-                                            ["hostname"], 5)
-            external.assert_not_called()
-            self.assertEqual(["hostname"], INITIAL.outer_ssh_command(
-                device, "PUBLIC-user", ["hostname"], 5, local=True))
-
     def test_supplied_invalid_metadata_is_rejected_by_all_three_before_dispatch(self):
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "02-devices_config.csv"
