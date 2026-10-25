@@ -370,6 +370,104 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
             self.assertNotEqual(0, completed.returncode)
             self.assertEqual("OWNER\n", foreign.read_text(encoding="ascii"))
 
+    def test_force_fill_missing_accepts_independent_membership_literals(self) -> None:
+        device = self.initial.Device(
+            "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+            "203.0.113.1", "", "", "",
+        )
+        # These are supplied readback facts, not output from desired_commands().
+        cases = (
+            ("no_eth0_yet", (), (), (), (), "nvos", True),
+            ("extra_eth0_target_missing", ("198.51.100.2/24",), (),
+             ("203.0.113.1",), (), "EXAMPLE-IB01", True),
+            ("target_and_extra_eth0", ("198.51.100.2/24", "203.0.113.2/24"), (),
+             ("203.0.113.1",), (), "EXAMPLE-IB01", False),
+            ("target_and_extra_gateway", ("203.0.113.2/24",), (),
+             ("198.51.100.1", "203.0.113.1"), (), "EXAMPLE-IB01", False),
+            ("unrequested_eth1_is_not_an_obligation", ("203.0.113.2/24",),
+             ("198.51.100.22/24",), ("203.0.113.1",),
+             ("198.51.100.21",), "EXAMPLE-IB01", False),
+            ("only_unrequested_eth1_does_not_supply_eth0", (),
+             ("198.51.100.22/24",), (), ("198.51.100.21",), "EXAMPLE-IB01", True),
+            ("empty_requested_gateway_can_be_filled", ("203.0.113.2/24",), (),
+             (), (), "EXAMPLE-IB01", True),
+            ("default_hostname_can_be_filled", ("203.0.113.2/24",), (),
+             ("203.0.113.1",), (), "nvos", True),
+        )
+        for name, eth0, eth1, gateway0, gateway1, hostname, expected in cases:
+            with self.subTest(case=name):
+                state = self.initial.DeviceState(
+                    eth0, eth1, gateway0, gateway1, hostname, "PUBLIC supplied readback",
+                )
+                self.assertIs(expected, self.initial.force_day0_needed(device, state))
+
+        dual = self.initial.Device(
+            "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+            "203.0.113.1", "", "192.0.2.2/24", "192.0.2.1",
+        )
+        dual_cases = (
+            ("requested_eth1_target_missing", ("198.51.100.22/24",), True),
+            ("requested_eth1_membership", ("198.51.100.22/24", "192.0.2.2/24"), False),
+        )
+        for name, actual_eth1, expected in dual_cases:
+            with self.subTest(case=name):
+                state = self.initial.DeviceState(
+                    ("203.0.113.2/24",), actual_eth1, ("203.0.113.1",),
+                    ("192.0.2.1",), "EXAMPLE-IB01", "PUBLIC supplied readback",
+                )
+                self.assertIs(expected, self.initial.force_day0_needed(dual, state))
+
+    def test_force_fill_missing_keeps_actual_hostname_and_gateway_conflicts(self) -> None:
+        device = self.initial.Device(
+            "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+            "203.0.113.1", "", "192.0.2.2/24", "192.0.2.1",
+        )
+        cases = (
+            ("wrong_eth0_gateway", ("198.51.100.1",), ("192.0.2.1",),
+             "EXAMPLE-IB01", "eth0 gateway"),
+            ("wrong_requested_eth1_gateway", ("203.0.113.1",), ("198.51.100.21",),
+             "EXAMPLE-IB01", "eth1 gateway"),
+            ("wrong_nondefault_hostname", ("203.0.113.1",), ("192.0.2.1",),
+             "OTHER-IB01", "hostname"),
+        )
+        for name, gateway0, gateway1, hostname, field in cases:
+            with self.subTest(case=name):
+                state = self.initial.DeviceState(
+                    ("203.0.113.2/24",), ("192.0.2.2/24",),
+                    gateway0, gateway1, hostname, "PUBLIC supplied readback",
+                )
+                with self.assertRaisesRegex(self.initial.SetupError, field):
+                    self.initial.force_day0_needed(device, state)
+
+    def test_force_does_not_qualify_unknown_empty_readback(self) -> None:
+        for raw in ("", " \n\t", "PUBLIC login banner only\n"):
+            with self.subTest(raw=raw):
+                with self.assertRaisesRegex(self.initial.SetupError, "UNKNOWN|verifiable"):
+                    self.initial.parse_nvue_state(raw)
+
+    def test_authorized_failure_summary_never_carries_a_credential_or_device_output(self) -> None:
+        """A1: the report text added after a failed authorized IB operation.
+
+        It is the product's own SetupError text: never an OSError text, never a
+        credential (checked on the text as raised, before any whitespace is
+        folded), and the product-written summary replaces a message that embeds
+        device output.
+        """
+        summary = self.initial._authorized_failure_summary
+        credential = "PUBLIC  spaced\tcredential"
+        self.assertIsNone(
+            summary(self.initial.SetupError("fixture " + credential), ("PUBLIC-OOB", credential)),
+            "a credential must be withheld even when folding whitespace would hide it",
+        )
+        embedded = self.initial.SetupError("nested SSH failed, exit=1: PUBLIC-DEVICE-LINE")
+        embedded.report_summary = "nested SSH failed, exit=1; device output withheld"
+        self.assertEqual("nested SSH failed, exit=1; device output withheld",
+                         summary(embedded, ("PUBLIC-OOB",)))
+        self.assertIsNone(summary(OSError(5, "PUBLIC-IO-TEXT"), ("PUBLIC-OOB",)))
+        self.assertEqual("PUBLIC product text",
+                         summary(self.initial.SetupError("PUBLIC\nproduct\x1b text"), ("PUBLIC-OOB",)))
+
+
 
 if __name__ == "__main__":
     unittest.main()

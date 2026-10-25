@@ -243,9 +243,9 @@ class EthJumpTransportContractTests(unittest.TestCase):
         self.assertEqual("snapshot", output)
         dispatched = runner.call_args.args[0]
         self.assertEqual(
-            shlex.join(command),
+            "sh -c 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec nv config show'",
             dispatched[-1],
-            "typed argv must be shell-quoted exactly once at the remote SSH boundary",
+            "typed argv must cross the remote OOB PATH wrapper as one quoted exec boundary",
         )
 
     def test_write_capable_nv_prefix_is_rejected_before_dispatch(self):
@@ -637,19 +637,417 @@ class EthJumpTransportContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {"run_on_ethernet", "run_on_ib", "verify_ipv4_login",
-             "install_oob_management_key"},
+             "install_oob_management_key", "_execute_ib_phase"},
             callers["interactive_run"],
         )
         self.assertEqual(
             {
                 "nested_ssh_command", "verify_ipv4_login", "_service_profile",
                 "desired_service_commands", "key_install_command",
-                "_validate_cache_profile",
+                "_validate_cache_profile", "_run_authorized_ib_command",
             },
             callers["ib_command_argv"],
             "every NVOS dispatch boundary must reuse the closed typed enforcer",
         )
 
+
+    def test_approved_private_phase_dispatch_reuses_closed_builder(self):
+        import contextlib
+        import inspect
+        import io
+        from functools import wraps
+
+        app = self.module
+        required = {
+            "target", "neighbor", "eth_user", "ethernet_password", "ib_user",
+            "ib_default_password", "timeout", "ib_command", "_phase_operation",
+        }
+        if (not callable(getattr(app, "_execute_ib_phase", None))
+                or not required <= set(inspect.signature(app.run_on_ib).parameters)):
+            raise RuntimeError("NOT_READY: approved private phase dispatch ABI absent")
+
+        read = ["nv", "config", "show", "-o", "commands"]
+        current = "PUBLIC-IB-Current-79!"
+        oob = "PUBLIC-Outer-Only-81!"
+        real_nested = app.nested_ssh_command
+        real_enforcer = app.ib_command_argv
+        real_outer = app.outer_ssh_command
+        real_interactive = app.interactive_run
+
+        # Fixed incoming names are an independent reviewed contract, not an
+        # expected set constructed from the observed implementation.
+        tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))
+        incoming = {
+            function.name
+            for function in ast.walk(tree)
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id == "_execute_ib_phase"
+        }
+        self.assertEqual({"run_on_ib", "_authenticate_ib_read"}, incoming)
+
+        for case in ("admitted-read", "general-apply-is-not-private-read"):
+            with self.subTest(case=case):
+                ib = app.Device(
+                    "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+                    "203.0.113.1", "", "", "",
+                )
+                target = app.Target(ib, self.ethernet(), "swp7", "eth0")
+                neighbor = app.Neighbor(
+                    "fe80::1", "swp7", "02:11:22:33:44:55", "default",
+                )
+                command = read if case == "admitted-read" else ["nv", "config", "apply", "-y"]
+                self.assertEqual(command, real_enforcer(command),
+                                 "PUBLIC vector is generally allowed, not private authority")
+                sentinel = RuntimeError("PUBLIC final PTY boundary stop")
+                seen = {"events": [], "bindings": [], "enforcer": [], "outer": None}
+                error = None
+                out, err = io.StringIO(), io.StringIO()
+
+                @wraps(real_enforcer)
+                def enforce(argv):
+                    result = real_enforcer(argv)
+                    seen["events"].append("enforcer-return")
+                    seen["enforcer"].append(type(result) is list and result == read)
+                    return result
+
+                @wraps(real_outer)
+                def outer(*args, **kwargs):
+                    bound = inspect.signature(real_outer).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    values = bound.arguments
+                    seen["events"].append("outer-entry")
+                    remote = values["remote_argv"]
+                    seen["bindings"].append(
+                        values["ethernet"] is target.ethernet
+                        and values["user"] == "admin" and values["local"] is False
+                        and values["tty"] is True and type(remote) is list
+                        and len(remote) == 3 and remote[:2] == ["sh", "-c"]
+                    )
+                    result = real_outer(*args, **kwargs)
+                    seen["outer"] = result
+                    seen["events"].append("outer-return")
+                    return result
+
+                @wraps(real_nested)
+                def nested(*args, **kwargs):
+                    bound = inspect.signature(real_nested).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    values = bound.arguments
+                    phase = values["_phase"]
+                    seen["events"].append("nested-entry")
+                    seen["bindings"].append(
+                        values["target"] is target and values["neighbor"] is neighbor
+                        and values["ib_command"] == read
+                        and values["local"] is False and values["password_only"] is True
+                        and type(phase) is app._IBPhase
+                        and type(values["marker"]) is str
+                        and re.fullmatch(r"[0-9a-f]{32}", values["marker"]) is not None
+                        and values["marker"] == phase.nonce
+                        and phase.operation == "auth-probe-readonly"
+                        and phase.endpoint == "admin@fe80::1"
+                        and phase.outer_endpoint == "admin@192.0.2.10"
+                    )
+                    result = real_nested(*args, **kwargs)
+                    seen["bindings"].append(result is seen["outer"])
+                    seen["events"].append("nested-return")
+                    return result
+
+                @wraps(real_interactive)
+                def stop(*args, **kwargs):
+                    bound = inspect.signature(real_interactive).bind(*args, **kwargs)
+                    responder = bound.arguments["responder"]
+                    seen["events"].append("interactive-entry")
+                    seen["bindings"].append(
+                        bound.arguments["command"] is seen["outer"]
+                        and type(responder) is app.NestedResponder
+                        and type(responder._phase) is app._IBPhase
+                        and responder.ib_default_password == current
+                        and responder.ethernet_password == oob
+                    )
+                    raise sentinel
+
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                        mock.patch.object(app, "nested_ssh_command", new=nested), \
+                        mock.patch.object(app, "ib_command_argv", new=enforce), \
+                        mock.patch.object(app, "outer_ssh_command", new=outer), \
+                        mock.patch.object(app, "interactive_run", new=stop), \
+                        mock.patch.object(app.ProjectPasswordPolicy, "password",
+                                          side_effect=AssertionError("PUBLIC no target fetch")) as fetch, \
+                        mock.patch.object(app, "verify_password_hash",
+                                          side_effect=AssertionError("PUBLIC no native verification")) as native, \
+                        mock.patch.object(app.getpass, "getpass",
+                                          side_effect=AssertionError("PUBLIC no prompt")) as prompt:
+                    try:
+                        app.run_on_ib(
+                            target, neighbor, "admin", oob, "admin", current, 10,
+                            command, _phase_operation="auth-probe-readonly",
+                        )
+                    except BaseException as caught:
+                        error = caught
+
+                self.assertTrue(
+                    all(value not in out.getvalue() + err.getvalue() for value in (current, oob)),
+                    "dispatch diagnostics exposed credential data; details suppressed",
+                )
+                self.assertTrue(fetch.call_count == native.call_count == prompt.call_count == 0,
+                                "private read routing must not acquire target authority")
+                if case == "admitted-read":
+                    self.assertTrue(error is sentinel,
+                                    "real private builder did not reach the sole external PTY stop")
+                    self.assertEqual(
+                        ["nested-entry", "enforcer-return", "outer-entry",
+                         "outer-return", "nested-return", "interactive-entry"],
+                        seen["events"],
+                    )
+                    self.assertTrue(bool(seen["bindings"]) and all(seen["bindings"]),
+                                    "private nonce/endpoint/typed/credential binding was not preserved")
+                    self.assertEqual([True], seen["enforcer"])
+                else:
+                    self.assertTrue(type(error) is app.SetupError,
+                                    "generally allowed write must be denied by private operation")
+                    self.assertEqual([], seen["events"],
+                                     "private mismatch must stop before builder or PTY dispatch")
+
+    def test_approved_management_dispatch_enforces_typed_argv_before_authority(self):
+        import contextlib
+        import hmac
+        import inspect
+        import io
+        from functools import wraps
+        from test_cases.test_initial_setup_target_password_policy import (
+            required_external_kat, project_global,
+        )
+
+        app = self.module
+        required = {
+            "target", "neighbor", "eth_user", "ethernet_password", "ib_user",
+            "current_password", "timeout", "ib_command", "_password_policy",
+        }
+        if (not callable(getattr(app, "_run_authorized_ib_command", None))
+                or not required <= set(inspect.signature(app._run_authorized_ib_command).parameters)):
+            raise RuntimeError("NOT_READY: approved ordinary management dispatch ABI absent")
+
+        def capture(operation):
+            out, err = io.StringIO(), io.StringIO()
+            result = error = None
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    result = operation()
+                except BaseException as caught:
+                    error = caught
+            return result, error, out.getvalue() + err.getvalue()
+
+        kat, kat_error, _kat_output = capture(required_external_kat)
+        if kat_error is not None or type(kat) is not dict:
+            raise RuntimeError("FIXTURE HOLD: required external KAT unavailable") from None
+        private = (
+            kat["PASSWORD"], kat["SHA512"], kat["YESCRYPT"],
+            "PUBLIC-IB-Current-79!", "PUBLIC-Outer-Only-81!",
+        )
+        self.assertTrue(all(value not in _kat_output for value in private),
+                        "KAT diagnostics exposed credential data; details suppressed")
+        # Actual original positive and wrong pairs qualify the external backend;
+        # no schema-only MODEL is accepted as native prerequisite.
+        for algorithm in ("SHA512", "YESCRYPT"):
+            good = capture(lambda: app.verify_password_hash(kat["PASSWORD"], kat[algorithm]))
+            bad = capture(lambda: app.verify_password_hash("PUBLIC-Wrong-Target-81!", kat[algorithm]))
+            self.assertTrue(
+                all(value not in good[2] + bad[2] for value in private),
+                "native prerequisite diagnostics exposed data; details suppressed",
+            )
+            if not (good[1] is None and good[0] is True
+                    and bad[1] is None and bad[0] is False):
+                raise RuntimeError("FIXTURE HOLD: genuine native KAT prerequisite unavailable") from None
+
+        tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))
+        incoming = {
+            function.name
+            for function in ast.walk(tree)
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for call in ast.walk(function)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id == "_run_authorized_ib_command"
+        }
+        self.assertEqual(
+            {"run_initial_stage", "run_service_stage", "run_key_stage", "main"},
+            incoming,
+        )
+        real_enforcer = app.ib_command_argv
+        real_ib = app.run_on_ib
+        real_nested = app.nested_ssh_command
+        real_outer = app.outer_ssh_command
+        real_interactive = app.interactive_run
+        real_native = app.verify_password_hash
+        real_password = app.ProjectPasswordPolicy.password
+        current, oob = "PUBLIC-IB-Current-79!", "PUBLIC-Outer-Only-81!"
+        setter = ["nv", "set", "system", "hostname", "EXAMPLE-IB01"]
+        blocked = ["nv", "config", "replace"]
+
+        for case in ("admitted-setter", "invalid-replace"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="closed-management-") as folder:
+                global_path = Path(folder) / "01-global.yaml"
+                global_path.write_text(project_global(kat["YESCRYPT"]), encoding="utf-8")
+                global_path.chmod(0o600)
+                original_global = global_path.read_bytes()
+                ib = app.Device(
+                    "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+                    "203.0.113.1", "", "", "",
+                )
+                target = app.Target(ib, self.ethernet(), "swp7", "eth0")
+                neighbor = app.Neighbor(
+                    "fe80::1", "swp7", "02:11:22:33:44:55", "default",
+                )
+                command = setter if case == "admitted-setter" else blocked
+                sentinel = RuntimeError("PUBLIC final ordinary PTY boundary stop")
+                seen = {"events": [], "native": [], "bindings": [], "enforcer": 0,
+                        "fetch": 0, "outer": None}
+
+                @wraps(real_enforcer)
+                def enforce(argv):
+                    seen["enforcer"] += 1
+                    seen["events"].append("enforcer-entry")
+                    result = real_enforcer(argv)
+                    seen["bindings"].append(type(result) is list and result == setter)
+                    seen["events"].append("enforcer-return")
+                    return result
+
+                @wraps(real_native)
+                def native(password, setting):
+                    answer = real_native(password, setting)
+                    seen["native"].append(
+                        hmac.compare_digest(password, kat["PASSWORD"])
+                        and hmac.compare_digest(setting, kat["YESCRYPT"])
+                        and answer is True
+                    )
+                    seen["events"].append("native-return")
+                    return answer
+
+                @wraps(real_password)
+                def fetch(policy):
+                    seen["fetch"] += 1
+                    return real_password(policy)
+
+                @wraps(real_ib)
+                def ordinary(*args, **kwargs):
+                    bound = inspect.signature(real_ib).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    values = bound.arguments
+                    seen["events"].append("ordinary-entry")
+                    seen["bindings"].append(
+                        values["target"] is target and values["neighbor"] is neighbor
+                        and values["ib_command"] == setter
+                        and values["ethernet_password"] == oob
+                        and values["ib_default_password"] == current
+                        and values["allow_password_change"] is False
+                        and values["_phase_operation"] is None
+                    )
+                    return real_ib(*args, **kwargs)
+
+                @wraps(real_nested)
+                def nested(*args, **kwargs):
+                    bound = inspect.signature(real_nested).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    values = bound.arguments
+                    seen["events"].append("nested-entry")
+                    seen["bindings"].append(
+                        values["target"] is target and values["neighbor"] is neighbor
+                        and values["ib_command"] == setter
+                        and values["_phase"] is None and values["local"] is False
+                    )
+                    return real_nested(*args, **kwargs)
+
+                @wraps(real_outer)
+                def outer(*args, **kwargs):
+                    bound = inspect.signature(real_outer).bind(*args, **kwargs)
+                    bound.apply_defaults()
+                    values = bound.arguments
+                    seen["events"].append("outer-entry")
+                    seen["bindings"].append(
+                        values["ethernet"] is target.ethernet
+                        and values["user"] == "admin" and values["local"] is False
+                        and values["tty"] is True and type(values["remote_argv"]) is list
+                    )
+                    result = real_outer(*args, **kwargs)
+                    seen["outer"] = result
+                    seen["events"].append("outer-return")
+                    return result
+
+                @wraps(real_interactive)
+                def stop(*args, **kwargs):
+                    bound = inspect.signature(real_interactive).bind(*args, **kwargs)
+                    responder = bound.arguments["responder"]
+                    seen["events"].append("interactive-entry")
+                    seen["bindings"].append(
+                        bound.arguments["command"] is seen["outer"]
+                        and type(responder) is app.NestedResponder
+                        and responder._phase is None
+                        and responder.ib_default_password == current
+                        and responder.ethernet_password == oob
+                        and responder.allow_password_change is False
+                    )
+                    raise sentinel
+
+                with mock.patch.object(app, "ib_command_argv", new=enforce), \
+                        mock.patch.object(app, "verify_password_hash", new=native), \
+                        mock.patch.object(app.ProjectPasswordPolicy, "password", new=fetch), \
+                        mock.patch.object(app, "run_on_ib", new=ordinary), \
+                        mock.patch.object(app, "nested_ssh_command", new=nested), \
+                        mock.patch.object(app, "outer_ssh_command", new=outer), \
+                        mock.patch.object(app, "interactive_run", new=stop), \
+                        mock.patch.object(app.getpass, "getpass",
+                                          side_effect=AssertionError("PUBLIC no prompt")) as prompt:
+                    born = capture(lambda: app.ProjectPasswordPolicy(
+                        global_path, "admin", target_password=kat["PASSWORD"], interactive=False,
+                    ))
+                    self.assertTrue(
+                        born[1] is None and type(born[0]) is app.ProjectPasswordPolicy,
+                        "genuine policy constructor failed on qualified input; details suppressed",
+                    )
+                    policy = born[0]
+                    result = capture(lambda: app._run_authorized_ib_command(
+                        target, neighbor, "admin", oob, "admin", current, 10,
+                        command, _password_policy=policy,
+                    ))
+
+                self.assertTrue(
+                    all(value not in born[2] + result[2] for value in private),
+                    "management diagnostics exposed credential data; details suppressed",
+                )
+                self.assertTrue(prompt.call_count == 0,
+                                "explicit management context unexpectedly prompted")
+                self.assertTrue(global_path.read_bytes() == original_global,
+                                "dispatch observation changed its project authority input")
+                if case == "admitted-setter":
+                    self.assertTrue(result[1] is sentinel,
+                                    "real authorized builder did not reach final PTY stop")
+                    self.assertTrue(bool(seen["bindings"]) and all(seen["bindings"]),
+                                    "ordinary typed or selected CURRENT/OOB roles changed")
+                    self.assertTrue(bool(seen["native"]) and all(seen["native"])
+                                    and seen["fetch"] > 0,
+                                    "actual project IB target/native verification was not reached")
+                    events = seen["events"]
+                    self.assertTrue(
+                        "enforcer-return" in events and "native-return" in events
+                        and "ordinary-entry" in events and "outer-return" in events
+                        and "interactive-entry" in events
+                        and events.index("enforcer-return") < events.index("native-return")
+                        < events.index("ordinary-entry") < events.index("outer-return")
+                        < events.index("interactive-entry"),
+                        "typed admission/native authority must precede the sole external dispatch",
+                    )
+                else:
+                    self.assertTrue(
+                        type(result[1]) is app.SetupError
+                        and result[1].args == ("management IB operation failed; device state is UNKNOWN",)
+                        and result[1].__cause__ is None and result[1].__context__ is None,
+                        "invalid typed command must give the fixed safe management HOLD",
+                    )
+                    self.assertEqual(["enforcer-entry"], seen["events"])
+                    self.assertTrue(seen["enforcer"] == 1 and seen["fetch"] == 0
+                                    and seen["native"] == [],
+                                    "invalid replace must fail at real enforcer before target or native")
 
 if __name__ == "__main__":
     unittest.main()
