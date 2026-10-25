@@ -973,6 +973,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/REAL_ENVIRONMENT.md",
                 "test_cases/monitor_authority_root_warden.py",
                 "test_cases/monitor_authority_source_guard.py",
+                "test_cases/private_public_fixture_input.py",
                 "test_cases/public_project_fixture.py",
                 "test_cases/splitter_profile_fixture.py",
                 "test_cases/module_loader.py",
@@ -1123,6 +1124,7 @@ class ImpactManifestTests(unittest.TestCase):
                 # 2026-10-24: macOS cp39 arm64 list of venv-ibsw-upgrade and the F01 SDK venv routing helper.
                 "infra/requirements-ibsw-upgrade-macos-cp39.txt",
                 "test_cases/f01_sdk_venv.py",
+                "infiniband/bringup/xdr-initial-setup/infra-neutral.conf",
             ],
             manifest["tracked_support"],
         )
