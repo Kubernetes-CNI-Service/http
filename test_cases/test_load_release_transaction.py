@@ -6002,6 +6002,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "      package: isc-dhcp-server\n"
                 "    http:\n"
                 "      status: enabled\n"
+                "      address: 192.0.2.2\n"
                 "      package: apache2\n"
                 f"      http_root: {LOAD.HTTP_ROOT}\n"
                 "    ztp:\n"
@@ -6089,6 +6090,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         settings = LOAD.GlobalSettings(
             dhcp_enabled=True, dhcp_package="isc-dhcp-server",
             http_enabled=True, http_package="apache2", http_root=self.root,
+            http_address="192.0.2.2",
             ztp_enabled=True, ztp_prefix="/ztp", ztp_ips={}, versions={},
         )
         self.inputs = LOAD.ProjectInputs(
@@ -20820,7 +20822,8 @@ os.kill(os.getpid(), signal.SIGKILL)
             "common": {
                 "mgmt": {
                     "dhcp-server": {"status": "enabled", "package": "isc-dhcp-server"},
-                    "http": {"status": "enabled", "package": "apache2", "http_root": "/var/www/html"},
+                    "http": {"status": "enabled", "package": "apache2", "http_root": "/var/www/html",
+                             "address": "192.0.2.2"},
                     "ztp": {"status": "enabled", "ztp_url_prefix": "/ztp"},
                 },
                 "switch": {"system": {"dns": {}, "ntp": {}, "date-time": {}}},
