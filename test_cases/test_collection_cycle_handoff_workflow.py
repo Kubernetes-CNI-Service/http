@@ -2070,14 +2070,20 @@ print(json.dumps(outcomes, sort_keys=True))
             observed["prefix"] = prefix
             # Exactly the original fixture env plus the prefix: still no HOME,
             # and chain children still never write bytecode.
+            # DEV merge: DEV's closed fixture env also binds PYTHONEXECUTABLE
+            # to the current runtime on darwin (literal contract in
+            # test_fixture_environment_is_closed_and_current_runtime_bound_on_darwin).
+            darwin_binding = {"PYTHONEXECUTABLE"} if sys.platform == "darwin" else set()
             self.assertEqual(
                 {
                     "TMPDIR", "TMP", "TEMP", "FIXTURE_PRIVATE_TMP", "BASH_ENV", "PATH",
                     "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX", "FIXTURE_TAR_MODE",
                     "DHCP_LEASES_FILE", "DHCP_RUNTIME_LOG_FILE",
-                },
+                } | darwin_binding,
                 set(env),
             )
+            if darwin_binding:
+                self.assertEqual(sys.executable, env["PYTHONEXECUTABLE"])
             self.assertEqual("1", env.get("PYTHONDONTWRITEBYTECODE"))
             self.assertNotIn("HOME", env)
             self.assertTrue(prefix.is_absolute(), prefix)
