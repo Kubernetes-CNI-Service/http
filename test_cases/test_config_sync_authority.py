@@ -346,7 +346,9 @@ class ConfigSyncAuthorityTests(unittest.TestCase):
                 return 1, [target]
             cycle = self.authority.ManagedInitialMethodCycle(project, SimpleNamespace(load_target_cache=parser_then_new_member))
             cycle.tool, cycle.cache, cycle.csv, cycle.p2p, cycle.targets = tool, project / "cache", project / "csv", project / "p2p", [target]
-            with self.assertRaises(self.authority.AuthorityError):
+            # The cycle was never admitted, so the neutral check would also raise; name the
+            # membership refusal so this test still fails if that recheck is removed (Q4).
+            with self.assertRaisesRegex(self.authority.AuthorityError, "public-key membership changed"):
                 cycle._inputs()
             self.assertTrue((tool / "publickey/new.pub").exists(), "foreign input must be retained")
 
