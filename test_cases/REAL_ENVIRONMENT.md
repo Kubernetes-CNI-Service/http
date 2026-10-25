@@ -2404,3 +2404,67 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [ ] 修复后通过：本卡不预填，定向运行结果以测试窗口的记录为准
 - [ ] 已纳入全量 discovery（需正式本机 load 的全量证明，未执行）
 - [ ] 逐台 Docker 主机重建与运行中容器复核（本卡，NOT RUN）
+
+## TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001 — initial-setup 严格管理路径测试夹具与私有前置输入
+
+### 基本信息
+
+- Case ID：`TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001`。
+- 名称：present-global 严格管理路径的测试夹具、口令 worker 合同与私有前置输入。
+- 类型：workflow / fixture / real-environment 前置说明。
+- 对应需求：I18（项目 global 存在时，新 IB 口令必须匹配 global 的目标哈希）。存在项目 global 的 manual／auto
+  管理运行构造 `ProjectPasswordPolicy`，每台 IB 经 `_authenticate_ib_read` → `_execute_ib_phase` 只读认证，
+  业务命令经 `_run_authorized_ib_command` → `run_on_ib`；managed 运行同样走这条路径。
+- 自动化：`test_req10b_services_keys_workflow`（严格路径方法，含 managed main 五轮用例）、
+  `test_ibsw225_managed_outer_guard_workflow`（managed 成功与下一轮 monitor 消费）、
+  `test_initial_setup_managed_merge_contract`（完成证明失败用例），共享 `strict_management_boundary` 与
+  `assert_strict_management_path`；口令策略与 worker 合同见 `test_initial_setup_target_password_policy`。
+  REQ10C workflow 的夹具在本树未迁移，不在本卡范围。
+- 适用平台：local；KAT 与私有夹具由操作员按路径提供。
+
+### 风险与目标
+
+- 路径见证：每次运行恰好用夹具 global 构造一次 strict policy；每台到达 IB 登录的设备都进入只读 phase 认证并
+  绑定该 policy；真实 PTY 传输为零；业务命令只经授权 helper 到达 adapter，两边一一对应；设备模型代持的事实
+  从不被写入。
+- 夹具：global 中的 IB 目标哈希与 manual 目标口令提示的应答取自 KAT reader
+  （`test_initial_setup_target_credentials_workflow.required_external_kat`），只在内存中使用；policy、缓存准入、
+  目标取用与原生校验、授权 helper 和全部阶段消费者真实运行，只替换传输层。原断言一条不改。
+- 设备模型：只读 pending diff 默认答空；REQ10B 读回保持 Initial（auto-save、ztp config-save）与保留管理口
+  （eth0-1 link up、type eth）事实为已验证值，它们分别由 `test_initial_setup_initial_closed_facts`、
+  `test_initial_setup_management_network` 覆盖；key 安装返回封闭收据；口令 worker 走真实子进程。适配器只建模
+  只读认证探测，带私有 phase 操作（改密、改密后读回）的请求在适配器处 AssertionError。
+- 口令 worker：唯一 argv 为同解释器 `-I -S -B <initial-setup.py> --_verify-password`，单次运行、8 秒上限，
+  stdin 为 password／hash JSON，env 只含 PATH=os.defpath、LC_ALL=C、LANG=C、PYTHONDONTWRITEBYTECODE=1。
+  只有恰好这一个私有参数才在运行锁与普通 CLI 之前进入纯 hash worker，带任何其他参数都不选中 worker。
+
+### 前置条件与输入
+
+- KAT：操作员显式提供绝对路径 `HTTP_TEST_INITIAL_SETUP_KAT_INPUT`。身份规则：固定完整 SHA256 与 135693 字节；
+  NOFOLLOW|NONBLOCK 打开、regular、nlink 1；每遍最多读 135694 字节并到真实 EOF；同一 FD 两遍读取的 9 域身份、
+  命名路径与 SHA 一致。只用 AST 取 PASSWORD、SHA512、YESCRYPT 三个唯一字符串常量，不 import／exec 该文件；
+  其值不进入日志、argv、env、断言差异或任何公开文件。
+- 原生后端：同一解释器可用的 libcrypt／libxcrypt，具备真实 SHA512 与 yescrypt（macOS 上为 libxcrypt）。
+- 私有夹具：`HTTP_TEST_PUBLIC_FIXTURE_INPUT_PATH` 提供绝对定位路径；原内容长度与整份摘要固定在
+  `private_public_fixture_input.py` 中，环境变量不能自行授权内容。
+- 缺任何一项、身份不符或后端不可用：FIXTURE HOLD／前置 ERROR，不是行为 RED；不 skip、不生成替代向量、
+  不自动安装。所需权限仅限测试自有临时目录。
+
+### 步骤与预期
+
+1. 在正式解释器（`/usr/bin/python3`，CLT 3.9.6）上，`env -i` 只带 HOME/USER/PATH/LANG，按路径提供上述两项输入，
+   运行本卡与 `test_cases/README.md` 列出的依赖模块。
+2. 预期（静态推断，未运行）：严格路径方法与口令策略方法 GREEN；不提供 KAT 时这些方法报 FIXTURE HOLD。
+3. 保存完整输出、实际退出码、源码／测试／manifest 与解释器身份；不得记录 KAT 值或私有夹具内容。
+
+### 故障注入、清理与风险
+
+- 全部状态都在 TemporaryDirectory 中；不读私有 CSV／global，不连接设备。
+- 风险：设备模型代持的 Initial／保留口事实与 pending diff 为空属于 REQ10B 之外的前提；若产品在这些前提下仍写入
+  这些事实，见证会失败而不是被掩盖。
+- 成本：严格路径的每次授权命令都会起一次原生校验子进程，相关模块运行时间增加。
+
+### 自动化状态
+
+- [x] 夹具迁移与路径见证已加入上述模块，原断言不改。
+- [ ] 带 KAT 与私有夹具的正式运行（NOT RUN）。

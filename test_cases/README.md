@@ -7,6 +7,23 @@
 本目录中的自动化测试不连接设备、不修改项目运行数据，重点检查跨目录接口，而不是替代
 真实交换机、Docker 或端到端部署测试。
 
+initial-setup 严格管理路径与口令策略测试使用两项私有前置输入；它们只按路径提供，不进入 Git、生产包、
+普通日志、argv、env 或断言消息，缺失、身份不符或后端不可用都是 FIXTURE HOLD／前置 ERROR，不是行为
+RED，也不 skip、不生成替代向量、不自动安装：
+
+- 原 KAT：操作员显式提供绝对路径 `HTTP_TEST_INITIAL_SETUP_KAT_INPUT`。测试按固定的完整 SHA256 与
+  135693 字节核对身份：NOFOLLOW|NONBLOCK 打开、regular、nlink 1，每遍最多读 135694 字节并到真实
+  EOF，同一 FD 两遍读取的 9 域身份、命名路径与 SHA 一致；只用 AST 取 PASSWORD、SHA512、YESCRYPT
+  三个唯一字符串常量，不 import／exec 该文件，不把固定 crypt 值复制进公开源码。同一解释器还需真实
+  原生口令后端（macOS 上为 libxcrypt），经 initial-setup 的 `--_verify-password` worker 资格化。
+- 私有夹具：环境变量 `HTTP_TEST_PUBLIC_FIXTURE_INPUT_PATH` 提供绝对定位路径；原内容长度与整份摘要
+  独立固定在 `private_public_fixture_input.py` 中，环境变量不能自行授权内容；非私有权限或身份失证
+  同样是失败／HOLD。
+- 依赖范围：直接取用 KAT 的模块为 `test_initial_setup_target_password_policy`、`test_initial_setup_target_credentials_workflow`、`test_initial_setup_auto_credentials_writer`、`test_initial_setup_auto_policy_fact`、`test_initial_setup_ib_phase_protocol`、`test_initial_setup_management_stage_roles`、`test_initial_setup_explicit_consumer_context`、`test_initial_setup_initial_closed_facts`、`test_eth_jump_transport_contract`、`test_req10b_services_keys_workflow`、`test_ibsw225_managed_outer_guard_workflow`、`test_initial_setup_managed_merge_contract`；
+  经导入它们的基类或 helper 间接取用的模块同样依赖，不走严格路径的方法不读取 KAT。取用私有夹具的
+  模块为 `test_private_public_fixture_input`、`test_initial_setup_handoff_transport`、`test_initial_setup_pending_diff`、`test_initial_setup_cache_admission_mode_auto_workflow`。现场要求与证据见
+  `REAL_ENVIRONMENT.md` 的 `TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001`。
+
 `test_project_image_owned_guard.py` 独立约束项目镜像测试夹具的固定解释器、两个借用原始 FD
 及真实 snapshot context 来源。原项目镜像正常/重试 workflow 使用真实 shared/upload installer，
 但其 guard 子进程仅消费本次私有目录中的 state/proc；不读取宿主服务状态、不扫描真实 PID，
