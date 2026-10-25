@@ -17,6 +17,7 @@ import ast
 import base64
 import copy
 import csv
+import errno
 import fcntl
 import getpass
 import hashlib
@@ -40,7 +41,9 @@ import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from contextlib import contextmanager
+from collections.abc import Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Callable, Optional
 
 
@@ -749,6 +752,10 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
         except StopIteration as exc:
             raise SetupError(f"device CSV is empty: {path}") from exc
         indexes = header_indexes(raw_header)
+        if len(indexes.get("config_method", ())) > 1:
+            raise SetupError(
+                f"device CSV config_method duplicate column: {path}"
+            )
         required_headers = {"hostname", "type", "eth0_ip"}
         missing = sorted(required_headers - indexes.keys())
         if missing:
@@ -757,6 +764,36 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
         for line_number, row in enumerate(reader, 2):
             hostname = row_value(row, indexes, "hostname")
             dev_type = row_value(row, indexes, "type").casefold()
+            config_method = row_value(row, indexes, "config_method").casefold()
+            if hostname and dev_type != "eth_jump" and "config_method" in indexes and not config_method:
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} config_method is empty"
+                )
+            if hostname and dev_type == "ib" and config_method not in {"", "initial-setup"}:
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 {config_method}，"
+                    "与当前 initial-setup 执行者不兼容"
+                )
+            if hostname and dev_type == "nvl" and config_method == "initial-setup":
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 initial-setup，"
+                    "但当前 NVL 执行者只支持 IB；拒绝静默跳过 NVL"
+                )
+            if (hostname and dev_type in TRANSIT_DEVICE_TYPES
+                    and config_method == "initial-setup"):
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} 声明 initial-setup，"
+                    "但此执行者仅将 Ethernet 设备作为 transit，不能将其配置计为成功"
+                )
+            if hostname and config_method and (
+                (dev_type == "eth_jump")
+                or (dev_type in TRANSIT_DEVICE_TYPES and config_method != "ztp")
+                or (dev_type == "nvl" and config_method != "ztp")
+            ):
+                raise SetupError(
+                    f"{path}:{line_number}: {hostname} config_method="
+                    f"{config_method} incompatible with initial-setup inventory binding"
+                )
             if not hostname or dev_type not in ({"ib"} | TRANSIT_DEVICE_TYPES):
                 continue
             if not valid_hostname(hostname):
@@ -1400,16 +1437,64 @@ def _public_key_fingerprint(line: str) -> str:
     ).rstrip(b"=").decode("ascii")
 
 
-def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True
+class _CacheInputSnapshot:
+    """Closed immutable bytes/mtime/canonical-name inputs from a held reader.
+
+    This optional management-host path never reopens project data. Missing or
+    malformed members reject the cache; they cannot fall back to live paths.
+    The disconnected leaf's ordinary filesystem parser is unchanged.
+    """
+    def __init__(self, values):
+        if not isinstance(values, Mapping):
+            raise ValueError("cache input snapshot must be a mapping")
+        images = {}
+        for name, value in values.items():
+            if (not isinstance(name, str) or not Path(name).is_absolute()
+                    or ".." in Path(name).parts or type(value) is not tuple or len(value) != 3
+                    or not isinstance(value[0], str) or not Path(value[0]).is_absolute()
+                    or ".." in Path(value[0]).parts or type(value[1]) is not int or value[1] < 0
+                    or type(value[2]) is not bytes or not 0 < len(value[2]) <= 8 * 1024 * 1024):
+                raise ValueError("invalid bounded cache input snapshot member")
+            images[name] = value
+        self.images = MappingProxyType(images)
+
+    def image(self, path):
+        try:
+            return self.images[str(path)]
+        except KeyError as exc:
+            raise ValueError("cache input snapshot member is missing") from exc
+
+    def read(self, path):
+        return self.image(path)[2]
+
+    def mtime_ns(self, path):
+        return self.image(path)[1]
+
+    def canonical(self, path):
+        return self.image(path)[0]
+
+    def is_file(self, path):
+        return str(path) in self.images
+
+    def public_keys(self, tool):
+        directory = tool / "publickey"
+        return sorted(Path(name) for name in self.images
+                      if Path(name).parent == directory and Path(name).name.endswith(".pub"))
+
+
+def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True,
+                        input_snapshot: Optional[_CacheInputSnapshot] = None
                         ) -> list[dict[str, str]]:
     directory = tool / "publickey"
-    if not directory.is_dir():
+    if input_snapshot is None and not directory.is_dir():
         return []
     result: list[dict[str, str]] = []
     validator: Optional[str] = None
-    for path in sorted(directory.glob("*.pub")):
+    paths = input_snapshot.public_keys(tool) if input_snapshot is not None else sorted(directory.glob("*.pub"))
+    for path in paths:
         try:
-            source = path.read_text(encoding="utf-8")
+            source = (input_snapshot.read(path).decode("utf-8") if input_snapshot is not None
+                      else path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError) as exc:
             raise SetupError(f"cannot read public key {path.name}: {exc}") from exc
         if not source.strip():
@@ -1499,7 +1584,8 @@ def _cache_authority(ib_csv: Path, p2p: Path,
 
 
 def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
-                           global_file: Optional[Path]) -> bool:
+                           global_file: Optional[Path], *,
+                           input_snapshot: Optional[_CacheInputSnapshot] = None) -> bool:
     authority = payload.get("cache_authority")
     if not isinstance(authority, dict) or set(authority) != {
         "ib_csv_sha256", "p2p_sha256", "global_sha256", "generator",
@@ -1523,14 +1609,17 @@ def _valid_cache_authority(payload: dict, ib_csv: Path, p2p: Path,
         return False
     if (payload.get("global") is None) != (authority["global_sha256"] is None):
         return False
+    def input_hash(path):
+        return (hashlib.sha256(input_snapshot.read(path)).hexdigest() if input_snapshot is not None
+                else _file_sha256(path))
     if (
-        authority["ib_csv_sha256"] != _file_sha256(ib_csv)
-        or authority["p2p_sha256"] != _file_sha256(p2p)
+        authority["ib_csv_sha256"] != input_hash(ib_csv)
+        or authority["p2p_sha256"] != input_hash(p2p)
         or authority["generator_sha256"] != _file_sha256(_SELF_SOURCE_PATH)
     ):
         return False
-    if global_file is not None and global_file.is_file():
-        if authority["global_sha256"] != _file_sha256(global_file):
+    if global_file is not None and (input_snapshot.is_file(global_file) if input_snapshot is not None else global_file.is_file()):
+        if authority["global_sha256"] != input_hash(global_file):
             return False
     return True
 
@@ -1579,6 +1668,7 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                       p2p: Path, *, public_key_tool: Optional[Path] = None,
                       validate_public_keys_with_ssh_keygen: bool = False,
                       allow_baked_missing_global: bool = False,
+                      input_snapshot=None,
                       _admission_out=None
                       ) -> Optional[tuple[int, list[Target]]]:
     if _admission_out is not None and (
@@ -1592,13 +1682,19 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
             error.__context__ = None
             raise
     try:
-        if cache_path.stat().st_mtime < max(ib_csv.stat().st_mtime, p2p.stat().st_mtime):
+        captured = _CacheInputSnapshot(input_snapshot) if input_snapshot is not None else None
+        def mtime(path):
+            return captured.mtime_ns(path) / 1000000000 if captured is not None else path.stat().st_mtime
+        def mtime_ns(path):
+            return captured.mtime_ns(path) if captured is not None else path.stat().st_mtime_ns
+        if mtime(cache_path) < max(mtime(ib_csv), mtime(p2p)):
             return None
         checksum_path = cache_path.with_name(cache_path.name + ".sha256")
-        if cache_path.stat().st_mtime_ns > checksum_path.stat().st_mtime_ns:
+        if mtime_ns(cache_path) > mtime_ns(checksum_path):
             return None
-        raw_cache = cache_path.read_bytes()
-        checksum_fields = checksum_path.read_text(encoding="ascii").split()
+        raw_cache = captured.read(cache_path) if captured is not None else cache_path.read_bytes()
+        checksum_fields = (captured.read(checksum_path).decode("ascii") if captured is not None
+                           else checksum_path.read_text(encoding="ascii")).split()
         if len(checksum_fields) != 2 or checksum_fields[1] != cache_path.name:
             return None
         if not re.fullmatch(r"[0-9a-f]{64}", checksum_fields[0]):
@@ -1611,30 +1707,36 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
         if payload.get("ib_csv") != str(ib_csv) or payload.get("p2p") != str(p2p):
             return None
         current_global = public_key_tool / "01-global.yaml" if public_key_tool else None
-        if not _valid_cache_authority(payload, ib_csv, p2p, current_global):
+        if captured is not None and current_global is not None:
+            captured.read(current_global)  # Required capture, never a live fallback.
+        if not _valid_cache_authority(payload, ib_csv, p2p, current_global, input_snapshot=captured):
             return None
         if "global" not in payload or "services" not in payload or "public_keys" not in payload:
             return None
         _validate_cache_profile(payload)
         if public_key_tool is not None:
             global_file = public_key_tool / "01-global.yaml"
-            if global_file.is_file():
-                if payload["global"] != str(global_file.resolve()):
+            if (captured.is_file(global_file) if captured is not None else global_file.is_file()):
+                canonical = captured.canonical(global_file) if captured is not None else str(global_file.resolve())
+                if payload["global"] != canonical:
                     return None
-                if global_file.stat().st_mtime_ns > cache_path.stat().st_mtime_ns:
+                if mtime_ns(global_file) > mtime_ns(cache_path):
                     return None
             elif payload["global"] is not None and not allow_baked_missing_global:
                 return None
             source_dir = public_key_tool / "publickey"
-            if source_dir.is_dir() and any(
-                path.stat().st_mtime_ns > cache_path.stat().st_mtime_ns
-                for path in source_dir.glob("*.pub")
+            source_available = captured is not None or source_dir.is_dir()
+            paths = captured.public_keys(public_key_tool) if captured is not None else source_dir.glob("*.pub")
+            if source_available and any(
+                mtime_ns(path) > mtime_ns(cache_path)
+                for path in paths
             ):
                 return None
-            if source_dir.is_dir() or not allow_baked_missing_global:
+            if source_available or not allow_baked_missing_global:
                 if _public_key_profile(
                     public_key_tool,
                     validate_with_ssh_keygen=validate_public_keys_with_ssh_keygen,
+                    input_snapshot=captured,
                 ) != payload["public_keys"]:
                     return None
         targets = [
@@ -4812,6 +4914,192 @@ def verify_management_key_possession(target: Target, ib_user: str,
         raise SetupError("management public-key-only IPv4 SSH verification failed")
 
 
+INITIAL_OBSERVATION_MAX_BYTES = 8 * 1024 * 1024
+
+
+def _run_initial_observation(command, timeout, *, pass_fds=()):
+    """Drain both pipes within one finite byte/deadline budget; always reap."""
+    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, pass_fds=pass_fds)
+    streams = {process.stdout.fileno(): bytearray(), process.stderr.fileno(): bytearray()}
+    buffers = dict(streams)
+    deadline, total = time.monotonic() + timeout, 0
+    try:
+        for descriptor in streams:
+            os.set_blocking(descriptor, False)
+        while streams:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise SetupError("initial method observation deadline exceeded")
+            ready, _, _ = select.select(list(streams), [], [], min(remaining, 0.1))
+            for descriptor in ready:
+                chunk = os.read(descriptor, min(65536, INITIAL_OBSERVATION_MAX_BYTES - total + 1))
+                if not chunk:
+                    del streams[descriptor]
+                    continue
+                total += len(chunk)
+                if total > INITIAL_OBSERVATION_MAX_BYTES:
+                    raise SetupError("initial method combined output exceeds capture budget")
+                buffers[descriptor].extend(chunk)
+        result = process.wait(timeout=max(0.001, deadline - time.monotonic()))
+        return subprocess.CompletedProcess(command, result,
+            buffers[process.stdout.fileno()].decode("utf-8"),
+            buffers[process.stderr.fileno()].decode("utf-8"))
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+        process.stdout.close()
+        process.stderr.close()
+
+
+@contextmanager
+def _initial_observation_key(private_key):
+    """Hold a no-follow private identity through the whole BatchMode session."""
+    descriptors = []
+    path = Path(os.path.abspath(private_key))
+    try:
+        descriptor = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        descriptors.append(descriptor)
+        for part in path.parts[1:-1]:
+            descriptor = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                 dir_fd=descriptor)
+            descriptors.append(descriptor)
+        parent = os.fstat(descriptor)
+        if parent.st_uid != os.geteuid() or parent.st_mode & 0o022:
+            raise SetupError("initial method private identity parent is not safely owned")
+        key_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                         dir_fd=descriptor)
+        descriptors.append(key_fd)
+        before = os.fstat(key_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.geteuid()
+                or before.st_mode & 0o777 != 0o600 or before.st_nlink != 1
+                or not 0 < before.st_size <= 1024 * 1024):
+            raise SetupError("initial method private identity is not a finite owned 0600 single-link file")
+        yield key_fd
+        # fstat includes nanosecond metadata; recheck the exact named identity too.
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink,
+                    info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if (identity(os.fstat(key_fd)) != identity(before)
+                or identity(os.stat(path, follow_symlinks=False)) != identity(before)):
+            raise SetupError("initial method private identity changed during observation")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def initial_method_input_digest(target, services, keys):
+    device = target.ib
+    expected = {"schema_version": 1, "type": "ib", "config_method": "initial-setup",
+                "hostname": device.hostname, "eth0": device.eth0_prefix,
+                "eth0_gateway": device.eth0_gateway, "eth1": device.eth1_prefix,
+                "eth1_gateway": device.eth1_gateway,
+                "eth0_mac": normalize_mac(device.eth0_mac, field="initial method eth0 MAC"),
+                "dns": services["dns"], "ntp": services["ntp"], "timezone": services["timezone"],
+                "key_fingerprints": sorted({entry["fingerprint"] for entry in keys})}
+    return hashlib.sha256(json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                                     ensure_ascii=False).encode()).hexdigest()
+
+
+def observe_managed_initial_configuration(
+    target: Target, ib_user: str, private_key: Path, timeout: int,
+    services: dict[str, object], keys: list[dict[str, str]],
+) -> dict[str, object]:
+    """Read-only own-session configuration proof, separate from key possession.
+
+    This standard-library-only leaf does not mint a local generation or write
+    receipts. A managed publisher must capture its pending boundary and input
+    before execution and recheck both after this observation. Interactive
+    Day-0/service/key logs never supply positive configuration evidence.
+    """
+    rejected = {"schema_version": 1, "hostname": target.ib.hostname,
+                "batch_identity_verified": False, "config_verified": False,
+                "interface": "eth0", "transport_ip": "", "mac_plain": "",
+                "live_state_sha256": "", "input_sha256": "", "observation_sha256": "",
+                "reason": "initial-current-configuration-not-verified"}
+    try:
+        device = target.ib
+        if device.dev_type != "ib" or not valid_ssh_user(ib_user):
+            raise SetupError("initial method executor/type incompatible")
+        login_ip = str(ipaddress.IPv4Address(device.login_ip))
+        expected_mac = normalize_mac(device.eth0_mac, field="initial method eth0 MAC")
+        if not expected_mac or not private_key.is_file() or private_key.is_symlink():
+            raise SetupError("initial method lacks bound MAC or management key")
+        if (type(timeout) is not int or not 1 <= timeout <= 600 or not isinstance(services, dict)
+                or set(services) != {"dns", "ntp", "timezone"}):
+            raise SetupError("initial method profile incomplete")
+        desired_service_commands(services, "")  # Typed profile validation, no I/O.
+        key_install_command(keys)  # Closed, fingerprint-checked public profile.
+        captured_services, captured_keys = copy.deepcopy(services), copy.deepcopy(keys)
+        input_digest = initial_method_input_digest(target, captured_services, captured_keys)
+        script = (
+            "set -eu; printf '__HTTP_INITIAL_METHOD_V1_IDENTITY_BEGIN__\\n'; "
+            "hostname; cat /sys/class/net/eth0/address; "
+            "printf '__HTTP_INITIAL_METHOD_V1_IDENTITY_END__\\n'; "
+            "printf '__HTTP_INITIAL_METHOD_V1_CONFIG_BEGIN__\\n'; "
+            "set +e; nv config show -o commands; rc=$?; set -e; "
+            "printf '__HTTP_INITIAL_METHOD_V1_CONFIG_END__=%s\\n' \"$rc\"; "
+            "printf '__HTTP_INITIAL_METHOD_V1_KEYS_BEGIN__\\n'; "
+            "test -n \"${HOME:-}\" && test ! -L \"$HOME/.ssh\" && "
+            "test ! -L \"$HOME/.ssh/authorized_keys\" && test -f \"$HOME/.ssh/authorized_keys\"; "
+            "set +e; cat \"$HOME/.ssh/authorized_keys\"; rc=$?; set -e; "
+            "printf '__HTTP_INITIAL_METHOD_V1_KEYS_END__=%s\\n' \"$rc\""
+        )
+        command = ["ssh", "-i", str(private_key), "-o", "BatchMode=yes",
+                   "-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no",
+                   "-o", "KbdInteractiveAuthentication=no", "-o", "IdentitiesOnly=yes",
+                   "-o", f"ConnectTimeout={timeout}", "-o", "StrictHostKeyChecking=accept-new",
+                   "-o", "LogLevel=ERROR", f"{ib_user}@{login_ip}", shlex.join(["sh", "-c", script])]
+        with _initial_observation_key(private_key) as key_fd:
+            command[2] = "/dev/fd/" + str(key_fd)
+            result = _run_initial_observation(command, max(timeout * 2, 30), pass_fds=(key_fd,))
+        raw = result.stdout
+        if type(result.returncode) is not int or result.returncode != 0 or not isinstance(raw, str) or len(raw.encode()) > 8 * 1024 * 1024:
+            raise SetupError("initial method batch command failed or oversized")
+        lines = raw.splitlines(keepends=True)
+        frames, cursor = {}, 0
+        for label in ("IDENTITY", "CONFIG", "KEYS"):
+            begin = "__HTTP_INITIAL_METHOD_V1_" + label + "_BEGIN__"
+            end = "__HTTP_INITIAL_METHOD_V1_" + label + "_END__"
+            starts = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == begin]
+            ends = [index for index, line in enumerate(lines) if line.rstrip("\r\n").startswith(end)]
+            if len(starts) != 1 or len(ends) != 1 or not cursor <= starts[0] < ends[0]:
+                raise SetupError("initial method framing missing, duplicated or out of order")
+            if lines[ends[0]].rstrip("\r\n") != end + ("" if label == "IDENTITY" else "=0"):
+                raise SetupError("initial method frame command did not succeed")
+            frames[label] = "".join(lines[starts[0] + 1:ends[0]])
+            cursor = ends[0] + 1
+        identity = frames["IDENTITY"].splitlines()
+        if (len(identity) != 2 or identity[0] != device.hostname
+                or normalize_mac(identity[1], field="observed eth0 MAC") != expected_mac):
+            raise SetupError("initial method own-session identity differs")
+        current = frames["CONFIG"]
+        if classify_auto_day0(device, parse_nvue_state(current)) != "complete":
+            raise SetupError("initial method current Day-0 fields are missing or conflicting")
+        if desired_service_commands(captured_services, current):
+            raise SetupError("initial method current services differ")
+        actual_keys = set()
+        for line in frames["KEYS"].splitlines():
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            tokens = shlex.split(line)
+            for index, token in enumerate(tokens[:-1]):
+                if re.fullmatch(r"(?:ssh-|ecdsa-|sk-)[A-Za-z0-9@._+-]+", token):
+                    actual_keys.add(_public_key_fingerprint(" ".join(tokens[index:index + 2])))
+                    break
+        if not {entry["fingerprint"] for entry in captured_keys}.issubset(actual_keys):
+            raise SetupError("initial method current authorized keys differ")
+        if services != captured_services or keys != captured_keys:
+            raise SetupError("initial method expected profile changed during the session")
+        return {**rejected, "batch_identity_verified": True, "config_verified": True,
+                "transport_ip": login_ip, "mac_plain": expected_mac.replace(":", ""),
+                "live_state_sha256": hashlib.sha256(current.encode()).hexdigest(),
+                "input_sha256": input_digest, "observation_sha256": hashlib.sha256(raw.encode()).hexdigest(), "reason": ""}
+    except (SetupError, OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError, UnicodeError):
+        return rejected
+
+
 def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
                   eth_password: str, ib_user: str, timeout: int,
                   keys: list[dict[str, str]], *, local: bool,
@@ -5033,7 +5321,7 @@ def _render_target_outcome_summary(*, target_results: tuple,
     return "\n".join(lines)
 
 
-def main() -> int:
+def main(*, method_cycle=None) -> int:
     global REPORT_HANDLE
     args = parse_args()
     auto_latched = False
@@ -5135,6 +5423,11 @@ def main() -> int:
             raise body_failure
 
     with auto_safety_scope():
+        if method_cycle is not None and args.auto:
+            raise SetupError(
+                "managed method authority cannot be combined with --auto; "
+                "the managed cycle runs one explicit management --apply execution"
+            )
         if args.plan and args.apply:
             raise SetupError("--plan cannot be combined with --apply")
         if args.generate_json and (args.plan or args.apply):
@@ -5158,6 +5451,9 @@ def main() -> int:
             )
         elif args.credentials_file is not None:
             raise SetupError("--credentials-file is only valid with --auto")
+        if method_cycle is not None and (not args.apply or args.plan or args.generate_json
+                                          or args.execution_mode == "ethernet"):
+            raise SetupError("managed method authority requires management --apply, not plan/generation/ethernet mode")
         try:
             auto_credentials = (
                 read_auto_credentials(args.credentials_file)
@@ -5184,6 +5480,19 @@ def main() -> int:
         p2p_path = discover_input_file(
             args.p2p, "p2p.xlsx", ".xlsx", "P2P workbook"
         )
+        if method_cycle is not None:
+            # Typed/executor admission must precede report/cache/authority writes.
+            method_cycle.admit_paths((ib_csv_path, p2p_path),
+                                     (args.target_cache, args.report, args.snapshot_dir))
+            load_devices(ib_csv_path)
+            with ib_csv_path.open(encoding="utf-8-sig", newline="") as stream:
+                reader = csv.reader(stream)
+                indexes = header_indexes(next(reader))
+                if "config_method" not in indexes:
+                    raise SetupError("managed initial-setup requires an explicit per-device config_method column")
+                for line, row in enumerate(reader, 2):
+                    if row_value(row, indexes, "type").casefold() == "ib" and row_value(row, indexes, "config_method").casefold() != "initial-setup":
+                        raise SetupError(f"{ib_csv_path}:{line}: managed IB config_method must be initial-setup")
         cache_path = args.target_cache.resolve()
         report_path = args.report.resolve()
         snapshot_directory = args.snapshot_dir.resolve()
@@ -5233,7 +5542,8 @@ def main() -> int:
                 "that file exposes all of those devices.  Edit CSV to correct "
                 "bad MACs; the next round revalidates inputs."
             )
-        tool = Path(__file__).resolve().parent
+        tool = (method_cycle.tool_input_root if method_cycle is not None
+                else Path(__file__).resolve().parent)
         source_inputs_available = (
             args.execution_mode in {"management", "ethernet"}
             or (args.execution_mode == "auto" and (
@@ -5376,6 +5686,10 @@ def main() -> int:
             log("Local Ethernet execution: " + ", ".join(sorted(local_keys)))
         else:
             log("Execution location: management server (all Ethernet access uses SSH)")
+        if method_cycle is not None:
+            if local_keys or args.execution_mode == "ethernet" or not args.apply:
+                raise SetupError("managed method authority requires an explicit management --apply execution")
+            method_cycle.start(tool, cache_path, ib_csv_path, p2p_path, targets, services, public_keys)
         passwords = (
             _auto_passwords_for_targets(auto_credentials, targets)
             if auto_credentials is not None else prompt_ethernet_passwords(
@@ -6072,6 +6386,10 @@ def main() -> int:
                         manual_outcome[5] = "NO"
                         configured += 1
                         log(f"  SUCCESS: configuration verified; IPv4 SSH to {target.ib.login_ip} succeeded.")
+                    if method_cycle is not None:
+                        if not apply_authorized or not method_cycle.complete(target, args.ib_user, management_private_key,
+                                                                              args.connect_timeout, services, public_keys):
+                            raise SetupError("managed current initial-setup configuration was not verified")
                     manual_outcome[2] = (
                         "COMPLETED" if strict_has_work else "SKIPPED_NO_WORK"
                     )
@@ -6167,6 +6485,10 @@ def main() -> int:
                         management_private_key=management_private_key,
                     )
                     completed_targets.add(normalize_name(target.ib.hostname))
+                    if method_cycle is not None:
+                        if not apply_authorized or not method_cycle.complete(target, args.ib_user, management_private_key,
+                                                                              args.connect_timeout, services, public_keys):
+                            raise SetupError("managed current initial-setup configuration was not verified")
                     continue
 
                 commands = desired_commands(target.ib)
@@ -6231,6 +6553,10 @@ def main() -> int:
                     management_private_key=management_private_key,
                 )
                 completed_targets.add(normalize_name(target.ib.hostname))
+                if method_cycle is not None:
+                    if not apply_authorized or not method_cycle.complete(target, args.ib_user, management_private_key,
+                                                                          args.connect_timeout, services, public_keys):
+                        raise SetupError("managed current initial-setup configuration was not verified")
             except SetupError as exc:
                 failures += 1
                 log(f"  ERROR: {_authorized_failure_text(exc)}")
@@ -6242,6 +6568,12 @@ def main() -> int:
                             or getattr(exc, "cleanup_uncertain", None) is True):
                         auto_latched = True
                         break
+            finally:
+                if method_cycle is not None:
+                    method_cycle.fail_unfinished(target)
+
+        if method_cycle is not None:
+            method_cycle.close()
 
         oob_key_pending = False
         if args.auto and not auto_latched:
@@ -6370,13 +6702,128 @@ def main() -> int:
         return 1 if failures else 0
 
 
+_RUNTIME_GUARD_PATH = Path('/tmp/http-ib-bringup.runtime.lock')
+
+class _InstanceGuardError(RuntimeError):
+    def __init__(self, code, detail):
+        super().__init__(detail)
+        self.code = code
+
+@contextmanager
+def _runtime_instance_guard():
+    """Nonblocking kernel lock, not a PID/sentinel or deployment prerequisite.
+
+    The persistent empty regular inode is intentional: never unlink it when
+    releasing, which would allow two processes to lock different generations.
+    Existing files are opened read-only so another UID, including root, can
+    participate without rewriting/chmodding the original creator's file.
+    """
+    descriptor = None
+    try:
+        flags = os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+        try:
+            descriptor = os.open(_RUNTIME_GUARD_PATH,
+                                 os.O_RDWR | os.O_CREAT | os.O_EXCL | flags, 0o644)
+            os.fchmod(descriptor, 0o644)
+        except FileExistsError:
+            descriptor = os.open(_RUNTIME_GUARD_PATH, os.O_RDONLY | flags)
+        os.set_inheritable(descriptor, False)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+                'Unsafe runtime guard type, links or permissions. No operations started. '
+                'Ask the administrator to inspect ' + str(_RUNTIME_GUARD_PATH))
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            if error.errno not in (errno.EAGAIN, errno.EACCES):
+                raise
+            raise _InstanceGuardError('ALREADY_RUNNING',
+                'Another initialization or upgrade process is running on this management host. '
+                'No operations started. Wait for it to finish; do not delete the runtime guard: '
+                + str(_RUNTIME_GUARD_PATH)) from None
+        current = os.stat(_RUNTIME_GUARD_PATH, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (info.st_dev, info.st_ino):
+            raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+                'Runtime guard changed while opening. No operations started. '
+                'Ask the administrator to inspect ' + str(_RUNTIME_GUARD_PATH))
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+            descriptor = None
+        raise _InstanceGuardError('INSTANCE_GUARD_UNAVAILABLE',
+            'Cannot safely acquire the runtime guard (errno=' + str(error.errno) + '). '
+            'No operations started. Ask the administrator to inspect '
+            + str(_RUNTIME_GUARD_PATH)) from None
+    except BaseException:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    primary = None
+    try:
+        yield descriptor
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        # Close, never LOCK_UN: retain the original owned-FD protocol.
+        try:
+            os.close(descriptor)
+        except BaseException as cleanup:
+            if primary is None or (
+                isinstance(primary, Exception) and not isinstance(cleanup, Exception)
+            ):
+                raise
+
+
+def _standalone_main_with_report_cleanup():
+    """Run the real algorithm and final diagnostic/close within the host guard."""
+    primary = None
+    try:
+        try:
+            return main()
+        except SetupError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            if REPORT_HANDLE is not None:
+                print(f"ERROR: {exc}", file=REPORT_HANDLE, flush=True)
+            return 2
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        if REPORT_HANDLE is not None:
+            try:
+                REPORT_HANDLE.close()
+            except BaseException as cleanup:
+                if primary is None or (
+                    isinstance(primary, Exception) and not isinstance(cleanup, Exception)
+                ):
+                    raise
+
+
+def _guarded_main():
+    # Only explicit sole help is exempt. Argparse also accepts long help
+    # abbreviations; these and mixed help must not escape operational locking.
+    argv = tuple(sys.argv[1:])
+    option_argv = argv[:argv.index("--")] if "--" in argv else argv
+    requests_help = any(
+        arg == "-h" or (len(arg) > 2 and arg.startswith("--")
+                        and "--help".startswith(arg))
+        for arg in option_argv
+    )
+    if argv in (("--help",), ("-h",)) or not requests_help:
+        # Pure syntax rejection does not read inputs/passwords/create the lock.
+        parse_args()
+    try:
+        with _runtime_instance_guard():
+            return _standalone_main_with_report_cleanup()
+    except _InstanceGuardError as exc:
+        print(f"{exc.code}: {exc}", file=sys.stderr)
+        return 75 if exc.code == "ALREADY_RUNNING" else 2
+
+
+
 if __name__ == "__main__":
     if sys.argv[1:] == ["--_verify-password"]:
         raise SystemExit(_password_hash_worker())
-    try:
-        raise SystemExit(main())
-    except SetupError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        if REPORT_HANDLE is not None:
-            print(f"ERROR: {exc}", file=REPORT_HANDLE, flush=True)
-        raise SystemExit(2)
+    raise SystemExit(_guarded_main())
