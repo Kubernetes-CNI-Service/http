@@ -472,6 +472,105 @@ BAD_PAYLOADS = {
 }
 
 
+def _split_source_lines(source: str) -> list[str]:
+    """Match AST's CRLF/CR/LF line numbering; form feed is not a newline."""
+    lines = []
+    start = index = 0
+    while index < len(source):
+        character = source[index]
+        if character == "\r":
+            index += 1
+            if index < len(source) and source[index] == "\n":
+                index += 1
+        elif character == "\n":
+            index += 1
+        else:
+            index += 1
+            continue
+        lines.append(source[start:index])
+        start = index
+    if start < len(source):
+        lines.append(source[start:])
+    return lines
+
+
+class _SourceSegments:
+    """Source-local, lazy line split with AST UTF-8 byte-column slicing."""
+
+    def __init__(self, source: str) -> None:
+        self._source = source
+        self._lines: list[str] | None = None
+
+    def get(self, node: ast.AST) -> str | None:
+        try:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return None
+            lineno = node.lineno - 1
+            end_lineno = node.end_lineno - 1
+            col_offset = node.col_offset
+            end_col_offset = node.end_col_offset
+        except AttributeError:
+            return None
+
+        if self._lines is None:
+            self._lines = _split_source_lines(self._source)
+        lines = self._lines
+        if end_lineno == lineno:
+            return lines[lineno].encode()[col_offset:end_col_offset].decode()
+        first = lines[lineno].encode()[col_offset:].decode()
+        last = lines[end_lineno].encode()[:end_col_offset].decode()
+        middle = lines[lineno + 1:end_lineno]
+        middle.insert(0, first)
+        middle.append(last)
+        return "".join(middle)
+
+
+def _class_scope_monitor_authority_findings(
+    path: Path, source: str,
+) -> tuple[list[str], set[str]]:
+    """Preserve the class/method/setUp scan's findings and order."""
+    violations = []
+    method_fixtures = set()
+    segments = _SourceSegments(source)
+    tree = ast.parse(source, filename=os.fspath(path))
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        class_decorators = " ".join(
+            segments.get(item) or ""
+            for item in node.decorator_list
+        )
+        if "monitor_authority" in class_decorators:
+            violations.append(f"{path.name}:{node.name}:class-decorator")
+        for child in node.body:
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            decorators = {
+                segments.get(item) or ""
+                for item in child.decorator_list
+            }
+            if "with_valid_monitor_authority_fixture" in decorators:
+                method_fixtures.add(child.name)
+                if (
+                    path.name != "test_ztp_container_runtime.py"
+                    or node.name != "ContainerTransactionContractTests"
+                    or child.name.startswith("test_monitor_authority")
+                ):
+                    violations.append(
+                        f"{path.name}:{node.name}.{child.name}:fixture-scope"
+                    )
+            if child.name in {"setUp", "setUpClass"}:
+                segment = segments.get(child) or ""
+                if (
+                    "require_monitor_authority" in segment
+                    or "with_valid_monitor_authority_fixture" in segment
+                ):
+                    violations.append(
+                        f"{path.name}:{node.name}.{child.name}"
+                    )
+    return violations, method_fixtures
+
+
 class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -4150,44 +4249,80 @@ printf 'timeout rc=%s\n' "$timeout_rc"
         actual_method_fixtures = set()
         for path in sorted((ROOT / "test_cases").glob("test_*.py")):
             source = path.read_text(encoding="utf-8")
-            tree = ast.parse(source, filename=os.fspath(path))
-            for node in tree.body:
-                if not isinstance(node, ast.ClassDef):
-                    continue
-                class_decorators = " ".join(
-                    ast.get_source_segment(source, item) or ""
-                    for item in node.decorator_list
-                )
-                if "monitor_authority" in class_decorators:
-                    violations.append(f"{path.name}:{node.name}:class-decorator")
-                for child in node.body:
-                    if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        continue
-                    decorators = {
-                        ast.get_source_segment(source, item) or ""
-                        for item in child.decorator_list
-                    }
-                    if "with_valid_monitor_authority_fixture" in decorators:
-                        actual_method_fixtures.add(child.name)
-                        if (
-                            path.name != "test_ztp_container_runtime.py"
-                            or node.name != "ContainerTransactionContractTests"
-                            or child.name.startswith("test_monitor_authority")
-                        ):
-                            violations.append(
-                                f"{path.name}:{node.name}.{child.name}:fixture-scope"
-                            )
-                    if child.name in {"setUp", "setUpClass"}:
-                        segment = ast.get_source_segment(source, child) or ""
-                        if (
-                            "require_monitor_authority" in segment
-                            or "with_valid_monitor_authority_fixture" in segment
-                        ):
-                            violations.append(
-                                f"{path.name}:{node.name}.{child.name}"
-                            )
+            found, fixtures = _class_scope_monitor_authority_findings(path, source)
+            violations.extend(found)
+            actual_method_fixtures.update(fixtures)
         self.assertEqual([], violations)
         self.assertEqual(expected_method_fixtures, actual_method_fixtures)
+
+
+class ClassScopeSegmentLiteralContractTests(unittest.TestCase):
+    """Independent source/AST expectations before U1-SEG implementation."""
+
+    def test_segments_preserve_newlines_utf8_bytes_formfeed_and_missing_locations(self):
+        segment_type = globals().get("_SourceSegments")
+        self.assertTrue(callable(segment_type), "U1-SEG helper not implemented")
+        splitter = globals().get("_split_source_lines")
+        self.assertTrue(callable(splitter), "U1-SEG splitter not implemented")
+        cases = (
+            ("LF", "value = f(\n x,\n)\n", "f(\n x,\n)"),
+            ("CRLF", "value = f(\r\n x,\r\n)\r\n", "f(\r\n x,\r\n)"),
+            ("CR", "value = f(\r x,\r)\r", "f(\r x,\r)"),
+            ("UTF8", "é = f(42)\n", "f(42)"),
+            ("FF", "value = 1\f+ 2\n", "1\f+ 2"),
+        )
+        original_get_source_segment = ast.get_source_segment
+        for label, source, expected in cases:
+            with self.subTest(source_shape=label):
+                tree = ast.parse(source)
+                node = tree.body[0].value
+                with mock.patch.object(
+                    sys.modules[__name__], "_split_source_lines", wraps=splitter,
+                ) as split:
+                    segments = segment_type(source)
+                    self.assertEqual(0, split.call_count)
+                    self.assertEqual(expected, segments.get(node))
+                    self.assertEqual(expected, segments.get(node))
+                    self.assertEqual(1, split.call_count)
+                self.assertEqual(expected, ast.get_source_segment(source, node))
+        self.assertIs(ast.get_source_segment, original_get_source_segment)
+        with mock.patch.object(
+            sys.modules[__name__], "_split_source_lines", wraps=splitter,
+        ) as split:
+            self.assertIsNone(segment_type("x = 1\n").get(ast.Constant(value=1)))
+            self.assertEqual(0, split.call_count)
+
+    def test_findings_keep_class_method_setup_rules_and_order_across_line_endings(self):
+        findings = globals().get("_class_scope_monitor_authority_findings")
+        self.assertTrue(callable(findings), "U1-SEG findings helper not implemented")
+        source = (
+            "@monitor_authority(\n"
+            "    enabled=True,\n"
+            ")\n"
+            "class Alpha:\n"
+            "    @tag(\n"
+            "        'multi-line',\n"
+            "    )\n"
+            "    @with_valid_monitor_authority_fixture\n"
+            "    def test_scoped(self):\n"
+            "        pass\n"
+            "    def setUp(self):\n"
+            "        require_monitor_authority(\n"
+            "            self,\n"
+            "        )\n"
+        )
+        expected = [
+            "synthetic.py:Alpha:class-decorator",
+            "synthetic.py:Alpha.test_scoped:fixture-scope",
+            "synthetic.py:Alpha.setUp",
+        ]
+        for line_ending in ("\n", "\r\n", "\r"):
+            with self.subTest(line_ending=repr(line_ending)):
+                violations, fixture_names = findings(
+                    Path("synthetic.py"), source.replace("\n", line_ending),
+                )
+                self.assertEqual(expected, violations)
+                self.assertEqual({"test_scoped"}, fixture_names)
 
 
 if __name__ == "__main__":
