@@ -1775,7 +1775,10 @@ FULL_SHARD_SHARED_TEMP_ROOTS = ("/tmp", "/var/tmp")
 # Ignored-file shapes some test reads across the whole checkout (census of the suite's
 # traversals: rglob("*.py"), os.walk for test_*.py, rglob("*.service"/"*.timer"),
 # rglob("02-AIR-devices_config.csv")) or the serial source discovery considers
-# (*.py, *.sh, *.cgi).  The plan's leftover_allowlist can never review them.
+# (*.py, *.sh, *.cgi).  The plan's leftover_allowlist can never review them outside
+# the non-source roots (NON_SOURCE_ROOTS and the .codex_tmp prefix): the serial source
+# discovery skips those roots, and the suite's test-side whole-checkout walks go
+# through governed_tree_paths (test_test_case_repository), which never enters them.
 FULL_SHARD_OBSERVED_LEFTOVER_SUFFIXES = frozenset({".py", ".sh", ".cgi", ".service", ".timer"})
 FULL_SHARD_OBSERVED_LEFTOVER_NAMES = frozenset({"02-AIR-devices_config.csv"})
 FULL_SHARD_DEFAULT_MANIFEST_RELATIVE = "test_cases/script_test_manifest.json"
@@ -2074,9 +2077,13 @@ def full_shard_shared_temp_problems(
 def full_shard_unreviewed_leftovers(paths: Iterable[str], allowlist: Mapping[str, str]) -> list[str]:
     """Sorted paths that no reviewed plan pattern (fnmatchcase; '*' also spans '/') matches.
 
-    A path of an observed shape (FULL_SHARD_OBSERVED_LEFTOVER_*) is never reviewed.
+    A path of an observed shape (FULL_SHARD_OBSERVED_LEFTOVER_*) outside the runner's
+    non-source roots is never reviewed; inside them only a reviewed pattern accepts it.
     """
     def observed(path: str) -> bool:
+        top = path.split("/", 1)[0]
+        if top in NON_SOURCE_ROOTS or top.startswith(".codex_tmp"):
+            return False
         name = path.rsplit("/", 1)[-1]
         return (
             name in FULL_SHARD_OBSERVED_LEFTOVER_NAMES

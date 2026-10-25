@@ -455,8 +455,11 @@ S0 修订（2026-10-24，第一次真实分片运行，诊断而非证明）：
   clone 的部署选择器，执行前后恢复 `sys.path`）是门禁问题；车道 clone 的被忽略文件变化（新增或原有的消失）
   必须匹配计划 `leftover_allowlist` 中经审阅、写明理由的形态（`fnmatchcase`，`*` 可跨 `/`；首个路径
   组件必须是字面量），否则作为不签证明的非门禁问题（阶段 B 照常运行）；整树遍历或串行源码发现会读的
-  形态（`*.py`、`*.sh`、`*.cgi`、`*.service`、`*.timer`、`02-AIR-devices_config.csv`）即使位于审阅过的
-  目录下也永远不算审阅。匹配的变化与私有 TMPDIR 内容只逐车道记入 `audit.json` 的
+  形态（`*.py`、`*.sh`、`*.cgi`、`*.service`、`*.timer`、`02-AIR-devices_config.csv`）位于 runner 的
+  非源码根（`NON_SOURCE_ROOTS`：`.git`、`outputs/`、`.codex`、`.agents`，以及 `.codex_tmp*`）之外时，即使在审阅过
+  的目录下也永远不算审阅；位于这些根之内时，与其他形态一样只凭经审阅的模式放行（整合修订 F6：串行源码发现
+  本来就跳过这些根，A 批之后测试侧的整树遍历改走 `governed_tree_paths`，也不进入它们）。匹配的变化与私有
+  TMPDIR 内容只逐车道记入 `audit.json` 的
   `leftovers`（`ignored`、`ignored_removed`、`unreviewed`、`tmpdir`，各为排序后的路径、个数，以及以 NUL
   连接的文件系统字节的 sha256），成功时随 clone 与 TMPDIR 一并删除。当前计划只审阅
   `outputs/test-diagnostics/collector-prefix-feedback-*`，依据是对 `test_cases/*.py` 全部 302 个文件的
