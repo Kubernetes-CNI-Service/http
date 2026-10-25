@@ -2212,6 +2212,7 @@ def main():
     explicit_csv = None
     deployment_scope = "all"
     switch_scope = "all"
+    presentation_context = "standalone"
     new_args = []
     i = 0
     while i < len(args):
@@ -2219,6 +2220,11 @@ def main():
             explicit_csv = args[i].split("=", 1)[1]
         elif args[i] == "--csv" and i + 1 < len(args):
             explicit_csv = args[i + 1]
+            i += 1
+        elif args[i].startswith("--presentation-context="):
+            presentation_context = args[i].split("=", 1)[1]
+        elif args[i] == "--presentation-context" and i + 1 < len(args):
+            presentation_context = args[i + 1]
             i += 1
         elif args[i].startswith("--deployment-scope="):
             deployment_scope = args[i].split("=", 1)[1]
@@ -2234,6 +2240,9 @@ def main():
             new_args.append(args[i])
         i += 1
     args = new_args
+    if presentation_context not in {"standalone", "load-parent"}:
+        print("[ERROR] unsupported presentation context", file=sys.stderr)
+        sys.exit(2)
     if deployment_scope not in {"all", "prod", "air"}:
         print(
             f"[ERROR] unsupported deployment scope: {deployment_scope!r}",
@@ -2248,7 +2257,7 @@ def main():
         sys.exit(2)
 
     if "-h" in args or "--help" in args:
-        print("""usage: d-hostname2mac.py [-y] [--csv PATH] [--deployment-scope all|prod|air] [--switch eth|ib|nvl] YAML_DIR [YAML_DIR]
+        print("""usage: d-hostname2mac.py [-y] [--csv PATH] [--deployment-scope all|prod|air] [--switch eth|ib|nvl] [--presentation-context standalone|load-parent] YAML_DIR [YAML_DIR]
 
 一个 Cumulus 目录：自动补齐同时间戳 Production 与 _air 两个目录后发布。
           两套 YAML 除 set.system.hostname 外必须完全一致，各自 MAC 链接只指向
@@ -2258,6 +2267,9 @@ def main():
 Cumulus 发布成功后归档并删除生成源目录。""")
         return
 
+    if presentation_context == "load-parent":
+        print("[INFO] 当前为统一 load 的 MAC 发布阶段；仅此阶段成功返回后，"
+              "父流程才继续 release 校验与服务门禁")
     if args:
         yaml_dirs = [arg.rstrip("/") for arg in args]
     else:
