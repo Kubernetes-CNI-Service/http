@@ -23836,8 +23836,20 @@ def main(
             )
 
         if dhcp_candidate_dir is not None and release_committed and not args.dry_run:
+            # Only after the commit: TEST's runtime rollback receipts bind the flat DHCP
+            # sources by (ino, mtime, ctime), and even a rename round trip changes ctime
+            # (measured on APFS 2026-10-25), so touching flat before the commit would turn
+            # every later pre-commit failure into "rollback is blocked".
             failure_phase = "发布已提交的 DHCP 候选"
-            publish_committed_dhcp_candidate(project, dhcp_candidate_dir, switch_scope)
+            try:
+                publish_committed_dhcp_candidate(project, dhcp_candidate_dir, switch_scope)
+            except (LoadError, OSError) as exc:
+                raise LoadError(
+                    "HOLD：父 release 已提交，但 DHCP 候选未能发布到 99-output-dhcp；"
+                    "flat DHCP 输出仍是提交前的内容，activate/unload 会拒绝它们。"
+                    f"候选目录已保留作为证据：{dhcp_candidate_dir}。"
+                    f"修复原因后重新运行 load 即可恢复：{exc}"
+                ) from exc
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
