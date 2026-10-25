@@ -41,6 +41,8 @@ from project_contract import (
     path_disposition,
     require_project_eligible,
     safe_load_global_yaml,
+    PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON,
+    is_private_b_primary_escrow_path,
     validate_optional_ib_upgrade,
     transfer_exclude_reason,
     validate_service_endpoint,
@@ -72,6 +74,10 @@ STATIC_SETUP_MANAGED_LINKS = frozenset({
     "infiniband/bringup/ufm-setup-upgrade/publickey",
     "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs",
     "infiniband/bringup/ufm-setup-upgrade/image",
+    # LOAD creates these after SETUP wrote its manifest. Their targets are
+    # host-owned runtime output, not deployable archive source members.
+    "ztp/config/cumulus/latest_yaml",
+    "ztp/config/nvos/latest_yaml",
 })
 RESERVED_UPGRADE_GLOBAL_ALIAS = "infiniband/bringup/xdr-upgrade/01-global.yaml"
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
@@ -105,6 +111,8 @@ REPRODUCIBLE_ARCHIVE_MTIME = 0
 
 P2P_VERSION_TOKEN = re.compile(r"(?<![A-Za-z0-9])v?\d+(?:\.\d+)+", re.IGNORECASE)
 P2P_DATE_TOKEN = re.compile(r"(?<!\d)(\d{4})-(\d{2})-?(\d{2})(?!\d)")
+P2P_RECEIPT_NAME = "03-selected-p2p.json"
+P2P_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class P2PSelectionError(ValueError):
@@ -182,6 +190,87 @@ def select_project_p2p_source(project: Path, explicit: str | None = None) -> Pat
     if not _p2p_regular_xlsx(path):
         raise P2PSelectionError(f"--p2p-file 必须是项目根目录内的非空普通 XLSX：{explicit}")
     return path
+
+
+def p2p_source_relative(project: Path, source: Path) -> str:
+    """Return the sole accepted lexical source identity for a selected file."""
+    project = project.resolve()
+    try:
+        relative = source.relative_to(project).as_posix()
+    except ValueError as exc:
+        raise P2PSelectionError(f"P2P 来源不在项目候选位置：{source}") from exc
+    if relative != source.name and relative != f"p2p/{source.name}":
+        raise P2PSelectionError(f"P2P 来源不在项目候选位置：{source}")
+    if not _p2p_regular_xlsx(source):
+        raise P2PSelectionError(f"P2P 来源不是非空普通 XLSX：{source}")
+    return relative
+
+
+def p2p_source_snapshot(project: Path, source: Path) -> tuple[object, ...]:
+    """Bind lexical parent alias and inode metadata across each workbook read."""
+    relative = p2p_source_relative(project, source)
+    parent = project / "p2p" if relative.startswith("p2p/") else project
+    parent_metadata = parent.stat()
+    source_metadata = source.lstat()
+    alias = project / "p2p"
+    if relative.startswith("p2p/") and alias.is_symlink():
+        alias_metadata = alias.lstat()
+        alias_identity = (alias_metadata.st_dev, alias_metadata.st_ino,
+                          os.readlink(alias))
+    else:
+        alias_identity = None
+    return (
+        relative, alias_identity,
+        (parent_metadata.st_dev, parent_metadata.st_ino),
+        (source_metadata.st_dev, source_metadata.st_ino,
+         source_metadata.st_size, source_metadata.st_mtime_ns),
+    )
+
+
+def assert_p2p_source_snapshot(project: Path, source: Path, before: tuple[object, ...]) -> None:
+    if p2p_source_snapshot(project, source) != before:
+        raise P2PSelectionError(f"P2P 外部目录或源文件在选择/读取期间变化：{source}")
+
+
+def p2p_receipt_bytes(basename: str, digest: str) -> bytes:
+    if (Path(basename).name != basename or basename == "p2p.xlsx"
+            or not basename.casefold().endswith(".xlsx")
+            or not P2P_SHA256.fullmatch(digest)):
+        raise P2PSelectionError("P2P 收据 basename/SHA-256 无效")
+    return (json.dumps({"schema_version": 1, "basename": basename,
+                        "sha256": digest}, sort_keys=True, separators=(",", ":"))
+            + "\n").encode("ascii")
+
+
+def read_p2p_receipt(project: Path) -> dict[str, str] | None:
+    """Revalidate the transferred entity; a receipt is never a trust shortcut."""
+    receipt = project / P2P_RECEIPT_NAME
+    if not os.path.lexists(receipt):
+        return None
+    metadata = receipt.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1 or metadata.st_size > 4096:
+        raise P2PSelectionError(f"P2P 收据不是安全的普通文件：{receipt}")
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise P2PSelectionError(f"P2P 收据重复 key：{key}")
+            result[key] = value
+        return result
+    try:
+        document = json.loads(receipt.read_bytes(), object_pairs_hook=unique_pairs)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise P2PSelectionError(f"P2P 收据格式无效：{receipt}") from exc
+    if not isinstance(document, dict) or set(document) != {"schema_version", "basename", "sha256"} or document["schema_version"] != 1:
+        raise P2PSelectionError("P2P 收据字段无效")
+    basename, expected = document["basename"], document["sha256"]
+    if not isinstance(basename, str) or not isinstance(expected, str):
+        raise P2PSelectionError("P2P 收据 basename/SHA-256 类型无效")
+    p2p_receipt_bytes(basename, expected)
+    source = project / basename
+    if not _p2p_regular_xlsx(source) or sha256(source) != expected:
+        raise P2PSelectionError(f"P2P 收据与真实文件不一致：{source}")
+    return {"basename": basename, "sha256": expected}
 
 
 def _reproducible_tarinfo(info: tarfile.TarInfo) -> tarfile.TarInfo:
@@ -407,6 +496,8 @@ def _add_reproducible_source(
     entry_name: str | None = None,
 ) -> None:
     """Add one entry while retaining its parent/entry filesystem authority."""
+    if is_private_b_primary_escrow_path(PurePosixPath(arcname)):
+        return
     try:
         initial = _entry_lstat(
             source, parent_fd=parent_fd, entry_name=entry_name,
@@ -647,9 +738,19 @@ def _reject_selected_special_sources(package_filter: "PackageFilter") -> None:
     for directory, dirnames, filenames in os.walk(
         root, topdown=True, followlinks=False, onerror=walk_error,
     ):
-        dirnames.sort()
-        filenames.sort()
         parent = Path(directory)
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if not is_private_b_primary_escrow_path(
+                (parent / name).relative_to(root),
+            )
+        )
+        filenames[:] = sorted(
+            name for name in filenames
+            if not is_private_b_primary_escrow_path(
+                (parent / name).relative_to(root),
+            )
+        )
         for name in (*dirnames, *filenames):
             source = parent / name
             try:
@@ -1201,13 +1302,39 @@ def resolve_project(value: str | None) -> Path:
 
 
 def directory_size(root: Path) -> int:
-    total = 0
-    for path in root.rglob("*"):
+    """Sum ordinary regular bytes without traversing the reserved root."""
+    root = root if root.is_absolute() else Path.cwd() / root
+    def private_workspace_path(path: Path) -> bool:
         try:
-            if path.is_file() and not path.is_symlink():
-                total += path.stat().st_size
-        except OSError:
-            pass
+            relative = path.relative_to(ROOT)
+        except ValueError:
+            return False
+        return is_private_b_primary_escrow_path(relative)
+
+    if private_workspace_path(root):
+        return 0
+    def scan_error(error: OSError) -> None:
+        if not isinstance(error, PermissionError):
+            raise error
+
+    total = 0
+    for directory, dirnames, filenames in os.walk(
+        root, topdown=True, followlinks=False, onerror=scan_error,
+    ):
+        parent = Path(directory)
+        dirnames[:] = [
+            name for name in dirnames
+            if not private_workspace_path(parent / name)
+        ]
+        for name in filenames:
+            path = parent / name
+            if private_workspace_path(path):
+                continue
+            try:
+                if path.is_file() and not path.is_symlink():
+                    total += path.stat().st_size
+            except OSError:
+                pass
     return total
 
 
@@ -1282,6 +1409,9 @@ class PackageFilter:
         name = info.name.removeprefix("./")
         path = PurePosixPath(name)
         parts = path.parts
+        if is_private_b_primary_escrow_path(path):
+            self.reject(info, PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON)
+            return None
         source_path = ROOT / name
 
         if name == RESERVED_UPGRADE_GLOBAL_ALIAS and not info.issym():
@@ -2098,7 +2228,10 @@ def create_package(
                 )
             for index, (project_rel, selected) in enumerate(selected_p2p_by_project.items()):
                 p2p_staged = Path(p2p_stage_name) / f"p2p-image-free-{index}.xlsx"
+                selected_project = ROOT / project_rel
+                source_before = p2p_source_snapshot(selected_project, selected)
                 stats = strip_xlsx_images(selected, p2p_staged)
+                assert_p2p_source_snapshot(selected_project, selected, source_before)
                 staged_p2p_by_project[project_rel] = p2p_staged
                 if selected == selected_p2p:
                     p2p_stats = stats
@@ -2152,6 +2285,11 @@ def create_package(
                     _reproducible_tarinfo(info)
                     with staged.open("rb") as stream:
                         archive.addfile(info, stream)
+                    receipt_data = p2p_receipt_bytes(selected.name, sha256(staged))
+                    receipt_info = tarfile.TarInfo(f"./{project_rel}/{P2P_RECEIPT_NAME}")
+                    receipt_info.mode = 0o644
+                    receipt_info.size = len(receipt_data)
+                    archive.addfile(_reproducible_tarinfo(receipt_info), io.BytesIO(receipt_data))
                 # Preserve the project contract as an empty placeholder while never
                 # exporting the management server's runtime key material.
                 for relative in sorted(package_filter.managed_pubkeys):
@@ -2178,6 +2316,18 @@ def create_package(
                 member = archive.getmember(member_name) if member_name in names else None
                 if member is None or not member.isfile():
                     raise RuntimeError(f"packaged P2P workbook missing: {member_name}")
+                receipt_name = f"./{project_rel}/{P2P_RECEIPT_NAME}"
+                receipt_member = archive.getmember(receipt_name) if receipt_name in names else None
+                if receipt_member is None or not receipt_member.isfile():
+                    raise RuntimeError(f"packaged P2P receipt missing: {receipt_name}")
+                receipt_stream = archive.extractfile(receipt_member)
+                workbook_stream = archive.extractfile(member)
+                if receipt_stream is None or workbook_stream is None:
+                    raise RuntimeError("cannot verify packaged P2P workbook/receipt")
+                receipt = json.loads(receipt_stream.read())
+                if (receipt.get("basename") != selected.name
+                        or receipt.get("sha256") != hashlib.sha256(workbook_stream.read()).hexdigest()):
+                    raise RuntimeError("packaged P2P receipt digest mismatch")
             required = {
                 "./.dockerignore",
                 "./infra/docker/Dockerfile",
@@ -2302,10 +2452,20 @@ def create_package(
                 if not stat.S_ISREG(existing.st_mode):
                     raise ValueError("--force can replace only a regular archive")
             _recheck_package_project_inputs(bound_inputs)
+            if artifact_kind == "download":
+                visible = output.parent.lstat()
+                if (not stat.S_ISDIR(visible.st_mode)
+                        or (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino)):
+                    raise ValueError("output directory changed before publication")
             os.replace(temporary_name, output.name,
                        src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         else:
             _recheck_package_project_inputs(bound_inputs)
+            if artifact_kind == "download":
+                visible = output.parent.lstat()
+                if (not stat.S_ISDIR(visible.st_mode)
+                        or (visible.st_dev, visible.st_ino) != (parent.st_dev, parent.st_ino)):
+                    raise ValueError("output directory changed before publication")
             os.link(temporary_name, output.name,
                     src_dir_fd=parent_fd, dst_dir_fd=parent_fd,
                     follow_symlinks=False)
