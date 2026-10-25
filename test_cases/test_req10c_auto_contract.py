@@ -24,12 +24,46 @@ from test_cases.module_loader import load_script
 
 ROOT = Path(os.environ.get("REQ10C_TEST_ROOT") or Path(__file__).resolve().parents[1])
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+UNSETUP = ROOT / "DAY0-Prepare/02-unsetup.py"
 
 
 class Req10CAutoDirectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.initial = load_script("req10c_auto_direct_initial", INITIAL)
+        cls.unsetup = load_script("req10c_auto_direct_unsetup", UNSETUP)
+
+    def test_crontab_update_requires_two_identical_snapshots(self) -> None:
+        stable = "1 * * * * /usr/bin/true\n"
+        changed = stable + "2 * * * * /usr/bin/false\n"
+
+        with mock.patch.object(
+            self.initial, "_read_auto_crontab", side_effect=[stable, stable]
+        ) as reads:
+            self.assertEqual(stable, self.initial._read_stable_auto_crontab())
+        self.assertEqual(2, reads.call_count)
+
+        with mock.patch.object(
+            self.initial, "_read_auto_crontab", side_effect=[stable, changed]
+        ):
+            with self.assertRaisesRegex(
+                self.initial.SetupError, "changed during the protected read window"
+            ):
+                self.initial._read_stable_auto_crontab()
+
+        with mock.patch.object(
+            self.unsetup, "_read_req10c_crontab", side_effect=[stable, stable]
+        ) as reads:
+            self.assertEqual(stable, self.unsetup._read_stable_req10c_crontab())
+        self.assertEqual(2, reads.call_count)
+
+        with mock.patch.object(
+            self.unsetup, "_read_req10c_crontab", side_effect=[stable, changed]
+        ):
+            with self.assertRaisesRegex(
+                OSError, "changed during the protected read window"
+            ):
+                self.unsetup._read_stable_req10c_crontab()
 
     def test_real_environment_card_has_title_and_remains_not_run(self) -> None:
         document = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(

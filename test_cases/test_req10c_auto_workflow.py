@@ -289,7 +289,7 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                     self.assertEqual(0, process.returncode, stdout + stderr)
                 self.assertEqual("L\n", before_release,
                                  "second project operation read while first held the RMW window")
-                self.assertEqual("L\nW\nL\nW\n", events.read_text(encoding="ascii"))
+                self.assertEqual("L\nL\nW\nL\nL\nW\n", events.read_text(encoding="ascii"))
                 lock = state / "auto-crontab.lock"
                 self.assertTrue(lock.is_file(), "lock inode must survive cleanup")
                 self.assertEqual(0o600, lock.stat().st_mode & 0o777)
