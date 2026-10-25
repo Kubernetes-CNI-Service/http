@@ -487,3 +487,29 @@ class DevCandidateGuaranteeTests(unittest.TestCase):
                         "--candidate-dir", str(candidate),
                     ])
                 self.assertEqual([], list(candidate.iterdir()))
+
+    def test_c1_private_candidate_flag_keeps_five_public_outputs_unchanged(self):
+        # DEV test_load_release_transaction::ReleaseTransactionTests::
+        # test_c1_private_candidate_flag_keeps_five_public_outputs_unchanged.
+        # flat_snapshot above binds the symlink inode, readlink and bytes; this
+        # keeps DEV's stronger target binding (target inode and mtime_ns).
+        # Call form: the candidate is TEST's empty project candidate, so DEV's
+        # copy2 pre-fill of the five outputs into the candidate is dropped.
+        with tempfile.TemporaryDirectory(prefix="dhcp-deferred-public-") as tmp:
+            fixture, _project, _output, candidate = private_project(Path(tmp))
+            before = {
+                label: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+                for label, path in fixture.outputs.items()
+            }
+            fixture.execute([
+                "c1-generate_dhcp.py", "-y", "--deployment-scope", "prod",
+                "--switch", "eth", "--candidate-dir", str(candidate),
+            ])
+            for label, expected in before.items():
+                path = fixture.outputs[label]
+                self.assertEqual(
+                    expected, (path.stat().st_ino, path.stat().st_mtime_ns,
+                               path.read_bytes()),
+                )
+            self.assertTrue((candidate / "dhcp-release-manifest.json").is_file())
+            self.assertTrue((candidate / "dhcpd.conf").is_file())
