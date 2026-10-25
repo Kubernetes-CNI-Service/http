@@ -1163,7 +1163,11 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="req10b-plan-") as directory:
             _, tool, _, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
-            with mock.patch.object(self.initial, "run_on_ib") as network:
+            # Like the other plan/apply cases here, the workstation is not an Ethernet jump
+            # switch: never resolve the real host name (socket.getfqdn() makes macOS libc keep
+            # an mDNSResponder socket open for the rest of the process).
+            with mock.patch.object(self.initial, "run_on_ib") as network, \
+                    mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()):
                 self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--plan"))
             network.assert_not_called()
             report = (cache.parent / "report.log").read_text(encoding="utf-8")
