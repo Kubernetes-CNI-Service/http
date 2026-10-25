@@ -155,7 +155,35 @@ def repository_inventory(root: Path) -> tuple[str, ...]:
     return inventory
 
 
-def source_summary(path: Path) -> str | None:
+class _InvocationSources:
+    """One render's text/AST facts only; never retained between invocations."""
+
+    def __init__(self) -> None:
+        self._texts: dict[Path, tuple[str | None, Exception | None]] = {}
+        self._trees: dict[Path, ast.Module | None] = {}
+
+    def text(self, path: Path) -> str:
+        if path not in self._texts:
+            try:
+                self._texts[path] = (path.read_text(encoding="utf-8"), None)
+            except (OSError, UnicodeError) as error:
+                self._texts[path] = (None, error)
+        text, error = self._texts[path]
+        if error is not None:
+            raise error
+        assert text is not None
+        return text
+
+    def tree(self, path: Path, text: str) -> ast.Module | None:
+        if path not in self._trees:
+            try:
+                self._trees[path] = ast.parse(text)
+            except SyntaxError:
+                self._trees[path] = None
+        return self._trees[path]
+
+
+def source_summary(path: Path, *, _facts: _InvocationSources | None = None) -> str | None:
     """Extract a short checked-in title/docstring without reading binary payloads."""
     if path.is_symlink():
         return f"相对软链接入口，canonical target 为 {os.readlink(path)}。"
@@ -163,7 +191,7 @@ def source_summary(path: Path) -> str | None:
     if suffix not in {".py", ".sh", ".cgi", ".md", ".txt"}:
         return None
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8") if _facts is None else _facts.text(path)
     except (OSError, UnicodeError):
         return None
     if suffix in {".py", ".cgi"}:
@@ -171,7 +199,7 @@ def source_summary(path: Path) -> str | None:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
                 warnings.simplefilter("ignore", SyntaxWarning)
-                module = ast.parse(text)
+                module = ast.parse(text) if _facts is None else _facts.tree(path, text)
         except SyntaxError:
             module = None
         if module is not None:
@@ -257,7 +285,7 @@ def file_responsibility(relative: str) -> str:
     return "仓库维护者按公开边界和测试治理修改；不得绕过 Git/manifest/发布检查。"
 
 
-def render_file_catalog(root: Path, inventory: tuple[str, ...]) -> str:
+def render_file_catalog(root: Path, inventory: tuple[str, ...], *, _facts: _InvocationSources | None = None) -> str:
     groups: dict[str, list[str]] = defaultdict(list)
     for relative in inventory:
         groups[Path(relative).parts[0]].append(relative)
@@ -293,7 +321,7 @@ def render_file_catalog(root: Path, inventory: tuple[str, ...]) -> str:
         ]
         for relative in members:
             source = root / relative
-            purpose = FILE_PURPOSE_OVERRIDES.get(relative) or source_summary(source) or generic_file_purpose(relative)
+            purpose = FILE_PURPOSE_OVERRIDES.get(relative) or source_summary(source, _facts=_facts) or generic_file_purpose(relative)
             category = file_category(relative)
             responsibility = file_responsibility(relative)
             lines.append(
@@ -308,11 +336,11 @@ def render_file_catalog(root: Path, inventory: tuple[str, ...]) -> str:
     return "\n".join(lines)
 
 
-def script_options(path: Path) -> tuple[str, ...]:
+def script_options(path: Path, *, _facts: _InvocationSources | None = None) -> tuple[str, ...]:
     if path.is_symlink():
         return ()
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8") if _facts is None else _facts.text(path)
     except (OSError, UnicodeError):
         return ()
     options: list[str] = []
@@ -321,7 +349,7 @@ def script_options(path: Path) -> tuple[str, ...]:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
                 warnings.simplefilter("ignore", SyntaxWarning)
-                tree = ast.parse(text)
+                tree = ast.parse(text) if _facts is None else _facts.tree(path, text)
         except SyntaxError:
             tree = None
         if tree is not None:
@@ -341,19 +369,22 @@ def script_options(path: Path) -> tuple[str, ...]:
     return tuple(options)
 
 
-def is_python_main(path: Path) -> bool:
+def is_python_main(path: Path, *, _facts: _InvocationSources | None = None) -> bool:
     if path.is_symlink() or path.suffix.lower() not in {".py", ".cgi"}:
         return False
     try:
+        if _facts is not None:
+            text = _facts.text(path)
+            return '__name__ == "__main__"' in text or "__name__ == '__main__'" in text
         return '__name__ == "__main__"' in path.read_text(encoding="utf-8") or "__name__ == '__main__'" in path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False
 
 
-def script_profile(root: Path, relative: str) -> dict[str, str]:
+def script_profile(root: Path, relative: str, *, _facts: _InvocationSources | None = None) -> dict[str, str]:
     path = Path(relative)
     source = root / relative
-    purpose = source_summary(source) or generic_file_purpose(relative)
+    purpose = source_summary(source, _facts=_facts) or generic_file_purpose(relative)
     top = path.parts[0]
     is_test = top == "test_cases"
     is_validation_entrypoint = relative in {
@@ -386,7 +417,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             prerequisite = ("工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。"
                             "AIR/prod 验证还须见证其他同 UID crontab 写者在安装、自动移除和 unsetup 各自整个读—改—写窗口保持静默。")
             syntax = "python3 -B test_cases/run_related_tests.py [options]"
-            parameters = ", ".join(script_options(source))
+            parameters = ", ".join(script_options(source, _facts=_facts))
             inputs = "当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。"
             outputs = ("选测清单、unittest 结果和退出码；普通 related/full 成功后可按合同原子更新批准状态。"
                        "验证模式仍如实报告三项 FAIL，只签发与普通发布证明严格区分的验证证明。")
@@ -399,7 +430,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             scenario = "load 完成后只读核对 release、source、服务、worker、DHCP 监听、HTTP 发布边界和项目 scope。"
             prerequisite = "目标项目已部署且身份明确；参数与实际 prod/air/mini 场景一致；测试脚本单独安全传入 VM。"
             syntax = "sudo python3 -B test_cases/run_vm_validation.py <project> [options]"
-            parameters = ", ".join(script_options(source))
+            parameters = ", ".join(script_options(source, _facts=_facts))
             inputs = "目标 VM 的项目、parent/child release、source receipt、运行配置、systemd 状态和可选 HTTP 响应。"
             outputs = "终端检查结果及可选 JSON 报告；工具只读，但主动 HTTP GET 会正常写 Apache access log。"
             success = "退出码 0，选择的 strict/full-systemd 检查全部通过；mock 或局部 HTTP 成功不能替代设备验收。"
@@ -476,7 +507,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         scenario = "上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。"
         prerequisite = "调用者已建立正确 root、权限、锁、输入身份和失败处理；不得绕过上层 preflight。"
         syntax = f"由上层 Python 模块导入 {relative} 中的公开函数/类"
-        opts = script_options(source)
+        opts = script_options(source, _facts=_facts)
         parameters = "无受支持的独立 CLI" + (f"；源码中出现的内部选项包括 {', '.join(opts)}" if opts else "。")
         inputs = "调用者已验证的数据结构、文件描述符或路径；具体 schema 由模块 direct 测试锁定。"
         outputs = "返回值、受控异常或调用者事务内的状态变化；库自身不构成完整部署。"
@@ -501,7 +532,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         scenario = "验证容器 build/deploy/load/health/restart/unload/down 的实现合同；尚未取得成功端到端真机证据前不服务生产项目。"
         prerequisite = "当前源码 full gate、fresh image/upload、immutable identity、批准 runner、回滚和证据目录全部就绪；旧 artifact 一律 stale。"
         syntax = "bash infra/docker/deploy.sh --help；生产部署命令在 Docker 正式准入前不提供"
-        parameters = ", ".join(script_options(source)) or "动作及参数以 --help 和隔离验证计划为准。"
+        parameters = ", ".join(script_options(source, _facts=_facts)) or "动作及参数以 --help 和隔离验证计划为准。"
         inputs = "fresh source manifest、upload、镜像、runtime config 和目标 VM 只读基线；不得复用历史 image ID。"
         outputs = "容器/image/CID/receipt/Supervisor/health/restart 证据；任何单项成功都不能单独构成生产准入。"
         success = "完整 VM 场景零失败、清理可恢复且独立 review 明确 GO；在此之前一律保持未准入。"
@@ -516,7 +547,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
         scenario = "上层生命周期启动后执行后台采集、恢复、健康检查、配置应用或容器激活。"
         prerequisite = "上层入口已验证 release/receipt、路径类型、权限、锁和依赖服务；当前身份必须匹配。"
         syntax = f"由所属上层配置调用 {relative}；人工只使用对应 deploy/load/status/CGI 入口"
-        opts = script_options(source)
+        opts = script_options(source, _facts=_facts)
         parameters = ", ".join(opts) if opts else "无公开操作员参数；参数由上层配置固定。"
         inputs = "已发布 release、受管配置/请求、日志或设备端 HTTP 资源。"
         outputs = "受管状态、日志、配置、health 或设备应用回执；所有写入应留在规定根目录。"
@@ -545,7 +576,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
             syntax = f"bash {relative} [options]"
         else:
             syntax = f"python3 -B {relative} [options]"
-        opts = script_options(source)
+        opts = script_options(source, _facts=_facts)
         parameters = ", ".join(opts) if opts else "该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。"
         inputs = "所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。"
         outputs = "命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。"
@@ -559,7 +590,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
                 "--host-role=management-server；Docker 由 hostctl 编排。"
             )
         if not example:
-            if is_python_main(source):
+            if is_python_main(source, _facts=_facts):
                 example = f"python3 -B {relative} --help"
             elif source.suffix.lower() == ".sh":
                 example = f"sed -n '1,120p' {relative}  # 先读文件头 Usage/安全边界，再由所属流程调用"
@@ -581,7 +612,7 @@ def script_profile(root: Path, relative: str) -> dict[str, str]:
     }
 
 
-def render_script_reference(root: Path, inventory: tuple[str, ...]) -> str:
+def render_script_reference(root: Path, inventory: tuple[str, ...], *, _facts: _InvocationSources | None = None) -> str:
     scripts = tuple(
         relative for relative in inventory
         if Path(relative).suffix.lower() in SCRIPT_SUFFIXES
@@ -613,7 +644,7 @@ def render_script_reference(root: Path, inventory: tuple[str, ...]) -> str:
             f"{html.escape(group)}/ — {len(groups[group])} 个脚本</h4>"
         )
         for relative in groups[group]:
-            profile = script_profile(root, relative)
+            profile = script_profile(root, relative, _facts=_facts)
             lines += [
                 f"        <details data-script-reference=\"{html.escape(relative, quote=True)}\" class=\"script-reference\">",
                 f"          <summary><code>{html.escape(relative)}</code> — {html.escape(profile['purpose'])}</summary>",
@@ -642,12 +673,13 @@ def render_manual(root: Path = ROOT) -> str:
     manual = root / "user-manual.html"
     current = manual.read_text(encoding="utf-8")
     inventory = repository_inventory(root)
+    facts = _InvocationSources()
     rendered = replace_block(
-        current, FILE_BEGIN, FILE_END, render_file_catalog(root, inventory),
+        current, FILE_BEGIN, FILE_END, render_file_catalog(root, inventory, _facts=facts),
     )
     return replace_block(
         rendered, SCRIPT_BEGIN, SCRIPT_END,
-        render_script_reference(root, inventory),
+        render_script_reference(root, inventory, _facts=facts),
     )
 
 

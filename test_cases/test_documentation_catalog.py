@@ -179,6 +179,25 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertNotRegex(prerequisite, r"已通过|已经通过|已完成")
         self.assertIn("旧候选", prerequisite)
 
+    def test_catalog_loader_is_independent_of_prior_tools_import_paths(self):
+        child = r'''
+import sys
+from pathlib import Path
+root = Path.cwd()
+sys.path[:] = [entry for entry in sys.path if Path(entry or '.').resolve() != root / 'tools']
+from test_cases.test_documentation_catalog import load_script
+before = tuple(sys.path)
+module = load_script()
+assert tuple(sys.path) == before, 'loader leaked a helper import path'
+assert callable(module.path_disposition) and module.BEGIN == '<!-- BEGIN GENERATED DOCUMENTATION CATALOG -->'
+print('INDEPENDENT_CATALOG_LOADER_OK')
+'''
+        result = subprocess.run([sys.executable, "-B", "-c", child], cwd=ROOT,
+                                capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("INDEPENDENT_CATALOG_LOADER_OK\n", result.stdout)
+        self.assertEqual("", result.stderr)
+
     def test_discovery_excludes_outputs_history_details_and_deduplicates_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -939,6 +958,353 @@ class DocumentationCatalogTests(unittest.TestCase):
                         ROOT, "check-ignore", "--quiet", relative,
                     )
                     self.assertNotEqual(0, ignored.returncode, relative)
+
+class ManualPF2InvocationFactsTests(unittest.TestCase):
+    """Literal expectations for one manual-render invocation, not an implementation oracle."""
+
+    MAIN = (
+        '"""Launch card."""\n'
+        'import argparse\n'
+        'p = argparse.ArgumentParser()\n'
+        'p.add_argument("--alpha", "-a")\n'
+        'if __name__ == "__main__":\n'
+        '    pass\n'
+    )
+    CGI = '# CGI endpoint\np.add_argument("--mode")\n'
+    SHELL = "#!/bin/sh\n# Manual operator helper\nprintf '%s' --dry-run\n"
+    NOTES = "# Field Notes\n"
+    BROKEN = "# Broken syntax note\nif (\n"
+    INVENTORY = (
+        "main.py", "handler.cgi", "ops.sh", "notes.md", "broken.py", "alias.py",
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.updater = load_path("update_user_manual_pf2_direct", USER_MANUAL_SCRIPT)
+
+    def _fixture(self, root: Path) -> None:
+        (root / "main.py").write_text(self.MAIN, encoding="utf-8")
+        (root / "handler.cgi").write_text(self.CGI, encoding="utf-8")
+        (root / "ops.sh").write_text(self.SHELL, encoding="utf-8")
+        (root / "notes.md").write_text(self.NOTES, encoding="utf-8")
+        (root / "broken.py").write_text(self.BROKEN, encoding="utf-8")
+        (root / "alias.py").symlink_to("main.py")
+        (root / "user-manual.html").write_text(
+            "prelude\n"
+            "        <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->\n"
+            "old file rows\n"
+            "        <!-- END GENERATED USER MANUAL FILE CATALOG -->\n"
+            "between\n"
+            "        <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+            "old script rows\n"
+            "        <!-- END GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+            "epilogue\n",
+            encoding="utf-8",
+        )
+
+    def _render_observed(self, root: Path):
+        reads = []
+        parses = []
+        original_read = Path.read_text
+        original_parse = self.updater.ast.parse
+
+        def observed_read(path, *args, **kwargs):
+            reads.append(Path(path))
+            return original_read(path, *args, **kwargs)
+
+        def observed_parse(source, *args, **kwargs):
+            parses.append(source)
+            return original_parse(source, *args, **kwargs)
+
+        with mock.patch.object(
+            self.updater, "repository_inventory", return_value=self.INVENTORY,
+        ), mock.patch.object(
+            Path, "read_text", observed_read,
+        ), mock.patch.object(
+            self.updater.ast, "parse", observed_parse,
+        ):
+            rendered = self.updater.render_manual(root)
+        return rendered, reads, parses
+
+    def test_pf2_one_parse_per_python_source_in_one_render(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-direct-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            _rendered, _reads, parses = self._render_observed(root)
+            self.assertEqual(1, parses.count(self.MAIN))
+            self.assertEqual(1, parses.count(self.CGI))
+            self.assertLessEqual(parses.count(self.BROKEN), 1)
+            self.assertEqual(0, parses.count(self.SHELL))
+            self.assertEqual(0, parses.count(self.NOTES))
+
+    def test_pf2_one_read_per_ordinary_source_and_no_alias_read(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-direct-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            _rendered, reads, _parses = self._render_observed(root)
+            for relative in ("main.py", "handler.cgi", "ops.sh", "notes.md", "broken.py"):
+                with self.subTest(relative=relative):
+                    self.assertEqual(1, reads.count(root / relative))
+            self.assertEqual(0, reads.count(root / "alias.py"))
+            self.assertEqual(1, reads.count(root / "user-manual.html"))
+
+    def test_pf2_literal_fields_and_legacy_direct_apis(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-direct-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            summary = self.updater.source_summary
+            options = self.updater.script_options
+            main = self.updater.is_python_main
+            self.assertEqual("Launch card。", summary(root / "main.py"))
+            self.assertEqual(("--alpha", "-a"), options(root / "main.py"))
+            self.assertIs(True, main(root / "main.py"))
+            self.assertEqual("CGI endpoint。", summary(root / "handler.cgi"))
+            self.assertEqual(("--mode",), options(root / "handler.cgi"))
+            self.assertIs(False, main(root / "handler.cgi"))
+            self.assertEqual("Manual operator helper。", summary(root / "ops.sh"))
+            self.assertEqual(("--dry-run",), options(root / "ops.sh"))
+            self.assertEqual("文档：Field Notes。", summary(root / "notes.md"))
+            self.assertEqual("Broken syntax note。", summary(root / "broken.py"))
+            self.assertEqual((), options(root / "broken.py"))
+            self.assertIs(False, main(root / "broken.py"))
+            self.assertEqual(
+                "相对软链接入口，canonical target 为 main.py。",
+                summary(root / "alias.py"),
+            )
+            self.assertEqual((), options(root / "alias.py"))
+            self.assertIs(False, main(root / "alias.py"))
+            profile = self.updater.script_profile(root, "main.py")
+            self.assertEqual("Launch card。", profile["purpose"])
+            self.assertEqual("--alpha, -a", profile["parameters"])
+            self.assertEqual("python3 -B main.py --help", profile["example"])
+            rendered, _reads, _parses = self._render_observed(root)
+            for literal in ("prelude", "between", "epilogue", "Launch card。", "--alpha, -a"):
+                with self.subTest(literal=literal):
+                    self.assertIn(literal, rendered)
+            self.assertIn('data-file-path="alias.py"', rendered)
+            self.assertIn('data-script-reference="main.py"', rendered)
+
+    def test_pf2_new_render_sees_rewritten_source_without_cross_call_cache(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-direct-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            before, _reads, _parses = self._render_observed(root)
+            self.assertIn("Launch card。", before)
+            self.assertIn("--alpha", before)
+            changed = self.MAIN.replace("Launch card.", "Updated card.").replace(
+                "--alpha", "--beta",
+            )
+            (root / "main.py").write_text(changed, encoding="utf-8")
+            after, _reads, _parses = self._render_observed(root)
+            self.assertIn("Updated card。", after)
+            self.assertIn("--beta", after)
+            self.assertNotIn("Launch card。", after)
+            self.assertNotIn("--alpha", after)
+
+    def test_pf2_render_keeps_module_globals_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-direct-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            before_keys = set(vars(self.updater))
+            before_containers = {
+                key: (id(value), copy.deepcopy(value))
+                for key, value in vars(self.updater).items()
+                if not key.startswith("__") and isinstance(value, (dict, list, set))
+            }
+            self._render_observed(root)
+            self.assertEqual(before_keys, set(vars(self.updater)))
+            after_containers = {
+                key: (id(value), copy.deepcopy(value))
+                for key, value in vars(self.updater).items()
+                if not key.startswith("__") and isinstance(value, (dict, list, set))
+            }
+            self.assertEqual(before_containers, after_containers)
+
+
+class PF2ReadFailureContracts(unittest.TestCase):
+    PURPOSE="属于“HTTP ZTP 仓库根级支持”的 item.py；具体边界由当前文件、已跟踪的上层入口和测试合同共同约束。"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.updater=load_path("update_user_manual_pf2_errors", USER_MANUAL_SCRIPT)
+
+    def _seed(self, root, invalid_utf8):
+        (root/"user-manual.html").write_text(
+            "before\n"
+            "        <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->\n"
+            "old files\n"
+            "        <!-- END GENERATED USER MANUAL FILE CATALOG -->\n"
+            "middle\n"
+            "        <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+            "old scripts\n"
+            "        <!-- END GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+            "after\n",encoding="utf-8")
+        if invalid_utf8:
+            (root/"item.py").write_bytes(b"\xff")
+
+    def _render_failure_and_recovery(self, invalid_utf8):
+        with tempfile.TemporaryDirectory(prefix="pf2-error-") as directory:
+            root=Path(directory)
+            self._seed(root,invalid_utf8)
+            seen=[]
+            original=Path.read_text
+            def observed(path,*args,**kwargs):
+                seen.append(Path(path))
+                return original(path,*args,**kwargs)
+            with mock.patch.object(self.updater,"repository_inventory",return_value=("item.py",)),mock.patch.object(Path,"read_text",observed):
+                rendered=self.updater.render_manual(root)
+            self.assertIn(self.PURPOSE,rendered)
+            self.assertIn('data-file-path="item.py"',rendered)
+            self.assertIn('data-script-reference="item.py"',rendered)
+            self.assertEqual(1,seen.count(root/"item.py"))
+            self.assertEqual(1,seen.count(root/"user-manual.html"))
+            (root/"item.py").write_text('"""Recovered title."""\n',encoding="utf-8")
+            with mock.patch.object(self.updater,"repository_inventory",return_value=("item.py",)):
+                recovered=self.updater.render_manual(root)
+            self.assertIn("Recovered title。",recovered)
+            self.assertNotIn(self.PURPOSE,recovered)
+
+    def _legacy_failure(self,invalid_utf8):
+        with tempfile.TemporaryDirectory(prefix="pf2-legacy-error-") as directory:
+            root=Path(directory)
+            self._seed(root,invalid_utf8)
+            path=root/"item.py"
+            self.assertIsNone(self.updater.source_summary(path))
+            self.assertEqual((),self.updater.script_options(path))
+            self.assertIs(False,self.updater.is_python_main(path))
+            profile=self.updater.script_profile(root,"item.py")
+            self.assertEqual(self.PURPOSE,profile["purpose"])
+            self.assertEqual("该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。",profile["parameters"])
+            self.assertEqual("python3 -B -m py_compile item.py  # 仅语法验证；实际运行由上层流程负责",profile["example"])
+
+    def test_missing_source_one_render_fallback_and_next_render_recovery(self):
+        self._render_failure_and_recovery(False)
+
+    def test_invalid_utf8_one_render_fallback_and_next_render_recovery(self):
+        self._render_failure_and_recovery(True)
+
+    def test_missing_source_legacy_default_apis_keep_fallbacks(self):
+        self._legacy_failure(False)
+
+    def test_invalid_utf8_legacy_default_apis_keep_fallbacks(self):
+        self._legacy_failure(True)
+
+
+class ManualPF2CurrentCliWorkflowTests(unittest.TestCase):
+    """Real current updater CLIs; literal documents, never renderer-made oracles."""
+
+    INVENTORY = (
+        "README.md", "module/README.md", "tools/project_contract.py",
+        "tools/update-root-readme.py", "tools/update-user-manual.py",
+        "user-manual.html",
+    )
+    README = (
+        "# Mini source reference\n\n"
+        "This is a private documentation fixture, not a deployment guide.\n\n"
+        "<!-- BEGIN GENERATED DOCUMENTATION CATALOG -->\n\n"
+        "此表由 `tools/update-root-readme.py` 生成；源 README 保持在所属模块，"
+        "这里仅保留去重后的入口。历史 issue 详情由各自索引导航，"
+        "不在根文档重复展开。\n\n"
+        "| 分类 | 文档 | 兼容别名 |\n"
+        "|---|---|---|\n"
+        "| `其他` | [Module title](module/README.md) | — |\n"
+        "<!-- END GENERATED DOCUMENTATION CATALOG -->\n\n"
+        "Fixture footer sentinel.\n\n"
+    )
+    STALE_MANUAL = (
+        "<!doctype html>\n<html><body>\n"
+        "<p>Unowned manual prelude sentinel.</p>\n"
+        "        <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->\n"
+        "<p>Independently stale file catalog sentinel.</p>\n"
+        "        <!-- END GENERATED USER MANUAL FILE CATALOG -->\n"
+        "<p>Unowned middle sentinel.</p>\n"
+        "        <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+        "<p>Independently stale script reference sentinel.</p>\n"
+        "        <!-- END GENERATED USER MANUAL SCRIPT REFERENCE -->\n"
+        "<p>Unowned manual footer sentinel.</p>\n</body></html>\n"
+    )
+
+    def _environment(self, root):
+        return {
+            "HOME": str(root), "PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C",
+            "TMPDIR": str(root / "fixture-tmp"),
+            "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+
+    def _git(self, root, *arguments):
+        return subprocess.run(
+            ["/usr/bin/git", "-c", "core.hooksPath=/dev/null", "-C", str(root), *arguments],
+            env=self._environment(root), stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10.0, check=True,
+        ).stdout
+
+    def _fixture(self, root):
+        (root / "fixture-tmp").mkdir(mode=0o700)
+        for relative in self.INVENTORY:
+            leaf = root / relative
+            leaf.parent.mkdir(parents=True, exist_ok=True)
+            if relative.startswith("tools/"):
+                source = ROOT / relative
+                self.assertFalse(source.is_symlink())
+                leaf.write_bytes(source.read_bytes())
+                leaf.chmod(stat.S_IMODE(source.stat().st_mode))
+            elif relative == "README.md":
+                leaf.write_text(self.README, encoding="utf-8")
+            elif relative == "module/README.md":
+                leaf.write_text(
+                    "# Module title\n\nUNIQUE_BODY_THAT_MUST_NOT_BE_EMBEDDED\n",
+                    encoding="utf-8",
+                )
+            else:
+                leaf.write_text(self.STALE_MANUAL, encoding="utf-8")
+        self._git(root, "init", "-q")
+        self._git(root, "add", "--", *self.INVENTORY)
+        tracked = self._git(root, "ls-files", "--cached", "-z").decode().split("\0")
+        self.assertEqual(list(self.INVENTORY), [name for name in tracked if name])
+
+    def _check_pair(self, root, expected):
+        before = {relative: (root / relative).read_bytes() for relative in self.INVENTORY}
+        index = (root / ".git/index").read_bytes()
+        for script, code, message in expected:
+            with self.subTest(script=script, expected_exit=code):
+                result = subprocess.run(
+                    # Keep the real CLI's sibling-import path; -I removes it.
+                    # HOME/PATH/Git configuration are private and fixed above.
+                    [sys.executable, "-s", "-B", str(root / "tools" / script), "--check"],
+                    cwd=root, env=self._environment(root), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30.0,
+                )
+                self.assertEqual(code, result.returncode, result.stdout + result.stderr)
+                self.assertIn(message, result.stdout)
+                self.assertEqual(b"", result.stderr)
+                self.assertEqual(before, {
+                    relative: (root / relative).read_bytes() for relative in self.INVENTORY
+                })
+                self.assertEqual(index, (root / ".git/index").read_bytes())
+                self.assertFalse((root / "test_cases/script_test_approved_hashes.json").exists())
+
+    def test_current_two_script_check_accepts_literal_readme_and_rejects_stale_manual(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-current-cli-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            self._check_pair(root, (
+                ("update-root-readme.py", 0, b"README catalog is current"),
+                ("update-user-manual.py", 1, b"user-manual.html is stale"),
+            ))
+
+    def test_current_two_script_check_rejects_stale_inputs_without_rewriting_documents(self):
+        with tempfile.TemporaryDirectory(prefix="pf2-current-cli-stale-") as directory:
+            root = Path(directory)
+            self._fixture(root)
+            (root / "module/README.md").write_text(
+                "# Changed module title\n\nNEW_BODY_MUST_NOT_BE_EMBEDDED\n", encoding="utf-8",
+            )
+            self._check_pair(root, (
+                ("update-root-readme.py", 1, b"README catalog is stale"),
+                ("update-user-manual.py", 1, b"user-manual.html is stale"),
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()
