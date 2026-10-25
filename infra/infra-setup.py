@@ -155,6 +155,27 @@ APACHE_PACKAGES = ("apache2", "apache2-utils", "ssl-cert")
 APACHE_AUTH_MODULES = ("auth_basic", "authn_file", "authn_core", "authz_user", "authz_core", "env",
                        "alias", "cgid", "headers")
 MGMT_CACHE_PACKAGES = BASE_PACKAGES + COMMON_PACKAGES + ZTP_DEPENDENCY_PACKAGES + OPTIONAL_SERVICE_PACKAGES
+# --load-components-v1 IDS: internal data from DAY0-Prepare/11-load.py prepare_infra, encoded by the
+# closed codec tools/infra_components.py.  This entry also ships alone to deployed clients and imports
+# nothing from the project tree, so the closed ID order is repeated here (the component workflow test
+# binds it to tools/infra_components.py).  A packet only narrows the Step 6/7 install lists below; the
+# management cache (MGMT_CACHE_PACKAGES) and the legacy tuples never change, and without the option
+# every run is unchanged.
+LOAD_COMPONENT_ORDER = (
+    "load-core", "http", "dhcp", "ztp-runtime", "render-eth", "render-ib",
+    "render-nvl", "validate-xlsx", "password-hash", "password-ssh", "docker",
+    "nfs", "power-cycle", "analysis", "doca", "init-dns", "init-ntp",
+    "init-timezone", "init-lldp",
+)
+LOAD_COMPONENT_REQUIRED = ("load-core", "init-dns", "init-ntp", "init-timezone", "init-lldp")
+LOAD_COMPONENT_PACKET_LIMIT = 512
+# (component, packages) in install order, as the LOAD component contract defines them: with a packet
+# Step 6 installs only these common packages and Step 7 the base four plus the per-component additions.
+LOAD_COMPONENT_COMMON = (("power-cycle", ("ipmitool",)), ("password-ssh", ("sshpass",)),
+                         ("docker", ("docker.io",)), ("nfs", ("nfs-common",)))
+LOAD_COMPONENT_ZTP_BASE = ("python3", "python3-yaml", "openssh-client", "curl")
+LOAD_COMPONENT_ZTP = (("render-eth", ("python3-jinja2",)), ("validate-xlsx", ("python3-openpyxl",)),
+                      ("analysis", ("python3-pandas", "python3-xlsxwriter")), ("password-hash", ("whois",)))
 EXIT_PENDING = 3  # check mode found changes; 2 stays the usage error (same name as ufm-setup-upgrade)
 SUMMARY_FILES = (RESOLVED_CONF, TIMESYNCD_CONF, LLDPCLI_CONF, APACHE_SERVERNAME_CONF, APACHE_PORTS_CONF,
                  APACHE_LISTENER_CONF, APACHE_PUBLIC_BOUNDARY_CONF, APACHE_DEFAULT_SITE)
@@ -350,11 +371,42 @@ def current_config_value(path: Path, key: str) -> str:
 
 # ------------------------------------------------------------- argument parsing
 
+def parse_load_component_packet(packet: object) -> tuple | None:
+    """The IDs of one canonical LOAD component packet, or None.
+
+    Canonical: non-empty ASCII of at most 512 bytes, comma-separated known IDs, each once and in
+    LOAD_COMPONENT_ORDER, always including load-core and the four init-* IDs.
+    """
+    if (type(packet) is not str or not packet or not packet.isascii()
+            or len(packet) > LOAD_COMPONENT_PACKET_LIMIT):
+        return None
+    components = tuple(packet.split(","))
+    if any(item not in LOAD_COMPONENT_ORDER for item in components):
+        return None
+    positions = [LOAD_COMPONENT_ORDER.index(item) for item in components]
+    if any(later <= earlier for earlier, later in zip(positions, positions[1:])):
+        return None
+    if any(item not in components for item in LOAD_COMPONENT_REQUIRED):
+        return None
+    return components
+
+
+def load_component_packages(components: tuple) -> tuple:
+    """(Step 6 packages, Step 7 ZTP packages) that one parsed packet selects for installation."""
+    common = tuple(package for component, packages in LOAD_COMPONENT_COMMON if component in components
+                   for package in packages)
+    ztp = LOAD_COMPONENT_ZTP_BASE + tuple(package for component, packages in LOAD_COMPONENT_ZTP
+                                          if component in components for package in packages)
+    return common, ztp
+
+
 def parse_arguments(argv: list) -> dict:
     options = {name: False for name in FLAG_NAMES.values()}
     explicit_policy = ""
     policy = "client"
-    for argument in argv:
+    packet: str | None = None
+    arguments = iter(argv)
+    for argument in arguments:
         if argument in ("--client", "--interactive", "--all"):
             requested = argument[2:]
             if explicit_policy and explicit_policy != requested:
@@ -363,6 +415,12 @@ def parse_arguments(argv: list) -> dict:
             explicit_policy = policy = requested
         elif argument in FLAG_NAMES:
             options[FLAG_NAMES[argument]] = True
+        elif argument == "--load-components-v1":
+            value = next(arguments, None)
+            if packet is not None or value is None:
+                print("ERROR: invalid LOAD component packet", file=sys.stderr)
+                raise SetupExit(1)
+            packet = value
         elif argument in ("-h", "--help"):
             sys.stdout.write(USAGE)
             raise SetupExit(0)
@@ -394,6 +452,24 @@ def parse_arguments(argv: list) -> dict:
     if options["skip_doca"]:
         modes["doca"] = "no"
     options["policy"], options["modes"] = policy, modes
+    options["load_components"] = None
+    if packet is not None:
+        # Data only: it must agree with the explicit action flags and can never widen them.
+        components = parse_load_component_packet(packet)
+        if components is None:
+            print("ERROR: invalid LOAD component packet", file=sys.stderr)
+            raise SetupExit(1)
+        if not options["mgmt"] or not options["defer_services"] or explicit_policy:
+            print("ERROR: LOAD components require default management deferred policy", file=sys.stderr)
+            raise SetupExit(1)
+        if (("http" in components) != options["force_apache"]
+                or ("dhcp" in components) != options["force_dhcp"]
+                or ("power-cycle" in components) != options["force_power_cycle"]
+                or ("doca" in components) == options["skip_doca"]
+                or options["force_bluefield"] or options["recover"]):
+            print("ERROR: LOAD component/action mismatch", file=sys.stderr)
+            raise SetupExit(1)
+        options["load_components"] = components
     return options
 
 
@@ -1998,12 +2074,19 @@ class InfraSetup:
 
     def step_common_tools(self) -> None:
         self.print_section("Step 6: Common Tools")
+        if self.opt["load_components"] is not None:
+            self.install_missing(load_component_packages(self.opt["load_components"])[0],
+                                 "Missing", "Packages installed")
+            return
         self.install_missing(COMMON_PACKAGES, "Missing", "Packages installed")
 
     def step_ztp_and_services(self) -> None:
         self.print_section("Step 7: ZTP Dependencies & Optional Services")
         if self.mgmt:
-            if self.install_missing(ZTP_DEPENDENCY_PACKAGES, "Missing ZTP dependencies",
+            ztp_packages = ZTP_DEPENDENCY_PACKAGES
+            if self.opt["load_components"] is not None:
+                ztp_packages = load_component_packages(self.opt["load_components"])[1]
+            if self.install_missing(ztp_packages, "Missing ZTP dependencies",
                                     "ZTP dependencies installed"):
                 self.success("All ZTP dependencies are already installed.")
         else:
