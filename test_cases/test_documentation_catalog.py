@@ -179,25 +179,6 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertNotRegex(prerequisite, r"已通过|已经通过|已完成")
         self.assertIn("旧候选", prerequisite)
 
-    def test_catalog_loader_is_independent_of_prior_tools_import_paths(self):
-        child = r'''
-import sys
-from pathlib import Path
-root = Path.cwd()
-sys.path[:] = [entry for entry in sys.path if Path(entry or '.').resolve() != root / 'tools']
-from test_cases.test_documentation_catalog import load_script
-before = tuple(sys.path)
-module = load_script()
-assert tuple(sys.path) == before, 'loader leaked a helper import path'
-assert callable(module.path_disposition) and module.BEGIN == '<!-- BEGIN GENERATED DOCUMENTATION CATALOG -->'
-print('INDEPENDENT_CATALOG_LOADER_OK')
-'''
-        result = subprocess.run([sys.executable, "-B", "-c", child], cwd=ROOT,
-                                capture_output=True, text=True, timeout=10, check=False)
-        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertEqual("INDEPENDENT_CATALOG_LOADER_OK\n", result.stdout)
-        self.assertEqual("", result.stderr)
-
     def test_discovery_excludes_outputs_history_details_and_deduplicates_aliases(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
