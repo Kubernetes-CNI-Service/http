@@ -461,13 +461,17 @@ S0 修订（2026-10-24，第一次真实分片运行，诊断而非证明）：
   本来就跳过这些根，A 批之后测试侧的整树遍历改走 `governed_tree_paths`，也不进入它们）。匹配的变化与私有
   TMPDIR 内容只逐车道记入 `audit.json` 的
   `leftovers`（`ignored`、`ignored_removed`、`unreviewed`、`tmpdir`，各为排序后的路径、个数，以及以 NUL
-  连接的文件系统字节的 sha256），成功时随 clone 与 TMPDIR 一并删除。当前计划只审阅
-  `outputs/test-diagnostics/collector-prefix-feedback-*`，依据是对 `test_cases/*.py` 全部 302 个文件的
-  静态普查：没有测试列出或通配临时根目录；整树遍历只有 4 个模块（quiesce workflow 的 `*.py`、
-  `test_test_case_repository` 的 `test_*.py`、`test_project_contracts` 的 `02-AIR-devices_config.csv`、
-  `test_ztp_monitor_watch_runtime_workflow` 的 `*.service`/`*.timer`），该形态都不命中。
-  `download-parent-red-*` 不审阅：在 G4 修好之前分片与串行都不能签证明。`.deployment.lock` 与
-  `monitor/.generate-monitor-html.lock` 也不审阅：测试经产品打包代码遍历 checkout（例如
+  连接的文件系统字节的 sha256），成功时随 clone 与 TMPDIR 一并删除。当前计划审阅
+  `outputs/test-diagnostics/` 下的两棵保留夹具树 `collector-prefix-feedback-*` 与 `download-parent-red-*`，
+  依据是对 `test_cases/*.py` 全部 302 个文件的静态普查（没有测试列出或通配临时根目录；整树遍历只有 4 个
+  模块——quiesce workflow 的 `*.py`、`test_test_case_repository` 的 `test_*.py`、`test_project_contracts`
+  的 `02-AIR-devices_config.csv`、`test_ztp_monitor_watch_runtime_workflow` 的 `*.service`/`*.timer`——A 批
+  之后都改走 `governed_tree_paths`，不进入 `outputs/`），以及整合修订 F6 对产品代码的静态普查（156 个文件）：
+  会进入 `outputs/` 的只有打包的特殊节点检查（对普通文件、目录、符号链接不做任何记录）、打包打印的工作区
+  大小、README 目录（`outputs/` 路径在读取前就被排除）和 finish-project 的容量普查（测试从不在真实 checkout
+  上运行它），都观察不到这两棵树中的条目。A 批之前 quiesce 会解析 `download-parent-red-*` 中的 `*.py`
+  （ROOTCAUSE G4），那时它不能审阅。`.deployment.lock` 与
+  `monitor/.generate-monitor-html.lock` 不审阅：测试经产品打包代码遍历 checkout（例如
   `test_upload_package_contract` 断言 monitor 锁不被打包），串行在该用例之前已由别的用例建出锁，所在车道
   却可能没有，断言的检出力因此不同——用正确代码两臂都绿，排除规则回退时却会串行红、分片绿，专用会话
   对照发现不了。所以分片运行前主 checkout 必须已有这两个空的被忽略文件（正式 checkout 在真实 load 后本来
