@@ -9,12 +9,16 @@ import importlib.util
 import ipaddress
 import json
 import io
-from contextlib import ExitStack
+import os
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 import stat
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -30,6 +34,445 @@ SPEC.loader.exec_module(VM)
 
 def sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+@contextmanager
+def actual_deployment_contract_fixture(root: Path):
+    """Give the VM CLI real source at --root, isolated from producer imports.
+
+    This is fixture setup, not a mock of the actual-root/source gate. The
+    LOAD producer has already run before entry; its repo tools modules are
+    restored afterward, exactly as a separate VM verifier process would be.
+    """
+    canonical = root.resolve(strict=True)
+    tools = canonical / "tools"
+    tools.mkdir(mode=0o700, exist_ok=True)
+    tools.chmod(0o700)
+    # A private regular package prevents Python namespace-package search
+    # from merging this actual deployment with repo tools on sys.path.
+    package = tools / "__init__.py"
+    package.write_bytes(b"")
+    package.chmod(0o600)
+    for name in ("project_contract.py", "generation_report.py", "ssh_key_preparation.py"):
+        destination = tools / name
+        destination.write_bytes((ROOT / "tools" / name).read_bytes())
+        destination.chmod(0o600)
+    previous_path = sys.path[:]
+    previous_modules = {name: module for name, module in sys.modules.copy().items()
+                        if name == "tools" or name.startswith("tools.")}
+    try:
+        for name in tuple(sys.modules):
+            if name == "tools" or name.startswith("tools."):
+                sys.modules.pop(name, None)
+        sys.path.insert(0, str(canonical))
+        yield
+    finally:
+        sys.path[:] = previous_path
+        for name in tuple(sys.modules):
+            if name == "tools" or name.startswith("tools."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
+
+
+class VmOperatingSystemContracts(unittest.TestCase):
+    def actual_os_finding(self, system, payload=None, error=None):
+        """Observe the real main branch without running unrelated VM checks."""
+        class FindingObserved(BaseException):
+            pass
+        observed = []
+        original_read = Path.read_text
+        original_add = VM.Recorder.add
+        def read(path, *args, **kwargs):
+            if path == Path("/etc/os-release"):
+                if error is not None:
+                    raise error
+                return payload
+            return original_read(path, *args, **kwargs)
+        def add(recorder, level, check, detail):
+            original_add(recorder, level, check, detail)
+            if check == "operating-system":
+                observed.append((level, detail))
+                raise FindingObserved()
+        with mock.patch.object(VM.platform, "system", return_value=system), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch.object(VM.Recorder, "add", add), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            with self.assertRaises(FindingObserved):
+                VM.main(["unused-os-probe", "--root", str(ROOT)])
+        self.assertEqual(1, len(observed))
+        return observed[0]
+
+    def test_main_accepts_both_supported_ubuntu_versions_and_reports_actual_version(self):
+        for payload, expected in (
+            ('ID=ubuntu\nVERSION_ID="22.04"\n', "Ubuntu 22.04 / Linux"),
+            ('ID="ubuntu"\nVERSION_ID=24.04\n', "Ubuntu 24.04 / Linux"),
+            ("# independent metadata\nPRETTY_NAME=ignored\nID='ubuntu'\nVERSION_ID='22.04'\nID_LIKE=debian\n",
+             "Ubuntu 22.04 / Linux"),
+        ):
+            with self.subTest(payload=payload):
+                self.assertEqual(("PASS", expected), self.actual_os_finding("Linux", payload))
+
+    def test_main_rejects_unsupported_missing_duplicate_and_malformed_os_identity(self):
+        for system, payload in (
+            ("Linux", 'ID=ubuntu\nVERSION_ID="20.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="26.04"\n'),
+            ("Linux", 'ID=debian\nVERSION_ID="24.04"\n'),
+            ("Darwin", 'ID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("FreeBSD", 'ID=ubuntu\nVERSION_ID="22.04"\n'),
+            ("Linux", 'VERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\n'),
+            ("Linux", 'ID=ubuntu\nID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=debian\nID=ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="20.04"\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04\n'),
+            ("Linux", 'ID="ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="24.04";true\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID="$(printf 24.04)"\n'),
+            ("Linux", 'ID=ubuntu\nVERSION_ID=""\n'),
+            ("Linux", 'ID =ubuntu\nVERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\n VERSION_ID="24.04"\n'),
+            ("Linux", 'ID=ubuntu\nID =debian\nVERSION_ID="24.04"\n'),
+        ):
+            with self.subTest(system=system, payload=payload):
+                self.assertEqual("FAIL", self.actual_os_finding(system, payload)[0])
+
+    def test_main_rejects_bare_required_identity_before_or_after_valid_assignments(self):
+        valid = 'ID=ubuntu\nVERSION_ID="24.04"\n'
+        for field in ("ID", "VERSION_ID"):
+            for payload in (field + "\n" + valid, valid + field + "\n"):
+                with self.subTest(field=field, payload=payload):
+                    self.assertEqual("FAIL", self.actual_os_finding("Linux", payload)[0])
+
+    def test_main_keeps_unreadable_os_identity_as_failure(self):
+        for error in (OSError("independent os-release read failure"),
+                      UnicodeDecodeError("utf-8", b"\xff", 0, 1, "independent invalid byte")):
+            with self.subTest(error=type(error).__name__):
+                self.assertEqual("FAIL", self.actual_os_finding("Linux", error=error)[0])
+
+
+class VmOperatingSystemWorkflowContracts(unittest.TestCase):
+    # Stop after a real gate finding: this is an OS/LOAD/root workflow,
+    # explicitly not a model of full systemd, HTTP or device acceptance.
+    CHILD = textwrap.dedent(r'''
+        import importlib.util, json, sys
+        from pathlib import Path
+        from unittest import mock
+        copied, root, os_payload, stop_check = sys.argv[1:]
+        spec = importlib.util.spec_from_file_location("independent_copied_vm", copied)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        observed, origins = [], []
+        original_read, original_add = Path.read_text, module.Recorder.add
+        original_contract = module.deployment_project_contract
+        class GateObserved(BaseException):
+            pass
+        def read(path, *args, **kwargs):
+            if path == Path("/etc/os-release"):
+                return os_payload
+            return original_read(path, *args, **kwargs)
+        def contract():
+            actual = original_contract()
+            origins.append(str(Path(actual.__file__).resolve()))
+            return actual
+        def add(recorder, level, check, detail):
+            original_add(recorder, level, check, detail)
+            observed.append({"level": level, "check": check, "detail": detail})
+            if check == stop_check:
+                raise GateObserved()
+        previous_path = sys.path[:]
+        previous_root = module._VALIDATION_DEPLOYMENT_ROOT
+        stopped = False
+        with mock.patch.object(module.platform, "system", return_value="Linux"), \
+                mock.patch.object(Path, "read_text", read), \
+                mock.patch.object(module.Recorder, "add", add), \
+                mock.patch.object(module, "deployment_project_contract", contract):
+            try:
+                module.main(["demo", "--root", root])
+            except GateObserved:
+                stopped = True
+        assert stopped, "requested real gate was not exercised"
+        assert sys.path == previous_path
+        assert module._VALIDATION_DEPLOYMENT_ROOT == previous_root
+        assert not any(name == "tools" or name.startswith("tools.") for name in sys.modules)
+        core = {"operating-system", "parent-release", "release-inputs", "dhcp-mode"}
+        failed = any(row["level"] == "FAIL" and row["check"] in core for row in observed)
+        print("SCOPED_OS_LOAD_EVIDENCE=" + json.dumps({
+            "findings": observed, "origins": origins,
+            "copied": str(Path(module.__file__).resolve()),
+            "root": str(Path(root).resolve()), "scope": "OS_LOAD_ROOT_ONLY_NOT_FULL_VM",
+        }))
+        raise SystemExit(1 if failed else 0)
+    ''')
+
+    @staticmethod
+    def snapshot(root):
+        values = {}
+        for path in root.rglob("*"):
+            metadata = path.lstat()
+            if path.is_symlink():
+                value = os.readlink(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                value = path.read_bytes()
+            else:
+                continue
+            values[path.relative_to(root).as_posix()] = (
+                metadata.st_ino, metadata.st_mode, value,
+            )
+        return values
+
+    def run_copy(self, fixture, payload, stop_check):
+        with tempfile.TemporaryDirectory(prefix="vm-os-copy-") as directory:
+            private = Path(directory).resolve()
+            copied = private / "independent-verifier.py"
+            copied.write_bytes(SCRIPT.read_bytes())
+            copied.chmod(0o600)
+            root = fixture.root.resolve()
+            self.assertFalse(copied.is_relative_to(root))
+            before = self.snapshot(root)
+            result = subprocess.run(
+                [sys.executable, "-B", "-c", self.CHILD, str(copied),
+                 str(root), payload, stop_check], cwd=private, capture_output=True,
+                text=True, timeout=30,
+                env=dict(os.environ, PYTHONPYCACHEPREFIX=str(private / "fresh-pyc")),
+            )
+            self.assertEqual(before, self.snapshot(root), result.stdout + result.stderr)
+            evidence = [line.partition("=")[2] for line in result.stdout.splitlines()
+                        if line.startswith("SCOPED_OS_LOAD_EVIDENCE=")]
+            self.assertEqual(1, len(evidence), result.stdout + result.stderr)
+            record = json.loads(evidence[0])
+            self.assertEqual(str(copied), record["copied"])
+            self.assertEqual(str(root), record["root"])
+            self.assertEqual("OS_LOAD_ROOT_ONLY_NOT_FULL_VM", record["scope"])
+            return result.returncode, record
+
+    def test_copied_verifier_accepts_both_os_with_real_load_parent_and_actual_root_import(self):
+        fixture, parent = VmReleaseAcceptanceTests._real_load_parent(enabled=False)
+        try:
+            with actual_deployment_contract_fixture(fixture.root):
+                for payload, detail in (
+                    ('ID=ubuntu\nVERSION_ID="22.04"\n', "Ubuntu 22.04 / Linux"),
+                    ('ID=ubuntu\nVERSION_ID="24.04"\n', "Ubuntu 24.04 / Linux"),
+                ):
+                    with self.subTest(payload=payload):
+                        code, record = self.run_copy(fixture, payload, "dhcp-mode")
+                        self.assertEqual(0, code, record)
+                        rows = {row["check"]: row for row in record["findings"]}
+                        self.assertEqual({"level": "PASS", "check": "operating-system",
+                                          "detail": detail}, rows["operating-system"])
+                        self.assertEqual("PASS", rows["parent-release"]["level"])
+                        self.assertEqual("release_id=" + parent["release_id"], rows["parent-release"]["detail"])
+                        self.assertEqual("PASS", rows["release-inputs"]["level"])
+                        self.assertEqual("global-bound disabled", rows["dhcp-mode"]["detail"])
+                        self.assertIn(str(fixture.root.resolve() / "tools/project_contract.py"), record["origins"])
+        finally:
+            fixture.tearDown()
+
+    def test_supported_os_does_not_relax_real_parent_input_or_actual_contract_gates(self):
+        for fault, stop_check in (("parent", "parent-release"),
+                                 ("input", "release-inputs"),
+                                 ("contract", "dhcp-mode")):
+            with self.subTest(fault=fault):
+                fixture, parent = VmReleaseAcceptanceTests._real_load_parent(enabled=False)
+                try:
+                    with actual_deployment_contract_fixture(fixture.root):
+                        if fault == "parent":
+                            path = fixture.project / "99-output-ztp/current-release.json"
+                            record = json.loads(path.read_bytes())
+                            record["release_id"] = "0" * 20
+                            path.write_text(json.dumps(record), encoding="utf-8")
+                        elif fault == "input":
+                            fixture.devices_file.write_bytes(fixture.devices_file.read_bytes() + b"\nindependent drift\n")
+                        else:
+                            (fixture.root / "tools/project_contract.py").unlink()
+                        code, record = self.run_copy(fixture, 'ID=ubuntu\nVERSION_ID="24.04"\n', stop_check)
+                        self.assertEqual(1, code, record)
+                        rows = [row for row in record["findings"] if row["check"] == stop_check]
+                        self.assertEqual(1, len(rows), record)
+                        self.assertEqual("FAIL", rows[0]["level"])
+                        if fault == "contract":
+                            self.assertEqual([], record["origins"])
+                finally:
+                    fixture.tearDown()
+
+
+class VmCopiedDeploymentRootContracts(unittest.TestCase):
+    def test_actual_root_not_copied_validator_location_drives_contract(self):
+        with mock.patch.object(VM, "_VALIDATION_DEPLOYMENT_ROOT", ROOT), \
+                mock.patch.object(VM, "__file__", "/tmp/private-copied-validator.py"):
+            module = VM.deployment_project_contract()
+        self.assertEqual(ROOT / "tools/project_contract.py", Path(module.__file__).resolve())
+
+    def test_foreign_cached_contract_is_not_reused(self):
+        with mock.patch.object(VM, "_VALIDATION_DEPLOYMENT_ROOT", ROOT), \
+                mock.patch.dict(sys.modules, {
+                    "tools.project_contract": type("Foreign", (), {"__file__": "/tmp/foreign-project-contract.py"})(),
+                }):
+            with self.assertRaisesRegex(ValueError, "foreign cached"):
+                VM.deployment_project_contract()
+
+    def test_missing_actual_root_contract_does_not_fallback_repo(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value).resolve()
+            (root / "tools").mkdir(mode=0o700)
+            with mock.patch.object(VM, "_VALIDATION_DEPLOYMENT_ROOT", root):
+                with self.assertRaises((ValueError, OSError)):
+                    VM.deployment_project_contract()
+
+    def test_main_restores_import_root_modules_and_path_after_exception(self):
+        sentinel = type("Original", (), {})()
+        original_path = sys.path[:]
+        def failed_main(argv):
+            VM._VALIDATION_DEPLOYMENT_ROOT = Path("/tmp/private-other-root")
+            sys.path.insert(0, "/tmp/private-other-root")
+            sys.modules["tools.independent-test-private-probe"] = sentinel
+            raise RuntimeError("independent verifier early exception")
+        with mock.patch.object(VM, "_VALIDATION_DEPLOYMENT_ROOT", ROOT), \
+                mock.patch.object(VM, "_main_bound_deployment", side_effect=failed_main):
+            with self.assertRaisesRegex(RuntimeError, "independent verifier"):
+                VM.main([])
+            self.assertEqual(ROOT, VM._VALIDATION_DEPLOYMENT_ROOT)
+            self.assertEqual(original_path, sys.path)
+            self.assertNotIn("tools.independent-test-private-probe", sys.modules)
+
+
+class VmRegularByteReaderRaceContracts(unittest.TestCase):
+    @staticmethod
+    @contextmanager
+    def owned_fifo_rebind(path, owned_root):
+        """Inject one real owned FIFO, but never issue a blocking syscall.
+
+        Missing NONBLOCK raises an independent model error before open; this
+        deliberately cannot count as the expected production ValueError.
+        """
+        path, owned_root = Path(path), Path(owned_root).resolve(strict=True)
+        if path.resolve(strict=True) != path or not path.is_relative_to(owned_root):
+            raise AssertionError("FIFO injection requires the owned private fixture")
+        held = path.with_name("independent-original-" + path.name)
+        if held.exists() or held.is_symlink():
+            raise AssertionError("independent held preimage must not preexist")
+        namespace = SimpleNamespace(**{name: getattr(os, name) for name in dir(os)})
+        original_open, original_close = os.open, os.close
+        attempts, opened, closed, injected = [], [], [], []
+        def open_reader(name, flags, *args, **kwargs):
+            if Path(name) == path:
+                attempts.append(flags)
+                if not injected:
+                    path.rename(held)
+                    os.mkfifo(path, 0o600)
+                    injected.append(path.lstat())
+                if not flags & os.O_NONBLOCK:
+                    raise RuntimeError("independent FIFO model: blocking open would hang")
+                descriptor = original_open(name, flags, *args, **kwargs)
+                opened.append(descriptor)
+                return descriptor
+            return original_open(name, flags, *args, **kwargs)
+        def close_reader(descriptor):
+            if descriptor in opened: closed.append(descriptor)
+            original_close(descriptor)
+        namespace.open, namespace.close = open_reader, close_reader
+        try:
+            with mock.patch.object(VM, "os", namespace):
+                yield attempts, opened, closed, injected
+        finally:
+            # Only exact recorded owned objects/FDs may be cleaned. A changed
+            # unknown name must remain untouched and fail the fixture closed.
+            for descriptor in opened:
+                if descriptor not in closed: original_close(descriptor)
+            if injected:
+                named = path.lstat()
+                before = injected[0]
+                if (named.st_dev, named.st_ino, named.st_mode) != (before.st_dev, before.st_ino, before.st_mode):
+                    raise AssertionError("owned FIFO name changed; refuse cleanup")
+                path.unlink()
+                held.rename(path)
+
+    def test_regular_byte_reader_fifo_rebind_is_nonblocking_and_closes_rejected_fd(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value).resolve(strict=True)
+            path = root / "independent-reader-input"
+            path.write_bytes(b"independent regular bytes before open\n")
+            with self.owned_fifo_rebind(path, root) as (attempts, opened, closed, injected):
+                with self.assertRaisesRegex(ValueError, "打开期间文件发生变化"):
+                    VM.read_regular_bytes(path)
+                self.assertEqual(1, len(attempts)); self.assertTrue(attempts[0] & os.O_NONBLOCK)
+                self.assertEqual(1, len(opened)); self.assertEqual(opened, closed)
+                self.assertEqual(1, len(injected))
+            self.assertEqual(b"independent regular bytes before open\n", path.read_bytes())
+
+    def test_regular_byte_reader_nonblock_preserves_regular_bytes_and_limits(self):
+        with tempfile.TemporaryDirectory() as value:
+            root = Path(value).resolve(strict=True)
+            path = root / "independent-reader-input"
+            payload = b"independent ordinary regular bytes\n"
+            path.write_bytes(payload)
+            self.assertEqual(payload, VM.read_regular_bytes(path, max_bytes=len(payload)))
+            with self.assertRaisesRegex(ValueError, "bytes"):
+                VM.read_regular_bytes(path, max_bytes=len(payload) - 1)
+
+
+class VmCumulusUpgradePolicyContracts(unittest.TestCase):
+    @staticmethod
+    def _independent_template_contract():
+        # This minimal expected executable body is authored independently;
+        # do not invoke LOAD's renderer or candidate normalizer to create it.
+        return (
+            b'#!/bin/bash\nset -euo pipefail\n'
+            b'ZTP_SERVER="http://127.0.0.1"\nZTP_SERVER_HOST="127.0.0.1"\n'
+            b'ZTP_URL_PREFIX="/ztp"\nMANUAL_ZTP_OOB_URL=""\n'
+            b'MANUAL_ZTP_OOBOFOOB_URL=""\nTARGET_CL_VER="0.0.0"\n'
+            b'ZTP_UPGRADE_ENABLED="false"\nPUBKEY_PATHS=(\n'
+            b'    "${ZTP_URL_PREFIX}/config/publickey/laptop.pub"\n'
+            b'    "${ZTP_URL_PREFIX}/config/publickey/mgmt-server.pub"\n)\n'
+            b'if [[ "${RUN_VER}" != "${TARGET_CL_VER}" && "${ZTP_UPGRADE_ENABLED}" == "true" ]];then\n'
+            b'    onie-install -fa -i "${USE_IMG_URL}"\nfi\n'
+        )
+
+    def test_bootstrap_whole_template_contract_accepts_only_exact_literal_render_slots(self):
+        template = self._independent_template_contract()
+        rendered = template.replace(b'http://127.0.0.1', b'http://192.0.2.40:8080')
+        rendered = rendered.replace(b'ZTP_SERVER_HOST="127.0.0.1"', b'ZTP_SERVER_HOST="192.0.2.40"')
+        rendered = rendered.replace(b'TARGET_CL_VER="0.0.0"', b'TARGET_CL_VER="5.15.0"')
+        rendered = rendered.replace(b'ZTP_UPGRADE_ENABLED="false"', b'ZTP_UPGRADE_ENABLED="true"')
+        rendered = rendered.replace(b'/config/publickey/laptop.pub', b'/config/publickey/_operator-key.pub')
+        VM.qualify_bootstrap_template_body(rendered, template)
+
+    def test_bootstrap_whole_template_contract_rejects_body_and_nonexecuted_or_expanding_slots(self):
+        template = self._independent_template_contract()
+        policy = b'ZTP_UPGRADE_ENABLED="false"\n'
+        for fault, candidate in (
+            ("upgrade-guard-removed", template.replace(b' && "${ZTP_UPGRADE_ENABLED}" == "true"', b'')),
+            ("extra-image-command", template + b'onie-install -fa -i "${USE_IMG_URL}"\n'),
+            ("nonexecuted-policy", template.replace(policy, b"cat <<'INDEPENDENT_POLICY'\n" + policy + b'INDEPENDENT_POLICY\n')),
+            ("expanding-url", template.replace(b'MANUAL_ZTP_OOB_URL=""', b'MANUAL_ZTP_OOB_URL="$(independent-probe)"')),
+            ("key-block-command", template.replace(b'    "${ZTP_URL_PREFIX}/config/publickey/laptop.pub"', b'    "$(independent-probe)"')),
+            ("duplicate-policy", template + policy),
+        ):
+            with self.subTest(fault=fault):
+                with self.assertRaises(ValueError):
+                    VM.qualify_bootstrap_template_body(candidate, template)
+
+    def test_exact_false_and_true_are_the_only_known_policies(self):
+        self.assertIs(False, VM.strict_bootstrap_upgrade_policy(b'#!/bin/bash\nZTP_UPGRADE_ENABLED="false"\n'))
+        self.assertIs(True, VM.strict_bootstrap_upgrade_policy(b'#!/bin/bash\nZTP_UPGRADE_ENABLED="true"\n'))
+
+    def test_missing_duplicate_export_and_expression_policies_fail_closed(self):
+        for payload in (
+            b'#!/bin/bash\n# ZTP_UPGRADE_ENABLED="false"\n',
+            b'ZTP_UPGRADE_ENABLED="false"\nZTP_UPGRADE_ENABLED="false"\n',
+            b'ZTP_UPGRADE_ENABLED="true"\nZTP_UPGRADE_ENABLED="false"\n',
+            b'export ZTP_UPGRADE_ENABLED="false"\n',
+            b' ZTP_UPGRADE_ENABLED="false"\n',
+            b'ZTP_UPGRADE_ENABLED = "false"\n',
+            b'ZTP_UPGRADE_ENABLED=0\n',
+            b'ZTP_UPGRADE_ENABLED="FALSE"\n',
+            b'ZTP_UPGRADE_ENABLED="false" # guessed waiver\n',
+            b'\xffZTP_UPGRADE_ENABLED="false"\n',
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(ValueError):
+                    VM.strict_bootstrap_upgrade_policy(payload)
 
 
 class VmNetworkAcceptanceTests(unittest.TestCase):
@@ -161,6 +604,63 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
         )
         return fixture, parent
 
+    @staticmethod
+    def _real_derived_parent():
+        """Obtain a derived parent from load, without assembling its ID here."""
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests(
+            "test_writes_parent_release_after_all_components_match"
+        )
+        fixture.setUp()
+        directory = Path(tempfile.mkdtemp(
+            prefix=".load-inventory-", dir=fixture.project,
+        ))
+        directory.chmod(0o700)
+        derived = directory / "02-devices_config.csv"
+        derived.write_bytes(fixture.devices_file.read_bytes() + b"\n")
+        derived.chmod(0o600)
+        inputs = release_fixture.LOAD.replace(
+            fixture.inputs, effective_devices_file=derived,
+            effective_devices_sha256=sha256(derived.read_bytes()),
+        )
+        parent = release_fixture.LOAD.validate_and_publish_release(
+            fixture.project, inputs, publish=True,
+        )
+        return fixture, parent, derived
+
+    def test_real_derived_parent_binds_identity_path_and_current_bytes(self) -> None:
+        fixture, parent, derived = self._real_derived_parent()
+        try:
+            self.assertIn("generated_inputs", parent)
+            self.assertEqual([], VM.parent_release_errors(parent, "demo"))
+            self.assertEqual([], VM.release_input_errors(fixture.project, parent))
+            self.assertEqual(
+                "enabled", VM.validated_parent_dhcp_status(fixture.project, parent),
+            )
+
+            changed_path = json.loads(json.dumps(parent))
+            changed_path["generated_inputs"]["effective_devices"]["path"] = (
+                "../outside/02-devices_config.csv"
+            )
+            self.assertTrue(VM.parent_release_errors(changed_path, "demo"))
+
+            changed_path["release_id"] = sha256(json.dumps(
+                {key: changed_path[key] for key in (
+                    "project", "deployment_scope", "switch_scope", "inputs",
+                    "input_sources", "components", "inventory", "dhcp_status",
+                    "generated_inputs",
+                )}, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8"))[:20]
+            with self.assertRaisesRegex(ValueError, "generated|derived|路径|path"):
+                VM.validated_parent_dhcp_status(fixture.project, changed_path)
+
+            derived.write_bytes(derived.read_bytes() + b"tampered\n")
+            with self.assertRaisesRegex(ValueError, "generated|derived|SHA|hash"):
+                VM.validated_parent_dhcp_status(fixture.project, parent)
+        finally:
+            fixture.tearDown()
+
     def test_real_load_v2_modes_and_legacy_v1_are_strictly_distinguished(self) -> None:
         for enabled in (False, True):
             with self.subTest(enabled=enabled):
@@ -276,10 +776,11 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             ), mock.patch.object(
                 VM, "check_password_backend", return_value="test backend",
             ), mock.patch("sys.stdout", new_callable=io.StringIO):
-                VM.main([
-                    "demo", "--root", str(fixture.root),
-                    "--expect-services", "--output", str(report),
-                ])
+                with actual_deployment_contract_fixture(fixture.root):
+                    VM.main([
+                        "demo", "--root", str(fixture.root),
+                        "--expect-services", "--output", str(report),
+                    ])
             findings = json.loads(report.read_text(encoding="utf-8"))["findings"]
             self.assertTrue(any(
                 item["check"] == "dhcp-mode" and item["level"] == "FAIL"
@@ -326,11 +827,17 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
                     ), mock.patch.object(
                         VM, "check_password_backend", return_value="test backend",
                     ), mock.patch("sys.stdout", new_callable=io.StringIO):
-                        VM.main([
-                            "demo", "--root", str(fixture.root),
-                            "--expect-services", "--output", str(report),
-                        ])
+                        with actual_deployment_contract_fixture(fixture.root):
+                            VM.main([
+                                "demo", "--root", str(fixture.root),
+                                "--expect-services", "--output", str(report),
+                            ])
                     findings = json.loads(report.read_text(encoding="utf-8"))["findings"]
+                    self.assertTrue(any(
+                        item["check"] == "dhcp-mode" and item["level"] == "PASS"
+                        and item["detail"] == ("global-bound enabled" if enabled else "global-bound disabled")
+                        for item in findings
+                    ), findings)
                     checks = {item["check"] for item in findings}
                     self.assertIn("service:apache2", checks)
                     self.assertIn("apache-config", checks)
@@ -465,17 +972,24 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
                         patch("read_control_authorization", return_value="Basic offline")
                         patch("bootstrap_http_assets", return_value=())
                         patch("release_http_assets", return_value=())
+                        # This is the service/HTTP evidence routing test. Its
+                        # synthetic parent does not render bootstraps; declare
+                        # the independent upgrade=true branch explicitly, as
+                        # we do for its other offline HTTP plans. Real LOAD ->
+                        # render -> policy qualification is covered separately.
+                        image_policy = patch("cumulus_runtime_image_required", return_value=True)
                         get_probe = patch("verify_http_asset", return_value="offline GET")
                         denial_probe = patch("verify_http_status", return_value="offline 403")
                         patch("verify_control_auth_challenge", return_value="offline 401")
                         cgi_probe = patch("verify_control_cgi", return_value="offline CGI")
                         head_probe = patch("verify_http_head", return_value="offline HEAD")
                         stack.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
-                        VM.main([
-                            "demo", "--root", str(fixture.root), "--full-systemd",
-                            "--worker-scope", "prod", "--control-auth-user", "nvis",
-                            "--output", str(report),
-                        ])
+                        with actual_deployment_contract_fixture(fixture.root):
+                            VM.main([
+                                "demo", "--root", str(fixture.root), "--full-systemd",
+                                "--worker-scope", "prod", "--control-auth-user", "nvis",
+                                "--output", str(report),
+                            ])
                     payload = json.loads(report.read_text(encoding="utf-8"))
                     self.assertEqual("full-systemd", payload["validation_profile"])
                     findings = payload["findings"]
@@ -491,6 +1005,7 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
                     self.assertGreater(denial_probe.call_count, 0)
                     self.assertGreater(cgi_probe.call_count, 0)
                     self.assertGreater(head_probe.call_count, 0)
+                    image_policy.assert_called_once()
                     self.assertEqual(
                         mode != "disabled", dhcp_checks <= checks,
                     )
@@ -586,6 +1101,50 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             ),
         )
 
+    def test_real_load_eth_scope_retains_cumulus_gate_without_requiring_nvos(self):
+        from test_cases import test_load_release_transaction as release_fixture
+
+        fixture = release_fixture.ReleaseTransactionTests()
+        fixture.setUp()
+        try:
+            for path in (fixture.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json",
+                         fixture.project / "99-output-eth/20260830_120000_combine/release-manifest.json"):
+                record = json.loads(path.read_bytes())
+                record["switch_scope"] = "eth"
+                path.write_text(json.dumps(record), encoding="utf-8")
+            inputs = release_fixture.LOAD.replace(fixture.inputs, switch_scope="eth")
+            parent = release_fixture.LOAD.validate_and_publish_release(fixture.project, inputs, publish=True)
+            self.assertEqual("eth", parent["switch_scope"])
+            self.assertNotIn("nvos", parent["components"])
+            self.assertEqual([], VM.parent_release_errors(parent, "demo"))
+            # The transaction fixture uses a materialized DHCP candidate;
+            # SETUP's public runtime layout instead links the same manifest.
+            flat = fixture.ztp / "config/isc-dhcp-server/dhcp-release-manifest.json"
+            published = fixture.project / "99-output-dhcp/dhcp-release-manifest.json"
+            published.parent.mkdir(exist_ok=True)
+            published.write_bytes(flat.read_bytes())
+            flat.unlink()
+            flat.symlink_to(published)
+            self.assertEqual([], VM.runtime_pointer_errors(fixture.root, fixture.project, parent))
+            # An eth-only selection is not permission to hide corrupt inventory
+            # or a missing Cumulus publication. Canonicalize each independent
+            # bad record so the semantic guard, not a stale digest, is tested.
+            for inventory in ([], [{"type": "ib"}], [{"type": "unknown"}], [None]):
+                with self.subTest(inventory=inventory):
+                    bad = dict(parent, inventory=inventory)
+                    keys = ("project", "deployment_scope", "switch_scope", "dhcp_status",
+                            "inputs", "input_sources", "components", "inventory")
+                    bad["release_id"] = hashlib.sha256(json.dumps(
+                        {key: bad[key] for key in keys}, ensure_ascii=False,
+                        sort_keys=True, separators=(",", ":"),
+                    ).encode()).hexdigest()[:20]
+                    self.assertTrue(VM.runtime_pointer_errors(fixture.root, fixture.project, bad))
+            (fixture.project / "99-output-eth/latest").unlink()
+            errors = VM.runtime_pointer_errors(fixture.root, fixture.project, parent)
+            self.assertTrue(any("cumulus" in error for error in errors))
+        finally:
+            fixture.tearDown()
+
     def test_explicit_disabled_parent_ignores_stale_dhcp_pointer_only(self) -> None:
         self.parent["schema_version"] = 2
         self.parent["dhcp_status"] = "disabled"
@@ -619,6 +1178,81 @@ class VmReleaseAcceptanceTests(unittest.TestCase):
             "DHCP",
             "\n".join(VM.runtime_pointer_errors(self.root, self.project, self.parent)),
         )
+
+
+class VmMiniSelectedOutputTests(unittest.TestCase):
+    def _project(self, directory):
+        project = Path(directory).resolve()
+        (project / "04-air-mini-devices.txt").write_text(
+            "[minimum-required]\nleaf10\n[customer-provided]\n", encoding="utf-8",
+        )
+        output = project / "99-output-p2p"
+        output.mkdir()
+        return project, output
+
+    def test_selected_output_ignores_retained_historical_air_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, output = self._project(directory)
+            source = project / "Pinned P2P_v1.0.xlsx"
+            source.write_bytes(b"selected workbook bytes")
+            (project / "p2p.xlsx").symlink_to(source.name)
+            (output / (source.stem + "-air.json")).write_text(
+                json.dumps({"content": {"nodes": {"leaf10": {}}}}), encoding="utf-8",
+            )
+            historical = output / "Other P2P_v99.0-air.json"
+            historical.write_bytes(b"retained invalid historical bytes")
+            original = historical.read_bytes(), historical.stat().st_ino
+            self.assertEqual((1, 1), VM.mini_air_summary(project))
+            self.assertEqual(original, (historical.read_bytes(), historical.stat().st_ino))
+
+    def test_missing_selected_output_never_falls_back_to_sole_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, output = self._project(directory)
+            source = project / "Selected P2P_v2.0.xlsx"
+            source.write_bytes(b"selected workbook bytes")
+            (project / "p2p.xlsx").symlink_to(source.name)
+            (output / "Historical P2P_v1.0-air.json").write_text(
+                json.dumps({"content": {"nodes": {"old": {}}}}), encoding="utf-8",
+            )
+            with self.assertRaises((OSError, ValueError)):
+                VM.mini_air_summary(project)
+
+    def test_selected_workbook_drift_during_summary_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, output = self._project(directory)
+            source = project / "Selected P2P_v2.0.xlsx"
+            source.write_bytes(b"selected workbook A")
+            (project / "p2p.xlsx").symlink_to(source.name)
+            (output / (source.stem + "-air.json")).write_text(
+                json.dumps({"content": {"nodes": {"leaf10": {}}}}), encoding="utf-8",
+            )
+            read_json = VM.load_json
+            def mutate_after_read(path):
+                value = read_json(path)
+                source.write_bytes(b"selected workbook B")
+                return value
+            with mock.patch.object(VM, "load_json", side_effect=mutate_after_read):
+                with self.assertRaisesRegex(ValueError, "P2P.*changed|P2P.*变化"):
+                    VM.mini_air_summary(project)
+
+    def test_real_setup_load_older_pin_drives_vm_selected_air_summary(self):
+        from test_cases.test_p2p_selection_workflow import P2PSelectionWorkflowTests, workbook
+
+        P2PSelectionWorkflowTests.setUpClass()
+        workflow = P2PSelectionWorkflowTests()
+        with tempfile.TemporaryDirectory() as directory:
+            project, output = self._project(directory)
+            older = workbook(project / "Fabric P2P_v1.0.xlsx", "selected")
+            newer = workbook(project / "Fabric P2P_v9.0.xlsx", "unselected")
+            workflow.select_and_link(project, older.name)
+            self.assertEqual(older, workflow.load.select_p2p(project, older.name))
+            (output / (older.stem + "-air.json")).write_text(
+                json.dumps({"content": {"nodes": {"leaf10": {}, "spine": {}}}}), encoding="utf-8",
+            )
+            retained = output / (newer.stem + "-air.json")
+            retained.write_text(json.dumps({"content": {"nodes": {"wrong": {}}}}), encoding="utf-8")
+            self.assertEqual((1, 2), VM.mini_air_summary(project))
+            self.assertEqual({"wrong": {}}, json.loads(retained.read_text())["content"]["nodes"])
 
 
 class VmDeviceCsvAcceptanceTests(unittest.TestCase):
@@ -1156,6 +1790,26 @@ class VmFullSystemdProfileTests(unittest.TestCase):
             )
             self.assertFalse(marker.exists())
 
+    def test_current_infra_v2_boundary_is_accepted_without_rewriting_bytes(self) -> None:
+        source = ROOT / "infra/infra-setup.sh"
+        payload = VM.expected_apache_boundary(source)
+        self.assertIn(b"# HTTP-ZTP-PUBLIC-BOUNDARY-V2\n", payload)
+        self.assertNotIn(b"# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n", payload)
+        # Independent wire contract: never silently downgrade the emitted policy.
+        self.assertIn(b"APACHE_PUBLIC_BOUNDARY_EOF", source.read_bytes())
+
+    def test_apache_boundary_rejects_unknown_missing_or_duplicate_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "infra-setup.sh"
+            for markers in ("", "# HTTP-ZTP-PUBLIC-BOUNDARY-V3\n",
+                            "# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n# HTTP-ZTP-PUBLIC-BOUNDARY-V2\n"):
+                with self.subTest(markers=markers):
+                    source.write_text("cat <<'APACHE_PUBLIC_BOUNDARY_EOF'\n" + markers
+                                      + "Options -Indexes\nAPACHE_PUBLIC_BOUNDARY_EOF\n",
+                                      encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        VM.expected_apache_boundary(source)
+
     def test_installed_cgi_contract_requires_hash_and_executable_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "root"
@@ -1233,6 +1887,40 @@ class VmFullSystemdProfileTests(unittest.TestCase):
             self.assertEqual({"python": 1, "shell": 0}, counts)
             self.assertEqual([], errors)
             self.assertTrue(stat.S_ISLNK((tools / "linked").lstat().st_mode))
+
+
+
+class VmSelectedDhcpConsumerContractTests(unittest.TestCase):
+    def test_installed_selected_empty_hosts_are_hash_bound_and_different_inodes_allowed(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            installed = Path(directory)
+            payloads = {"dhcpd.conf": b"# independently specified conf\n",
+                        "dhcpd_eth.hosts": b"host independent-leaf {}\n",
+                        "dhcpd_ib.hosts": b"", "dhcpd_nvl.hosts": b""}
+            selected = SimpleNamespace(mode="pinned", binding={"independent": True},
+                                       output_hashes={name: sha256(payload)
+                                                      for name, payload in payloads.items()})
+            for name, payload in payloads.items():
+                (installed / name).write_bytes(payload)
+            with mock.patch.object(VM, "selected_dhcp_authority", return_value=selected), \
+                 mock.patch.object(VM, "_recheck_selected_dhcp_authority", return_value=selected):
+                self.assertEqual([], VM.installed_dhcp_errors(installed, {}, installed))
+                (installed / "dhcpd_ib.hosts").write_bytes(b"unexpected host\n")
+                errors = VM.installed_dhcp_errors(installed, {}, installed)
+                self.assertEqual(1, len(errors))
+                self.assertIn("dhcpd_ib.hosts", errors[0])
+
+    def test_installed_selected_identity_failure_cannot_pass_using_flat_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            installed = Path(directory)
+            for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+                (installed / name).write_bytes(b"independent plausible legacy bytes\n")
+            with mock.patch.object(VM, "selected_dhcp_authority",
+                                   side_effect=ValueError("independent bad selector")):
+                errors = VM.installed_dhcp_errors(installed, {}, installed)
+            self.assertTrue(errors)
+            self.assertIn("selector", errors[0])
 
 
 if __name__ == "__main__":
