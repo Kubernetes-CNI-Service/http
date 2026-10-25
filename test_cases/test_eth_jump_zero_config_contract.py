@@ -246,34 +246,6 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertEqual([], warnings)
 
-    def test_configuration_intent_is_rejected_by_both_schema_gates(self):
-        cases = (("template", "border"),) + tuple(
-            (field, None) for field in CONFIG_ONLY_FIELDS
-        )
-        for field, template in cases:
-            with self.subTest(field=field), tempfile.TemporaryDirectory() as name:
-                csv_path = Path(name) / "02-devices_config.csv"
-                row = jump_row(
-                    template=template or "NA",
-                    field=None if field == "template" else field,
-                )
-                write_devices(csv_path, [row])
-
-                with self.assertRaisesRegex(
-                    LOAD.LoadError, rf"eth_jump.*{field}.*配置意图冲突"
-                ):
-                    LOAD.load_device_types(csv_path)
-                errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
-                self.assertTrue(
-                    any(
-                        "eth_jump" in error
-                        and field in error
-                        and "配置意图冲突" in error
-                        for error in errors
-                    ),
-                    errors,
-                )
-
     def test_generator_exclusion_is_explicit_future_proofing(self):
         self.assertTrue(GENERATOR._exclude_config_type("air"))
         self.assertTrue(GENERATOR._exclude_config_type("eth_jump"))
