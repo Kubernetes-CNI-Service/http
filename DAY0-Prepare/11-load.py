@@ -23552,10 +23552,12 @@ def main(
             host_role=host_role,
             switch_scope=switch_scope,
             no_upgrade=args.no_upgrade,
-            prepare_switch_wal=(
-                local_services_supported and not args.dry_run
-                and active_before is not None and active_before != project
-            ),
+            # This batch keeps DEV's 01-a-setup, which never fills the late Q values
+            # of a setup-switch journal (TEST setup's _SETUP_SWITCH_WAL_CONTEXT family:
+            # 52 sites in TEST, 0 in the merged setup). The journal therefore stays off,
+            # which is TEST's own non-WAL path (macOS, same-project reload) and DEV's
+            # current behaviour; porting the setup WAL family is a separate batch.
+            prepare_switch_wal=False,
             runtime_backend=runtime_backend_instance,
             runtime_rollback_context=cross_project_rollback,
             prefix_settings=inputs.settings if http_service_available else None,
