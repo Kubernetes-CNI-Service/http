@@ -221,6 +221,10 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 不能靠脚本 `__file__` 指向项目来隐式取得输入。管理 CLI 可用 `--tool-inputs <project-dir>`
 显式选择项目内的其他 global/publickey 布局（包括 `99-output-ib_nvl/bringup/xdr-initial-setup`）；
 该目录必须已存在且受当前 UID 所有、不可组/全局写入，外部目录或外链在 leaf 输出前拒绝。
+该目录还必须自带 `infra-neutral.conf`，它是受管运行唯一的中性服务来源（不回退到项目 `infra/`）：
+regular、非符号链接、单链接、当前 UID 所有、不可组/全局写入、有大小上限，内容满足 initial-setup
+自身的 DNS/NTP/TIMEZONE 语法；准入在任何输出前检查，start、每次 complete 与缓存复用时都重新核对
+同一身份，缺失或不合格即拒绝。
 此选项只选择数据，不加载其中的代码。真实管理 CLI 的五轮流程覆盖缺省及显式布局。
 受管 CLI 在进入 leaf 前取得仓库的共享部署锁，并持有到方法撤销与报告清理结束；
 load/setup/unsetup 的排他锁期间拒绝入口，不在拆除窗口重新授予成功。

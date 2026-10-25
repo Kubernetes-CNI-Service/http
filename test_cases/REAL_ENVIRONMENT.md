@@ -537,6 +537,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   获取 V2 方法权威，原单文件离线入口不提供该权威。NVL 在支持合同建立前显式拒绝。
   非缺省布局须通过 `--tool-inputs` 显式绑定项目内 global/publickey 目录，留存目录身份、
   原像与摘要；不执行其中的代码，外部或不安全目录在输出/设备操作前拒绝。
+  受管 tool 根（缺省或 `--tool-inputs`）必须自带合格的 `infra-neutral.conf`（regular、非符号链接、单链接、
+  当前 UID 所有、不可组/全局写入，内容满足 initial-setup 的中性服务语法），留存其身份与摘要；
+  缺失或不合格时在任何输出前拒绝，不回退到项目 `infra/`。
 - 正向：保留原独立密钥登录探针；再用 public-key-only BatchMode 的同一会话读取
   hostname/eth0 MAC、`nv config show -o commands`、当前 authorized_keys。逐项核验
   本设备 Day-0、DNS/NTP/timezone 和所需公钥，不凭交互日志或旧收据晋升。
