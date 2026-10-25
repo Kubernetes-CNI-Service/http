@@ -248,6 +248,7 @@ def _private_real_chain(
     document["common"]["mgmt"]["ztp"]["status"] = "enabled"
     if http_enabled:
         document["common"]["mgmt"]["http"]["status"] = "enabled"
+        document["common"]["mgmt"]["http"]["address"] = "192.0.2.20"
     complete = border_globals()
     eth = document["switches"][0]["eth"]
     eth["bridge"] = complete["bridge"]
