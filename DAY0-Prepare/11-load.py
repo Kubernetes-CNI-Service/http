@@ -23802,7 +23802,16 @@ def main(
             report_candidate = generation_report.prepare_generation_report(
                 project, actual_key_report,
             )
-        if (cross_project_rollback is not None and not args.dry_run
+        # The setup-switch journal is prepared only by activate_project(prepare_switch_wal=True),
+        # which this batch never requests (DEV 01-a-setup has no WAL participation). Every WAL
+        # consumer below is therefore gated on the journal actually existing -- the same
+        # predicate the prefix publication uses above -- so a Linux cross-project switch takes
+        # TEST's established non-WAL path instead of failing "registration unconfirmed; HOLD".
+        setup_switch_wal_active = bool(
+            cross_project_rollback is not None and not args.dry_run
+            and os.path.lexists(_setup_switch_journal_path())
+        )
+        if (setup_switch_wal_active
                 and pinned_generation_candidate is not None and report_candidate is not None):
             failure_phase = "登记完整 SETUP 发布候选 WAL"
             publication_registration_attempted = True
@@ -23825,7 +23834,7 @@ def main(
                 "deployment_lock_descriptor": deployment_lock_descriptor,
                 "services_quiesced": runtime_restore_safe,
                 "runtime_backend": runtime_backend_instance,
-            }} if cross_project_rollback is not None and not args.dry_run else {})
+            }} if setup_switch_wal_active else {})
             mount_and_test_dhcp(
                 args.dry_run, parent_candidate=parent_candidate, **setup_dhcp_options,
                 **({"setup_publication_token": publication_token} if publication_token is not None else {}),
