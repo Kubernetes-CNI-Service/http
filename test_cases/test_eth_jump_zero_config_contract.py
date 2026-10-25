@@ -246,6 +246,17 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             self.assertEqual([], errors)
             self.assertEqual([], warnings)
 
+    def test_inventory_metadata_is_not_configuration_intent(self):
+        populated = public_jump_row(populated=True)
+        for field in ("template", *CONFIG_ONLY_FIELDS):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as name:
+                csv_path = Path(name) / "02-devices_config.csv"
+                row = jump_row()
+                row[DEVICE_HEADER.index(field)] = populated[DEVICE_HEADER.index(field)]
+                write_devices(csv_path, [row])
+                self.assertEqual(frozenset({"eth_jump"}), LOAD.load_device_types(csv_path))
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(csv_path)))
+
     def test_generator_exclusion_is_explicit_future_proofing(self):
         self.assertTrue(GENERATOR._exclude_config_type("air"))
         self.assertTrue(GENERATOR._exclude_config_type("eth_jump"))
@@ -378,6 +389,92 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             DIAGNOSTICS.select_devices(report, ["EXAMPLE-JUMP01"], "prod")
 
 
+    def test_blank_inventory_is_admitted_by_three_real_inputs(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "02-devices_config.csv"
+            write_inventory(path, public_jump_row())
+            self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
+            self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+            ib, transit = INITIAL.load_devices(path)
+            self.assertEqual({"example-ib01"}, set(ib))
+            self.assertEqual({"example-jump01"}, set(transit))
+            self.assertEqual("eth_jump", transit["example-jump01"].dev_type)
+            self.assertEqual("", transit["example-jump01"].login_ip)
+            self.assertEqual("", transit["example-jump01"].eth0_mac)
+
+
+    def test_populated_metadata_is_not_a_template_or_config_request(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "02-devices_config.csv"
+            write_inventory(path, public_jump_row(populated=True))
+            self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
+            self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+            _ib, transit = INITIAL.load_devices(path)
+            self.assertEqual("192.0.2.10", transit["example-jump01"].login_ip)
+            self.assertFalse((Path(name) / "INVENTORY-ONLY-NOT-A-TEMPLATE").exists())
+
+
+    def test_filled_invalid_typed_values_are_rejected_not_ignored(self):
+        # Independent (physical 0-based column, field occurrence, invalid literal).
+        cases = (
+            (3, "eth0_ip", "not-an-ip"),
+            (4, "netmask[1]", "255.0.255.0"),
+            (5, "eth0_gw", "300.0.0.1"),
+            (6, "eth0_mac", "not-a-mac"),
+            (7, "eth1_ip", "300.0.0.1"),
+            (10, "eth1_mac", "not-a-mac"),
+            (11, "lo_ip", "300.1.1.1/32"),
+            (13, "vlan_id", "4095"),
+            (14, "svi_ip[1]", "300.1.1.1"),
+            (16, "vrr_ip[1]", "300.1.1.1"),
+            (17, "vrr_mac[1]", "bad-mac"),
+            (23, "bond_mac", "bad-mac"),
+            (32, "svi_ip[2]", "300.1.1.1"),
+            (35, "vrr_mac[2]", "bad-mac"),
+        )
+        for index, label, value in cases:
+            with self.subTest(index=index, field=label), tempfile.TemporaryDirectory() as name:
+                path = Path(name) / "02-devices_config.csv"
+                row = public_jump_row(populated=True)
+                row[index] = value
+                write_inventory(path, row)
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.load_device_types(path)
+                load_error = str(caught.exception)
+                self.assertIn(label, load_error)
+                self.assertIn(value, load_error)
+                self.assertNotIn("配置意图", load_error)
+                errors, _warnings = SETUP._validate_eth_csv(str(path))
+                self.assertTrue(any(label in item and value in item for item in errors), errors)
+                self.assertFalse(any("配置意图" in item for item in errors), errors)
+                with self.assertRaises(INITIAL.SetupError) as caught:
+                    INITIAL.load_devices(path)
+                self.assertIn(label, str(caught.exception))
+                self.assertIn(value, str(caught.exception))
+
+
+    def test_unknown_jump_spellings_do_not_extend_any_role_registry(self):
+        for kind in ("ib_jump", "nvl_jump", "unknown_jump", "jump"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as name:
+                path = Path(name) / "02-devices_config.csv"
+                # Independent valid identity, distinct from every known row.
+                unknown = [""] * len(DEVICE_HEADER)
+                unknown[:7] = [
+                    "EXAMPLE-UNKNOWN01", kind, "", "192.0.2.40", "24",
+                    "192.0.2.1", "02:00:00:00:00:40",
+                ]
+                write_devices(path, [public_ib_row(), public_jump_row(populated=True), unknown])
+                with self.assertRaisesRegex(LOAD.LoadError, rf"type=.*{kind}.*无效"):
+                    LOAD.load_device_types(path)
+                errors, _warnings = SETUP._validate_eth_csv(str(path))
+                self.assertTrue(
+                    any("type 无效" in error and kind in error for error in errors),
+                    errors,
+                )
+                _ib, transit = INITIAL.load_devices(path)
+                self.assertEqual({"example-jump01"}, set(transit))
+
+
     def test_normal_transit_types_do_not_gain_optional_login_address(self):
         for kind in ("eth", "eth_spx", "spx", "ethernet"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as name:
@@ -440,6 +537,116 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             ["hostname"],
             INITIAL.outer_ssh_command(jump, "cumulus", ["hostname"], 3, local=True),
         )
+
+
+    def test_schema_v2_optional_inventory_and_repeated_fields(self):
+        # Independently frozen public schema-2 header: two VLAN groups, one EVPN group.
+        header = (
+            "hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw",
+            "eth0_mac", "eth1_ip", "netmask", "eth1_gw", "eth1_mac", "lo_ip",
+            "vlan_id", "svi_ip", "netmask", "vlan_ports",
+            "vlan_id", "svi_ip", "netmask", "vlan_ports",
+            "bgp_asn", "bgp_ports", "bond_ports", "bond_type", "bond_mac",
+            "peerlink_ports", "vrl",
+            "evpn_vrf", "evpn_l3vni", "evpn_l3vlan", "dhcp_relay",
+            "evpn_l2vni", "evpn_l2vlan", "svi_ip", "netmask", "vlan_ports",
+        )
+        for populated in (False, True):
+            with self.subTest(populated=populated), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                path = root / "02-devices_config.csv"
+                (root / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+                ib = [""] * len(header)
+                ib[:7] = ["EXAMPLE-IB01", "ib", "NA", "198.51.100.2", "24",
+                          "198.51.100.1", "02:00:00:00:00:02"]
+                jump = [""] * len(header)
+                jump[:3] = ["EXAMPLE-JUMP01", "eth_jump", ""]
+                if populated:
+                    jump[2] = "INVENTORY-ONLY-NOT-A-TEMPLATE"
+                    jump[12:20] = [
+                        "100", "203.0.113.1", "24", "swp1",
+                        "200", "203.0.113.2", "24", "swp2",
+                    ]
+                with path.open("w", newline="", encoding="utf-8") as stream:
+                    csv.writer(stream).writerows((header, ib, jump))
+                self.assertEqual(
+                    frozenset({"ib", "eth_jump"}),
+                    LOAD.load_device_types(path, schema_version=2),
+                )
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+                _ib, transit = INITIAL.load_devices(path)
+                self.assertEqual({"example-jump01"}, set(transit))
+                self.assertEqual("", transit["example-jump01"].login_ip)
+                if populated:
+                    for index, label, value in (
+                        (17, "svi_ip[2]", "300.1.1.1"),
+                        (18, "netmask[4]", "255.0.255.0"),
+                    ):
+                        with self.subTest(index=index):
+                            bad = list(jump)
+                            bad[index] = value
+                            with path.open("w", newline="", encoding="utf-8") as stream:
+                                csv.writer(stream).writerows((header, ib, bad))
+                            with self.assertRaises(LOAD.LoadError) as caught:
+                                LOAD.load_device_types(path, schema_version=2)
+                            self.assertIn(label, str(caught.exception))
+                            self.assertIn(value, str(caught.exception))
+                            self.assertNotIn("配置意图", str(caught.exception))
+                            errors, _warnings = SETUP._validate_eth_csv(str(path))
+                            self.assertTrue(any(label in e and value in e for e in errors), errors)
+                            self.assertFalse(any("配置意图" in e for e in errors), errors)
+                            with self.assertRaises(INITIAL.SetupError) as caught:
+                                INITIAL.load_devices(path)
+                            self.assertIn(label, str(caught.exception))
+                            self.assertIn(value, str(caught.exception))
+
+
+    def test_inventory_bond_mac_groups_validate_each_token_without_companions(self):
+        good = "02:00:00:00:04:01|02:00:00:00:04:02"
+        bad = "02:00:00:00:04:01|bad-mac"
+        self.assertEqual("bond_mac", DEVICE_HEADER[23])
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "02-devices_config.csv"
+            row = jump_row()
+            row[23] = good
+            # No bond_ports/type: inventory syntax does not imply configuration completeness.
+            self.assertEqual("NA", row[21])
+            self.assertEqual("NA", row[22])
+            write_inventory(path, row)
+            with self.subTest(stage="good", reader="LOAD"):
+                self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
+            with self.subTest(stage="good", reader="SETUP"):
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+            with self.subTest(stage="good", reader="INITIAL"):
+                _ib, transit = INITIAL.load_devices(path)
+                self.assertEqual({"example-jump01"}, set(transit))
+            placeholder = "NA|02:00:00:00:04:02"
+            row[23] = placeholder
+            write_inventory(path, row)
+            with self.subTest(stage="placeholder", reader="LOAD"):
+                self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
+            with self.subTest(stage="placeholder", reader="SETUP"):
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+            with self.subTest(stage="placeholder", reader="INITIAL"):
+                _ib, transit = INITIAL.load_devices(path)
+                self.assertEqual({"example-jump01"}, set(transit))
+            row[23] = bad
+            write_inventory(path, row)
+            with self.subTest(stage="bad", reader="LOAD"):
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.load_device_types(path)
+                self.assertIn("bond_mac", str(caught.exception))
+                self.assertIn(bad, str(caught.exception))
+                self.assertNotIn("配置意图", str(caught.exception))
+            with self.subTest(stage="bad", reader="SETUP"):
+                errors, _warnings = SETUP._validate_eth_csv(str(path))
+                self.assertTrue(any("bond_mac" in e and bad in e for e in errors), errors)
+                self.assertFalse(any("配置意图" in e for e in errors), errors)
+            with self.subTest(stage="bad", reader="INITIAL"):
+                with self.assertRaises(INITIAL.SetupError) as caught:
+                    INITIAL.load_devices(path)
+                self.assertIn("bond_mac", str(caught.exception))
+                self.assertIn(bad, str(caught.exception))
 
 
 if __name__ == "__main__":
