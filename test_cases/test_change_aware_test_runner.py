@@ -3669,24 +3669,33 @@ class FullShardS0FixTests(unittest.TestCase):
         )
 
     def test_real_plan_reviews_only_the_unobservable_s0_leftover_shapes(self):
-        # S0 and the serial armG run left the same 611 ignored files in four shapes.  Only
-        # the retained collector-prefix-feedback fixture tree is reviewed: no test reads it
-        # (whole-checkout traversals: quiesce workflow rglob("*.py"), test_case_repository
-        # os.walk for test_*.py, project_contracts rglob("02-AIR-devices_config.csv"),
-        # monitor watch runtime rglob("*.service"/"*.timer")).  The download-parent-red
-        # trees hold *.py the quiesce workflow parses (ROOTCAUSE G4: serial fails there).
-        # The two lock files are read through product packaging
-        # (test_upload_package_contract asserts monitor/.generate-monitor-html.lock is not
-        # packaged; serial creates it before that test, a lane may not): they are not
-        # reviewed, so a sharded run needs them to exist in the main checkout beforehand.
+        # S0 and the serial armG run left the same 611 ignored files in four shapes.  The
+        # two retained fixture trees under outputs/test-diagnostics are reviewed: after
+        # batch A no test-side whole-checkout walk enters outputs/ (governed_tree_paths),
+        # the serial source discovery skips it, and the product walks that do enter it
+        # (packaging's special-node check, its printed workspace size, the README
+        # catalogue, which drops outputs/ paths) cannot observe regular files, directories
+        # or symlinks there (integration F6 census).  Before A the quiesce workflow parsed
+        # the download-parent-red *.py (ROOTCAUSE G4).  The two lock files are read through
+        # product packaging (test_upload_package_contract asserts
+        # monitor/.generate-monitor-html.lock is not packaged; serial creates it before
+        # that test, a lane may not): they are not reviewed, so a sharded run needs them to
+        # exist in the main checkout beforehand.
         plan = RUNNER.load_full_shard_plan(ROOT)
         allowlist = plan.get("leftover_allowlist")
-        self.assertEqual({"outputs/test-diagnostics/collector-prefix-feedback-*"}, set(allowlist))
+        self.assertEqual({
+            "outputs/test-diagnostics/collector-prefix-feedback-*",
+            "outputs/test-diagnostics/download-parent-red-*",
+        }, set(allowlist))
         self.assertTrue(all(isinstance(reason, str) and reason.strip() for reason in allowlist.values()))
-        unreviewed = [
-            ".deployment.lock", "monitor/.generate-monitor-html.lock",
+        reviewed = [
             "outputs/test-diagnostics/download-parent-red-26amxbnl/http/DAY0-Prepare/13-unload.py",
+            "outputs/test-diagnostics/download-parent-red-26amxbnl/http/DAY0-Prepare/customer/README.md",
+            "outputs/test-diagnostics/download-parent-red-_82x1swl/safe",
+            "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/bin/ssh",
         ]
+        self.assertEqual([], RUNNER.full_shard_unreviewed_leftovers(reviewed, allowlist))
+        unreviewed = [".deployment.lock", "monitor/.generate-monitor-html.lock"]
         self.assertEqual(unreviewed, RUNNER.full_shard_unreviewed_leftovers(unreviewed, allowlist))
 
     def test_serial_post_run_check_of_a_checkout_restores_sys_path(self):
