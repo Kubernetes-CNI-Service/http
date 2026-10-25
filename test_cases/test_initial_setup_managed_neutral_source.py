@@ -132,5 +132,59 @@ class ManagedNeutralSourceTests(unittest.TestCase):
                         cycle._inputs()
 
 
+    def test_monitor_reader_binds_the_tool_root_neutral_image(self):
+        # The read-only monitor binder re-observes the same held inputs as the writer, so it
+        # captures the managed tool root's neutral image itself; it never admits outputs.
+        import json
+        cases = ("unchanged", "explicit-tool-root", "missing", "explicit-root-missing", "rewritten-invalid", "replaced")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                project, tool = self.project(directory)
+                if case in ("explicit-tool-root", "explicit-root-missing"):
+                    # explicit-tool-root: only the passed root has a neutral file.
+                    # explicit-root-missing: only the default root has a qualified one; it never stands in.
+                    if case == "explicit-root-missing":
+                        (tool / "infra-neutral.conf").write_bytes(NEUTRAL)
+                        (tool / "infra-neutral.conf").chmod(0o644)
+                    tool = project / "99-output-ib_nvl/bringup/xdr-initial-setup"
+                    (tool / "publickey").mkdir(parents=True)
+                    for name in ("01-global.yaml", "publickey/management.pub"):
+                        (tool / name).write_text("independent finite fixture bytes\n")
+                        (tool / name).chmod(0o644)
+                neutral = tool / "infra-neutral.conf"
+                if case not in ("missing", "explicit-root-missing"):
+                    neutral.write_bytes(NEUTRAL)
+                    neutral.chmod(0o644)
+                cache = project / "out/targets.json"
+                cache.write_text(json.dumps({"services": {"dns": ["192.0.2.53"]}, "public_keys": ["key"]}))
+                target = SimpleNamespace(ib=SimpleNamespace(hostname="EXAMPLE-IB01", dev_type="ib"))
+                parser = SimpleNamespace(load_target_cache=lambda *args, **kwargs: (1, [target]),
+                                         desired_service_commands=lambda *args: [],
+                                         key_install_command=lambda *args: "",
+                                         _neutral_services=self.initial._neutral_services)
+                build = lambda: self.authority.InitialMethodMonitorInputs(
+                    project, parser, tool, cache, project / "ib.csv", project / "p2p.dot")
+                if case in ("missing", "explicit-root-missing"):
+                    # No fallback to the default root or to project-level infra/infra-neutral.conf.
+                    with self.assertRaisesRegex(self.authority.AuthorityError, "unavailable"):
+                        build()
+                    continue
+                reader = build()
+                self.assertEqual(tool, reader.tool_input_root)
+                if case in ("unchanged", "explicit-tool-root"):
+                    reader.recheck()  # positive control: the captured image re-observes
+                    continue
+                if case == "replaced":
+                    replacement = tool / "replacement.conf"
+                    replacement.write_bytes(NEUTRAL)
+                    replacement.chmod(0o644)
+                    os.replace(replacement, neutral)
+                else:
+                    neutral.write_bytes(NEUTRAL + NEUTRAL)
+                with self.assertRaises(self.authority.AuthorityError):
+                    reader.recheck()
+                self.assertFalse((project / "99-output-ztp").exists(), "the read-only binder publishes nothing")
+
+
 if __name__ == "__main__":
     unittest.main()

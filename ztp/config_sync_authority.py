@@ -313,10 +313,13 @@ class InitialMethodMonitorInputs(ManagedInitialMethodCycle):
         raise AuthorityError("initial monitor inputs cannot publish a writer result")
 
     def __init__(self, project, initial, tool, cache, csv_path, p2p, *, inventory=None):
-        super().__init__(project, initial)
+        # Q4: bind the same project-internal tool root the writer admitted; this read-only
+        # binder never admits outputs, so it captures the neutral image before its first read.
+        super().__init__(project, initial, tool_input_root=tool)
         self.inventory = Path(inventory) if inventory is not None else None
         self.inventory_image = self._image(self.inventory) if self.inventory is not None else None
         self.tool, self.cache, self.csv, self.p2p = [Path(path).resolve(strict=True) for path in (tool, cache, csv_path, p2p)]
+        self.neutral_image = self._neutral_image()
         paths = [self.cache, self.cache.with_name(self.cache.name + ".sha256"),
                  self.csv, self.p2p, self.tool / "01-global.yaml"]
         key_paths = sorted((self.tool / "publickey").glob("*.pub"))
