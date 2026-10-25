@@ -1975,24 +1975,50 @@ def _validate_eth_csv(path):
     global_path = os.path.join(os.path.dirname(os.path.realpath(path)), "01-global.yaml")
     try:
         import yaml
+    except ImportError as exc:
+        errors.append(f"  无法确定 devices_config.csv schema：PyYAML 不可用：{exc}")
+        return errors, warnings
+    try:
         with open(global_path, encoding="utf-8") as stream:
             global_document = safe_load_global_yaml(stream)
         schema_version = detect_global_schema_version(global_document)
-        normalize_issue_tracker_policy(global_document)
-        if schema_version == 2 and isinstance(global_document, dict):
-            eth_config = next((
-                item["eth"] for item in global_document.get("switches", [])
-                if isinstance(item, dict) and isinstance(item.get("eth"), dict)
-            ), None)
-            if eth_config is not None:
+    except FileNotFoundError as exc:
+        if os.path.lexists(global_path):
+            errors.append(f"  无法确定 devices_config.csv schema：01-global.yaml 无效：{exc}")
+            return errors, warnings
+        # Standalone CSV checks retain the legacy v1 contract.  The project
+        # preflight separately requires 01-global.yaml before setup can run.
+        global_document = None
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        # A malformed or unsupported global cannot silently select the v1
+        # layout: doing so misdiagnoses a valid v2 inventory as a v1 CSV.
+        errors.append(f"  无法确定 devices_config.csv schema：01-global.yaml 无效：{exc}")
+        return errors, warnings
+
+    if global_document is not None:
+        try:
+            normalize_issue_tracker_policy(global_document)
+        except ValueError as exc:
+            errors.append(f"  01-global.yaml issue tracker 策略无效：{exc}")
+
+    # CSV layout is bound only to the declared schema.  ETH policy is relevant
+    # to Cumulus setup, not to an IB/NVL-only setup of a mixed inventory.
+    if schema_version == 2 and _SWITCH_SCOPE in {"all", "eth"}:
+        switches = global_document.get("switches", [])
+        eth_config = next((
+            item["eth"] for item in switches
+            if isinstance(item, dict) and isinstance(item.get("eth"), dict)
+        ), None) if isinstance(switches, list) else None
+        if eth_config is not None:
+            common = global_document.get("common")
+            common_switch = common.get("switch", {}) if isinstance(common, dict) else {}
+            eth_config = _v2_preflight_deep_merge(common_switch, eth_config)
+            try:
                 v2_vrr_gateway_mode = normalize_v2_vrr_policy(eth_config)[
                     "gateway_ip"
                 ]
-    except (OSError, ValueError, yaml.YAMLError):
-        # _validate_global_yaml reports the authoritative global error.  Keep
-        # the legacy layout here so this validator can still return useful
-        # inventory errors without masking that earlier diagnostic.
-        schema_version = 1
+            except ValueError as exc:
+                errors.append(f"  {exc}")
 
     # ETH 设备类型集合
     _ETH_TYPES  = {"eth", "eth_spx", "spx"}
