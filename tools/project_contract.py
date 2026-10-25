@@ -13,14 +13,19 @@ import ipaddress
 import json
 import os
 import posixpath
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 import re
 import stat
+import sys
 from types import MappingProxyType
 from typing import Callable, Iterable
 
 import yaml
+
+class PrivatePublicationSourceError(RuntimeError):
+    """Fatal private-publication admission HOLD, not ordinary report tolerance."""
+
 
 GLOBAL_SCHEMA_VERSION = 1
 CURRENT_GLOBAL_SCHEMA_VERSION = 2
@@ -335,6 +340,81 @@ def validate_service_endpoint(
     ):
         raise ValueError(f"{field} port must be an integer from 1 through 65535")
     return ServiceEndpoint(parsed, resolved_port)
+
+
+def validate_dhcp_subnet_placements(
+    rows: Iterable[tuple[int, Mapping[str, object]]],
+    *, service_ips: Iterable[str] = (),
+) -> None:
+    """Check DHCP pool and service address placement without reading or writing files.
+
+    The caller owns the CSV header and platform-profile contract.  Every
+    declared ZTP endpoint is included in the derived service set so an address
+    on one row cannot accidentally fall into another row's dynamic pool.
+    """
+    placements = []
+    derived_service_ips = []
+    for lineno, row in rows:
+        raw_service_ip = str(row.get("ztp_service_ip") or "").strip()
+        service_address = None
+        if raw_service_ip:
+            try:
+                service_address = validate_service_endpoint(
+                    raw_service_ip,
+                    field=f"DHCP subnet CSV 第 {lineno} 行 ztp_service_ip",
+                ).address
+            except ValueError as exc:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={raw_service_ip!r} 不是可用单播地址"
+                ) from exc
+            derived_service_ips.append(str(service_address))
+        try:
+            network = ipaddress.IPv4Network(
+                f"{row['subnet'].strip()}/{row['netmask'].strip()}", strict=False,
+            )
+            start = ipaddress.IPv4Address(row["range_start"].strip())
+            end = ipaddress.IPv4Address(row["range_end"].strip())
+            router = ipaddress.IPv4Address(row["routers"].strip())
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行网络字段无效：{exc}"
+            ) from exc
+        if start not in network or end not in network or router not in network or start > end:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行 range/router 不属于 {network}"
+            )
+        if start <= router <= end:
+            raise ValueError(
+                f"DHCP subnet CSV 第 {lineno} 行 routers={router} "
+                f"落入动态 range {start}-{end}"
+            )
+        if service_address is not None and service_address in network:
+            if service_address in (network.network_address, network.broadcast_address):
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={service_address} 不是 {network} 的可用主机地址"
+                )
+            if start <= service_address <= end:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 "
+                    f"ztp_service_ip={service_address} 落入动态 range {start}-{end}"
+                )
+        placements.append((lineno, network, start, end))
+
+    addresses = []
+    for raw_service_ip in dict.fromkeys((*derived_service_ips, *service_ips)):
+        try:
+            addresses.append(ipaddress.IPv4Address(raw_service_ip))
+        except ipaddress.AddressValueError as exc:
+            raise ValueError(f"推导出的 service_ip={raw_service_ip!r} 无效") from exc
+    for lineno, network, start, end in placements:
+        for service_address in addresses:
+            if service_address in network and start <= service_address <= end:
+                raise ValueError(
+                    f"DHCP subnet CSV 第 {lineno} 行 service_ip={service_address} "
+                    f"落入动态 range {start}-{end}"
+                )
 
 
 def merge_http_listener_addresses(
@@ -2024,6 +2104,7 @@ DEPLOYMENT_CODE_TREE_NAMES = frozenset({
 # DEPLOYABLE_TOOL_SUBTREES lists the small runtime exception.
 # Other subdirectories remain workstation-only analyzers, imports, or samples.
 TOOLS_CODE_SUFFIXES = frozenset({".py", ".sh", ".js", ".cjs", ".mjs"})
+WORKSTATION_ONLY_TOOLS = frozenset({"tools/monitor-loopback-proxy.py"})
 
 MANUAL_BACKUP_PATTERNS = (
     "*_副本.*",
@@ -2079,7 +2160,8 @@ def validate_ztp_url_prefix(value: object) -> str:
         )
 
     parts = tuple(part.casefold() for part in prefix.lstrip("/").split("/"))
-    if any(part in ZTP_PREFIX_RESERVED_SEGMENTS for part in parts):
+    if (is_private_b_primary_escrow_path(prefix.lstrip("/"))
+            or any(part in ZTP_PREFIX_RESERVED_SEGMENTS for part in parts)):
         raise ValueError(
             "common.mgmt.ztp.ztp_url_prefix 使用了 Apache 保留发布路径"
         )
@@ -2177,6 +2259,8 @@ def ztp_prefix_publication_relative(root: Path | str) -> PurePosixPath | None:
 def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
     """Return whether a tools/ source file belongs on a management server."""
     value = PurePosixPath(path)
+    if value.as_posix() in WORKSTATION_ONLY_TOOLS:
+        return False
     if not value.parts or value.parts[0] != "tools":
         return False
     if len(value.parts) > 2:
@@ -2195,9 +2279,46 @@ def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
     )
 
 
+PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON = "private b-primary escrow state"
+
+
+def is_private_b_primary_escrow_path(path: PurePosixPath | str) -> bool:
+    """Reserve only the exact ASCII-insensitive workspace-root component."""
+    parts = PurePosixPath(path).parts
+    return bool(parts and parts[0].isascii()
+                and parts[0].lower() == ".private-b-primary-escrows")
+
+
+def assert_no_private_b_primary_escrow_root(root: Path) -> None:
+    """Hold before forensic work if the reserved immediate root name exists."""
+    try:
+        descriptor = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        try:
+            with os.scandir(descriptor) as entries:
+                present = any(
+                    is_private_b_primary_escrow_path(entry.name)
+                    for entry in entries
+                )
+        finally:
+            os.close(descriptor)
+    except OSError:
+        raise ValueError(
+            "private b-primary escrow root admission unavailable; HOLD"
+        ) from None
+    if present:
+        raise ValueError("private b-primary escrow root present; HOLD")
+
+
 def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
     """Return why a workspace-relative path is not deployable, if applicable."""
     value = PurePosixPath(path)
+    if is_private_b_primary_escrow_path(value):
+        return PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON
+    if value.as_posix() in WORKSTATION_ONLY_TOOLS:
+        return "workstation-only tool"
     parts = value.parts
     if (
         len(parts) == 3
@@ -2301,6 +2422,625 @@ def rsync_excludes() -> tuple[str, ...]:
         REHYDRATE_RECEIPT_NAME, REHYDRATE_READY_NAME, REHYDRATE_COMMIT_NAME,
         ZTP_PREFIX_PUBLICATION_MARKER,
     )
+
+
+# Consumer-only authority: never accepts an unpublished LOAD candidate.
+SELECTED_DHCP_OUTPUTS = (
+    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+)
+
+
+@dataclass(frozen=True)
+class SelectedDhcpRelease:
+    mode: str
+    parent: Mapping
+    parent_path: Path
+    generation_dir: Path | None
+    manifest_path: Path | None
+    manifest: Mapping | None
+    output_paths: Mapping
+    output_hashes: Mapping
+    binding: Mapping
+
+
+def open_selected_dhcp_release(
+    project: Path, *, expected_parent: Mapping | None = None,
+    legacy_manifest: Path | None = None,
+) -> SelectedDhcpRelease:
+    """Read one committed DHCP generation with all namespace FDs held.
+
+    A selector which exists but is unsafe, dangling or inconsistent never
+    grants legacy fallback. Explicit legacy authority is confined to this
+    project's canonical 99-output-dhcp, not a runtime compatibility alias.
+    Root/project owners come from held inodes, not the reader's EUID.
+    No file, link, mode, receipt, installed state or service is changed.
+    """
+    # LOAD and other direct entrypoints import this module from tools/;
+    # package consumers import tools.project_contract from its parent. Select
+    # the sibling in the same namespace without catching dependency failures
+    # or granting a repository-parent/cwd fallback.
+    if __package__:
+        from . import generation_report as authority
+    else:
+        import generation_report as authority
+
+    project = Path(os.path.abspath(os.fspath(project)))
+    if (project == Path("/") or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name)):
+        raise ValueError("selected release requires a safe project basename")
+    for flag in ("O_DIRECTORY", "O_NOFOLLOW"):
+        if not getattr(os, flag, 0):
+            raise ValueError("platform lacks no-follow directory descriptors")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptors: list[int] = []
+    held: list[dict] = []
+    missing: list[tuple[int, str, Path]] = []
+    records: dict[str, dict] = {}
+
+    def identity(metadata):
+        return authority.release_file_identity(metadata)
+
+    def namespace_identity(metadata, *, governed):
+        # release_file_identity's full order is dev/ino/mode/nlink/uid/gid/
+        # size/mtime/ctime. A prefix of six accidentally includes nlink.
+        # Exterior ancestors bind only inode/name and security metadata;
+        # unrelated child mkdir must not be adopted as release authority.
+        return identity(metadata) if governed else (
+            metadata.st_dev, metadata.st_ino, metadata.st_mode,
+            metadata.st_uid, metadata.st_gid,
+        )
+
+    def inspect(parent_fd, name):
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+
+    def hold_directory(parent_fd, name, path, *, governed):
+        named = inspect(parent_fd, name)
+        if not stat.S_ISDIR(named.st_mode):
+            raise ValueError(f"no-follow directory required: {path}")
+        descriptor = os.open(name, directory_flags, dir_fd=parent_fd)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if (namespace_identity(before, governed=governed)
+                != namespace_identity(named, governed=governed)
+                or not stat.S_ISDIR(before.st_mode)):
+            raise ValueError(f"directory rebound before open: {path}")
+        row = {"fd": descriptor, "parent": parent_fd, "name": name,
+               "path": path, "identity": namespace_identity(before, governed=governed), "kind": "directory",
+               "governed": governed}
+        held.append(row)
+        if governed:
+            records[str(path)] = {"kind": "directory", "identity": list(row["identity"])}
+        return descriptor
+
+    def require_owner(metadata, path, *, ancestor=False):
+        if metadata.st_uid not in trusted_owners:
+            raise ValueError(f"release namespace owner is not trusted: {path}")
+        if stat.S_ISLNK(metadata.st_mode):
+            if metadata.st_nlink != 1:
+                raise ValueError(f"release selector is not single-link: {path}")
+        elif metadata.st_mode & 0o022:
+            # Shared /tmp ancestors may be root-owned sticky directories.
+            # Governed project/output/generation directories may never be.
+            if not (ancestor and stat.S_ISDIR(metadata.st_mode)
+                    and metadata.st_uid == root_uid
+                    and metadata.st_mode & stat.S_ISVTX):
+                raise ValueError(f"release authority is writable by other users: {path}")
+
+    def hold_regular(parent_fd, name, path, limit, *, allow_empty=False):
+        named = inspect(parent_fd, name)
+        require_owner(named, path)
+        if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or named.st_size > limit or (not allow_empty and named.st_size <= 0)):
+            raise ValueError(f"bounded single-link regular authority required: {path}")
+        descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                             | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if identity(before) != identity(named) or not stat.S_ISREG(before.st_mode):
+            raise ValueError(f"release leaf rebound before open: {path}")
+        row = {"fd": descriptor, "parent": parent_fd, "name": name,
+               "path": path, "identity": identity(before), "kind": "file",
+               "governed": True}
+        held.append(row)
+        chunks, remaining = [], limit + 1
+        while remaining:
+            part = os.read(descriptor, min(64 * 1024, remaining))
+            if not part:
+                break
+            chunks.append(part)
+            remaining -= len(part)
+        payload = b"".join(chunks)
+        if len(payload) > limit:
+            raise ValueError(f"release leaf exceeds bound: {path}")
+        if (identity(os.fstat(descriptor)) != row["identity"]
+                or identity(inspect(parent_fd, name)) != row["identity"]):
+            raise ValueError(f"release leaf changed during held read: {path}")
+        records[str(path)] = {"kind": "file", "identity": list(row["identity"]),
+                              "sha256": hashlib.sha256(payload).hexdigest()}
+        return payload
+
+    def absent(parent_fd, name, path):
+        try:
+            inspect(parent_fd, name)
+        except FileNotFoundError:
+            missing.append((parent_fd, name, path))
+            records[str(path)] = {"kind": "missing"}
+            return True
+        return False
+
+    def hold_selector(parent_fd, name, path):
+        named = inspect(parent_fd, name)
+        require_owner(named, path)
+        if not stat.S_ISLNK(named.st_mode):
+            raise ValueError("current selector must be a single-link symlink")
+        # Linux O_PATH and Darwin O_SYMLINK hold the link inode, not its target.
+        if getattr(os, "O_PATH", 0):
+            flags = os.O_PATH | os.O_NOFOLLOW
+        elif sys.platform == "darwin":
+            # Darwin's public sys/fcntl.h defines this ABI flag, but CPython
+            # does not expose it in every build. fstat below still requires
+            # the held descriptor to denote the exact symlink inode.
+            flags = os.O_RDONLY | getattr(os, "O_SYMLINK", 0x00200000)
+        else:
+            raise ValueError("platform lacks a no-follow symlink descriptor")
+        descriptor = os.open(name, flags | getattr(os, "O_CLOEXEC", 0),
+                             dir_fd=parent_fd)
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if not stat.S_ISLNK(before.st_mode) or identity(before) != identity(named):
+            raise ValueError("current selector rebound before hold")
+        target = os.readlink(name, dir_fd=parent_fd)
+        if re.fullmatch(r"generations/[0-9a-f]{20}", target) is None:
+            raise ValueError("unsafe current selector target")
+        row = {"fd": descriptor, "parent": parent_fd, "name": name,
+               "path": path, "identity": identity(before), "kind": "selector",
+               "target": target, "governed": True}
+        held.append(row)
+        records[str(path)] = {"kind": "selector", "identity": list(row["identity"]),
+                              "target": target}
+        return target
+
+    try:
+        root_fd = os.open("/", directory_flags)
+        descriptors.append(root_fd)
+        root_named = os.stat("/", follow_symlinks=False)
+        root_metadata = os.fstat(root_fd)
+        if namespace_identity(root_named, governed=False) != namespace_identity(root_metadata, governed=False):
+            raise ValueError("filesystem root changed before hold")
+        root_uid = root_metadata.st_uid
+        held.append({"fd": root_fd, "parent": None, "name": "/",
+                     "path": Path("/"), "identity": namespace_identity(root_metadata, governed=False),
+                     "kind": "directory", "governed": False})
+        current_fd, current_path = root_fd, Path("/")
+        parts = project.parts[1:]
+        for index, part in enumerate(parts):
+            current_path = current_path / part
+            current_fd = hold_directory(current_fd, part, current_path,
+                                        governed=index == len(parts) - 1)
+        project_fd = current_fd
+        project_uid = os.fstat(project_fd).st_uid
+        trusted_owners = {root_uid, project_uid}
+        for row in held:
+            require_owner(os.fstat(row["fd"]), row["path"],
+                          ancestor=not row["governed"])
+        output = project / "99-output-ztp"
+        output_fd = hold_directory(project_fd, "99-output-ztp", output, governed=True)
+        require_owner(os.fstat(output_fd), output)
+        parent_path = output / "current-release.json"
+        parent_payload = hold_regular(output_fd, "current-release.json",
+                                      parent_path, authority.PARENT_LIMIT)
+        parent = authority.decode_release_record(parent_payload, "current parent")
+        authority.validate_parent_release_basis(parent, project.name)
+        if expected_parent is not None and dict(expected_parent) != parent:
+            raise ValueError("caller parent differs from selected current parent")
+        status = "enabled" if parent["schema_version"] == 1 else parent["dhcp_status"]
+        components = parent.get("components")
+        if not isinstance(components, dict):
+            raise ValueError("release parent components must be an object")
+        selector = output / "current"
+        generation = None
+        generation_fd = None
+        if not absent(output_fd, "current", selector):
+            target = hold_selector(output_fd, "current", selector)
+            if parent["schema_version"] != 2:
+                raise ValueError("selected pinned generation requires schema 2")
+            generations = output / "generations"
+            generations_fd = hold_directory(output_fd, "generations", generations, governed=True)
+            require_owner(os.fstat(generations_fd), generations)
+            generation = output / target
+            generation_fd = hold_directory(generations_fd, generation.name,
+                                           generation, governed=True)
+            require_owner(os.fstat(generation_fd), generation)
+            frozen = hold_regular(generation_fd, "current-release.json",
+                                  generation / "current-release.json", authority.PARENT_LIMIT)
+            if generation.name != parent["release_id"] or frozen != parent_payload:
+                raise ValueError("selector/generation/current parent differ")
+            mode = "pinned"
+        else:
+            mode = "legacy"
+
+        paths, hashes, manifest, manifest_path = {}, {}, None, None
+        if status == "disabled":
+            if "dhcp" in components:
+                raise ValueError("disabled parent cannot bind DHCP component")
+            if generation_fd is not None and not absent(
+                    generation_fd, "dhcp", generation / "dhcp"):
+                raise ValueError("disabled pinned generation contains DHCP authority")
+            mode = "disabled"
+        else:
+            if generation_fd is not None:
+                source = generation / "dhcp"
+                source_fd = hold_directory(generation_fd, "dhcp", source, governed=True)
+            else:
+                legal_legacy = project / "99-output-dhcp/dhcp-release-manifest.json"
+                if legacy_manifest is None or Path(legacy_manifest) != legal_legacy:
+                    raise ValueError("explicit legacy authority must be this project's canonical DHCP output")
+                source = legal_legacy.parent
+                source_fd = hold_directory(project_fd, "99-output-dhcp", source, governed=True)
+            require_owner(os.fstat(source_fd), source)
+            child = components.get("dhcp")
+            if not isinstance(child, dict):
+                raise ValueError("enabled parent lacks DHCP child")
+            manifest_path = source / "dhcp-release-manifest.json"
+            payload = hold_regular(source_fd, manifest_path.name, manifest_path,
+                                   4 * 1024 * 1024)
+            manifest = authority.decode_release_record(payload, "DHCP manifest")
+            if (hashlib.sha256(payload).hexdigest() != child.get("manifest_sha256")
+                    or manifest.get("release_id") != child.get("release_id")
+                    or any(manifest.get(key, "all") != parent.get(key, "all")
+                           for key in ("deployment_scope", "switch_scope"))):
+                raise ValueError("DHCP child identity/hash/scope differs from parent")
+            outputs = manifest.get("outputs")
+            if not isinstance(outputs, dict) or set(outputs) != set(SELECTED_DHCP_OUTPUTS):
+                raise ValueError("DHCP output inventory is incomplete or extended")
+            if mode == "pinned" and set(os.listdir(source_fd)) != (
+                    set(SELECTED_DHCP_OUTPUTS) | {"dhcp-release-manifest.json"}):
+                raise ValueError("pinned DHCP directory is incomplete or extended")
+            for name in SELECTED_DHCP_OUTPUTS:
+                record = outputs[name]
+                expected = record.get("sha256") if isinstance(record, dict) else None
+                if not isinstance(expected, str) or re.fullmatch(r"[0-9a-f]{64}", expected) is None:
+                    raise ValueError(f"DHCP output hash is invalid: {name}")
+                path = source / name
+                payload = hold_regular(source_fd, name, path, 32 * 1024 * 1024,
+                                       allow_empty=name != "dhcpd.conf")
+                actual = hashlib.sha256(payload).hexdigest()
+                if expected != actual:
+                    raise ValueError(f"DHCP output hash drift: {name}")
+                paths[name], hashes[name] = path, actual
+
+        for row in held:
+            descriptor_identity = namespace_identity(os.fstat(row["fd"]), governed=row["governed"])
+            if row["parent"] is None:
+                named = os.stat("/", follow_symlinks=False)
+            else:
+                named = inspect(row["parent"], row["name"])
+            named_identity = namespace_identity(named, governed=row["governed"])
+            # Full nine fields bind all governed project/parent/selector/leaf
+            # authority. Outer ancestors retain dev/ino/mode/uid/gid without
+            # treating unrelated child nlink/size/timestamp bookkeeping
+            # creation as a change to this project's prepared release.
+            if (descriptor_identity != row["identity"]
+                    or named_identity != row["identity"]):
+                raise ValueError(f"held release namespace changed: {row['path']}")
+            require_owner(named, row["path"], ancestor=not row["governed"])
+            if row["kind"] == "selector" and os.readlink(
+                    row["name"], dir_fd=row["parent"]) != row["target"]:
+                raise ValueError("current selector target changed")
+        for parent_fd, name, path in missing:
+            try:
+                inspect(parent_fd, name)
+            except FileNotFoundError:
+                continue
+            raise ValueError(f"absent release authority appeared during read: {path}")
+        binding = {"record_type": "parent-selected-dhcp-v1", "mode": mode,
+                   "project": str(project), "release_id": parent["release_id"],
+                   "records": records}
+        return SelectedDhcpRelease(
+            mode, MappingProxyType(parent), parent_path, generation, manifest_path,
+            MappingProxyType(manifest) if manifest is not None else None,
+            MappingProxyType(paths), MappingProxyType(hashes), binding,
+        )
+    except (OSError, authority.GenerationReportError) as exc:
+        raise ValueError(f"selected DHCP authority unavailable: {exc}") from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def recheck_selected_dhcp_release(
+    project: Path, expected_binding: Mapping, *, legacy_manifest: Path | None = None,
+) -> SelectedDhcpRelease:
+    """Reopen all held authority; never upgrade an old prepared qualification."""
+    if (not isinstance(expected_binding, Mapping)
+            or expected_binding.get("record_type") != "parent-selected-dhcp-v1"):
+        raise ValueError("prepared selected DHCP authority is missing or invalid")
+    selected = open_selected_dhcp_release(project, legacy_manifest=legacy_manifest)
+    if selected.binding != dict(expected_binding):
+        raise ValueError("prepared selected DHCP identity changed; repeat preflight")
+    return selected
+
+
+@dataclass(frozen=True)
+class SelectedReleaseInventory:
+    source_path: Path
+    effective_path: Path
+    release_id: str
+    air_targets: Mapping
+    binding: Mapping
+    effective_payload: bytes = field(repr=False)
+
+
+def open_release_inventory(project: Path) -> SelectedReleaseInventory:
+    """Bind consumers to the committed effective CSV, not the upload CSV.
+
+    Mutable report namespaces bind inode and security metadata, while parent,
+    selector, sealed generation and CSV authorities retain all nine metadata
+    fields and byte hashes. No existing damaged parent grants legacy fallback.
+    """
+    if __package__:
+        from . import generation_report as authority
+    else:
+        import generation_report as authority
+    project = Path(os.path.abspath(os.fspath(project)))
+    if project == Path("/") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", project.name):
+        raise ValueError("release inventory requires a safe project basename")
+    if not getattr(os, "O_DIRECTORY", 0) or not getattr(os, "O_NOFOLLOW", 0):
+        raise ValueError("release inventory requires no-follow directory descriptors")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    descriptors, held, records = [], [], {}
+    full = authority.release_file_identity
+    def namespace(metadata):
+        return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)
+    def safe(metadata, path, *, outer=False):
+        if metadata.st_uid not in owners:
+            raise ValueError(f"inventory authority owner is not trusted: {path}")
+        if metadata.st_mode & 0o022 and not (
+                outer and stat.S_ISDIR(metadata.st_mode) and metadata.st_uid == 0
+                and metadata.st_mode & stat.S_ISVTX):
+            raise ValueError(f"inventory authority is writable by others: {path}")
+    def directory(parent_fd, name, path, *, sealed=False, outer=False):
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(named.st_mode):
+            raise ValueError(f"inventory requires a real directory: {path}")
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        descriptors.append(fd)
+        metadata = os.fstat(fd)
+        identity = full(metadata) if sealed else namespace(metadata)
+        if identity != (full(named) if sealed else namespace(named)):
+            raise ValueError(f"inventory directory changed before hold: {path}")
+        held.append((fd, parent_fd, name, path, identity, sealed, outer))
+        records[str(path)] = {"kind": "sealed-directory" if sealed else "namespace", "identity": list(identity)}
+        return fd
+    def leaf(parent_fd, name, path, *, limit=64 * 1024 * 1024, mode=None):
+        named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        safe(named, path)
+        if (not stat.S_ISREG(named.st_mode) or named.st_nlink != 1
+                or not 0 < named.st_size <= limit
+                or (mode is not None and stat.S_IMODE(named.st_mode) != mode)):
+            raise ValueError(f"inventory requires a bounded single-link regular authority: {path}")
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                     | getattr(os, "O_CLOEXEC", 0), dir_fd=parent_fd)
+        descriptors.append(fd)
+        metadata = os.fstat(fd)
+        if full(metadata) != full(named):
+            raise ValueError(f"inventory leaf changed before hold: {path}")
+        held.append((fd, parent_fd, name, path, full(metadata), True, False))
+        parts, remaining = [], limit + 1
+        while remaining:
+            part = os.read(fd, min(65536, remaining))
+            if not part:
+                break
+            parts.append(part)
+            remaining -= len(part)
+        payload = b"".join(parts)
+        if len(payload) > limit or full(os.fstat(fd)) != full(metadata):
+            raise ValueError(f"inventory authority changed during read: {path}")
+        records[str(path)] = {"kind": "leaf", "identity": list(full(metadata)),
+                              "sha256": hashlib.sha256(payload).hexdigest()}
+        return payload
+    try:
+        root_fd = os.open("/", flags)
+        descriptors.append(root_fd)
+        fd, path = root_fd, Path("/")
+        for index, part in enumerate(project.parts[1:]):
+            path = path / part
+            fd = directory(fd, part, path, outer=index < len(project.parts) - 2)
+        project_fd = fd
+        owners = {os.fstat(root_fd).st_uid, os.fstat(project_fd).st_uid}
+        output = project / "99-output-ztp"
+        output_fd = directory(project_fd, output.name, output)
+        parent_payload = leaf(output_fd, "current-release.json", output / "current-release.json", limit=authority.PARENT_LIMIT)
+        parent = authority.decode_release_record(parent_payload, "inventory current parent")
+        authority.validate_parent_release_basis(parent, project.name)
+        if parent.get("validation") != "passed":
+            raise ValueError("inventory parent validation is not passed")
+        selector = output / "current"
+        try:
+            selector_stat = os.stat("current", dir_fd=output_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            records[str(selector)] = {"kind": "missing"}
+        else:
+            if not stat.S_ISLNK(selector_stat.st_mode) or selector_stat.st_nlink != 1:
+                raise ValueError("inventory current selector must be a single-link symlink")
+            target = os.readlink("current", dir_fd=output_fd)
+            if target != "generations/" + parent["release_id"]:
+                raise ValueError("inventory current selector differs from committed parent")
+            records[str(selector)] = {"kind": "selector", "identity": list(full(selector_stat)), "target": target}
+            generations_fd = directory(output_fd, "generations", output / "generations")
+            generation_path = output / target
+            generation_fd = directory(generations_fd, parent["release_id"], generation_path, sealed=True)
+            if leaf(generation_fd, "current-release.json", generation_path / "current-release.json", limit=authority.PARENT_LIMIT) != parent_payload:
+                raise ValueError("inventory frozen generation differs from current parent")
+        source = project / "02-devices_config.csv"
+        source_payload = leaf(project_fd, source.name, source)
+        if parent["inputs"].get("devices") != hashlib.sha256(source_payload).hexdigest():
+            raise ValueError("inventory source CSV SHA-256 drift")
+        global_path = project / "01-global.yaml"
+        global_payload = leaf(project_fd, global_path.name, global_path)
+        if parent["inputs"].get("global") != hashlib.sha256(global_payload).hexdigest():
+            raise ValueError("inventory global input SHA-256 drift")
+        effective = source
+        effective_payload = source_payload
+        if "generated_inputs" in parent:
+            generated = parent["generated_inputs"]
+            if not isinstance(generated, dict) or set(generated) != {"effective_devices"}:
+                raise ValueError("inventory generated inputs are invalid")
+            value = generated["effective_devices"]
+            if not isinstance(value, dict) or set(value) != {"path", "sha256"}:
+                raise ValueError("inventory effective authority is invalid")
+            raw = value["path"]
+            if not isinstance(raw, str) or re.fullmatch(r"\.load-inventory-[A-Za-z0-9_-]+/02-devices_config\.csv", raw) is None:
+                raise ValueError("inventory effective path is unsafe")
+            effective = project / raw
+            private_fd = directory(project_fd, effective.parent.name, effective.parent, sealed=True)
+            if stat.S_IMODE(os.fstat(private_fd).st_mode) != 0o700:
+                raise ValueError("inventory private directory requires mode 0700")
+            payload = leaf(private_fd, effective.name, effective, mode=0o600)
+            if value["sha256"] != hashlib.sha256(payload).hexdigest():
+                raise ValueError("inventory effective CSV SHA-256 drift")
+            effective_payload = payload
+        inventory = parent.get("inventory")
+        if not isinstance(inventory, list):
+            raise ValueError("inventory parent target list is invalid")
+        targets = {}
+        for record in inventory:
+            if not isinstance(record, dict) or not isinstance(record.get("hostname"), str):
+                raise ValueError("inventory parent target identity is invalid")
+            if record.get("type") == "air":
+                key = record["hostname"].casefold()
+                if key in targets:
+                    raise ValueError("inventory parent has duplicate AIR target names")
+                targets[key] = MappingProxyType(dict(record))
+        for held_fd, parent_fd, name, held_path, identity, sealed, outer in held:
+            named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            metadata = os.fstat(held_fd)
+            safe(named, held_path, outer=outer)
+            if (identity != (full(named) if sealed else namespace(named))
+                    or identity != (full(metadata) if sealed else namespace(metadata))):
+                raise ValueError(f"inventory authority changed during held read: {held_path}")
+        try:
+            current_stat = os.stat("current", dir_fd=output_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            if records[str(selector)]["kind"] != "missing":
+                raise ValueError("inventory selector disappeared during read")
+        else:
+            if (records[str(selector)]["kind"] != "selector"
+                    or records[str(selector)]["identity"] != list(full(current_stat))
+                    or records[str(selector)]["target"] != os.readlink("current", dir_fd=output_fd)):
+                raise ValueError("inventory selector changed during read")
+        binding = {"record_type": "selected-release-inventory-v1", "project": str(project),
+                   "release_id": parent["release_id"], "records": records}
+        return SelectedReleaseInventory(source, effective, parent["release_id"], MappingProxyType(targets), binding,
+                                        effective_payload)
+    except (OSError, authority.GenerationReportError) as exc:
+        raise ValueError(f"release inventory authority unavailable: {exc}") from exc
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
+
+def recheck_release_inventory(project: Path, expected_binding: Mapping) -> SelectedReleaseInventory:
+    if not isinstance(expected_binding, Mapping) or expected_binding.get("record_type") != "selected-release-inventory-v1":
+        raise ValueError("prepared inventory authority is invalid")
+    selected = open_release_inventory(project)
+    if selected.binding != dict(expected_binding):
+        raise ValueError("prepared inventory authority changed; repeat preflight")
+    return selected
+
+
+def release_inventory_for_csv(csv_path: Path) -> SelectedReleaseInventory | None:
+    """Resolve deployed CSV aliases; only absent parents use legacy readers."""
+    def committed_marker(project):
+        for name in ("current-release.json", "current"):
+            try:
+                (project / "99-output-ztp" / name).lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError(f"inventory committed authority cannot be inspected: {exc}") from exc
+            return True
+        return False
+    logical = Path(os.path.abspath(os.fspath(csv_path)))
+    logical_project = (logical.parent.parent if logical.parent.name.startswith(".load-inventory-")
+                       else logical.parent)
+    if committed_marker(logical_project):
+        # A project's canonical input may not escape to an unrelated CSV and
+        # erase an already present authority. Monitor's deployed aliases have
+        # no parent here and are resolved to their real project below.
+        canonical_project = logical_project.resolve(strict=True)
+        selected = open_release_inventory(canonical_project)
+        canonical_slot = canonical_project / logical.relative_to(logical_project)
+        if canonical_slot not in {selected.source_path, selected.effective_path}:
+            raise ValueError("inventory alias is not the committed source/effective CSV")
+        return selected
+    path = Path(csv_path).resolve(strict=False)
+    project = path.parent.parent if path.parent.name.startswith(".load-inventory-") else path.parent
+    if not committed_marker(project):
+        return None
+    selected = open_release_inventory(project)
+    if path not in {selected.source_path, selected.effective_path}:
+        raise ValueError("inventory alias is not the committed source/effective CSV")
+    return selected
+
+
+def topology_qualified_runtime_air_device(device: Mapping, air_json: Path | None) -> bool:
+    """Admit unplanned runtime Cumulus only with one current topology MAC.
+
+    Ubuntu BCM nodes may boot Cumulus in an AIR experiment. A DHCP identity
+    alone (including unknown UFM) is observation, never a main ZTP target.
+    """
+    if (device.get("unbound_identity") is not True
+            or device.get("managed_ztp") is not True
+            or device.get("platform_family") != "cumulus" or air_json is None):
+        return False
+    mac = re.sub(r"[^0-9a-f]", "", str(device.get("mac") or "").casefold())
+    if not re.fullmatch(r"[0-9a-f]{12}", mac):
+        return False
+    path = Path(air_json).resolve(strict=True)
+    before = path.lstat()
+    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+            or not 0 < before.st_size <= 64 * 1024 * 1024 or before.st_mode & 0o022):
+        raise ValueError("runtime inventory topology authority is unsafe")
+    if __package__:
+        from . import generation_report as authority
+    else:
+        import generation_report as authority
+    identity = authority.release_file_identity(before)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    try:
+        if authority.release_file_identity(os.fstat(fd)) != identity:
+            raise ValueError("runtime inventory topology changed before read")
+        pieces, remaining = [], 64 * 1024 * 1024 + 1
+        while remaining:
+            piece = os.read(fd, min(65536, remaining))
+            if not piece:
+                break
+            pieces.append(piece)
+            remaining -= len(piece)
+        payload = b"".join(pieces)
+        if (len(payload) > 64 * 1024 * 1024
+                or authority.release_file_identity(os.fstat(fd)) != identity
+                or authority.release_file_identity(path.lstat()) != identity):
+            raise ValueError("runtime inventory topology changed during read")
+    finally:
+        os.close(fd)
+    topology = authority.decode_release_record(payload, "runtime inventory topology")
+    content = topology.get("content", topology)
+    nodes = content.get("nodes") if isinstance(content, dict) else None
+    if not isinstance(nodes, dict):
+        raise ValueError("runtime inventory topology nodes are invalid")
+    matches = []
+    for name, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        interfaces = node.get("management_interfaces")
+        eth0 = interfaces.get("eth0") if isinstance(interfaces, dict) else None
+        value = (eth0.get("mac_address") or eth0.get("mac")) if isinstance(eth0, dict) else ""
+        if re.sub(r"[^0-9a-f]", "", str(value or "").casefold()) == mac:
+            matches.append(name)
+    return len(matches) == 1 and isinstance(matches[0], str) and bool(
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", matches[0]))
 
 
 # IB-only source proposal: original named function/class bodies preserved; producer mappings extended above.
