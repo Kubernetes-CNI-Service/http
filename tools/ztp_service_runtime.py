@@ -12,6 +12,7 @@ import csv
 from contextlib import contextmanager
 from dataclasses import dataclass
 import fcntl
+import io
 import ipaddress
 import json
 import os
@@ -33,7 +34,8 @@ DEFAULT_SUPERVISOR_DHCP_PID = Path("/run/http-ztp/dhcpd.pid")
 DEFAULT_SUPERVISOR_LOG_BYTES = 1024 * 1024
 MAX_SUPERVISOR_LOG_BYTES = 20 * 1024 * 1024
 REQUIRED_SUBNET_COLUMNS = frozenset({
-    "shared_network", "subnet", "netmask", "ztp_service_ip",
+    "shared_network", "subnet", "netmask", "range_start", "range_end",
+    "routers", "ztp_service_ip",
     "cumulus_profile", "nvos_ztp",
 })
 
@@ -922,6 +924,22 @@ def _logical_interfaces(
                 raise RuntimeContractError(
                     f"link snapshot ifindex {ifindex} has empty info_kind"
                 )
+        if link_kind == "vlan" and "link" in record:
+            # Resolve only the explicit observation in this same snapshot.
+            # A present malformed name must not be bypassed by link_index.
+            parent_name = _interface_name(
+                record["link"], f"link snapshot ifindex {ifindex} link",
+            )
+            named_parent = name_to_index.get(parent_name)
+            if named_parent is None:
+                raise RuntimeContractError(
+                    f"VLAN parent name {parent_name} is absent"
+                )
+            if lower_ifindex is not None and lower_ifindex != named_parent:
+                raise RuntimeContractError(
+                    f"VLAN parent name/index conflict for {record['ifname']}"
+                )
+            lower_ifindex = named_parent
         interfaces.append(LogicalInterface(
             ifindex=ifindex,
             ifname=str(record["ifname"]),
@@ -1011,64 +1029,189 @@ def inspect_http_listener_owners(
     return tuple(owners)
 
 
-def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
-    path = Path(subnet_csv)
+def snapshot_subnet_csv_text(stream: io.TextIOBase) -> io.TextIOBase:
+    """Own a regular held FD and parse only its single stable byte snapshot.
+
+    Copy in bounded chunks to a private temporary file, without imposing an
+    arbitrary CSV size limit or retaining the whole input in memory.  A
+    caller-supplied StringIO already represents a package byte capture.
+    """
+    if isinstance(stream, io.StringIO):
+        return stream
+    snapshot = tempfile.TemporaryFile(mode="w+b")
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
-    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-        raise RuntimeContractError(
-            "DHCP subnet CSV must be a non-symlink single-link regular file"
+        descriptor = stream.fileno()
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or os.lseek(descriptor, 0, os.SEEK_CUR) != 0:
+            raise RuntimeContractError("DHCP subnet CSV snapshot requires a fresh regular FD")
+        while True:
+            block = os.read(descriptor, 64 * 1024)
+            if not block:
+                break
+            snapshot.write(block)
+        after = os.fstat(descriptor)
+        identity = lambda item: (
+            item.st_dev, item.st_ino, item.st_mode, item.st_nlink,
+            item.st_size, item.st_mtime_ns, item.st_ctime_ns,
         )
-    nofollow = getattr(os, "O_NOFOLLOW", None)
-    if nofollow is None:
-        raise RuntimeContractError("platform cannot safely reject DHCP subnet CSV symlinks")
-    try:
-        descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_CLOEXEC)
-    except OSError as exc:
-        raise RuntimeContractError(f"cannot safely open DHCP subnet CSV {path}: {exc}") from exc
-    try:
-        opened = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_nlink != 1
-            or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
-        ):
-            raise RuntimeContractError("DHCP subnet CSV source identity changed")
-        stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
-    except BaseException:
-        os.close(descriptor)
+        if identity(before) != identity(after) or snapshot.tell() != before.st_size:
+            raise RuntimeContractError("DHCP subnet CSV changed during byte snapshot")
+        snapshot.seek(0)
+        return io.TextIOWrapper(snapshot, encoding="utf-8-sig", newline="")
+    except (OSError, ValueError) as exc:
+        snapshot.close()
+        raise RuntimeContractError(f"cannot snapshot DHCP subnet CSV: {exc}") from exc
+    except Exception:
+        snapshot.close()
         raise
+    finally:
+        stream.close()
+
+
+def subnet_csv_record_start_lines(stream: io.TextIOBase) -> Tuple[int, ...]:
+    """Preflight raw CSV records on one held stream, then restore its cursor.
+
+    Genuinely whitespace-only physical records may appear between data rows
+    or at the end. A delimiter/quote record is content even when DictReader
+    would normalize all its values to empty strings. csv.reader tracks quoted
+    multiline records, so diagnostics use their true first physical line.
+    """
+    class ObservedLines:
+        def __init__(self, source: io.TextIOBase) -> None:
+            self.source = source
+            self.current: list[str] = []
+
+        def __iter__(self):
+            return self
+
+        def __next__(self) -> str:
+            line = next(self.source)
+            self.current.append(line)
+            return line
+
+    initial = stream.tell()
+    observed = ObservedLines(stream)
+    reader = csv.reader(observed, strict=True)
+    starts: list[int] = []
+    try:
+        try:
+            next(reader)
+        except StopIteration:
+            return ()  # The owning reader reports the missing header.
+        if not "".join(observed.current).strip(" \t\r\n"):
+            raise RuntimeContractError(
+                "DHCP subnet CSV line 1 (行1) must contain the canonical header"
+            )
+        observed.current.clear()
+        previous_end = reader.line_num
+        for cells in reader:
+            start = previous_end + 1
+            previous_end = reader.line_num
+            raw = "".join(observed.current)
+            observed.current.clear()
+            if not raw.strip(" \t\r\n"):
+                # DictReader skips a physically empty csv.reader record ([]),
+                # but yields a whitespace-only field. Keep its index aligned
+                # with the later semantic pass, which skips that row itself.
+                if cells:
+                    starts.append(start)
+                continue
+            if not any(cell.strip() for cell in cells):
+                raise RuntimeContractError(
+                    f"DHCP subnet CSV line {start} (行{start}) "
+                    "contains an empty delimiter/quote record"
+                )
+            starts.append(start)
+    except csv.Error as exc:
+        line = reader.line_num
+        raise RuntimeContractError(
+            f"DHCP subnet CSV line {line} (行{line}) has invalid CSV syntax: {exc}"
+        ) from exc
+    finally:
+        stream.seek(initial)
+    return tuple(starts)
+
+
+def _read_dhcp_networks(
+    subnet_csv: Path, *, dhcp_enabled: Optional[bool] = None,
+    ztp_enabled: Optional[bool] = None,
+    _held_stream: Optional[io.TextIOBase] = None,
+) -> Tuple[DhcpNetwork, ...]:
+    # Mode contract (DEV 7f59263): both modes are supplied together as exact
+    # booleans, or both are omitted.  The unbound form exists only for
+    # historical direct parser calls in tests; every production consumer
+    # passes both modes explicitly.  All mode errors precede any I/O.
+    if (dhcp_enabled is None) != (ztp_enabled is None):
+        raise RuntimeContractError("DHCP/ZTP mode must be supplied together")
+    mode_bound = dhcp_enabled is not None
+    if mode_bound and (type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool):
+        raise RuntimeContractError("DHCP/ZTP mode must be exact booleans")
+    if mode_bound and not dhcp_enabled and ztp_enabled:
+        raise RuntimeContractError("DHCP disabled + ZTP enabled is invalid")
+    path = Path(subnet_csv)
+    if _held_stream is None:
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise RuntimeContractError(
+                "DHCP subnet CSV must be a non-symlink single-link regular file"
+            )
+        if metadata.st_size == 0:
+            raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise RuntimeContractError("platform cannot safely reject DHCP subnet CSV symlinks")
+        if any(not hasattr(os, name) for name in ("O_NONBLOCK", "O_CLOEXEC")):
+            raise RuntimeContractError("DHCP subnet CSV safe open requires O_NOFOLLOW/O_NONBLOCK/O_CLOEXEC")
+        try:
+            descriptor = os.open(path, os.O_RDONLY | nofollow | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError as exc:
+            raise RuntimeContractError(f"cannot safely open DHCP subnet CSV {path}: {exc}") from exc
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino)
+            ):
+                raise RuntimeContractError("DHCP subnet CSV source identity changed")
+            if opened.st_size == 0:
+                raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+            stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
+            descriptor = -1
+        except OSError as exc:
+            raise RuntimeContractError(f"cannot read DHCP subnet CSV {path}: {exc}") from exc
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    else:
+        stream = _held_stream
+    stream = snapshot_subnet_csv_text(stream)
     with stream:
-        physical_lines: list[str] = []
-
-        def captured_lines():
-            for line in stream:
-                physical_lines.append(line)
-                yield line
-
-        reader = csv.DictReader(captured_lines())
+        line_starts = subnet_csv_record_start_lines(stream)
+        reader = csv.DictReader(stream)
         if reader.fieldnames is None:
             raise RuntimeContractError("DHCP subnet CSV has no header")
-        missing = sorted(REQUIRED_SUBNET_COLUMNS - set(reader.fieldnames))
+        fields = [str(field or "").strip() for field in reader.fieldnames]
+        if len(fields) != len(set(fields)):
+            raise RuntimeContractError("DHCP subnet CSV has duplicate columns")
+        if any(field.casefold() in {"bootfile_name", "cumulus_provision_url"}
+               for field in fields):
+            raise RuntimeContractError("DHCP subnet CSV has retired URL columns")
+        missing = sorted(REQUIRED_SUBNET_COLUMNS - set(fields))
         if missing:
             raise RuntimeContractError(
                 "DHCP subnet CSV missing columns: " + ", ".join(missing)
             )
+        reader.fieldnames = fields
         result = []
         shared_lines = {}
-        physical_lines.clear()
-        for lineno, row in enumerate(reader, 2):
-            source_record = "".join(physical_lines)
-            physical_lines.clear()
+        for index, row in enumerate(reader):
             if not any(str(value or "").strip() for value in row.values()):
-                if not source_record.strip():
-                    continue
-                raise RuntimeContractError(
-                    f"DHCP subnet CSV line {reader.line_num} is an empty "
-                    "delimiter/quote record, not a blank physical line"
-                )
+                continue
+            lineno = line_starts[index]
             profile = str(row.get("cumulus_profile") or "").strip().casefold()
             nvos_ztp = str(row.get("nvos_ztp") or "").strip().casefold()
             if profile not in {"oob", "oobofoob", "none"}:
@@ -1082,6 +1225,11 @@ def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
                     f"nvos_ztp={nvos_ztp!r}"
                 )
             endpoint_enabled = profile in {"oob", "oobofoob"} or nvos_ztp == "yes"
+            if mode_bound and endpoint_enabled and not ztp_enabled:
+                raise RuntimeContractError(
+                    f"DHCP subnet CSV line {lineno} enables ZTP while global ZTP is disabled; "
+                    "global ZTP disabled conflicts with a platform ZTP row"
+                )
             raw_service_ip = str(row.get("ztp_service_ip") or "").strip()
             if endpoint_enabled and not raw_service_ip:
                 raise RuntimeContractError(
@@ -1131,7 +1279,38 @@ def _read_dhcp_networks(subnet_csv: Path) -> Tuple[DhcpNetwork, ...]:
                 service_ip=service_ip,
                 endpoint_enabled=endpoint_enabled,
             ))
+    if mode_bound:
+        # DHCP disabled may still carry fully validated DHCP-only rows for an
+        # external DHCP server (DEV c395bb6/7f59263); only the forbidden
+        # DHCP-off/ZTP-on pair and endpoint rows without global ZTP fail.
+        if not result and (dhcp_enabled or ztp_enabled):
+            raise RuntimeContractError(
+                "DHCP enabled CSV requires a subnet row; "
+                "no DHCP networks are configured"
+            )
+        if ztp_enabled and not any(item.endpoint_enabled for item in result):
+            raise RuntimeContractError(
+                "global ZTP enabled requires a platform ZTP row; "
+                "ZTP enabled requires an endpoint row"
+            )
     return tuple(result)
+
+
+def _read_dhcp_networks_from_bytes(
+    payload: bytes, *, dhcp_enabled: bool, ztp_enabled: bool,
+) -> Tuple[DhcpNetwork, ...]:
+    """Run the same row semantics on already-bound bytes without reopening a path."""
+    if not payload:
+        raise RuntimeContractError("DHCP subnet CSV is zero bytes; canonical header required")
+    try:
+        decoded = payload.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise RuntimeContractError("DHCP subnet CSV is not UTF-8") from exc
+    return _read_dhcp_networks(
+        Path("<held-subnet>"), dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
+        _held_stream=io.StringIO(decoded),
+    )
 
 
 def _ordered_names(values: Iterable[str], label: str) -> Tuple[str, ...]:
@@ -1265,26 +1444,16 @@ def plan_dhcp_runtime(
     inside that row's subnet.  Off-link rows do not add one interface per pool;
     a relay-only deployment instead requires explicitly scoped ingress names.
     """
-    if (dhcp_enabled is None) != (ztp_enabled is None):
-        raise RuntimeContractError("DHCP/ZTP mode must be supplied together")
-    mode_bound = dhcp_enabled is not None
-    if mode_bound and (type(dhcp_enabled) is not bool or type(ztp_enabled) is not bool):
-        raise RuntimeContractError("DHCP/ZTP mode must be exact booleans")
-    if mode_bound and not dhcp_enabled and ztp_enabled:
-        raise RuntimeContractError("DHCP disabled + ZTP enabled is invalid")
-    networks = _read_dhcp_networks(Path(subnet_csv))
-    if mode_bound:
-        if not networks and (dhcp_enabled or ztp_enabled):
-            raise RuntimeContractError("DHCP enabled CSV requires a subnet row")
-        endpoint_rows = tuple(item for item in networks if item.endpoint_enabled)
-        if not ztp_enabled and endpoint_rows:
-            raise RuntimeContractError(
-                "global ZTP disabled conflicts with a platform ZTP row"
-            )
-        if ztp_enabled and not endpoint_rows:
-            raise RuntimeContractError("global ZTP enabled requires a platform ZTP row")
-        if not dhcp_enabled:
-            return DhcpRuntimePlan((), (), (), (), (), ())
+    # The reader enforces the DHCP/ZTP mode contract before any I/O, then the
+    # full CSV contract on one stable byte snapshot.
+    networks = _read_dhcp_networks(
+        Path(subnet_csv), dhcp_enabled=dhcp_enabled,
+        ztp_enabled=ztp_enabled,
+    )
+    if dhcp_enabled is not None and not dhcp_enabled:
+        # External DHCP may use the validated rows, but a disabled local DHCP
+        # service never requires or authorizes a listener/relay plan.
+        return DhcpRuntimePlan((), (), (), (), (), ())
     interfaces = _logical_interfaces(link_snapshot, address_snapshot)
     by_name = {interface.ifname: interface for interface in interfaces}
     by_index = {interface.ifindex: interface for interface in interfaces}
@@ -1612,12 +1781,38 @@ class ServiceRuntimeBackend:
     def is_active(self, service: str) -> bool:
         raise NotImplementedError
 
+    def is_quiesced(self, service: str) -> bool:
+        """Confirm stopped safety independently of the RUNNING health bit."""
+        raise RuntimeContractError(f"{self.name} backend has no stopped-state authority")
+
     def is_enabled(self, service: str) -> Optional[bool]:
         """Return system boot enablement, or None when the backend has no bit."""
         return None
 
     def read_log(self, service: str) -> str:
         raise NotImplementedError
+
+
+@dataclass(frozen=True)
+class _SystemdUnitState:
+    """One strictly parsed systemd show result, not a persisted runtime state."""
+
+    load_state: str
+    active_state: str
+    sub_state: str
+    main_pid: str
+    control_pid: str
+    job: str
+
+    def require_loaded(self) -> None:
+        if self.load_state != "loaded":
+            raise RuntimeContractError("systemd unit is not loaded")
+
+    def loaded_quiescent(self) -> bool:
+        self.require_loaded()
+        return (self.active_state == "inactive" and self.sub_state == "dead"
+                and self.main_pid == "0" and self.control_pid == "0"
+                and self.job == "")
 
 
 class SystemdRuntimeBackend(ServiceRuntimeBackend):
@@ -1644,7 +1839,9 @@ class SystemdRuntimeBackend(ServiceRuntimeBackend):
     def is_active(self, service: str) -> bool:
         command = ("systemctl", "is-active", "--quiet", self._service(service))
         result = self._invoke(command)
-        returncode = getattr(result, "returncode", 0)
+        returncode = getattr(result, "returncode", None)
+        if type(returncode) is not int:
+            raise RuntimeContractError("systemd active status has invalid return code")
         if returncode == 0:
             return True
         if returncode == 3:
@@ -1654,10 +1851,63 @@ class SystemdRuntimeBackend(ServiceRuntimeBackend):
             + _exit_detail(returncode, getattr(result, "stderr", ""))
         )
 
+    def is_quiesced(self, service: str) -> bool:
+        return self.read_unit_state(service).loaded_quiescent()
+
+    def read_unit_state(self, service: str) -> _SystemdUnitState:
+        result = self._invoke((
+            "systemctl", "show", "--all", "--no-pager",
+            "--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job",
+            self._service(service),
+        ))
+        returncode = getattr(result, "returncode", None)
+        if type(returncode) is not int:
+            raise RuntimeContractError("systemd unit status has invalid return code")
+        if returncode != 0:
+            raise RuntimeContractError(
+                f"systemd backend cannot determine stopped status for {service!r} "
+                + _exit_detail(returncode, getattr(result, "stderr", "")))
+        payload = getattr(result, "stdout", None)
+        if type(payload) is not str:
+            raise RuntimeContractError("systemd unit status has invalid stdout type")
+        fields = {}
+        expected = {"LoadState", "ActiveState", "SubState", "MainPID", "ControlPID", "Job"}
+        for line in payload.splitlines():
+            name, separator, value = line.partition("=")
+            if not separator or name not in expected or name in fields:
+                raise RuntimeContractError("systemd stopped status has invalid/duplicate properties")
+            fields[name] = value
+        if set(fields) != expected or fields["LoadState"] not in {"loaded", "not-found"}:
+            raise RuntimeContractError("systemd stopped status is incomplete or unit state is unknown")
+        if (fields["ActiveState"] not in {"active", "inactive", "activating", "deactivating",
+                                         "reloading", "failed", "maintenance", "refreshing"}
+                or not re.fullmatch(r"[a-z][a-z-]*", fields["SubState"])):
+            raise RuntimeContractError("systemd stopped status contains unknown state")
+        for name in ("MainPID", "ControlPID"):
+            if not re.fullmatch(r"0|[1-9][0-9]{0,9}", fields[name]) or int(fields[name]) > 0xffffffff:
+                raise RuntimeContractError("systemd stopped status contains invalid PID")
+        # systemctl's Job (uo) printer emits an empty value for job id zero.
+        # --all makes the empty property present; omission is never authority.
+        if fields["Job"] and (not re.fullmatch(r"[1-9][0-9]{0,9}", fields["Job"])
+                              or int(fields["Job"]) > 0xffffffff):
+            raise RuntimeContractError("systemd stopped status contains invalid Job")
+        if fields["LoadState"] == "not-found" and not (
+                fields["ActiveState"] == "inactive" and fields["SubState"] == "dead"
+                and fields["MainPID"] == "0" and fields["ControlPID"] == "0"
+                and fields["Job"] == ""):
+            raise RuntimeContractError("systemd absent unit has inconsistent runtime state")
+        return _SystemdUnitState(
+            load_state=fields["LoadState"], active_state=fields["ActiveState"],
+            sub_state=fields["SubState"], main_pid=fields["MainPID"],
+            control_pid=fields["ControlPID"], job=fields["Job"],
+        )
+
     def is_enabled(self, service: str) -> bool:
         command = ("systemctl", "is-enabled", "--quiet", self._service(service))
         result = self._invoke(command)
-        returncode = getattr(result, "returncode", 0)
+        returncode = getattr(result, "returncode", None)
+        if type(returncode) is not int:
+            raise RuntimeContractError("systemd enabled status has invalid return code")
         if returncode == 0:
             return True
         if returncode == 1:
@@ -1732,7 +1982,7 @@ class SupervisorRuntimeBackend(ServiceRuntimeBackend):
     def status(self, service: str) -> Any:
         return self._supervisorctl("status", service)
 
-    def is_active(self, service: str) -> bool:
+    def _observed_state(self, service: str) -> str:
         program = self._program(service)
         command = ("supervisorctl", "status", program)
         result = self._invoke(command)
@@ -1756,14 +2006,22 @@ class SupervisorRuntimeBackend(ServiceRuntimeBackend):
                     f"supervisor status for {program!r} is inconsistent: "
                     f"RUNNING with exit={returncode}"
                 )
-            return True
+            return state
         if state in {
             "STOPPED", "STARTING", "STOPPING", "EXITED", "BACKOFF", "FATAL",
         }:
-            return False
+            return state
         raise RuntimeContractError(
             f"supervisor backend returned unknown status for {program!r}: {state}"
         )
+
+    def is_active(self, service: str) -> bool:
+        return self._observed_state(service) == "RUNNING"
+
+    def is_quiesced(self, service: str) -> bool:
+        # EXITED/BACKOFF may restart automatically; transitions can retain
+        # live processes. Even FATAL requires an explicit stop for this gate.
+        return self._observed_state(service) == "STOPPED"
 
     def read_log(self, service: str) -> str:
         if self._program(service) == "dhcpd":
