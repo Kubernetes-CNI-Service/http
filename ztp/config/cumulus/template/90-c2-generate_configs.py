@@ -32,6 +32,7 @@ import gzip
 import hashlib
 import ipaddress
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -512,10 +513,20 @@ def _validate_final_yaml_outputs(*directories):
 def _load_global_document():
     """Load and schema-check the authoritative project global document."""
     try:
-        with open(_GLOBAL_FILE, encoding="utf-8") as f:
-            data = _load_yaml_bounded_nesting(f, Loader=_MacStringSafeLoader)
+        with open(_GLOBAL_FILE, "rb") as f:
+            source = f.read()
     except FileNotFoundError:
         print(f"[ERROR] 找不到配置文件: {_GLOBAL_FILE}"); sys.exit(1)
+    # LOAD passes the sha256 of the global it validated (TEST bcdbacc); a standalone run
+    # has no such variable and is unchanged.
+    expected = os.environ.get("HTTP_EXPECTED_GLOBAL_SHA256")
+    if expected is not None:
+        if not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise ValueError("invalid global source authority")
+        if hashlib.sha256(source).hexdigest() != expected:
+            raise ValueError("global input source drift from LOAD authority")
+    try:
+        data = _load_yaml_bounded_nesting(io.BytesIO(source), Loader=_MacStringSafeLoader)
     except yaml.YAMLError as e:
         print(f"[ERROR] {_GLOBAL_FILE} YAML 语法错误: {e}"); sys.exit(1)
     try:
