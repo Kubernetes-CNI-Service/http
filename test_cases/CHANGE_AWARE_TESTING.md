@@ -349,7 +349,8 @@ macOS load 仅对 check 的 4/5 运行一次 full；sync/package/pre-push 仅复
 | 两个轻量模块并行 | 11 原案例/三轮交替；native 限制实验单进程 0.408341 秒，双 worker 0.395331 秒，双 worker 串行 0.683555 秒 | 不接入正式 runner；约 13ms 不证明 full 收益，不能用双启动的串行值夸大基线 |
 | 单文件 SHA 缓冲区调整 | 462 条 regular 路径、七轮交替、每条摘要相同；1MiB/64KiB/16KiB 中位数 0.068527/0.070711/0.070280 秒 | 保持 1MiB；另外两种实测更慢 |
 | mtime/stat 驱动哈希缓存、alias 合并 | proof 必须发现同 inode/mtime 的 ABA、链接及来源变化 | 不采用；不能用 metadata 替代原字节检查 |
-| 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不改；没有完整 full 热点证据支持承担跨案例状态污染风险 |
+| 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不缓存模块/namespace；下方纯编译结果缓存是独立方案，不复用运行对象 |
+| 纯编译结果缓存 | 五轮交替，每轮真实 LOAD/SETUP 共 12 次 fresh import；完整函数 code 字段相同；0.595356→0.123089 秒 | 每次重读源字节，最多 8 项、单源 2MiB；只缓存 code，每次重新执行新模块；不读取或写入磁盘 pyc |
 | 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
 | 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
 | 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格 |
@@ -375,6 +376,50 @@ SHA 缓冲区诊断 `hash-buffer-benchmark.log` SHA256
 这些是诊断证据，不签发批准；正式状态只看最终源码提交、自动 ledger 和当前 full/check。
 AIR simulation 必须验证最终同版 receipt/源码和项目身份，不能用本机 fixture 或历史跳板
 示例代替当前目标确认，也不因本次优化批准生产部署、服务切换或网络写入。
+
+### 2026-10-09 当前源码执行与纯编译缓存
+
+> 合入 DEV 注（2026-10-25）：本小节取自 TEST b92f554，只保留 (a) 当前源码执行修复（runner 与 `test_runner_preflight`，本批合入）与 (b) 纯编译缓存（`module_loader` 与 `test_module_loader_contract`，M05 性能部分随 initial-setup 批合入）的合同正文；M06 私有 HTTP fixture 退出轮询没有合入（随 XC-1A 组）。
+
+实测发现 `-B` 只阻止 pyc 写入，并不阻止读取时间戳有效的旧 pyc。同长度源码改写后
+恢复 mtime，原 loader、canonical discovery、测试的生产依赖、部署 selector、clean
+authority 及 runner 启动的 project contract 都能执行旧值。先保留独立字面预期的 RED，
+再修实现；不能以 source snapshot 正确推断执行的代码也正确。
+
+共享 loader 每次通过 SourceFileLoader 读取当前源字节，以完整 bytes、实际 filename 和
+optimization 为 key；有界 LRU 只保留不可变 code，超过 2MiB 的源仍正常编译但不缓存。
+每次保持原 ModuleSpec、package 信息、fresh module/globals/classes，以及生产模块声明的
+lazy import 路径。删源、同 metadata 改源、坏语法、编码/future flags、路径差异、驱逐及
+大源不缓存都有独立 direct；不缓存已导入模块、执行结果、文件 metadata 或可变对象。
+
+runner 的 selector/clean authority 直接编译当前 bytes。同步治理依赖导入使用一次性私有
+字节码 namespace 并恢复原 sys.pycache_prefix；ordinary 与 validation-only 测试子进程
+各获唯一、空、0700 缓存目录，原 argv/discovery/环境版本闸门、stdin 隔离及精确例外不变。
+原 operator cache 和环境变量不删除、不覆盖；正常结束及 child 创建异常均清理自有目录。
+这不承诺任意同 UID 恶意写者隔离或在长驻进程中热重载所有已加载依赖；正式 proof 仍用
+当前提交的新 CLI/测试进程，保留每个原字节与环境重核、fsync 和 ledger 回滚边界。
+
+以下为 http-test 的历史证据（TEST 树上的 RED/GREEN 与基准；DEV 没有运行这些测试，不能当作 DEV 的证明）：
+
+原 loader RED：`exact-source-loader-red.log`，9 tests / 2 FAIL / exit1，SHA256
+`cc224cbdb06ba0cabcc2cd7f60ad1bf7260fb8ceee024a3f0fd41ff5e29fcd91`。
+runner RED：`proof-source-bytecode-red.log`，4 methods / 6 FAIL（含 subtests）/ exit1，
+SHA256 `70132719bba43a376ae3faa7427926fd4fa50d9aef69c4d22c10b44308dd7774`；
+依赖补充 RED：`proof-source-dependency-red.log`，7 methods / 2 FAIL / exit1，SHA256
+`030fef8ab5a4e619e85570db5667a4f420e5adb4660e21dcac5e26e2319fe625`。
+治理、发布门禁、loader 与真实 R22/REQ23 workflow 六模块最终诊断回归为 402 tests /
+2707.341 秒 / OK / exit0，完整日志 `proof-source-dependency-green.log`，SHA256
+`e04072889aa448e1071a948ad96e95df6063383166f8b881dd74efda546737d7`。
+此局部回归不签发整树 proof。
+
+纯编译五轮基准 `exact-source-loader-paired-benchmark2.log`，SHA256
+`f9c469f1d6f670b3499a6e368ec73cc93c9f13265a067c6de73069e56d647001`；
+每轮含两个 cold compile 和十个 hit，同一空 pyc namespace、先预热两侧依赖、每次新模块，
+源码/ledger 不变。首次诊断使用 marshal 序列化当 code canonical oracle 而失败；完整
+`exact-source-loader-paired-benchmark.log` 原样保留，SHA256
+`86b1157e4455d4a2a015bfadda2763f83cefc913ea898d0a351228d75f1d5cd4`。
+调查确认序列化的 interning/reference 编码不同，而所有非 callable co_* 字段及嵌套 code
+相同；最终比较全部这些字段，不删除或放松受管测试断言。
 
 ### 2026-10-08 当前 source guard 的不可变对象批量读取
 
