@@ -3,15 +3,22 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import re
 import shlex
+import stat
 import subprocess
+import sys
+import time
 import tempfile
 import textwrap
 from typing import Optional
 import unittest
+from unittest import mock
+
+from test_cases.subprocess_timeout_evidence import capture_timeout_before_cleanup
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,10 +33,71 @@ EXPECTED_FETCH_OPTIONS = {
 }
 
 
+def _await_fixture_ctime_tick(probe: Path, original_ctime_ns: int) -> None:
+    """Qualify this Linux fixture's clock tick without touching the ABA target."""
+    deadline = time.monotonic() + 2.0
+    probe.touch(exist_ok=False)
+    while True:
+        if time.monotonic() >= deadline:
+            raise AssertionError("fixture ctime probe did not advance within 2 seconds")
+        if probe.stat().st_ctime_ns > original_ctime_ns:
+            return
+        time.sleep(0.001)
+        probe.touch()
+
+
 def _write_executable(directory: Path, name: str, source: str) -> None:
     path = directory / name
     path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
     path.chmod(0o755)
+
+
+class BootstrapFetchTimeout(subprocess.TimeoutExpired):
+    """Keep the original timeout failure and private fixture evidence after cleanup."""
+
+    def __init__(self, original: subprocess.TimeoutExpired, diagnostic: dict):
+        super().__init__(original.cmd, original.timeout, output=original.output, stderr=original.stderr)
+        self.bootstrap_diagnostics = diagnostic
+
+    def __str__(self) -> str:
+        evidence = json.dumps(self.bootstrap_diagnostics, ensure_ascii=False, sort_keys=True)
+        return super().__str__() + "; bootstrap fixture evidence=" + evidence[:16000]
+
+
+def _partial_output_tail(value, limit: int = 2048) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value[-limit:].decode("utf-8", errors="replace")
+    return value[-limit:]
+
+
+def _timeout_event_evidence(events: Path) -> dict:
+    """Only read the bounded tail of a held regular fixture file; label races."""
+    try:
+        fd = os.open(events, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode):
+                return {"stable": False, "error": "events is not a regular file"}
+            os.lseek(fd, max(0, before.st_size - 8192), os.SEEK_SET)
+            tail = os.read(fd, 8192)
+            after = os.fstat(fd)
+            named = events.lstat()
+            identity = lambda value: (
+                value.st_dev, value.st_ino, value.st_mode, value.st_nlink,
+                value.st_size, value.st_mtime_ns, value.st_ctime_ns,
+            )
+            stable = identity(before) == identity(after) == identity(named)
+            return {
+                "stable": stable, "inode": before.st_ino, "size": before.st_size,
+                "mtime_ns": before.st_mtime_ns, "ctime_ns": before.st_ctime_ns,
+                "tail": tail.decode("utf-8", errors="replace") if stable else "",
+            }
+        finally:
+            os.close(fd)
+    except OSError as error:
+        return {"stable": False, "error": f"{type(error).__name__}: {error}"}
 
 
 def run_bootstrap_fetch(
@@ -223,10 +291,24 @@ def run_bootstrap_fetch(
         "DEFAULT_AVAILABLE": "1" if default_available else "0",
         "TEST_HOME": str(switch_home),
     }
-    result = subprocess.run(
-        ["bash", str(script)], text=True, capture_output=True,
-        check=False, env=env, timeout=15,
-    )
+    try:
+        with capture_timeout_before_cleanup(expected_command=["bash", str(script)]):
+            result = subprocess.run(
+                ["bash", str(script)], text=True, capture_output=True,
+                check=False, env=env, timeout=15,
+            )
+    except subprocess.TimeoutExpired as error:
+        process_evidence = getattr(error, "prekill_process_evidence", None)
+        raise BootstrapFetchTimeout(error, {
+            "events": _timeout_event_evidence(events),
+            "stdout_tail": _partial_output_tail(error.output),
+            "stderr_tail": _partial_output_tail(error.stderr),
+            "response_codes": response_codes,
+            "descendant_state": (process_evidence.get("descendant_state", "unknown")
+                                 if isinstance(process_evidence, dict)
+                                 else "not captured by subprocess.run; unknown"),
+            "prekill_process": process_evidence,
+        }) from error
     lines = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
     return result, lines, state_root, switch_home
 
@@ -310,6 +392,131 @@ def default_mutations(events: list[str]) -> list[str]:
         event for event in config_mutations(events)
         if event.startswith("nv:config patch ") and MAC_FILE not in event
     ]
+
+
+class BootstrapFetchHarnessDiagnosticsTests(unittest.TestCase):
+    def test_timeout_retains_precleanup_snapshot_without_changing_original_failure(self):
+        snapshot = {"capture_phase": "before_cleanup", "pid": 7301, "returncode": None,
+                    "root": {"pid": 7301, "state": "S"}, "descendants": [], "stage": "unknown"}
+        original = subprocess.TimeoutExpired(["bash", "private-script"], 15, output=b"original partial output")
+        original.prekill_process_evidence = snapshot
+        with tempfile.TemporaryDirectory(prefix="bootstrap-precleanup-diagnostic-") as name:
+            with mock.patch.object(subprocess, "run", side_effect=original):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_bootstrap_fetch(Path(name), response_codes=("401",))
+        diagnostic = caught.exception.bootstrap_diagnostics
+        self.assertIn("prekill_process", diagnostic)
+        self.assertIs(snapshot, diagnostic["prekill_process"])
+        self.assertIs(original, caught.exception.__cause__)
+        self.assertIs(original.output, caught.exception.output)
+        self.assertEqual(15, caught.exception.timeout)
+
+    def test_timeout_event_same_inode_aba_is_not_stable_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = Path(directory) / "events.log"
+            original = b"last-event:401\n"
+            events.write_bytes(original)
+            metadata = events.stat()
+            real_read = os.read
+            observed = []
+
+            def mutate_after_read(descriptor, count):
+                payload = real_read(descriptor, count)
+                opened = os.fstat(descriptor)
+                if not observed and (opened.st_dev, opened.st_ino) == (metadata.st_dev, metadata.st_ino):
+                    observed.append(True)
+                    if sys.platform.startswith("linux"):
+                        _await_fixture_ctime_tick(Path(directory) / "ctime-probe", metadata.st_ctime_ns)
+                    events.write_bytes(b"last-event:403\n")
+                    events.write_bytes(original)
+                    os.utime(events, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+                    after = events.stat()
+                    self.assertEqual((metadata.st_ino, metadata.st_size, metadata.st_mtime_ns),
+                                     (after.st_ino, after.st_size, after.st_mtime_ns))
+                    self.assertNotEqual(metadata.st_ctime_ns, after.st_ctime_ns)
+                return payload
+
+            with mock.patch.object(os, "read", side_effect=mutate_after_read):
+                diagnostic = _timeout_event_evidence(events)
+            self.assertTrue(observed)
+            self.assertFalse(diagnostic["stable"], "same-inode ABA cannot be frozen failure evidence")
+            self.assertEqual("", diagnostic["tail"], "do not emit an untrusted event tail as evidence")
+            self.assertEqual(original, events.read_bytes())
+
+    def test_timeout_keeps_fifteen_second_limit_and_original_partial_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def timeout(command, **options):
+                self.assertEqual(15, options["timeout"])
+                (root / "events.log").write_text("last-event:401\n", encoding="utf-8")
+                raise subprocess.TimeoutExpired(
+                    command, 15, output=b"fixture-stage-before-auth\n",
+                    stderr=b"fixture-child-stderr\n",
+                )
+
+            with mock.patch.object(subprocess, "run", side_effect=timeout):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_bootstrap_fetch(root, response_codes=("401", "200"))
+            error = caught.exception
+            self.assertEqual(15, error.timeout)
+            self.assertEqual(b"fixture-stage-before-auth\n", error.output)
+            self.assertEqual(b"fixture-child-stderr\n", error.stderr)
+            diagnostic = getattr(error, "bootstrap_diagnostics", None)
+            self.assertIsNotNone(diagnostic, "timeout discarded its private fixture evidence")
+            self.assertEqual("last-event:401\n", diagnostic["events"]["tail"])
+            self.assertIn("fixture-stage-before-auth", str(error))
+            self.assertIn("fixture-child-stderr", str(error))
+            self.assertIn("last-event:401", str(error))
+
+    def test_timeout_evidence_is_bounded_and_includes_last_not_first_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def timeout(command, **options):
+                (root / "events.log").write_bytes(b"old-event\n" * 10000 + b"last-event:401\n")
+                raise subprocess.TimeoutExpired(command, 15, output=b"s" * 100000, stderr=b"e" * 100000)
+
+            with mock.patch.object(subprocess, "run", side_effect=timeout):
+                with self.assertRaises(subprocess.TimeoutExpired) as caught:
+                    run_bootstrap_fetch(root, response_codes=("401",))
+            diagnostic = getattr(caught.exception, "bootstrap_diagnostics", None)
+            self.assertIsNotNone(diagnostic, "timeout has no bounded failure report")
+            self.assertLessEqual(len(diagnostic["events"]["tail"].encode()), 8192)
+            self.assertTrue(diagnostic["events"]["tail"].endswith("last-event:401\n"))
+            self.assertLess(len(str(caught.exception)), 18000)
+            self.assertEqual(100000, len(caught.exception.output))
+            self.assertEqual(100000, len(caught.exception.stderr))
+
+
+class FixtureCtimeTickProbeTests(unittest.TestCase):
+    def test_probe_requires_strictly_newer_tick_before_returning(self):
+        probe = mock.Mock(spec=Path)
+        probe.stat.side_effect = [
+            mock.Mock(st_ctime_ns=699),
+            mock.Mock(st_ctime_ns=700),
+            mock.Mock(st_ctime_ns=701),
+        ]
+        with mock.patch.object(time, "monotonic", side_effect=[10.0, 10.0, 10.001, 10.002]) as clock:
+            with mock.patch.object(time, "sleep") as sleep:
+                self.assertIsNone(_await_fixture_ctime_tick(probe, 700))
+        self.assertEqual(4, clock.call_count)
+        self.assertEqual([mock.call(0.001), mock.call(0.001)], sleep.call_args_list)
+        self.assertEqual([mock.call(exist_ok=False), mock.call(), mock.call()], probe.touch.call_args_list)
+        self.assertEqual([mock.call(), mock.call(), mock.call()], probe.stat.call_args_list)
+
+    def test_probe_deadline_is_fixture_failure_without_accepting_equal_tick(self):
+        probe = mock.Mock(spec=Path)
+        probe.stat.return_value = mock.Mock(st_ctime_ns=700)
+        with mock.patch.object(time, "monotonic", side_effect=[50.0, 50.0, 52.0]) as clock:
+            with mock.patch.object(time, "sleep") as sleep:
+                with self.assertRaisesRegex(AssertionError, "^fixture ctime probe did not advance within 2 seconds$") as caught:
+                    _await_fixture_ctime_tick(probe, 700)
+        self.assertIs(type(caught.exception), AssertionError)
+        self.assertEqual(3, clock.call_count)
+        self.assertEqual([mock.call(0.001)], sleep.call_args_list)
+        self.assertEqual([mock.call(exist_ok=False), mock.call()], probe.touch.call_args_list)
+        self.assertEqual([mock.call()], probe.stat.call_args_list)
 
 
 class RequiredDeviceConfigFetchTests(unittest.TestCase):

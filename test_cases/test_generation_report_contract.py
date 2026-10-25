@@ -16,6 +16,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -41,6 +42,75 @@ def report_helper():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+REPORT_IDENTITY_FIELDS = (
+    "st_dev", "st_ino", "st_mode", "st_nlink", "st_uid", "st_gid",
+    "st_size", "st_mtime_ns", "st_ctime_ns",
+)
+
+
+class ReportCtimeCollisionOS:
+    """Independent clock model for one real inode; bytes/IO remain genuine.
+
+    Do not patch global os or the producer's identity/hash predicates. The
+    model represents a filesystem timestamp collision, not an acceptance
+    test of that filesystem or arbitrary same-byte write-history detection.
+    """
+    def __init__(self, before):
+        self.before = before
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def _observed(self, value):
+        if (value.st_dev, value.st_ino) != (self.before.st_dev, self.before.st_ino):
+            return value
+        class Observed:
+            st_ctime_ns = self.before.st_ctime_ns
+            st_ctime = self.before.st_ctime
+            def __getattr__(self, name):
+                return getattr(value, name)
+        return Observed()
+
+    def lstat(self, *args, **kwargs):
+        return self._observed(os.lstat(*args, **kwargs))
+
+    def stat(self, *args, **kwargs):
+        return self._observed(os.stat(*args, **kwargs))
+
+    def fstat(self, *args, **kwargs):
+        return self._observed(os.fstat(*args, **kwargs))
+
+
+def mutate_report_after_clock_boundary(path, before, payload, *, probe_root):
+    """Establish observable ctime before invoking the tested operation.
+
+    A separate private probe advances the same filesystem's clock first.
+    The target is mutated once; failure to establish the precondition fails
+    explicitly rather than weakening assertions, skipping or retrying tests.
+    """
+    deadline = time.monotonic() + 2.0
+    with tempfile.TemporaryDirectory(prefix="report-clock-", dir=probe_root) as directory:
+        probe = Path(directory) / "clock"
+        probe.write_bytes(b"clock\n")
+        while probe.stat().st_ctime_ns <= before.st_ctime_ns:
+            if time.monotonic() >= deadline:
+                raise AssertionError("report injection filesystem clock did not advance within 2s")
+            time.sleep(0.001)
+            probe.write_bytes(b"clock\n")
+        if probe.stat().st_dev != before.st_dev:
+            raise AssertionError("report clock precondition probe is on a different filesystem")
+        path.write_bytes(payload)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        observed = path.stat()
+        if (observed.st_ino != before.st_ino or observed.st_dev != before.st_dev
+                or observed.st_mtime_ns != before.st_mtime_ns
+                or observed.st_ctime_ns == before.st_ctime_ns):
+            raise AssertionError("report injection did not establish same inode/restored mtime/changed ctime")
+        if path.read_bytes() != payload:
+            raise AssertionError("report injection did not establish expected independent bytes")
+        return observed
 
 
 def parent_release(project: Path) -> dict[str, object]:
@@ -148,6 +218,82 @@ class GenerationReportContract(unittest.TestCase):
         )
         self.assertEqual(LAPTOP_FINGERPRINT, self.build()["public_keys"][0]["fingerprint"])
 
+    def test_derived_parent_digest_includes_generated_inputs_without_weakening_legacy_parent(self):
+        helper = report_helper()
+        legacy = self.build()
+        self.assertEqual(self.parent["release_id"], legacy["release_id"])
+
+        derived = dict(self.parent)
+        derived["generated_inputs"] = {"effective_devices": {
+            "path": ".load-inventory-fixed/02-devices_config.csv",
+            "sha256": "a" * 64,
+        }}
+        # Independent schema-2 release basis oracle: generated_inputs belongs
+        # to the digest only when the parent declares a derived inventory.
+        basis = {key: derived[key] for key in (
+            "project", "deployment_scope", "switch_scope", "dhcp_status",
+            "inputs", "input_sources", "components", "inventory",
+            "generated_inputs",
+        )}
+        derived["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        self.assertNotEqual(self.parent["release_id"], derived["release_id"])
+        self.parent = derived
+        (self.output / "current-release.json").write_text(
+            json.dumps(derived, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        _, report = self.publish()
+        self.assertEqual(derived["release_id"], report["release_id"])
+        self.assertEqual(report, helper.inspect_generation_report(
+            self.project, published_dir=self.published,
+        ))
+
+        for label, changed in (
+            ("changed generated hash", {
+                **derived, "generated_inputs": {"effective_devices": {
+                    **derived["generated_inputs"]["effective_devices"],
+                    "sha256": "b" * 64,
+                }},
+            }),
+            ("omitted generated input", {
+                key: value for key, value in derived.items() if key != "generated_inputs"
+            }),
+            ("wrong release ID", {**derived, "release_id": "0" * 20}),
+        ):
+            with self.subTest(label=label):
+                with self.assertRaisesRegex(helper.GenerationReportError, "parent release digest mismatch"):
+                    helper.build_report(self.project, changed, published_dir=self.published)
+
+    def test_imported_configs_is_optional_parent_basis_and_changes_release_id(self):
+        helper = report_helper()
+        ordinary_id = self.parent["release_id"]
+        imported = dict(self.parent)
+        imported["imported_configs"] = {
+            "source_name": "20261003_101112", "sha256": "a" * 64,
+        }
+        basis = {key: imported[key] for key in (
+            "project", "deployment_scope", "switch_scope", "dhcp_status",
+            "inputs", "input_sources", "components", "inventory",
+            "imported_configs",
+        )}
+        imported["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        self.assertNotEqual(ordinary_id, imported["release_id"])
+        self.parent = imported
+        (self.output / "current-release.json").write_text(
+            json.dumps(imported, sort_keys=True) + "\n", encoding="utf-8",
+        )
+        report = self.build()
+        self.assertEqual(report["release_id"], imported["release_id"])
+        changed = dict(imported)
+        changed["imported_configs"] = {
+            "source_name": "20261003_101112", "sha256": "b" * 64,
+        }
+        with self.assertRaisesRegex(helper.GenerationReportError, "parent release digest mismatch"):
+            helper.build_report(self.project, changed, published_dir=self.published)
+
     def test_published_link_must_bind_this_projects_same_name_regular_leaf(self):
         helper = report_helper()
         other = self.root / "DAY0-Prepare/other"
@@ -199,6 +345,207 @@ class GenerationReportContract(unittest.TestCase):
         with self.assertRaises(Exception):
             helper.inspect_generation_report(self.project, published_dir=self.published)
         self.assertEqual(ad_hoc_bytes, ad_hoc.read_bytes())
+
+    def test_report_commit_rejects_same_inode_preimage_change_and_aba(self):
+        helper, report = self.publish()
+        original_payload = (self.output / "generation-report.json").read_bytes()
+        for boundary in ("content", "same-byte-aba", "held-directory"):
+            with self.subTest(boundary=boundary):
+                project = self.root / ("existing-" + boundary) / self.project.name
+                output = project / "99-output-ztp"
+                output.mkdir(parents=True)
+                path = output / "generation-report.json"
+                path.write_bytes(original_payload)
+                candidate = helper.prepare_generation_report(project, report)
+                self.addCleanup(helper.discard_prepared_generation_report, candidate)
+                before = path.stat()
+                before_bytes = path.read_bytes()
+                changed = dict(report, generated_at="2026-09-24T12:00:09+08:00")
+                foreign = (before_bytes if boundary == "same-byte-aba" else
+                           (json.dumps(changed, sort_keys=True) + "\n").encode("utf-8"))
+                injections = []
+                native_open = helper._open_prepared_directory
+
+                def mutate_original():
+                    injections.append(mutate_report_after_clock_boundary(
+                        path, before, foreign, probe_root=self.root))
+
+                def open_then_mutate(*args, **kwargs):
+                    descriptor = native_open(*args, **kwargs)
+                    mutate_original()
+                    return descriptor
+
+                if boundary == "held-directory":
+                    with mock.patch.object(helper, "_open_prepared_directory",
+                                           side_effect=open_then_mutate):
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate)
+                else:
+                    mutate_original()
+                    with self.assertRaises(helper.GenerationReportError):
+                        helper.commit_prepared_generation_report(candidate)
+                self.assertEqual(1, len(injections))
+                self.assertEqual(before.st_ino, injections[0].st_ino)
+                self.assertEqual(before.st_mtime_ns, injections[0].st_mtime_ns)
+                self.assertNotEqual(before.st_ctime_ns, injections[0].st_ctime_ns)
+                self.assertEqual(before.st_ino, path.stat().st_ino)
+                self.assertEqual(foreign, path.read_bytes())
+                self.assertTrue(candidate.temporary.is_file(), "rejected publication consumed its candidate")
+
+    def test_changed_staged_report_is_neither_published_nor_discarded(self):
+        helper = report_helper()
+        report = self.build()
+        control = helper.prepare_generation_report(self.project, report)
+        self.assertTrue(helper.discard_prepared_generation_report(control))
+        for action in ("commit", "discard"):
+            for mutation in ("content", "same-byte-aba"):
+                for boundary in ("before", "held-directory"):
+                    with self.subTest(action=action, mutation=mutation, boundary=boundary):
+                        # A failed negative case may actually publish corrupt bytes;
+                        # do not let it contaminate the next independent injection.
+                        project = self.root / f"{action}-{mutation}-{boundary}" / self.project.name
+                        output = project / "99-output-ztp"
+                        output.mkdir(parents=True)
+                        destination = output / "generation-report.json"
+                        candidate = helper.prepare_generation_report(project, report)
+                        path = candidate.temporary
+                        before = path.stat()
+                        foreign = (b"foreign staged report evidence must survive\n"
+                                   if mutation == "content" else path.read_bytes())
+                        injections = []
+                        native_open = helper._open_prepared_directory
+
+                        def mutate_staged():
+                            injections.append(mutate_report_after_clock_boundary(
+                                path, before, foreign, probe_root=self.root))
+
+                        def open_then_mutate(*args, **kwargs):
+                            descriptor = native_open(*args, **kwargs)
+                            mutate_staged()
+                            return descriptor
+
+                        operation = (helper.commit_prepared_generation_report if action == "commit"
+                                     else helper.discard_prepared_generation_report)
+                        if boundary == "held-directory":
+                            with mock.patch.object(helper, "_open_prepared_directory",
+                                                   side_effect=open_then_mutate):
+                                with self.assertRaises(helper.GenerationReportError):
+                                    operation(candidate)
+                        else:
+                            mutate_staged()
+                            with self.assertRaises(helper.GenerationReportError):
+                                operation(candidate)
+                        self.assertEqual(1, len(injections))
+                        self.assertEqual(before.st_ino, injections[0].st_ino)
+                        self.assertEqual(before.st_mtime_ns, injections[0].st_mtime_ns)
+                        self.assertNotEqual(before.st_ctime_ns, injections[0].st_ctime_ns)
+                        self.assertEqual(before.st_ino, path.stat().st_ino)
+                        self.assertEqual(foreign, path.read_bytes())
+                        self.assertFalse(destination.exists())
+
+    def test_old_report_same_size_clock_collision_rejects_changed_bytes(self):
+        helper, report = self.publish()
+        payload = (self.output / "generation-report.json").read_bytes()
+        foreign = payload.replace(b"12:00:00+08:00", b"12:00:09+08:00")
+        self.assertNotEqual(payload, foreign)
+        self.assertEqual(len(payload), len(foreign))
+        self.assertEqual("2026-09-24T12:00:09+08:00", json.loads(foreign)["generated_at"])
+        for boundary in ("before", "held-directory", "authority-callback"):
+            with self.subTest(boundary=boundary):
+                project = self.root / ("collision-" + boundary) / self.project.name
+                output = project / "99-output-ztp"
+                output.mkdir(parents=True)
+                path = output / "generation-report.json"
+                path.write_bytes(payload)
+                candidate = helper.prepare_generation_report(project, report)
+                self.addCleanup(helper.discard_prepared_generation_report, candidate)
+                before = path.stat()
+                model = ReportCtimeCollisionOS(before)
+                injected = []
+                native_open = helper._open_prepared_directory
+                def mutate():
+                    path.write_bytes(foreign)
+                    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                    observed = model.lstat(path)
+                    self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                                     tuple(getattr(observed, field) for field in REPORT_IDENTITY_FIELDS))
+                    self.assertNotEqual(hashlib.sha256(payload).hexdigest(),
+                                        hashlib.sha256(path.read_bytes()).hexdigest())
+                    injected.append(path.stat().st_ino)
+                def open_then_mutate(*args, **kwargs):
+                    descriptor = native_open(*args, **kwargs)
+                    mutate()
+                    return descriptor
+                authority_calls = []
+                def authority():
+                    authority_calls.append(True)
+                    if len(authority_calls) == 2:
+                        mutate()
+                with mock.patch.object(helper, "os", model):
+                    if boundary == "before":
+                        mutate()
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate)
+                    elif boundary == "held-directory":
+                        with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+                            with self.assertRaises(helper.GenerationReportError):
+                                helper.commit_prepared_generation_report(candidate)
+                    else:
+                        with self.assertRaises(helper.GenerationReportError):
+                            helper.commit_prepared_generation_report(candidate, require_authority=authority)
+                self.assertEqual([before.st_ino], injected)
+                self.assertEqual(before.st_ino, path.stat().st_ino)
+                self.assertEqual(foreign, path.read_bytes())
+                self.assertTrue(candidate.temporary.is_file())
+
+    def test_old_report_unchanged_clock_collision_model_still_commits(self):
+        helper, report = self.publish()
+        path = self.output / "generation-report.json"
+        candidate = helper.prepare_generation_report(self.project, report)
+        with mock.patch.object(helper, "os", ReportCtimeCollisionOS(path.stat())):
+            self.assertEqual(path, helper.commit_prepared_generation_report(candidate))
+        self.assertEqual(report, json.loads(path.read_bytes()))
+        self.assertFalse(candidate.temporary.exists())
+
+    def test_staged_report_same_size_clock_collision_preserves_foreign_evidence(self):
+        helper = report_helper()
+        report = self.build()
+        for action in ("commit", "discard"):
+            for boundary in ("before", "held-directory"):
+                with self.subTest(action=action, boundary=boundary):
+                    project = self.root / ("staged-collision-" + action + boundary) / self.project.name
+                    output = project / "99-output-ztp"
+                    output.mkdir(parents=True)
+                    candidate = helper.prepare_generation_report(project, report)
+                    path = candidate.temporary
+                    before = path.stat()
+                    payload = path.read_bytes()
+                    foreign = payload.replace(b"12:00:00+08:00", b"12:00:09+08:00")
+                    self.assertNotEqual(payload, foreign)
+                    self.assertEqual(len(payload), len(foreign))
+                    model = ReportCtimeCollisionOS(before)
+                    native_open = helper._open_prepared_directory
+                    def mutate():
+                        path.write_bytes(foreign)
+                        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+                        self.assertEqual(tuple(getattr(before, field) for field in REPORT_IDENTITY_FIELDS),
+                                         tuple(getattr(model.lstat(path), field) for field in REPORT_IDENTITY_FIELDS))
+                    def open_then_mutate(*args, **kwargs):
+                        descriptor = native_open(*args, **kwargs)
+                        mutate()
+                        return descriptor
+                    operation = (helper.commit_prepared_generation_report if action == "commit"
+                                 else helper.discard_prepared_generation_report)
+                    with mock.patch.object(helper, "os", model):
+                        if boundary == "before":
+                            mutate()
+                            with self.assertRaises(helper.GenerationReportError): operation(candidate)
+                        else:
+                            with mock.patch.object(helper, "_open_prepared_directory", side_effect=open_then_mutate):
+                                with self.assertRaises(helper.GenerationReportError): operation(candidate)
+                    self.assertEqual(before.st_ino, path.stat().st_ino)
+                    self.assertEqual(foreign, path.read_bytes())
+                    self.assertFalse(candidate.destination.exists())
 
     def test_prepare_does_not_publish_and_failed_commit_preserves_old_record(self):
         helper, old = self.publish()
