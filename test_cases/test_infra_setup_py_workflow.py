@@ -62,7 +62,7 @@ class InfraSetupPyWorkflow(unittest.TestCase):
             global_file=box.infra / "01-global.yaml", devices_file=box.infra / "02-devices_config.csv",
             setup_script=box.infra / "infra-setup.py", teardown_script=box.infra / "infra-teardown.sh",
             teardown=False, http_server_ip="192.0.2.10", user="operator", identity=None, hosts=None,
-            prepare_only=True, dry_run=False, max_workers=1)
+            prepare_only=True, dry_run=False, max_workers=1, load_components_v1=None)
         with mock.patch.object(DEPLOY, "parse_args", return_value=args), \
                 mock.patch.object(DEPLOY, "load_servers", return_value=[]), \
                 mock.patch.object(DEPLOY, "_local_ipv4_addresses", return_value={"192.0.2.10"}), \

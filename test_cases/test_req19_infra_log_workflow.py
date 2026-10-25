@@ -884,6 +884,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 user="root", identity=None, setup_script=ROOT / "infra/infra-setup.py",
                 teardown_script=ROOT / "infra/infra-teardown.sh",
                 http_server_ip=None,
+                load_components_v1=None,
             )
             server = {"hostname": "server-a", "address": "192.0.2.3"}
 

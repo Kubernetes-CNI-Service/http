@@ -34,6 +34,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 TOOLS_DIR = SCRIPT_DIR.parent / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
+from infra_components import parse_load_components  # noqa: E402
 from project_contract import (  # noqa: E402
     infra_log_pending_state_names,
     managed_infra_log_project,
@@ -907,12 +908,27 @@ def parse_args() -> argparse.Namespace:
         "--max-workers", type=int, default=8,
         help="client 并行部署数，默认 8",
     )
+    # Internal LOAD data (DAY0-Prepare/11-load.py prepare_infra): validated
+    # only; it never selects packages here and never reaches remote clients.
+    parser.add_argument(
+        "--load-components-v1", action="append",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
+        if args.load_components_v1 is not None:
+            if len(args.load_components_v1) != 1:
+                raise DeployError("invalid LOAD component packet")
+            try:
+                parse_load_components(args.load_components_v1[0])
+            except ValueError:
+                raise DeployError("invalid LOAD component packet") from None
+            if not args.prepare_only or args.teardown:
+                raise DeployError("LOAD components require setup --prepare-only")
         action = "teardown" if args.teardown else "setup"
         if args.prepare_only and args.teardown:
             raise DeployError("--prepare-only 仅用于准备 setup，不能与 --teardown 同时使用")

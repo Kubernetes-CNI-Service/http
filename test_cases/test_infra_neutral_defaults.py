@@ -122,6 +122,7 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
             prepare_only=False,
             dry_run=False,
             max_workers=1,
+            load_components_v1=None,
         )
         with mock.patch.object(DEPLOY, "parse_args", return_value=SimpleNamespace(**base_args)), \
              mock.patch.object(DEPLOY, "load_servers", return_value=[]), \

@@ -183,6 +183,7 @@ class HttpPortWorkflowTests(unittest.TestCase):
                 teardown=False, http_server_ip="192.0.2.10", user="operator",
                 identity=None, hosts=None, prepare_only=True, dry_run=False,
                 max_workers=1,
+                load_components_v1=None,
             )
 
             def run_infra():
