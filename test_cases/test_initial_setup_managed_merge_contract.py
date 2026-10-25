@@ -10,13 +10,17 @@ Expected values come from the agreed merge contract, not from the implementation
     the auto watch can be armed or any output exists.
   * D-2/H22: only the exact argv ["--_verify-password"] reaches the private password
     worker; it never enters the runtime guard or the operational entry.
+  * Q4: a managed run's only neutral-service source is <tool root>/infra-neutral.conf; a
+    missing or symlinked file is refused before any report, cache, snapshot or method
+    era exists, even when the project's infra/ holds a valid copy (no fallback).
 The strict-path cases use the REQ10B PUBLIC device adapter and the reviewed
 external KAT (FIXTURE HOLD when absent), as TEST d876330 does.
 """
 from __future__ import annotations
 
 import ast
-from contextlib import ExitStack
+from contextlib import ExitStack, redirect_stderr
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -104,27 +108,47 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
 
     def test_i18_managed_global_without_target_hash_fails_closed_without_device_writes(self):
         with tempfile.TemporaryDirectory(prefix="managed-i18-") as directory:
-            helper, root, tool, _, ib_csv, p2p, cache = self.managed_project(directory, strict=False)
+            helper, root, tool, global_path, ib_csv, p2p, cache = self.managed_project(directory, strict=False)
             cycle = self.authority.ManagedInitialMethodCycle(root, self.initial)
-            calls, phases = [], []
+            calls, phases, authority_attempts = [], [], []
+            real_policy_init = self.initial.ProjectPasswordPolicy.__init__
 
             def phase(*args, **kwargs):
                 phases.append(kwargs.get("_phase_operation"))
                 raise AssertionError("no IB phase may run without the project's target hash")
+
+            def policy_init(policy, path, user, *args, **kwargs):
+                # I18 witness: the project password authority is consulted and refuses.
+                try:
+                    real_policy_init(policy, path, user, *args, **kwargs)
+                except BaseException as error:
+                    authority_attempts.append((Path(os.path.abspath(path)).resolve(), user, error))
+                    raise
+                authority_attempts.append((Path(os.path.abspath(path)).resolve(), user, None))
 
             with ExitStack() as stack:
                 self.device_io(stack, calls)
                 stack.enter_context(mock.patch.object(self.initial, "_execute_ib_phase", side_effect=phase))
                 stack.enter_context(mock.patch.object(
                     self.initial, "interactive_run", side_effect=AssertionError("no device transport")))
+                stack.enter_context(mock.patch.object(self.initial.ProjectPasswordPolicy, "__init__", new=policy_init))
+                failure = None
                 try:
                     result = helper.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes",
                                                 "--execution-mode", "management", method_cycle=cycle)
-                except self.initial.SetupError:
-                    result = "SetupError"
+                except self.initial.SetupError as error:
+                    result, failure = "SetupError", error
                 finally:
                     cycle.close()
             self.assertNotEqual(0, result, "a global without the target hash must fail closed")
+            # Positive cause (I18): the project-stage password authority over the fixture
+            # global was consulted exactly once and refused; nothing else stopped the run.
+            self.assertEqual(1, len(authority_attempts), "project password authority must be consulted once")
+            attempted_path, attempted_user, refusal = authority_attempts[0]
+            self.assertEqual((Path(global_path).resolve(), "admin"), (attempted_path, attempted_user))
+            self.assertIsInstance(refusal, self.initial.SetupError, "the authority itself must refuse")
+            self.assertIsNotNone(failure, "the refusal must stop the run as a SetupError")
+            self.assertIn("project", str(failure), "the stop must be the project-stage failure")
             self.assertEqual([], [entry for entry in calls if entry[0] not in READ_ONLY or entry[1] is not None],
                              "no device write and no password phase may happen")
             self.assertEqual([], [operation for operation in phases if operation != "auth-probe-readonly"])
@@ -166,6 +190,41 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
             storage = root / "99-output-ztp/configuration-methods"
             self.assertIsNone(self.authority.read_method_receipt(storage, "EXAMPLE-IB01"))
             self.assertEqual("failed", self.authority.read_method_current(storage, "EXAMPLE-IB01")["state"])
+
+    def test_q4_managed_tool_root_without_regular_neutral_is_refused_before_outputs(self):
+        for case in ("missing", "symlink"):
+            for entry in ("main", "managed-cli"):
+                with self.subTest(case=case, entry=entry), tempfile.TemporaryDirectory(prefix="managed-q4-") as directory:
+                    helper, root, tool, _, ib_csv, p2p, cache = self.managed_project(directory, strict=False)
+                    project_copy = root / "infra/infra-neutral.conf"
+                    self.assertTrue(project_copy.is_file(), "a valid project-level copy must be present")
+                    neutral = tool / "infra-neutral.conf"
+                    neutral.unlink()
+                    if case == "symlink":
+                        neutral.symlink_to(os.path.relpath(project_copy, tool))
+                        self.assertEqual(project_copy.read_bytes(), neutral.read_bytes())
+                    cycle = self.authority.ManagedInitialMethodCycle(root, self.initial)
+                    calls, stderr = [], io.StringIO()
+                    with ExitStack() as stack:
+                        self.device_io(stack, calls)
+                        stack.enter_context(redirect_stderr(stderr))
+                        if entry == "main":
+                            with self.assertRaises(self.authority.AuthorityError):
+                                helper.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes",
+                                                   "--execution-mode", "management", method_cycle=cycle)
+                        else:
+                            result = helper.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes",
+                                                        "--execution-mode", "management", method_cycle=cycle,
+                                                        managed_entry=self.authority.managed_initial_main)
+                            self.assertEqual(2, result)
+                            self.assertIn("managed initial-setup rejected: AuthorityError", stderr.getvalue())
+                        cycle.close()
+                    for output in (cache.parent / "report.log", cache, cache.with_name(cache.name + ".sha256"),
+                                   cache.parent / "snapshots", root / "99-output-ztp"):
+                        self.assertFalse(os.path.lexists(output), f"{output.name} must not exist")
+                    self.assertFalse(cache.parent.exists(), "no output directory may be created")
+                    self.assertEqual([], calls)
+                    self.assertTrue(project_copy.is_file(), "the project copy is never consumed or changed")
 
     def test_q3_managed_authority_with_auto_is_refused_before_watch_or_output(self):
         with tempfile.TemporaryDirectory(prefix="managed-q3-") as directory:

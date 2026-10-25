@@ -2378,7 +2378,8 @@
         "test_cases.test_req10b_services_keys_workflow",
         "test_cases.test_initial_setup_authorized_key_shell_workflow",
         "test_cases.test_initial_setup_key_receipt_workflow",
-        "test_cases.test_initial_setup_managed_merge_contract"
+        "test_cases.test_initial_setup_managed_merge_contract",
+        "test_cases.test_initial_setup_managed_neutral_source"
       ]
     },
     {
