@@ -555,5 +555,57 @@ class DerivedInventoryTests(unittest.TestCase):
                 self.assertEqual(outputs, fixture.snapshot())
 
 
+class DhcpDisabledInventoryOnlyTests(unittest.TestCase):
+    """LOAD derives the AIR inventory with --inventory-only when DHCP is off.
+
+    Contract sources: the parent load passes --inventory-only exactly when
+    DHCP is disabled (TEST f384f73 11-load generate_configs), and the
+    standalone generator refuses to write DHCP artifacts when DHCP is
+    disabled (DEV ad4bc3c c1 main).
+    """
+
+    @staticmethod
+    def _disable_dhcp_and_ztp(fixture: ScopedDhcpFixture) -> None:
+        fixture.global_file.write_text(
+            "schema_version: 1\n"
+            "common:\n"
+            "  mgmt:\n"
+            "    dhcp-server: {status: disabled}\n"
+            "    http: {address: 192.0.2.2}\n"
+            "    ztp:\n"
+            "      status: disabled\n"
+            "      ztp_url_prefix: /ztp\n",
+            encoding="utf-8",
+        )
+        fixture.subnet_file.write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.200,"
+            "192.0.2.1,,none,no\n",
+            encoding="utf-8",
+        )
+
+    def test_inventory_only_runs_while_dhcp_generation_stays_refused(self):
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            self._disable_dhcp_and_ztp(fixture)
+            source, outputs = fixture.devices_file.read_bytes(), fixture.snapshot()
+            private = fixture.devices_file.resolve().parent / ".load-inventory-test"
+            private.mkdir(mode=0o700)
+            derived = private / "02-devices_config.csv"
+            fixture.execute([
+                "c1-generate_dhcp.py", "-y", "--inventory-output", str(derived),
+                "--inventory-only",
+            ])
+            self.assertIn(FAMILY_HOST["eth"], derived.read_text())
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertEqual(outputs, fixture.snapshot())
+            with self.assertRaises(SystemExit) as caught:
+                fixture.execute(["c1-generate_dhcp.py", "-y"])
+            self.assertEqual(1, caught.exception.code)
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertEqual(outputs, fixture.snapshot())
+
+
 if __name__ == "__main__":
     unittest.main()
