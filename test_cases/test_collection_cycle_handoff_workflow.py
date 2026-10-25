@@ -1029,12 +1029,34 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
                 stderr=b'COLLECTION_PHASE_START {"phase":"collect","slot":"infiniband/prod"}\n',
             )
             diagnostics = io.StringIO()
-            with mock.patch.object(subprocess, "run", side_effect=error) as run, \
+            # Intercept only the BOOTSTRAP launch (by argv signature); HO-7's private stdlib
+            # pyc warm child and any other subprocess.run keep running for real.
+            real_run = subprocess.run
+            intercepted, intercepted_argv = [], []
+            warm_signature = ["-I", "-B", "-c", HANDOFF_STDLIB_PYC_WARM]
+
+            def bootstrap_times_out(command, *args, **kwargs):
+                if isinstance(command, list) and command[1:4] == ["-B", "-c", BOOTSTRAP]:
+                    intercepted.append(kwargs)
+                    intercepted_argv.append(list(command))
+                    raise error
+                return real_run(command, *args, **kwargs)
+
+            with mock.patch.object(subprocess, "run", side_effect=bootstrap_times_out) as run, \
                     redirect_stderr(diagnostics):
                 with self.assertRaises(subprocess.TimeoutExpired) as caught:
                     self.run_workflow(root, "all", "mixed_nonempty")
             self.assertIs(error, caught.exception, "never replace or swallow the original timeout")
+            warm_calls = [call for call in run.call_args_list
+                          if call.args and list(call.args[0])[1:5] == warm_signature]
+            self.assertEqual(1, len(warm_calls), "the HO-7 stdlib pyc warm child ran once")
+            self.assertEqual([], [argv for argv in intercepted_argv if argv[1:5] == warm_signature],
+                             "the HO-7 warm child must never be intercepted")
             self.assertEqual(30, run.call_args.kwargs["timeout"])
+            self.assertEqual(["-B", "-c", BOOTSTRAP], run.call_args.args[0][1:4],
+                             "the last observed call is the intercepted BOOTSTRAP launch")
+            self.assertEqual(1, len(intercepted), "exactly one BOOTSTRAP launch is intercepted")
+            self.assertEqual(30, intercepted[0]["timeout"])
             self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDOUT\nchild-started\n", diagnostics.getvalue())
             self.assertIn('COLLECTION_PHASE_START {"phase":"collect","slot":"infiniband/prod"}', diagnostics.getvalue())
             self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDERR", diagnostics.getvalue())
