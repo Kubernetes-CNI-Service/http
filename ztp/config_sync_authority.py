@@ -111,6 +111,7 @@ class ManagedInitialMethodCycle:
         self.root = self.project / "99-output-ztp/configuration-methods"
         self.tickets, self.finished = {}, set()
         self.targets = []
+        self.neutral_image = None
 
     def _image(self, path, *, content=False):
         path = Path(path).resolve(strict=True)
@@ -150,9 +151,21 @@ class ManagedInitialMethodCycle:
         finally:
             os.close(descriptor)
 
+    def _neutral_image(self):
+        """The managed tool root is the only infra-neutral.conf source; no fallback lookup."""
+        path = self.tool_input_root / "infra-neutral.conf"
+        try:
+            info = os.lstat(path)
+        except OSError as exc:
+            raise AuthorityError("managed initial neutral service authority is unavailable") from exc
+        if not stat.S_ISREG(info.st_mode):
+            raise AuthorityError("managed initial neutral service authority must be a regular non-symlink file")
+        return self._image(path)
+
     def admit_paths(self, inputs, outputs):
         """Validate the managed leaf's scope before it creates any output."""
         self._check_project()
+        self.neutral_image = self._neutral_image()
         for path in inputs:
             self._image(path)
         for value in outputs:
@@ -197,6 +210,8 @@ class ManagedInitialMethodCycle:
             raise AuthorityError("managed initial input changed during parser validation")
         if sorted((self.tool / "publickey").glob("*.pub")) != key_paths:
             raise AuthorityError("managed initial public-key membership changed during validation")
+        if self.neutral_image is None or self._neutral_image() != self.neutral_image:
+            raise AuthorityError("managed initial neutral service authority changed or was not admitted")
         self._check_project()
         return images
 
