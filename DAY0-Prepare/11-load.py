@@ -6799,6 +6799,33 @@ _DHCP_OUTPUT_NAMES = (
 )
 
 
+def _discard_dhcp_candidate_dir(candidate: Path, identity: tuple[int, int]) -> None:
+    """Remove an uncommitted LOAD candidate with DEV's discard rules (G22).
+
+    Only single-link regular files are removed; anything else (a directory, a symlink,
+    a hard link, a FIFO) is refused with "unexpected DHCP stage entry" and left in place
+    as evidence instead of being swept by rmtree.
+    """
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent_fd = os.open(candidate.parent, flags)
+    try:
+        stage_fd = os.open(candidate.name, flags, dir_fd=parent_fd)
+        try:
+            held = os.fstat(stage_fd)
+            if (held.st_dev, held.st_ino) != identity:
+                raise LoadError("private DHCP candidate identity changed before cleanup")
+            for name in os.listdir(stage_fd):
+                item = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                if not stat.S_ISREG(item.st_mode) or item.st_nlink != 1:
+                    raise LoadError(f"unexpected DHCP stage entry: {name}")
+                os.unlink(name, dir_fd=stage_fd)
+        finally:
+            os.close(stage_fd)
+        os.rmdir(candidate.name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
 def publish_committed_dhcp_candidate(
     project: Path, candidate: Path, switch_scope: str,
 ) -> None:
@@ -24061,7 +24088,7 @@ def main(
                         or (private_stat.st_dev, private_stat.st_ino)
                         != dhcp_candidate_identity):
                     raise LoadError("private DHCP candidate identity changed before cleanup")
-                shutil.rmtree(dhcp_candidate_dir)
+                _discard_dhcp_candidate_dir(dhcp_candidate_dir, dhcp_candidate_identity)
             except BaseException as cleanup_exc:
                 final_cleanup_errors.append(("DHCP 候选暂存清理", cleanup_exc))
         if inventory_directory is not None and not release_committed and not publication_registration_attempted:
