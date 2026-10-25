@@ -1245,15 +1245,23 @@ class ManualPF2CurrentCliWorkflowTests(unittest.TestCase):
         self.assertEqual(list(self.INVENTORY), [name for name in tracked if name])
 
     def _check_pair(self, root, expected):
+        import yaml
         before = {relative: (root / relative).read_bytes() for relative in self.INVENTORY}
         index = (root / ".git/index").read_bytes()
+        # -s hides the user site-packages; on the formal CLT interpreter PyYAML
+        # (needed by tools/project_contract.py) is installed only there, so the
+        # child gets exactly that dependency directory as a declared PYTHONPATH.
+        environment = {
+            **self._environment(root),
+            "PYTHONPATH": str(Path(yaml.__file__).resolve().parents[1]),
+        }
         for script, code, message in expected:
             with self.subTest(script=script, expected_exit=code):
                 result = subprocess.run(
                     # Keep the real CLI's sibling-import path; -I removes it.
                     # HOME/PATH/Git configuration are private and fixed above.
                     [sys.executable, "-s", "-B", str(root / "tools" / script), "--check"],
-                    cwd=root, env=self._environment(root), stdin=subprocess.DEVNULL,
+                    cwd=root, env=environment, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30.0,
                 )
                 self.assertEqual(code, result.returncode, result.stdout + result.stderr)
