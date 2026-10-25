@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 from pathlib import Path
 import shlex
 import shutil
@@ -11,18 +12,28 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import yaml
 from unittest import mock
 
 from test_cases.module_loader import load_script
 from test_cases.test_eth_jump_zero_config_contract import (
     BACKUP,
+    DHCP,
+    INITIAL,
+    MANUAL,
+    PUBLISHER,
     DIAGNOSTICS,
     GATE,
     GENERATOR,
     HTML,
     MONITOR,
     SETUP,
+    DEVICE_HEADER,
     jump_row,
+    public_ib_row,
+    public_jump_row,
+    write_inventory,
     write_devices,
 )
 from test_cases.test_mlag_evpn_generation import (
@@ -285,6 +296,137 @@ class EthJumpZeroConfigWorkflowTests(unittest.TestCase):
 
             self.assertEqual([], MONITOR.read_devices(csv_path, dhcp_leases=leases))
             self.assertEqual([], BACKUP.load_devices_csv(str(csv_path)))
+
+
+    def test_admission_p2p_and_real_consumers_keep_jump_inventory_only(self):
+        for populated in (False, True):
+            with self.subTest(populated=populated), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                path = root / "02-devices_config.csv"
+                row = public_jump_row(populated=populated)
+                write_inventory(path, row)
+                self.assertEqual(frozenset({"ib", "eth_jump"}), LOAD.load_device_types(path))
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
+                ib, transit = INITIAL.load_devices(path)
+                targets = INITIAL.build_targets(
+                    [INITIAL.Link("EXAMPLE-IB01", "eth0", "EXAMPLE-JUMP01", "7")],
+                    ib, transit,
+                )
+                self.assertEqual(1, len(targets))
+                self.assertEqual("EXAMPLE-JUMP01", targets[0].ethernet.hostname)
+                # Consumers receive the same admitted row, not a sanitized copy.
+                write_devices(path, [row])
+                leases = root / "dhcpd.leases"
+                leases.write_bytes(b"")
+                self.assertEqual([], DHCP.load_csv(str(path)))
+                self.assertEqual({}, PUBLISHER.load_csv(str(path)))
+                self.assertEqual([], MANUAL.read_devices(path, dhcp_leases=leases))
+                self.assertEqual([], MONITOR.read_devices(path, dhcp_leases=leases))
+                self.assertEqual([], BACKUP.load_devices_csv(str(path)))
+                self.assertEqual((), GATE.project_inventory_targets(str(root), "all"))
+                for family in ({"eth", "eth_spx", "spx"}, {"ib"}, {"nvl"}):
+                    self.assertEqual([], HTML.read_host_csv(path, family))
+
+
+    def test_actual_two_generator_passes_ignore_nonexistent_jump_template(self):
+        for populated in (False, True):
+            with self.subTest(populated=populated), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                eth_script, _devices, eth_template = prepare_schema_v1_collision_generator(root)
+                shutil.copy2(ROOT / "ztp/dynamic_air_inventory.py", root / "ztp/dynamic_air_inventory.py")
+                nvos_service = root / "ztp/config/nvos"
+                ib_template = nvos_service / "template"
+                ib_template.mkdir(parents=True)
+                ib_script = ib_template / "90-c2-generate_configs.py"
+                ib_script.symlink_to("../../cumulus/template/90-c2-generate_configs.py")
+                ib_publisher = nvos_service / "d-hostname2mac.py"
+                ib_publisher.symlink_to("../cumulus/d-hostname2mac.py")
+                self.assertTrue(ib_script.is_symlink())
+                self.assertEqual(
+                    "../../cumulus/template/90-c2-generate_configs.py", os.readlink(ib_script),
+                )
+                self.assertTrue(ib_publisher.is_symlink())
+                self.assertEqual("../cumulus/d-hostname2mac.py", os.readlink(ib_publisher))
+                shutil.copy2(ROOT / "ztp/config/nvos/default.yaml", nvos_service / "default.yaml")
+                # Literal ordinary ETH + ordinary IB + jump all share each exact inventory.
+                ordinary_eth = ["NA"] * len(DEVICE_HEADER)
+                ordinary_eth[:7] = [
+                    "COLLIDE-LEAF01", "eth", "oob-leaf", "192.0.2.30", "24",
+                    "192.0.2.1", "02:00:00:00:00:30",
+                ]
+                ordinary_eth[11], ordinary_eth[12], ordinary_eth[19] = (
+                    "198.51.100.30/32", "default", "65030",
+                )
+                rows = [ordinary_eth, public_ib_row(), public_jump_row(populated=populated)]
+                for template in (eth_template, ib_template):
+                    write_devices(template / "02-devices_config.csv", rows)
+                shutil.copy2(eth_template / "01-global.yaml", ib_template / "01-global.yaml")
+                inventory = eth_template / "02-devices_config.csv"
+                self.assertEqual(
+                    frozenset({"eth", "ib", "eth_jump"}), LOAD.load_device_types(inventory),
+                )
+                self.assertEqual(([], []), SETUP._validate_eth_csv(str(inventory)))
+                ib_devices, transit = INITIAL.load_devices(inventory)
+                self.assertEqual({"example-ib01"}, set(ib_devices))
+                self.assertEqual({"collide-leaf01", "example-jump01"}, set(transit))
+                for branch, script, template in (
+                    ("eth", eth_script, eth_template), ("ib", ib_script, ib_template),
+                ):
+                    argv = [sys.executable, "-B", str(script), "--branch", branch, "-y"]
+                    if branch == "eth":
+                        argv += ["--skip-descriptions", "--deployment-scope", "prod"]
+                    completed = subprocess.run(
+                        argv, cwd=template, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, timeout=30, check=False,
+                    )
+                    self.assertEqual(0, completed.returncode, completed.stdout)
+                    self.assertIn("type=eth_jump: 1", completed.stdout)
+                eth_root, ib_root = eth_template / "99-output", ib_template / "99-output-ib_nvl"
+                self.assertTrue(eth_root.is_dir())
+                self.assertTrue(ib_root.is_dir())
+                eth_files = list(eth_root.glob("*/COLLIDE-LEAF01.yaml"))
+                ib_files = list(ib_root.glob("*-ib/EXAMPLE-IB01.yaml"))
+                self.assertEqual(1, len(eth_files), eth_files)
+                self.assertEqual(1, len(ib_files), ib_files)
+                for path, hostname in (
+                    (eth_files[0], "COLLIDE-LEAF01"), (ib_files[0], "EXAMPLE-IB01"),
+                ):
+                    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+                    self.assertEqual(hostname, document[0]["set"]["system"]["hostname"])
+                # Retain prior zero-hostname assertions, now over both actual output trees.
+                outputs = [p for output_root in (eth_root, ib_root)
+                           for p in output_root.rglob("*") if p.is_file()]
+                devices_yaml = eth_template / "91-devices.yaml"
+                self.assertTrue(devices_yaml.is_file())
+                outputs.append(devices_yaml)
+                self.assertFalse(any(p.name == "EXAMPLE-JUMP01.yaml" for p in outputs))
+                self.assertFalse(any("EXAMPLE-JUMP01" in p.read_text(encoding="utf-8") for p in outputs))
+                for family, service, source_dir, expected_host, expected_mac in (
+                    ("eth", eth_template.parent, eth_files[0].parent,
+                     "COLLIDE-LEAF01.yaml", "020000000030.yaml"),
+                    ("ib", nvos_service, ib_files[0].parent,
+                     "EXAMPLE-IB01.yaml", "020000000002.yaml"),
+                ):
+                    publish = subprocess.run(
+                        [sys.executable, "-B", str(service / "d-hostname2mac.py"), "-y",
+                         "--csv", str(inventory), "--switch", family,
+                         "--deployment-scope", "prod", str(source_dir)],
+                        cwd=service, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, timeout=30, check=False,
+                    )
+                    self.assertEqual(0, publish.returncode, publish.stdout)
+                    latest = service / "latest_yaml"
+                    self.assertTrue(latest.is_symlink())
+                    self.assertTrue((latest / expected_host).is_file())
+                    self.assertTrue((latest / expected_mac).is_symlink())
+                    self.assertEqual(expected_host, (latest / expected_mac).resolve().name)
+                    self.assertFalse((latest / "EXAMPLE-JUMP01.yaml").exists())
+                    for jump_mac in ("020000000010.yaml", "020000000020.yaml"):
+                        self.assertFalse((latest / jump_mac).exists())
+                    self.assertFalse(any(
+                        "EXAMPLE-JUMP01" in p.read_text(encoding="utf-8")
+                        for p in latest.rglob("*.yaml") if p.is_file()
+                    ))
 
 
 if __name__ == "__main__":
