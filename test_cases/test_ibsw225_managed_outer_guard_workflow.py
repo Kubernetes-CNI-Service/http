@@ -185,10 +185,16 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
         previous_module = sys.modules.get("_http_managed_initial_setup")
         self.assertIsNone(previous_profile)
         events, crypto, transports, cycles, main_globals, reports = [], [], [], [], [], []
+        # I18: a present project global carries the IB target hash (reviewed external KAT,
+        # read before the environment is cleared); the run takes the strict path.
+        kat = req10b_fixtures.strict_kat(load_script("ibsw_managed_success_kat", INITIAL))
+        worker_argv = [sys.executable, "-I", "-S", "-B", str(INITIAL.resolve()), "--_verify-password"]
+        witnesses = []
         with tempfile.TemporaryDirectory(prefix="ibsw-managed-success-", dir="/private/tmp") as raw, ExitStack() as patches:
             base = Path(raw).resolve()
             project = base / "project"
-            _, tool, _, csv_path, p2p, pubdir, cache, laptop, _ = req10b_fixtures.Req10BServicesKeysWorkflowTests().fixture(str(project))
+            _, tool, global_path, csv_path, p2p, pubdir, cache, laptop, _ = req10b_fixtures.Req10BServicesKeysWorkflowTests().fixture(
+                str(project), global_text=req10b_fixtures.strict_global_text(kat))
             csv_path.write_text(
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
@@ -222,6 +228,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
 
             def local_or_simulated_transport(argv, **kwargs):
                 argv = list(argv)
+                if argv == worker_argv:
+                    # The leaf's own native hash verifier: real child, never a stub.
+                    return real_run(argv, **kwargs)
                 if argv[:2] == ["ssh", "-i"]:
                     self.assertEqual(argv[2], str(private))
                     self.assertEqual(argv[-2:], ["admin@203.0.113.2", "true"])
@@ -246,6 +255,8 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
 
             def local_crypto_child(argv, *args, **kwargs):
                 # subprocess.run's real context/wait/pipe cleanup remains intact.
+                if list(argv) == worker_argv:
+                    return real_popen(argv, *args, **kwargs)
                 self.assertEqual(argv[0], "/usr/bin/ssh-keygen")
                 self.assertIn(tuple(argv[1:]), (("-y", "-f", str(private)),
                     ("-l", "-E", "sha256", "-f", "/dev/stdin")))
@@ -273,11 +284,16 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                     if command == ["nv", "config", "show", "-o", "commands"]:
                         transports.append("config")
                         return initial.SessionResult(_MANAGED_SUCCESS_STATE, 0)
+                    if command == ["nv", "config", "diff", "-o", "commands"]:
+                        # Strict path's read-only pending probe: nothing uncommitted.
+                        transports.append("pending_diff")
+                        return initial.SessionResult("", 0)
                     self.assertEqual(command[:4], ["sh", "-c", initial._KEY_INSTALL_SCRIPT, "--"])
                     self.assertEqual(len(command), 5)
                     self.assertEqual(base64.b64decode(command[4]).decode(), "\n".join(expected_lines) + "\n")
                     transports.append("install_keys")
-                    return initial.SessionResult("", 0)
+                    # The key stage verifies the device's closed install receipt.
+                    return initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 def observation_transport(command, timeout, *, pass_fds=()):
                     self.assertEqual(len(pass_fds), 1)
                     self.assertEqual(command[2], "/dev/fd/" + str(pass_fds[0]))
@@ -290,6 +306,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                                        ("_run_initial_observation", observation_transport)):
                     patches.enter_context(mock.patch.object(initial, name, side_effect=callback))
                 patches.enter_context(mock.patch.object(initial, "interactive_run", side_effect=AssertionError("No interactive device transport")))
+                # Present-global strict path: PUBLIC adapter for the fresh leaf's private phase
+                # transport only; policy, helper and stage consumers stay real (TEST d876330).
+                witnesses.append(patches.enter_context(req10b_fixtures.strict_management_boundary(self, initial, kat=kat)))
 
             def begin(*args, **kwargs):
                 result = real_begin(*args, **kwargs)
@@ -345,6 +364,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                     sys.setprofile(previous_profile)
             self.assertEqual(code, 0, out.getvalue() + err.getvalue())
             self.assertEqual(err.getvalue(), "")
+            self.assertEqual(1, len(witnesses))
+            req10b_fixtures.assert_strict_management_path(self, witnesses[0], global_path=global_path,
+                                                         devices=("EXAMPLE-IB01",))
             self.assertEqual(len(main_globals), 1)
             self.assertEqual(crypto, ["generate", "fingerprint:laptop.pub", "fingerprint:mgmt-server.pub", "derive"])
             self.assertEqual(events.count("pending"), 1)

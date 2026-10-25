@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import base64
 from contextlib import ExitStack
+from contextlib import contextmanager
 from contextlib import redirect_stdout
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -24,6 +26,256 @@ ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
 GENERATOR = ROOT / "ztp/config/nvos/template/90-c2-generate_configs.py"
 LOADER = ROOT / "DAY0-Prepare/11-load.py"
+
+STRICT_READ = ("nv", "config", "show", "-o", "commands")
+STRICT_DIFF = ("nv", "config", "diff", "-o", "commands")
+# Facts owned by later, separately tested requirements (Initial stage:
+# test_initial_setup_initial_closed_facts; reserved management ports:
+# test_initial_setup_management_network).  The REQ10B device model holds them
+# at their verified values so that REQ10B's own Day-0/Services/Keys oracles
+# keep measuring the same transactions; the witness proves they stay unwritten.
+STRICT_HELD_ROWS = (
+    "nv set system config auto-save state enabled",
+    "nv set system ztp config-save enabled",
+    "nv set interface eth0-1 link state up",
+    "nv set interface eth0-1 type eth",
+)
+HELD_FACT_SETTERS = frozenset({
+    "nv set system config auto-save state enabled",
+    "nv set system ztp config-save enabled",
+    *(f"nv set interface {port} link state up" for port in ("eth0", "eth1", "eth0-1")),
+    *(f"nv set interface {port} type eth" for port in ("eth0", "eth1", "eth0-1")),
+})
+_STRICT_KAT: dict = {}
+
+
+def held_fact_setters(held_rows) -> frozenset:
+    """Setter lines that would rewrite a fact the device model holds.
+
+    A held `eth0-1` range fact also covers the single-port eth0/eth1 setters
+    for the same field.  No held rows means no held facts.
+    """
+    setters = set()
+    for row in held_rows:
+        setters.add(row)
+        tokens = row.split()
+        if tokens[:4] == ["nv", "set", "interface", "eth0-1"]:
+            for port in ("eth0", "eth1"):
+                setters.add(" ".join(["nv", "set", "interface", port, *tokens[4:]]))
+    return frozenset(setters)
+
+
+def held_failure_note(failure, private_values=()) -> str:
+    """Name a run failure that was held until the path witness was checked.
+
+    The class name and the failure's fixed text are reported; a text that
+    contains any private fixture value is withheld instead.
+    """
+    if failure is None:
+        return ""
+    text = str(failure)
+    if any(value and value in text for value in private_values):
+        text = "message withheld: it contains a private fixture value"
+    return f"held run failure {type(failure).__name__}: {text}"
+
+
+def strict_kat(app) -> dict:
+    """The reviewed external KAT through the existing reader, qualified once.
+
+    Values stay in RAM: they are never written to a log, an assertion message
+    or a public file.  A missing input or native backend is a FIXTURE HOLD.
+    """
+    if "values" not in _STRICT_KAT:
+        from test_cases import test_initial_setup_target_credentials_workflow as kat_basis
+
+        values = kat_basis.required_external_kat()
+        try:
+            qualified = app.verify_password_hash(values["PASSWORD"], values["YESCRYPT"]) is True
+        except app.SetupError:
+            qualified = False
+        if not qualified:
+            error = RuntimeError("FIXTURE HOLD: native project password backend rejected the reviewed KAT")
+            raise error from None
+        _STRICT_KAT["values"] = values
+    return _STRICT_KAT["values"]
+
+
+def strict_global_text(kat: dict) -> str:
+    """GLOBAL plus the project's IB target hash for the management account."""
+    anchor = "        timezone: Asia/Taipei\n- nvl:\n"
+    if GLOBAL.count(anchor) != 1:
+        raise RuntimeError("FIXTURE HOLD: REQ10B IB global anchor changed")
+    # The hash is substituted with %-formatting so that no source line pairs
+    # the YAML key with a literal value (public audit cleartext rule).
+    block = (
+        "        timezone: Asia/Taipei\n"
+        "      aaa:\n        user:\n          admin:\n"
+        "            password: %s\n"
+        "- nvl:\n"
+    ) % json.dumps(kat["YESCRYPT"])
+    return GLOBAL.replace(anchor, block, 1)
+
+
+def _public_command(argv) -> tuple[str, ...]:
+    command = tuple(argv)
+    return ("KEY-SHELL",) if command[:2] == ("sh", "-c") else command
+
+
+@contextmanager
+def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
+                               empty_pending_diff=True):
+    """PUBLIC device boundary for the present-global management path of one main() run.
+
+    Since 50efbbd a manual/auto management run with a present project global
+    builds a ProjectPasswordPolicy, authenticates each IB through the private
+    phase transport (_authenticate_ib_read -> _execute_ib_phase) and sends every
+    business command through _run_authorized_ib_command -> run_on_ib.  Policy,
+    cache admission, target fetch with native verification, the authorized
+    helper and all stage consumers run unchanged.  Only the transport layer is
+    replaced: the private phase transport and run_on_ib both reach the test's
+    own PUBLIC SessionResult boundary (the run_on_ib mock installed by the
+    test).  The manual target prompt answers with the reviewed KAT target.
+    Unless the caller passes empty_pending_diff=False, the device model answers
+    the read-only pending-diff probe as empty; it holds `held_rows` present in
+    every non-empty read.  Only the read-only authentication probe is modeled:
+    a run_on_ib request that carries a private phase operation (password
+    change, post-change read) fails at the adapter instead of reaching the
+    test's boundary.
+
+    Witness records, checked by assert_strict_management_path():
+      * policies     - successful ProjectPasswordPolicy constructions;
+      * phases       - (IB hostname, operation, policy) per private phase entry;
+      * helper       - commands handed to the authorized helper;
+      * device       - (command, inside-helper) per request reaching the boundary;
+      * transport    - real PTY transport attempts (must stay zero);
+      * held_setters - setter lines for the facts this model holds (none for
+                       held_rows=()).
+    """
+    witness = {"policies": [], "phases": [], "helper": [], "device": [], "transport": 0,
+               "held_setters": held_fact_setters(held_rows)}
+    depth = [0]
+    real_init = app.ProjectPasswordPolicy.__init__
+    real_helper = app._run_authorized_ib_command
+    phase_signature = inspect.signature(app._execute_ib_phase)
+    positional = tuple(phase_signature.parameters)[:8]
+    inner = app.run_on_ib
+    target_prompts = ("IB target password (admin): ", "Confirm IB target password: ")
+
+    def prompt(label):
+        if label not in target_prompts:
+            raise AssertionError("PUBLIC adapter: unexpected interactive credential prompt")
+        return kat["PASSWORD"]
+
+    def init(policy, path, user, *args, **kwargs):
+        real_init(policy, path, user, *args, **kwargs)
+        witness["policies"].append({
+            "path": Path(os.path.abspath(path)).resolve(), "user": user,
+            "interactive": policy.interactive, "instance": policy,
+        })
+
+    def phase(*args, **kwargs):
+        bound = phase_signature.bind(*args, **kwargs).arguments
+        witness["phases"].append((bound["target"].ib.hostname,
+                                  bound.get("_phase_operation"),
+                                  bound.get("_password_policy")))
+        if (bound.get("_phase_operation") != "auth-probe-readonly"
+                or bound.get("local", False) is not False
+                or bound.get("allow_password_change", False) is not False
+                or bound.get("ib_new_password") is not None):
+            raise AssertionError("PUBLIC adapter models only the read-only authentication probe")
+        # Same positional request a legacy run_on_ib read carried.
+        return app.run_on_ib(*(bound[name] for name in positional))
+
+    def helper(*args, **kwargs):
+        command = args[7] if len(args) > 7 else kwargs["ib_command"]
+        witness["helper"].append(_public_command(command))
+        depth[0] += 1
+        try:
+            return real_helper(*args, **kwargs)
+        finally:
+            depth[0] -= 1
+
+    def device(*args, **kwargs):
+        operation = kwargs.get("_phase_operation")
+        if operation is not None:
+            # Values such as the new target are never echoed.
+            raise AssertionError(
+                "PUBLIC adapter models only the read-only authentication probe; "
+                f"a private {operation!r} phase request reached the device boundary"
+            )
+        command = args[7] if len(args) > 7 else kwargs["ib_command"]
+        witness["device"].append((_public_command(command), depth[0] > 0))
+        result = inner(*args, **kwargs)
+        if tuple(command) == STRICT_DIFF and empty_pending_diff:
+            # No pre-existing uncommitted change on the modeled device.
+            return app.SessionResult("", 0)
+        if (tuple(command) == STRICT_READ and held_rows
+                and type(result.output) is str and result.output.strip()):
+            lines = result.output.splitlines()
+            missing = [row for row in held_rows if row not in lines]
+            if missing:
+                body = result.output if result.output.endswith("\n") else result.output + "\n"
+                result = app.SessionResult(
+                    body + "\n".join(missing) + "\n", result.exit_code,
+                    result.password_changed, result.password_change_required,
+                    result.password_change_attempted, result.ib_authentication_rejected,
+                )
+        return result
+
+    def transport(*_args, **_kwargs):
+        witness["transport"] += 1
+        raise AssertionError("PUBLIC adapter: a real PTY transport was requested")
+
+    with ExitStack() as stack:
+        stack.enter_context(mock.patch.object(app.getpass, "getpass", new=prompt))
+        stack.enter_context(mock.patch.object(app.ProjectPasswordPolicy, "__init__", new=init))
+        stack.enter_context(mock.patch.object(app, "_execute_ib_phase", new=phase))
+        stack.enter_context(mock.patch.object(app, "_run_authorized_ib_command", new=helper))
+        stack.enter_context(mock.patch.object(app, "run_on_ib", new=device))
+        stack.enter_context(mock.patch.object(app, "interactive_run", new=transport))
+        yield witness
+
+
+def assert_strict_management_path(test, witness, *, global_path, devices,
+                                  interactive=True, note="") -> None:
+    """Path witness: strict policy once, phase per device, writes via the adapter.
+
+    `note` (see held_failure_note) is appended to every failure message, so a
+    run failure held until this check stays visible when the witness fails.
+    """
+    suffix = f" [{note}]" if note else ""
+    policies = witness["policies"]
+    test.assertTrue(
+        len(policies) == 1
+        and policies[0]["path"] == Path(global_path).resolve()
+        and policies[0]["user"] == "admin"
+        and policies[0]["interactive"] is interactive,
+        "the run must construct exactly one strict ProjectPasswordPolicy from the fixture global"
+        + suffix,
+    )
+    policy = policies[0]["instance"]
+    test.assertEqual(list(devices), [entry[0] for entry in witness["phases"]],
+                     "every device that reaches IB login must enter phase authentication" + suffix)
+    test.assertTrue(
+        all(entry[1] == "auth-probe-readonly" and entry[2] is policy
+            for entry in witness["phases"]),
+        "phase authentication must be the read-only probe bound to the strict policy" + suffix,
+    )
+    test.assertEqual(0, witness["transport"],
+                     "no real PTY transport may run behind the PUBLIC adapter" + suffix)
+    writes = [entry for entry in witness["device"]
+              if entry[0] not in (STRICT_READ, STRICT_DIFF)]
+    test.assertTrue(all(inside for _, inside in writes),
+                    "every business command must reach the adapter through the authorized helper"
+                    + suffix)
+    test.assertEqual([command for command in witness["helper"] if command != STRICT_READ],
+                     [command for command, _ in writes],
+                     "authorized business commands and adapter-observed writes must match one to one"
+                     + suffix)
+    # Only facts this run's device model actually holds (none when held_rows=()).
+    test.assertEqual([], [command for command, _ in witness["device"]
+                          if " ".join(command) in witness["held_setters"]],
+                     "facts held by the device model must never be written" + suffix)
 
 GLOBAL = """\
 schema_version: 2
@@ -269,15 +521,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertEqual(2 if case == "new-writer" else 1, current["generation"])
                 self.assertFalse(monitor.completion_handoff_device_complete(device))
 
-    def fixture(self, directory: str):
+    def fixture(self, directory: str, *, global_text: str = GLOBAL):
         root = Path(directory)
         tool = root / "infiniband/bringup/xdr-initial-setup"
         tool.mkdir(parents=True)
         global_path = tool / "01-global.yaml"
-        global_path.write_text(GLOBAL, encoding="utf-8")
+        global_path.write_text(global_text, encoding="utf-8")
         neutral = root / "infra/infra-neutral.conf"
         neutral.parent.mkdir(parents=True)
         neutral.write_text("DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n", encoding="ascii")
+        (tool / "infra-neutral.conf").write_text("DNS=8.8.8.8\nNTP=ntp.ubuntu.com\nTIMEZONE=Etc/UTC\n", encoding="ascii")
         ib_csv = root / "ib.csv"
         ib_csv.write_text(
             "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
@@ -349,7 +602,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         cycle_type = getattr(authority, "ManagedInitialMethodCycle", None)
         self.assertTrue(callable(cycle_type), "managed initial main must produce its own causal receipt")
         with tempfile.TemporaryDirectory(prefix="f02-managed-initial-main-") as directory:
-            root, tool, _, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
+            # I18: a present project global must carry the IB target hash, so the
+            # managed run takes the present-global strict path (TEST d876330 model).
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             root = root.resolve()
             tool, ib_csv, p2p = tool.resolve(), ib_csv.resolve(), p2p.resolve()
             ib_csv.write_text("hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
@@ -384,11 +639,18 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     current_tool.mkdir(parents=True)
                     (current_tool / "01-global.yaml").symlink_to((tool / "01-global.yaml").resolve())
                     (current_tool / "publickey").symlink_to((tool / "publickey").resolve())
+                    # Q4: the managed tool root is the only infra-neutral.conf source.
+                    (current_tool / "infra-neutral.conf").write_bytes((tool / "infra-neutral.conf").read_bytes())
                 def device_boundary(*args, **kwargs):
                     current = authority.read_method_current(storage, "EXAMPLE-IB01")
                     self.assertEqual((cycle, "pending", True), tuple(current[name] for name in ("generation", "state", "veto")))
                     if cycle == 2:
                         raise self.initial.SetupError("independent transport failure")
+                    command = tuple(args[7])
+                    if (len(command) == 5 and command[:2] == ("sh", "-c")
+                            and command[2] == self.initial._KEY_INSTALL_SCRIPT and command[3] == "--"):
+                        # The key stage verifies the device's closed install receipt.
+                        return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                     return self.initial.SessionResult(state, 0)
                 def batch_observer(target, user, key, timeout, services, keys):
                     if cycle == 3:
@@ -410,10 +672,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary))
                     stack.enter_context(mock.patch.object(self.initial, "verify_management_key_possession"))
                     stack.enter_context(mock.patch.object(self.initial, "observe_managed_initial_configuration", side_effect=batch_observer))
+                    witnesses = []
+                    if cycle not in (4, 5):
+                        witnesses.append(stack.enter_context(strict_management_boundary(
+                            self, self.initial, kat=strict_kat(self.initial))))
                     result = self.run_initial(current_tool, ib_csv, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
                                               method_cycle=executor,
                                               managed_entry=authority.managed_initial_main if cycle in (4, 5) else None,
-                                              managed_tool_inputs=current_tool if cycle == 5 else None)
+                                              managed_tool_inputs=current_tool if cycle == 5 else None,
+                                              managed_strict=witnesses if cycle in (4, 5) else None)
+                self.assertEqual(1, len(witnesses))
+                assert_strict_management_path(self, witnesses[0], global_path=global_path, devices=("EXAMPLE-IB01",))
                 current = authority.read_method_current(storage, "EXAMPLE-IB01")
                 self.assertEqual((cycle, "success" if cycle in (1, 4, 5) else "failed", cycle not in (1, 4, 5)),
                                  tuple(current[name] for name in ("generation", "state", "veto")))
@@ -473,7 +742,8 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse((root / "99-output-ztp").exists())
 
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
-                    cache: Path, *extra: str, method_cycle=None, managed_entry=None, managed_tool_inputs=None) -> int:
+                    cache: Path, *extra: str, method_cycle=None, managed_entry=None, managed_tool_inputs=None,
+                    managed_strict=None) -> int:
         argv = [
             "initial-setup.py", "--ib-csv", str(ib_csv), "--p2p", str(p2p),
             "--target-cache", str(cache), "--report", str(cache.parent / "report.log"),
@@ -502,6 +772,11 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                      "interface_oper_status", "fdb_port_for_interface", "neighbor_for_port", "interface_vrf",
                                      "run_on_ib", "verify_management_key_possession", "observe_managed_initial_configuration"):
                             setattr(module, name, getattr(self.initial, name))
+                        if managed_strict is not None:
+                            # Present-global strict path of the fresh leaf: the same PUBLIC
+                            # adapter replaces only its private phase transport (I18).
+                            managed_strict.append(stack.enter_context(strict_management_boundary(
+                                self, module, kat=strict_kat(self.initial))))
                 stack.enter_context(mock.patch.object(SourceFileLoader, "exec_module", isolated_device_io))
             try:
                 if managed_entry is not None:
@@ -514,13 +789,50 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     report.close()
                     self.initial.REPORT_HANDLE = None
 
+    def run_strict(self, tool: Path, ib_csv: Path, p2p: Path, cache: Path, *extra: str,
+                   global_path: Path, devices: tuple[str, ...],
+                   held_rows=STRICT_HELD_ROWS) -> int:
+        """One present-global management P2 run, then its strict-path witness.
+
+        A SetupError from the run is held until the witness is checked, so a run
+        that never reached the strict path fails on that fact first; the held
+        error's class name and fixed text are carried in that failure message.
+        A test whose own device model states every fact passes held_rows=().
+        """
+        failure = None
+        result = None
+        kat = strict_kat(self.initial)
+        with strict_management_boundary(self, self.initial, kat=kat,
+                                        held_rows=held_rows) as witness:
+            try:
+                result = self.run_initial(tool, ib_csv, p2p, cache, *extra)
+            except self.initial.SetupError as error:
+                failure = error
+        assert_strict_management_path(
+            self, witness, global_path=global_path, devices=devices,
+            note=held_failure_note(failure, tuple(value for value in kat.values()
+                                                 if type(value) is str)),
+        )
+        if failure is not None:
+            raise failure
+        return result
+
+    def strict_fixture(self, directory: str):
+        """fixture() whose global carries the project's IB target hash (KAT)."""
+        return self.fixture(directory, global_text=strict_global_text(strict_kat(self.initial)))
+
     def drive_one_device(self, first_state: str, verified_state: str,
                          *extra: str, remove_global_before_p1: bool = False,
                          remove_global_before_p2: bool = False,
                          post_service_state: str | None = None):
         """Exercise real P1/cache/P2 control flow with only the network boundary faked."""
+        # Default management mode with the project global kept through P2 is
+        # the present-global strict path; the other variants stay legacy.
+        strict = (not remove_global_before_p1 and not remove_global_before_p2
+                  and "ethernet" not in extra)
         with tempfile.TemporaryDirectory(prefix="req10b-device-flow-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, laptop, management = (
+                self.strict_fixture(directory) if strict else self.fixture(directory))
             if remove_global_before_p1:
                 global_path.unlink()
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
@@ -539,6 +851,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     if shows > 2 and post_service_state is not None:
                         output = post_service_state
                     return self.initial.SessionResult(output, 0)
+                if (len(command) == 5 and command[:2] == ("sh", "-c")
+                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
+                        and command[3] == "--"):
+                    return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 return self.initial.SessionResult("", 0)
 
             neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
@@ -561,10 +877,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
                 stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary))
                 try:
-                    result = self.run_initial(
-                        tool, ib_csv, p2p, cache, "--apply", "--yes",
-                        "--ethernet-password", "eth-password", *extra,
-                    )
+                    if strict:
+                        result = self.run_strict(
+                            tool, ib_csv, p2p, cache, "--apply", "--yes",
+                            "--ethernet-password", "eth-password", *extra,
+                            global_path=global_path, devices=("EXAMPLE-IB01",),
+                        )
+                    else:
+                        result = self.run_initial(
+                            tool, ib_csv, p2p, cache, "--apply", "--yes",
+                            "--ethernet-password", "eth-password", *extra,
+                        )
                 finally:
                     report = self.initial.REPORT_HANDLE
                     if report is not None:
@@ -840,7 +1163,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 "nv set system ntp server ntp.ubuntu.com",
                 "nv set system ntp server time.ib.example.test",
                 "nv set system date-time timezone Asia/Taipei",
-                "nv config apply",
+                "nv config apply -y",
                 "nv config save",
             ):
                 with self.subTest(command=command):
@@ -854,7 +1177,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_configured_day0_still_enters_independent_service_transaction(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-configured-p2-") as directory:
-            _, tool, _, ib_csv, p2p, _, cache, _, _ = self.fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             commands: list[tuple[str, ...]] = []
             current = (
@@ -873,8 +1196,12 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 command = tuple(args[7])
                 commands.append(command)
                 if command == ("nv", "config", "show", "-o", "commands"):
-                    applied = ("nv", "config", "apply") in commands
+                    applied = ("nv", "config", "apply", "-y") in commands
                     return self.initial.SessionResult(current + (services if applied else ""), 0)
+                if (len(command) == 5 and command[:2] == ("sh", "-c")
+                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
+                        and command[3] == "--"):
+                    return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 return self.initial.SessionResult("", 0)
 
             neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
@@ -891,9 +1218,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                  mock.patch.object(self.initial, "interface_vrf", return_value="default"), \
                  mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary):
                 try:
-                    self.run_initial(
+                    self.run_strict(
                         tool, ib_csv, p2p, cache, "--apply", "--yes",
                         "--ethernet-password", "eth-password",
+                        global_path=global_path, devices=("EXAMPLE-IB01",),
                     )
                 finally:
                     report = self.initial.REPORT_HANDLE
@@ -908,7 +1236,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 ("nv", "set", "system", "dns", "server", "203.0.113.53"), commands,
                 "configured Day-0 must not skip missing services",
             )
-            self.assertIn(("nv", "config", "apply"), commands)
+            self.assertIn(("nv", "config", "apply", "-y"), commands)
             self.assertIn(("nv", "config", "save"), commands)
             self.assertIn("day0-skipped=1", (cache.parent / "report.log").read_text(encoding="utf-8"))
             self.assertIn("services-skipped=0", (cache.parent / "report.log").read_text(encoding="utf-8"))
@@ -919,7 +1247,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                 suppress_day0_detection: bool = False) -> None:
         """Run the real setup three times against one isolated device state."""
         with tempfile.TemporaryDirectory(prefix="req10b-upgrade-rerun-") as directory:
-            root, tool, _, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             day0 = [
                 "nv set interface eth0 ipv4 address 203.0.113.2/24",
@@ -950,10 +1278,14 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 command = tuple(args[7])
                 rounds[-1].append(command)
                 if command == ("nv", "config", "show", "-o", "commands"):
-                    return self.initial.SessionResult("\n".join(running) + "\n", 0)
+                    # A wiped device still has an independently known factory
+                    # hostname. Empty transport output is UNKNOWN, not evidence
+                    # that these in-memory desired values were removed.
+                    output = "\n".join(running) + "\n" if running else "nv set system hostname nvos\n"
+                    return self.initial.SessionResult(output, 0)
                 if command in service_argv or command in day0_argv:
                     pending.append(" ".join(command))
-                elif command == ("nv", "config", "apply"):
+                elif command == ("nv", "config", "apply", "-y"):
                     for line in pending:
                         if line not in running:
                             running.append(line)
@@ -965,6 +1297,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                         capture_output=True, text=True, timeout=10, check=False,
                     )
                     self.assertEqual(0, result.returncode, result.stderr)
+                    return self.initial.SessionResult(result.stdout, result.returncode)
                 return self.initial.SessionResult("", 0)
 
             neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
@@ -991,9 +1324,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
                 def invoke() -> str:
                     rounds.append([])
-                    self.assertEqual(0, self.run_initial(
+                    self.assertEqual(0, self.run_strict(
                         tool, ib_csv, p2p, cache, "--apply", "--yes",
                         "--ethernet-password", "eth-password",
+                        global_path=global_path, devices=("EXAMPLE-IB01",),
                     ))
                     return (cache.parent / "report.log").read_text(encoding="utf-8")
 
@@ -1003,6 +1337,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse(any(command in day0_argv for command in rounds[0]))
                 self.assertFalse(any(command in service_argv for command in rounds[0]))
                 self.assertNotIn(("nv", "config", "apply"), rounds[0])
+                self.assertNotIn(("nv", "config", "apply", "-y"), rounds[0])
                 self.assertNotIn(("nv", "config", "save"), rounds[0])
                 self.assertEqual(original_keys, (authorized.stat().st_ino, authorized.read_bytes()))
 
@@ -1032,11 +1367,11 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     self.assertEqual(day0_argv, [command for command in rounds[1]
                                                   if command in day0_argv])
                     transaction_commands = set(day0_argv + service_argv) | {
-                        ("nv", "config", "apply"), ("nv", "config", "save")
+                        ("nv", "config", "apply", "-y"), ("nv", "config", "save")
                     }
                     self.assertEqual(
-                        day0_argv + [("nv", "config", "apply"), ("nv", "config", "save")]
-                        + service_argv + [("nv", "config", "apply"), ("nv", "config", "save")],
+                        day0_argv + [("nv", "config", "apply", "-y"), ("nv", "config", "save")]
+                        + service_argv + [("nv", "config", "apply", "-y"), ("nv", "config", "save")],
                         [command for command in rounds[1] if command in transaction_commands],
                         "upgrade rerun must commit Day-0 before the separate service transaction",
                     )
@@ -1050,7 +1385,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     "upgrade rerun must write only missing service values",
                 )
                 self.assertEqual(2 if wipe_day0 else 1,
-                                 rounds[1].count(("nv", "config", "apply")))
+                                 rounds[1].count(("nv", "config", "apply", "-y")))
                 self.assertEqual(2 if wipe_day0 else 1,
                                  rounds[1].count(("nv", "config", "save")))
                 self.assertEqual(original_keys, (authorized.stat().st_ino, authorized.read_bytes()))
@@ -1061,6 +1396,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse(any(command in day0_argv for command in rounds[2]))
                 self.assertFalse(any(command in service_argv for command in rounds[2]))
                 self.assertNotIn(("nv", "config", "apply"), rounds[2])
+                self.assertNotIn(("nv", "config", "apply", "-y"), rounds[2])
                 self.assertNotIn(("nv", "config", "save"), rounds[2])
                 self.assertEqual(day0, running[:len(day0)])
                 self.assertEqual(set(service_lines), set(running[len(day0):]))
@@ -1107,8 +1443,137 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 services, wipe_day0=True, suppress_day0_detection=True,
             )
 
+    def test_upgrade_complete_wipe_restores_initial_and_reserved_port_facts_then_is_idempotent(self) -> None:
+        """A complete wipe also removes the Initial and reserved-port facts.
+
+        Expected values come from the stage requirements recorded in
+        test_cases/REAL_ENVIRONMENT.md, not from the implementation: missing
+        Initial values (auto-save, ztp config-save) are set to enabled; a fresh
+        single-gateway device gets eth0 address, the eth0-1 gateway, eth0-1 link
+        up, eth0-1 type eth and its CSV hostname; the services are restored; a
+        rerun writes nothing.  Only end-state facts are asserted, never how many
+        transactions the product uses.  The device model holds no row on the
+        device's behalf (held_rows=()): every fact lives in the modeled running
+        configuration, a wipe leaves only the factory hostname, and only an
+        applied setter restores a fact.
+        """
+        with tempfile.TemporaryDirectory(prefix="req10b-complete-wipe-") as directory:
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
+            self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
+            factory = "nv set system hostname nvos"
+            initial = [
+                "nv set system config auto-save state enabled",
+                "nv set system ztp config-save enabled",
+            ]
+            network = [
+                "nv set interface eth0 ipv4 address 203.0.113.2/24",
+                "nv set interface eth0-1 ipv4 gateway 203.0.113.1",
+                "nv set interface eth0-1 link state up",
+                "nv set interface eth0-1 type eth",
+                "nv set system hostname EXAMPLE-IB01",
+            ]
+            services = [
+                "nv set system dns server 203.0.113.53",
+                "nv set system ntp server ntp.ubuntu.com",
+                "nv set system ntp server time.ib.example.test",
+                "nv set system date-time timezone Asia/Taipei",
+            ]
+            desired = initial + network + services
+            setters = {tuple(line.split()) for line in desired}
+            apply = ("nv", "config", "apply", "-y")
+            save = ("nv", "config", "save")
+            running = list(desired)
+            pending: list[str] = []
+            rounds: list[list[tuple[str, ...]]] = []
+            device_home = root / "fake-device-home"
+            (device_home / ".ssh").mkdir(parents=True)
+            authorized = device_home / ".ssh/authorized_keys"
+            authorized.write_text(laptop + management, encoding="ascii")
+            original_keys = (authorized.stat().st_ino, authorized.read_bytes())
+
+            def device_boundary(*args, **_kwargs):
+                command = tuple(args[7])
+                rounds[-1].append(command)
+                if command == STRICT_READ:
+                    return self.initial.SessionResult("\n".join(running) + "\n", 0)
+                if command in setters:
+                    pending.append(" ".join(command))
+                elif command == apply:
+                    for line in pending:
+                        if line.startswith("nv set system hostname "):
+                            running[:] = [kept for kept in running
+                                          if not kept.startswith("nv set system hostname ")]
+                        if line not in running:
+                            running.append(line)
+                    pending.clear()
+                elif command[:2] == ("sh", "-c"):
+                    result = subprocess.run(
+                        command, cwd=root,
+                        env={"HOME": str(device_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+                        capture_output=True, text=True, timeout=10, check=False,
+                    )
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    return self.initial.SessionResult(result.stdout, result.returncode)
+                return self.initial.SessionResult("", 0)
+
+            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
+                # The IPv4 SSH check is a transport outside this PUBLIC model.
+                stack.enter_context(mock.patch.object(self.initial, "verify_ipv4_login"))
+                for name, value in (
+                    ("local_ethernet_keys", set()),
+                    ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
+                    ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
+                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
+                    ("interface_status_line", "swp7 up"),
+                    ("interface_oper_status", "up"),
+                    ("fdb_port_for_interface", "swp7"),
+                    ("neighbor_for_port", neighbor),
+                    ("interface_vrf", "default"),
+                ):
+                    stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
+                stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device_boundary))
+
+                def invoke() -> str:
+                    rounds.append([])
+                    self.assertEqual(0, self.run_strict(
+                        tool, ib_csv, p2p, cache, "--apply", "--yes",
+                        "--ethernet-password", "eth-password",
+                        global_path=global_path, devices=("EXAMPLE-IB01",), held_rows=(),
+                    ))
+                    return (cache.parent / "report.log").read_text(encoding="utf-8")
+
+                first_report = invoke()
+                self.assertIn("day0-skipped=1", first_report)
+                self.assertIn("services-skipped=1", first_report)
+                self.assertFalse(any(command in setters for command in rounds[0]))
+                self.assertNotIn(apply, rounds[0])
+                self.assertNotIn(save, rounds[0])
+
+                running[:] = [factory]
+                second_report = invoke()
+                self.assertEqual(sorted(desired), sorted(running),
+                                 "a complete wipe must be restored to the full desired state")
+                self.assertIn("day0-skipped=0", second_report)
+                self.assertIn("services-skipped=0", second_report)
+                self.assertEqual([], pending, "every restored fact must be applied")
+
+                third_report = invoke()
+                self.assertIn("day0-skipped=1", third_report)
+                self.assertIn("services-skipped=1", third_report)
+                self.assertFalse(any(command in setters for command in rounds[2]),
+                                 "a rerun after restoration must write nothing")
+                self.assertNotIn(apply, rounds[2])
+                self.assertNotIn(save, rounds[2])
+                self.assertEqual(sorted(desired), sorted(running))
+                self.assertEqual(original_keys, (authorized.stat().st_ino, authorized.read_bytes()))
+
     def test_day0_verification_failure_never_enters_services(self) -> None:
-        _, commands, report, _, _ = self.drive_one_device("", "")
+        _, commands, report, _, _ = self.drive_one_device(
+            "nv set system hostname nvos\n", "nv set system hostname nvos\n",
+        )
         self.assertIn("post-configuration verification failed", report)
         self.assertFalse(any(command[:4] == ("nv", "set", "system", "dns")
                              for command in commands))
@@ -1128,7 +1593,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             "nv set system date-time timezone Asia/Taipei\n"
         )
         result, commands, report, _, _ = self.drive_one_device(
-            "", day0, post_service_state=day0 + services,
+            "nv set system hostname nvos\n", day0, post_service_state=day0 + services,
         )
         self.assertEqual(0, result, report)
         self.assertIn(("nv", "set", "interface", "eth0", "ipv4", "address",
@@ -1143,13 +1608,27 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             "nv set system hostname EXAMPLE-IB01\n"
         )
         result, commands, report, _, _ = self.drive_one_device(
-            "", verified, remove_global_before_p1=True,
+            "nv set system hostname nvos\n", verified, remove_global_before_p1=True,
         )
         self.assertEqual(0, result, report)
         self.assertIn("Services SKIP: 01-global.yaml was unavailable", report)
         self.assertIn("services-skipped=1", report)
         self.assertFalse(any(command[:4] == ("nv", "set", "system", "dns")
                              for command in commands))
+
+    def test_unknown_empty_preflight_refuses_day0_services_and_key_writes(self) -> None:
+        verified = (
+            "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+            "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+            "nv set system hostname EXAMPLE-IB01\n"
+        )
+        result, commands, report, _, _ = self.drive_one_device("", verified)
+        self.assertEqual(1, result)
+        self.assertIn("UNKNOWN", report)
+        self.assertFalse(any(command[:2] == ("nv", "set") for command in commands))
+        self.assertFalse(any(command[:3] == ("nv", "config", "apply") for command in commands))
+        self.assertNotIn(("nv", "config", "save"), commands)
+        self.assertFalse(any(command[:2] == ("sh", "-c") for command in commands))
 
     def test_ethernet_p2_uses_baked_services_without_global_or_yaml_library(self) -> None:
         configured = (
@@ -1204,24 +1683,87 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         result, commands, report, _, _ = self.drive_one_device(first, verified, "--force")
         self.assertEqual(0, result, report)
         self.assertIn(("nv", "set", "system", "hostname", "EXAMPLE-IB01"), commands)
-        self.assertIn(("nv", "config", "apply"), commands)
+        self.assertIn(("nv", "config", "apply", "-y"), commands)
         self.assertIn(("nv", "config", "save"), commands)
 
-    def test_force_refuses_mismatching_existing_eth0_without_day0_writes(self) -> None:
-        state = (
+
+    def test_force_fills_target_address_without_removing_existing_address(self) -> None:
+        # Requirement change: an old address alone is not a Day-0 conflict.
+        services = (
+            "nv set system dns server 203.0.113.53\n"
+            "nv set system ntp server ntp.ubuntu.com\n"
+            "nv set system ntp server time.ib.example.test\n"
+            "nv set system date-time timezone Asia/Taipei\n"
+        )
+        first = (
             "nv set interface eth0 ipv4 address 198.51.100.2/24\n"
             "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+            "nv set system hostname EXAMPLE-IB01\n" + services
+        )
+        verified = (
+            "nv set interface eth0 ipv4 address 198.51.100.2/24\n"
+            "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+            "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+            "nv set system hostname EXAMPLE-IB01\n" + services
+        )
+        result, commands, report, _, _ = self.drive_one_device(first, verified, "--force")
+        self.assertEqual(0, result, report)
+        self.assertIn(("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"), commands)
+        self.assertEqual(1, commands.count(("nv", "config", "save")))
+        self.assertFalse(any(command[:2] in {("nv", "unset"), ("nv", "reset")}
+                             or command[:3] in {("nv", "config", "replace"), ("nv", "config", "reset")}
+                             for command in commands))
+        self.assertNotRegex(report.lower(), "day-0 skip:.*conflict")
+
+    def test_force_membership_with_extra_and_unrequested_fields_skips_day0(self) -> None:
+        state = (
+            "nv set interface eth0 ipv4 address 198.51.100.2/24\n"
+            "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+            "nv set interface eth1 ipv4 address 198.51.100.22/24\n"
+            "nv set interface eth0 ipv4 gateway 198.51.100.1\n"
+            "nv set interface eth0 ipv4 gateway 203.0.113.1\n"
+            "nv set interface eth1 ipv4 gateway 198.51.100.21\n"
             "nv set system hostname EXAMPLE-IB01\n"
             "nv set system dns server 203.0.113.53\n"
             "nv set system ntp server ntp.ubuntu.com\n"
             "nv set system ntp server time.ib.example.test\n"
             "nv set system date-time timezone Asia/Taipei\n"
         )
-        _, commands, report, _, _ = self.drive_one_device(state, state, "--force")
+        result, commands, report, _, _ = self.drive_one_device(state, state, "--force")
+        self.assertEqual(0, result, report)
         self.assertFalse(any(command[:3] == ("nv", "set", "interface") for command in commands))
-        self.assertNotIn(("nv", "config", "apply"), commands)
+        self.assertNotIn(("nv", "set", "system", "hostname", "EXAMPLE-IB01"), commands)
+        self.assertFalse(any(command[:3] == ("nv", "config", "apply") for command in commands))
         self.assertNotIn(("nv", "config", "save"), commands)
-        self.assertRegex(report.lower(), "mismatch|conflict|differs")
+        self.assertNotRegex(report.lower(), "mismatch|conflict|differs")
+
+    def test_force_refuses_real_gateway_or_hostname_conflict_without_day0_writes(self) -> None:
+        services = (
+            "nv set system dns server 203.0.113.53\n"
+            "nv set system ntp server ntp.ubuntu.com\n"
+            "nv set system ntp server time.ib.example.test\n"
+            "nv set system date-time timezone Asia/Taipei\n"
+        )
+        cases = (
+            ("gateway", "198.51.100.1", "EXAMPLE-IB01", "eth0 gateway"),
+            ("hostname", "203.0.113.1", "OTHER-IB01", "hostname"),
+        )
+        for name, gateway, hostname, field in cases:
+            with self.subTest(case=name):
+                state = (
+                    "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+                    f"nv set interface eth0-1 ipv4 gateway {gateway}\n"
+                    f"nv set system hostname {hostname}\n" + services
+                )
+                _, commands, report, _, _ = self.drive_one_device(state, state, "--force")
+                self.assertFalse(any(command[:3] == ("nv", "set", "interface") for command in commands))
+                self.assertFalse(any(command[:4] == ("nv", "set", "system", "hostname") for command in commands))
+                self.assertNotIn(("nv", "config", "apply"), commands)
+                self.assertNotIn(("nv", "config", "apply", "-y"), commands)
+                self.assertNotIn(("nv", "config", "save"), commands)
+                self.assertRegex(report.lower(), "mismatch|conflict|differs")
+                self.assertIn(field, report.lower())
+
 
     def test_p2_installs_baked_keys_through_nested_device_boundary(self) -> None:
         state = (
@@ -1267,7 +1809,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 0, "", "")
                 self.fail(f"unexpected local command {argv}")
 
-            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("", 0)) as installer, \
+            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)) as installer, \
                  mock.patch.object(subprocess, "run", side_effect=key_boundary), \
                  redirect_stdout(io.StringIO()) as output:
                 self.assertTrue(self.initial.run_key_stage(
@@ -1288,7 +1830,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             self.assertIn("mgmt-server.pub", output.getvalue())
             self.assertIn("已验证", output.getvalue())
 
-            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("", 0)), \
+            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)), \
                  mock.patch.object(subprocess, "run") as local_command, \
                  redirect_stdout(io.StringIO()) as no_private_output:
                 self.initial.run_key_stage(
@@ -1299,7 +1841,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             local_command.assert_not_called()
             self.assertEqual(2, no_private_output.getvalue().count("已写入，未验证"))
 
-            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("", 0)), \
+            with mock.patch.object(self.initial, "run_on_ib", return_value=self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)), \
                  mock.patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
                      ["ssh-keygen"], 0, laptop + "\n", ""
                  )) as wrong_key:
@@ -1314,7 +1856,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_key_failure_on_first_device_does_not_block_second_device(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-key-continue-") as directory:
-            _, tool, _, ib_csv, p2p, _, cache, _, _ = self.fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
             with ib_csv.open("a", encoding="utf-8") as stream:
                 stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
             with p2p.open("a", encoding="utf-8") as stream:
@@ -1337,6 +1879,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     attempted.append(target.ib.hostname)
                     if target.ib.hostname == "EXAMPLE-IB01":
                         raise self.initial.SetupError("injected key installation failure")
+                    return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 output = state.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
                     "EXAMPLE-IB01", target.ib.hostname
                 )
@@ -1360,8 +1903,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
                 stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=boundary))
                 try:
-                    self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes",
-                                     "--ethernet-password", "eth-password")
+                    self.run_strict(tool, ib_csv, p2p, cache, "--apply", "--yes",
+                                    "--ethernet-password", "eth-password",
+                                    global_path=global_path,
+                                    devices=("EXAMPLE-IB01", "EXAMPLE-IB02"))
                 finally:
                     report = self.initial.REPORT_HANDLE
                     if report is not None:
@@ -1371,7 +1916,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_service_failure_on_first_device_continues_to_second_device(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-service-continue-") as directory:
-            _, tool, _, ib_csv, p2p, _, cache, _, _ = self.fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
             with ib_csv.open("a", encoding="utf-8") as stream:
                 stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
             with p2p.open("a", encoding="utf-8") as stream:
@@ -1394,11 +1939,15 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             def boundary(target, *_args, **_kwargs):
                 command = tuple(_args[6])
                 name = target.ib.hostname
+                if (len(command) == 5 and command[:2] == ("sh", "-c")
+                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
+                        and command[3] == "--"):
+                    return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 if command[:5] == ("nv", "set", "system", "dns", "server"):
                     attempted.append(name)
                     if name == "EXAMPLE-IB01":
                         raise self.initial.SetupError("injected service failure")
-                if command == ("nv", "config", "apply"):
+                if command == ("nv", "config", "apply", "-y"):
                     applied.add(name)
                 output = day0.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
                     "EXAMPLE-IB01", name
@@ -1424,12 +1973,105 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 ):
                     stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
                 stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=boundary))
-                result = self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes",
-                                          "--ethernet-password", "eth-password")
+                result = self.run_strict(tool, ib_csv, p2p, cache, "--apply", "--yes",
+                                         "--ethernet-password", "eth-password",
+                                         global_path=global_path,
+                                         devices=("EXAMPLE-IB01", "EXAMPLE-IB02"))
             report = (cache.parent / "report.log").read_text(encoding="utf-8")
             self.assertEqual(1, result, report)
             self.assertEqual(["EXAMPLE-IB01", "EXAMPLE-IB02"], attempted)
             self.assertIn("injected service failure", report)
+            self.assertIn("[EXAMPLE-IB02]", report)
+            self.assertIn("Services SUCCESS: desired values verified", report)
+
+    def test_service_failure_report_never_carries_raw_device_output(self) -> None:
+        """A device's own failure text stays out of the report (A1 guard).
+
+        The first device's DNS setter goes through the real run_on_ib with only
+        the PTY transport modeled: the device answers exit 1 with a PUBLIC
+        marker line.  The report may name the failure with product-written
+        text, but the device's raw output (the marker) must never appear, and
+        the second device still completes.
+        """
+        with tempfile.TemporaryDirectory(prefix="req10b-raw-output-guard-") as directory:
+            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
+            with ib_csv.open("a", encoding="utf-8") as stream:
+                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
+            with p2p.open("a", encoding="utf-8") as stream:
+                stream.write('"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n')
+            self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
+            marker = "PUBLIC-RAW-DEVICE-OUTPUT-" + os.urandom(6).hex()
+            real_run_on_ib = self.initial.run_on_ib
+            attempted: list[str] = []
+            raw_failures: list[str] = []
+            applied: set[str] = set()
+            day0 = (
+                "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+                "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+                "nv set system hostname EXAMPLE-IB01\n"
+            )
+            services = (
+                "nv set system dns server 203.0.113.53\n"
+                "nv set system ntp server ntp.ubuntu.com\n"
+                "nv set system ntp server time.ib.example.test\n"
+                "nv set system date-time timezone Asia/Taipei\n"
+            )
+
+            def boundary(target, *args, **kwargs):
+                command = tuple(args[6])
+                name = target.ib.hostname
+                if (len(command) == 5 and command[:2] == ("sh", "-c")
+                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
+                        and command[3] == "--"):
+                    return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
+                if command[:5] == ("nv", "set", "system", "dns", "server"):
+                    attempted.append(name)
+                    if name == "EXAMPLE-IB01":
+                        # Real run_on_ib; only its PTY answer is modeled.
+                        answer = self.initial.SessionResult("nv: error: " + marker + "\n", 1)
+                        with mock.patch.object(self.initial, "interactive_run", return_value=answer):
+                            try:
+                                return real_run_on_ib(target, *args, **kwargs)
+                            except self.initial.SetupError as error:
+                                raw_failures.append(str(error))
+                                raise
+                if command == ("nv", "config", "apply", "-y"):
+                    applied.add(name)
+                output = day0.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
+                    "EXAMPLE-IB01", name
+                )
+                if name in applied:
+                    output += services
+                return self.initial.SessionResult(output, 0)
+
+            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
+                for name, value in (
+                    ("local_ethernet_keys", set()),
+                    ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
+                    ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
+                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
+                    ("interface_status_line", "swp7 up"),
+                    ("interface_oper_status", "up"),
+                    ("fdb_port_for_interface", "swp7"),
+                    ("neighbor_for_port", neighbor),
+                    ("interface_vrf", "default"),
+                ):
+                    stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
+                stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=boundary))
+                result = self.run_strict(tool, ib_csv, p2p, cache, "--apply", "--yes",
+                                         "--ethernet-password", "eth-password",
+                                         global_path=global_path,
+                                         devices=("EXAMPLE-IB01", "EXAMPLE-IB02"))
+            report = (cache.parent / "report.log").read_text(encoding="utf-8")
+            self.assertEqual(1, result)
+            self.assertEqual(["EXAMPLE-IB01", "EXAMPLE-IB02"], attempted)
+            self.assertTrue(len(raw_failures) == 1 and marker in raw_failures[0],
+                            "the real transport failure carrying device output was not reached")
+            self.assertNotIn(marker, report, "raw device output reached the report")
+            self.assertIn("management IB operation failed; device state is UNKNOWN", report)
             self.assertIn("[EXAMPLE-IB02]", report)
             self.assertIn("Services SUCCESS: desired values verified", report)
 
@@ -1464,6 +2106,148 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                              "--apply", "--yes", "--execution-mode", "ethernet")
                     network.assert_not_called()
                     self.assertEqual(before, (cache.stat().st_ino, cache.read_bytes()))
+
+    def test_ntp_properties_and_quoted_membership_skip_transaction_but_keep_key_stage(self) -> None:
+        state = (
+            "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
+            "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
+            "nv set system hostname EXAMPLE-IB01\n"
+            "nv set system dns server 203.0.113.53\n"
+            'nv set system ntp server "NTP.UBUNTU.COM." state enabled\n'
+            "nv set system ntp server 'TIME.IB.EXAMPLE.TEST.' iburst enabled\n"
+            "nv set system ntp server time.ib.example.test association-type pool\n"
+            "nv set system date-time timezone Asia/Taipei\n"
+        )
+        result, commands, report, laptop, management = self.drive_one_device(state, state)
+        self.assertFalse(any(command[:5] == ("nv", "set", "system", "ntp", "server")
+                             for command in commands))
+        self.assertFalse(any(command[:3] == ("nv", "config", "apply") for command in commands))
+        self.assertNotIn(("nv", "config", "save"), commands)
+        self.assertEqual(0, result, report)
+        self.assertIn("services-skipped=1", report)
+        key_commands = [command for command in commands if command[:2] == ("sh", "-c")]
+        self.assertEqual(1, len(key_commands), "NTP idempotence must not skip the independent key stage")
+        self.assertEqual(5, len(key_commands[0]))
+        self.assertEqual("--", key_commands[0][3])
+        self.assertEqual(laptop + management,
+                         base64.b64decode(key_commands[0][4], validate=True).decode("ascii"))
+
+
+class StrictManagementBoundaryControlTests(unittest.TestCase):
+    """Known-true controls for the shared strict-path adapter and witness.
+
+    No KAT is read: the adapter is entered with an empty KAT mapping and no
+    run reaches a credential prompt.  The device boundary under the adapter
+    is a mock owned by each test.
+    """
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.initial = load_script("req10b_strict_boundary_control_initial", INITIAL)
+
+    @staticmethod
+    def _request(app, command, **kwargs):
+        # Same eight positional fields a run_on_ib request carries; the adapter
+        # reads only the command and passes the rest through unchanged.
+        return app.run_on_ib(None, None, "admin", "PUBLIC-OOB", "admin", "PUBLIC-CURRENT",
+                             5, list(command), local=False, **kwargs)
+
+    def test_device_boundary_refuses_private_phase_operations(self) -> None:
+        app = self.initial
+        private_target = os.urandom(8).hex()
+        with mock.patch.object(app, "run_on_ib") as inner, \
+             strict_management_boundary(self, app, kat={}):
+            for operation in ("password-change", "post-change-read", "auth-probe-readonly"):
+                with self.subTest(operation=operation):
+                    changing = operation == "password-change"
+                    with self.assertRaises(AssertionError) as caught:
+                        self._request(
+                            app, STRICT_READ, allow_password_change=changing,
+                            ib_new_password=private_target if changing else None,
+                            _phase_operation=operation, _password_policy=None,
+                        )
+                    self.assertNotIn(private_target, str(caught.exception))
+            # An ordinary read-only request still reaches the test's boundary.
+            self._request(app, STRICT_READ, allow_password_change=False)
+        self.assertEqual(1, inner.call_count,
+                         "a private phase request must not reach the test's device boundary")
+        self.assertNotIn(private_target, repr(inner.call_args_list))
+
+    def test_never_written_check_covers_exactly_the_held_rows(self) -> None:
+        app = self.initial
+        with tempfile.TemporaryDirectory(prefix="req10b-held-witness-") as directory:
+            global_path = Path(directory) / "01-global.yaml"
+            policy = object()
+
+            def witness_for(held_rows, written):
+                with strict_management_boundary(self, app, kat={}, held_rows=held_rows) as witness:
+                    pass
+                witness["policies"].append({"path": global_path.resolve(), "user": "admin",
+                                            "interactive": True, "instance": policy})
+                witness["phases"].append(("EXAMPLE-IB01", "auth-probe-readonly", policy))
+                witness["helper"].append(written)
+                witness["device"].append((written, True))
+                return witness
+
+            reserved_link = ("nv", "set", "interface", "eth0-1", "link", "state", "up")
+            # Nothing held (REQ10C): a reserved-port write is not a held fact.
+            assert_strict_management_path(self, witness_for((), reserved_link),
+                                          global_path=global_path, devices=("EXAMPLE-IB01",))
+            # Rows held (REQ10B): the held rows and single-port forms of a held
+            # eth0-1 range fact must never be written.
+            for written in (
+                reserved_link,
+                ("nv", "set", "interface", "eth1", "type", "eth"),
+                ("nv", "set", "system", "ztp", "config-save", "enabled"),
+            ):
+                with self.subTest(written=written):
+                    with self.assertRaisesRegex(AssertionError, "must never be written"):
+                        assert_strict_management_path(
+                            self, witness_for(STRICT_HELD_ROWS, written),
+                            global_path=global_path, devices=("EXAMPLE-IB01",),
+                        )
+            derive = globals().get("held_fact_setters")
+            self.assertTrue(callable(derive), "held setters must be derived from the held rows")
+            self.assertEqual(HELD_FACT_SETTERS, derive(STRICT_HELD_ROWS))
+            self.assertEqual(frozenset(), derive(()))
+
+    def test_pending_diff_rewrite_is_selected_by_the_caller(self) -> None:
+        parameters = inspect.signature(strict_management_boundary).parameters
+        self.assertIn("empty_pending_diff", parameters,
+                      "the empty pending-diff model must be selectable by the caller")
+        self.assertIs(True, parameters["empty_pending_diff"].default,
+                      "existing callers keep the modeled empty pending diff")
+        app = self.initial
+        pending = "nv set system hostname PUBLIC-PENDING\n"
+        for selected, expected in ((True, ""), (False, pending)):
+            with self.subTest(empty_pending_diff=selected):
+                with mock.patch.object(app, "run_on_ib", return_value=app.SessionResult(pending, 0)), \
+                     strict_management_boundary(self, app, kat={}, empty_pending_diff=selected):
+                    result = self._request(app, STRICT_DIFF, allow_password_change=False)
+                self.assertEqual(expected, result.output)
+
+    def test_witness_failure_names_the_held_run_failure(self) -> None:
+        build_note = globals().get("held_failure_note")
+        self.assertTrue(callable(build_note),
+                        "a run failure held behind the witness must be reportable")
+        self.assertIn("note", inspect.signature(assert_strict_management_path).parameters)
+        app = self.initial
+        private_value = os.urandom(8).hex()
+        fixed = "IB phase project authority failed; device state is UNKNOWN"
+        note = build_note(app.SetupError(fixed), (private_value,))
+        self.assertIn("SetupError", note)
+        self.assertIn(fixed, note)
+        withheld = build_note(app.SetupError("fixture " + private_value), (private_value,))
+        self.assertIn("SetupError", withheld)
+        self.assertNotIn(private_value, withheld)
+        self.assertEqual("", build_note(None, (private_value,)))
+        with strict_management_boundary(self, app, kat={}) as witness:
+            pass
+        with self.assertRaises(AssertionError) as caught:
+            assert_strict_management_path(self, witness, global_path=Path("/nonexistent/01-global.yaml"),
+                                          devices=("EXAMPLE-IB01",), note=note)
+        self.assertIn("SetupError", str(caught.exception))
+        self.assertIn(fixed, str(caught.exception))
 
 
 if __name__ == "__main__":
