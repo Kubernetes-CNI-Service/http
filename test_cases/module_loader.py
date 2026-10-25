@@ -6,11 +6,29 @@ use a subprocess, not silently remove a module's declared paths.
 """
 import importlib.util
 from importlib.machinery import SourceFileLoader
+from functools import lru_cache
 from pathlib import Path
 import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@lru_cache(maxsize=8)
+def _compile_source(source: bytes, filename: str, optimization: int):
+    # Source bytes and traceback filename are authority; metadata and .pyc
+    # files are not. Code objects hold no module namespace or mutable globals.
+    return compile(source, filename, "exec", dont_inherit=True, optimize=optimization)
+
+
+class _ExactSourceLoader(SourceFileLoader):
+    def get_code(self, fullname):
+        filename = self.get_filename(fullname)
+        source = self.get_data(filename)
+        if len(source) > 2 * 1024 * 1024:
+            # Large source files still load normally, but cannot grow the cache.
+            return self.source_to_code(source, filename)
+        return _compile_source(source, filename, sys.flags.optimize)
 
 
 class _HelperPath(str):
@@ -24,6 +42,10 @@ def load_script(name: str, path: Path):
         spec = importlib.util.spec_from_loader(name, SourceFileLoader(name, str(path)))
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load {path}")
+    if type(spec.loader) is SourceFileLoader:
+        # Preserve ModuleSpec/package metadata and exec_module's normal frame
+        # handling. Custom/extension loaders retain their original behavior.
+        spec.loader = _ExactSourceLoader(name, spec.loader.path)
     module = importlib.util.module_from_spec(spec)
     previous = sys.modules.get(name)
     sys.modules[name] = module
