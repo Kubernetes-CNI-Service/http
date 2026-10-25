@@ -127,6 +127,7 @@ _AUTO_YES = False
 _DRY_RUN  = False
 _FORCE    = False  # --force：忽略校验错误强行继续（独立于 -y）
 _STRICT   = False  # --strict：把空公钥/xlsx/共享镜像占位文件视为错误
+_NO_UPGRADE = False  # load --no-upgrade：不检查或发布升级镜像
 _CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _SWITCH_SCOPE = "all"  # --switch：只严格校验所选设备族的 global 分支
@@ -420,6 +421,8 @@ def _image_platform(filename):
 
 def _shared_image_pairs():
     """返回 (ZTP 链接路径, http/image 源文件)；忽略无法识别的平台文件。"""
+    if _NO_UPGRADE:
+        return []
     pairs = []
     for src in sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin"))):
         platform = _image_platform(os.path.basename(src))
@@ -435,6 +438,9 @@ def _shared_image_pairs():
 def _process_bin_files():
     """把 http/image/ 中的共享镜像链接到 ztp/image/cumulus|nvos/。"""
     global _LINK_ERRORS
+    if _NO_UPGRADE:
+        print("  [SKIP] --no-upgrade：不检查或发布升级镜像")
+        return
     bins = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
     if not bins:
         print(_c(YELLOW, f"  [MISS] {IMAGE_DIR}/ 下未找到 .bin 镜像文件"))
@@ -3097,8 +3103,9 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
             _run(label, _P2P_SOURCE, _validate_xlsx)
 
     # 共享系统镜像：http/image/ 是唯一来源，不再读取项目目录中的旧 .bin 文件。
-    shared_bins = sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
-    if not shared_bins:
+    # --no-upgrade has no image dependency, including on empty legacy files.
+    shared_bins = [] if _NO_UPGRADE else sorted(glob.glob(os.path.join(IMAGE_DIR, "*.bin")))
+    if not _NO_UPGRADE and not shared_bins:
         message = f"共享镜像目录 {IMAGE_DIR}/ 下没有 .bin 文件"
         all_warnings.append(message)
         print(_c(YELLOW, f"  [WRN] {message}"))
@@ -3224,6 +3231,8 @@ def _unsetup_previous(proj_dir):
         # 旧版镜像链接即使指向当前项目也必须移除；镜像现由 http/image/ 统一提供。
         image_root = os.path.join(ZTP, "image") + os.sep
         if os.path.abspath(lp).startswith(image_root):
+            if _NO_UPGRADE:
+                continue
             to_del.append(lp)
             continue
         # 旧版项目监控 CSV 已由 monitor/02-devices_config.csv 取代。
@@ -4586,6 +4595,8 @@ def _parse_args(argv=None):
                         help="忽略输入校验错误继续（独立于 -y）")
     parser.add_argument("--strict", action="store_true",
                         help="把空公钥、XLSX 和共享镜像占位视为错误")
+    parser.add_argument("--no-upgrade", action="store_true",
+                        help="不检查或发布升级镜像；load --no-upgrade 委派时使用")
     parser.add_argument("--dry-run", action="store_true",
                         help="只显示操作，不创建项目、文件、目录或链接")
     parser.add_argument("--csv-dir",
@@ -4601,7 +4612,7 @@ def _parse_args(argv=None):
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
-            args.host_role, getattr(args, "switch_scope", None),
+            args.host_role, args.no_upgrade, getattr(args, "switch_scope", None),
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
     elif args.project is None:
@@ -4682,7 +4693,7 @@ def _main_locked(args):
 
 def main(argv=None):
     global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT, _CONFIRM_PROJECT_SWITCH
-    global _SWITCH_SCOPE
+    global _SWITCH_SCOPE, _NO_UPGRADE
 
     args = _parse_args(argv)
     if getattr(args, "status", False) or getattr(args, "list_projects", False):
@@ -4714,6 +4725,7 @@ def main(argv=None):
     _AUTO_YES = args.auto_yes
     _FORCE = args.force
     _STRICT = args.strict
+    _NO_UPGRADE = bool(getattr(args, "no_upgrade", False))
     _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
     _SWITCH_SCOPE = getattr(args, "switch_scope", None) or "all"
     key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")
