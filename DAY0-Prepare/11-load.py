@@ -6771,6 +6771,7 @@ def _validated_dhcp_candidate_dir(project: Path, candidate: Path) -> Path:
         if (not stat.S_ISDIR(output_stat.st_mode)
                 or not stat.S_ISDIR(candidate_stat.st_mode)
                 or stat.S_IMODE(candidate_stat.st_mode) != 0o700
+                or candidate_stat.st_uid != os.geteuid()
                 or candidate.resolve(strict=True) != output / candidate_name
                 or candidate.parent.resolve(strict=True) != output):
             raise LoadError("DHCP candidate is not a private canonical project directory")
@@ -6790,6 +6791,123 @@ def _validated_dhcp_candidate_dir(project: Path, candidate: Path) -> Path:
     except OSError as exc:
         raise LoadError(f"DHCP candidate cannot be verified: {exc}") from exc
     return output / candidate_name
+
+
+_DHCP_OUTPUT_NAMES = (
+    "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+    "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
+)
+
+
+def publish_committed_dhcp_candidate(
+    project: Path, candidate: Path, switch_scope: str,
+) -> None:
+    """Publish the validated candidate to the flat DHCP outputs, then delete it.
+
+    T+ (agreed by http test and http dev, 2026-10-25): TEST's private candidate stays the
+    authority up to the parent commit; after the commit the flat 99-output-dhcp files that
+    activate.py, c1's scoped carry-over and 13-unload read must equal it (DEV G2), and a
+    successful load leaves no candidate behind (DEV G20).  The publish/rollback/cleanup
+    rules are DEV's DeferredDHCPOutput (G6-G9, G22): backup-name collision refused, prior
+    outputs must be single-link regular files, a partial publish restores every replaced
+    file, and cleanup refuses anything that is not a single-link regular file.  Called only
+    after the parent release (and pinned generation) commit; a failure here leaves the
+    committed release with the previous flat outputs and the candidate as HOLD evidence.
+    """
+    candidate = _validated_dhcp_candidate_dir(project, candidate)
+    output = candidate.parent
+    links = ZTP_DIR / "config/isc-dhcp-server"
+    targets = {(links / name).resolve(strict=False).parent for name in _DHCP_OUTPUT_NAMES}
+    if targets != {output}:
+        raise LoadError("DHCP output links do not resolve to this project's 99-output-dhcp")
+    if switch_scope == "all":
+        names = _DHCP_OUTPUT_NAMES
+    elif switch_scope in {"eth", "ib", "nvl"}:
+        names = ("dhcpd.conf", f"dhcpd_{switch_scope}.hosts", "dhcp-release-manifest.json")
+    else:
+        raise LoadError(f"无法识别 switch scope：{switch_scope!r}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    parent_fd = os.open(output, flags)
+    try:
+        stage_fd = os.open(candidate.name, flags, dir_fd=parent_fd)
+    except BaseException:
+        os.close(parent_fd)
+        raise
+    expected_stage = candidate.lstat()
+
+    def verify_visible() -> None:
+        held = os.fstat(stage_fd)
+        named = os.stat(candidate.name, dir_fd=parent_fd, follow_symlinks=False)
+        if ((held.st_dev, held.st_ino) != (named.st_dev, named.st_ino)
+                or (held.st_dev, held.st_ino) != (expected_stage.st_dev, expected_stage.st_ino)):
+            raise LoadError("DHCP candidate directory changed")
+
+    published: list[tuple[str, bool]] = []
+    try:
+        try:
+            verify_visible()
+            for name in names:
+                try:
+                    os.stat(f"backup-{name}", dir_fd=stage_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise LoadError(f"DHCP backup name collision: {name}")
+            for name in names:
+                verify_visible()
+                staged = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+                if not stat.S_ISREG(staged.st_mode) or staged.st_nlink != 1:
+                    raise LoadError(f"unsafe DHCP candidate: {name}")
+                try:
+                    previous = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    previous = None
+                if previous is not None and (
+                        not stat.S_ISREG(previous.st_mode) or previous.st_nlink != 1):
+                    raise LoadError(f"unsafe prior DHCP output: {name}")
+                # The private candidate is 0600; the published file keeps the flat mode.
+                mode = stat.S_IMODE(previous.st_mode) if previous is not None else 0o644
+                descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                     dir_fd=stage_fd)
+                try:
+                    if (os.fstat(descriptor).st_dev, os.fstat(descriptor).st_ino) != (
+                            staged.st_dev, staged.st_ino):
+                        raise LoadError(f"DHCP candidate changed before publish: {name}")
+                    os.fchmod(descriptor, mode)
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+                if previous is not None:
+                    os.replace(name, f"backup-{name}", src_dir_fd=parent_fd, dst_dir_fd=stage_fd)
+                try:
+                    os.replace(name, name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+                except BaseException:
+                    if previous is not None:
+                        os.replace(f"backup-{name}", name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+                    raise
+                published.append((name, previous is not None))
+                verify_visible()
+            os.fsync(parent_fd)
+        except BaseException:
+            for name, existed in reversed(published):
+                os.unlink(name, dir_fd=parent_fd)
+                if existed:
+                    os.replace(f"backup-{name}", name, src_dir_fd=stage_fd, dst_dir_fd=parent_fd)
+            os.fsync(parent_fd)
+            raise
+        # Accept: the parent is already committed, so the backups and the candidate go.
+        verify_visible()
+        for name in os.listdir(stage_fd):
+            item = os.stat(name, dir_fd=stage_fd, follow_symlinks=False)
+            if not stat.S_ISREG(item.st_mode) or item.st_nlink != 1:
+                raise LoadError(f"unexpected DHCP stage entry: {name}")
+            os.unlink(name, dir_fd=stage_fd)
+        os.rmdir(candidate.name, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+    finally:
+        os.close(stage_fd)
+        os.close(parent_fd)
+    ok("DHCP 候选已在父 release 提交后发布到 99-output-dhcp，候选目录已删除")
 
 
 def _pinned_generation_payloads(
@@ -23716,6 +23834,10 @@ def main(
                 **({"prepared_selector": json.loads(publication_token["payload"])["body"]["publication_bundle"]["selector"]["staged"]}
                    if publication_token is not None else {}),
             )
+
+        if dhcp_candidate_dir is not None and release_committed and not args.dry_run:
+            failure_phase = "发布已提交的 DHCP 候选"
+            publish_committed_dhcp_candidate(project, dhcp_candidate_dir, switch_scope)
 
         failure_phase = "服务启动门禁"
         section("服务启动门禁")
