@@ -7,8 +7,8 @@
   "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0447",
   "rerun": "re-derive with the O0 serial timing log before any timed comparison (B-6)",
   "runtime_skips": "the suite's only runtime skip site (static AST census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); decorator skips are not listed because the canonical enumeration computes them",
-  "outputs_dependency": "whole-checkout traversals (monitor_writer_quiesce_workflow rglob *.py, test_case_repository os.walk, project_contracts and ztp_monitor_watch_runtime_workflow rglob) scale with the ignored files of the checkout, outputs/ included; the lab weights do not record whether the c09fix tree held outputs/ content (it is empty now), and the S0 lane clones started from a checkout with none (ignored_inventory 0); after http-test outputs/ moved out (2026-10-24) re-derive these modules' weights from a log taken in the same checkout state as the run",
-  "leftover_allowlist": "of the ignored-file shapes S0 lanes and the serial armG run left (611 files, 4 shapes, equal in both) only collector-prefix-feedback-* is reviewed: download-parent-red-* holds *.py the quiesce workflow parses (ROOTCAUSE G4), and .deployment.lock / monitor/.generate-monitor-html.lock are read through product packaging (test_upload_package_contract walks the checkout and asserts the monitor lock is not packaged; serial creates it before that test, its lane may not), so a sharded run needs both lock files to exist in the main checkout beforehand; static census of test_cases/*.py (302 files): no test lists or globs a temporary root, 4 modules traverse the whole checkout; indirect traversal through product code is not exhaustively censused"
+  "outputs_dependency": "the lab weights predate two changes: batch A routes the test-side whole-checkout walks (monitor_writer_quiesce_workflow *.py, test_case_repository test_*.py, project_contracts 02-AIR-devices_config.csv, ztp_monitor_watch_runtime_workflow *.service/*.timer) through governed_tree_paths, which never enters outputs/, .codex* or .agents, and http-test outputs/ moved out of the main tree (2026-10-24); their cost no longer depends on outputs/ content, so the lab weights of those modules may be overestimated; re-derive from a timing log taken on the integrated tree (O0 or a sharded diagnostic run) before any timed comparison",
+  "leftover_allowlist": "of the ignored-file shapes S0 lanes and the serial armG run left (611 files, 4 shapes, equal in both) only collector-prefix-feedback-* is reviewed.  download-parent-red-* stays unreviewed: before batch A the quiesce workflow parsed its *.py (ROOTCAUSE G4); after A no test-side whole-checkout walk enters outputs/, but the runner never accepts *.py/*.sh/*.cgi/*.service/*.timer leftovers anywhere (a rule that predates A), so while the fixture retains them a sharded run refuses the proof (integration finding F6).  .deployment.lock and monitor/.generate-monitor-html.lock are read through product packaging (test_upload_package_contract walks the checkout and asserts the monitor lock is not packaged; serial creates it before that test, its lane may not), so a sharded run needs both lock files to exist in the main checkout beforehand.  Static census of test_cases/*.py: no test lists or globs a temporary root; indirect traversal through product code is not exhaustively censused"
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -44,6 +44,8 @@
     "test_cases.test_control_no_store_workflow",
     "test_cases.test_cumulus_snippet_rendering",
     "test_cases.test_current_exclusive_deployment_lock",
+    "test_cases.test_darwin_lock_kernel_witness",
+    "test_cases.test_darwin_lock_transaction_workflow",
     "test_cases.test_deploy_upload_archive",
     "test_cases.test_deployment_writer_lock",
     "test_cases.test_description_selection_cli",
@@ -384,6 +386,6 @@
   "setUpClass (test_cases.test_private_documentation_contract.PrivateDocumentationContractTests)": "private documentation tier absent in public checkout"
  },
  "leftover_allowlist": {
-  "outputs/test-diagnostics/collector-prefix-feedback-*": "S0 w0 and serial armG: 12 files the feedback discovery permission test deliberately retains (csv, yaml, jsonl, lock, log, json and a suffix-less bin/ssh); no test reads outputs/test-diagnostics except through the whole-checkout traversals (quiesce rglob *.py, test_case_repository os.walk for test_*.py, project_contracts rglob 02-AIR-devices_config.csv, watch runtime rglob *.service/*.timer), which never match these shapes (the runner never accepts those shapes anyway)"
+  "outputs/test-diagnostics/collector-prefix-feedback-*": "S0 w0 and serial armG: 12 files the feedback discovery permission test deliberately retains (csv, yaml, jsonl, lock, log, json and a suffix-less bin/ssh); after batch A no test-side whole-checkout walk enters outputs/ (governed_tree_paths), none of the files has an observed shape (the runner never accepts those anyway), and no test reads outputs/test-diagnostics otherwise"
  }
 }
