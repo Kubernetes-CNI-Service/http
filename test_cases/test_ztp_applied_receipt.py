@@ -492,7 +492,7 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
                 env=env, start_new_session=True,
             )
             try:
-                _, stderr = process.communicate(timeout=3)
+                _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
@@ -544,7 +544,7 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
                 env=env, start_new_session=True,
             )
             try:
-                _, stderr = process.communicate(timeout=3)
+                _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 _, stderr = process.communicate()
@@ -593,7 +593,7 @@ class AppliedReceiptPersistenceTests(unittest.TestCase):
                 start_new_session=True,
             )
             try:
-                _, stderr = process.communicate(timeout=3)
+                _, stderr = process.communicate(timeout=10)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()

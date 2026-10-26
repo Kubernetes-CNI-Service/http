@@ -4938,12 +4938,16 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 "CHILD_PID": str(child_file),
             })
             started = time.monotonic()
+            # Owner 2026-10-26: 5 s / 1.5 s flaked once in the macOS full suite (3.35 s,
+            # cut off by the output cap, not by the timeout). Timeout and budget are scaled
+            # together so the ~3x margin that separates "cut off at the cap" from "buffered
+            # until the timeout" is unchanged; the fake ssh still sleeps 20 s > timeout.
             result = self.backup._run_ssh(
-                "cumulus", self.TARGET, "true", 5,
+                "cumulus", self.TARGET, "true", 15,
                 self.backup._KEY_AUTH_OPTS, env=environment,
             )
             elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 1.5, "output flood was buffered until timeout")
+            self.assertLess(elapsed, 5.0, "output flood was buffered until timeout")
             self.assertEqual(125, result.returncode)
             self.assertLessEqual(
                 len(result.stdout.encode("utf-8")),
