@@ -1,22 +1,49 @@
 {
-  "impact_manifest_sha256": "0ffe53c0b319b295dad03941139fe5f25f6f918444d9640346e0283bc0900062",
+  "full_suite_attestation": {
+    "environment": {
+      "container_toplevel_lock_sha256": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
+      "container_toplevel_versions": [
+        "Jinja2==3.1.6",
+        "openpyxl==3.1.5",
+        "pandas==2.3.3",
+        "PyYAML==6.0.3",
+        "XlsxWriter==3.2.9"
+      ],
+      "machine": "arm64",
+      "platform": "darwin",
+      "python_cache_tag": "cpython-39",
+      "python_executable": "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9",
+      "python_implementation": "CPython",
+      "python_version": [
+        3,
+        9,
+        6
+      ]
+    },
+    "scenario_coverage": {
+      "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
+    },
+    "schema_version": 1,
+    "snapshot_sha256": "41851326a2b51b9164740a9e6cd0e34f737bd0b587c454a3b1de9c191703ebc9"
+  },
+  "impact_manifest_sha256": "ab3739975469e9be7376212f29e9480ae5b6b4e3d2687cb9ccf7a6bf72d149b3",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "aef857531cd4c33b75b361ab0653375fb18d2066c41b1d5f26bcdfb4316d2e02"
+      "sha256": "46908c2e7155c854e87da8db49d1cea263ae71d27e3c504bc96ed7a3d2b83047"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
-      "sha256": "9d8da6b88f995017730e6cf4d849d329f9f0676f8685d6c7de2100ffdd3bc9e3"
+      "sha256": "e732f5a7500179ff011ecf31407bc2ef9e6fa80c0cd19d7db185d1465ceb2683"
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "dc44e5fc3bbe7efce65dde1d55b784fe6b708084e5ce4bdbae7bf63b75038f9a"
+      "sha256": "b04e0ec9ae185c4a03dd70d20e26ee81cc186058d3fbca5ba531382be77064eb"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
-      "sha256": "ac9d61c7ac33f42e11d3e7f40e8f431842b6ce20e926ffbcb37e29c1787f8e86"
+      "sha256": "04d25d76eca44b7ec5262c52218c6305d05721c737bbb901597fe48b08d14b37"
     },
     "DAY0-Prepare/13-unload.py": {
       "canonical": "DAY0-Prepare/13-unload.py",
@@ -24,7 +51,7 @@
     },
     "ethernet/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "a5b26668539ffd40a4ab54c3099be56e7783e592e6df360646092ef2008ea8f2"
+      "sha256": "3b413687fdbb040c6927faa21b6438d7afa29de033093d4225189b83bb81f1e0"
     },
     "ethernet/monitor/post-collect.py": {
       "canonical": "ethernet/monitor/post-collect.py",
@@ -32,11 +59,11 @@
     },
     "ethernet/monitor/sw-info.sh": {
       "canonical": "ethernet/monitor/sw-info.sh",
-      "sha256": "481c30bc6673b2f0cb56ba37c6761488af64fce97557f7c1c5234d41ddbffebb"
+      "sha256": "c6bcd3a88ef064a0eb353da6aa5947e323268d453bbceaf51c65c852ced7be83"
     },
     "ethernet/monitor/sw-link.sh": {
       "canonical": "ethernet/monitor/sw-link.sh",
-      "sha256": "27936d354e759f15067a17cdc2263c9c128121ee3eaf0e6733b6c38db8852922"
+      "sha256": "86d39b2f23ee29cba6b13f419a90c1ee063fc90fc5ab9f7d23c979a4f89b7d2b"
     },
     "infiniband/bringup/ndr/OS-CPLD-upgrade.sh": {
       "canonical": "infiniband/bringup/ndr/OS-CPLD-upgrade.sh",
@@ -46,37 +73,77 @@
       "canonical": "infiniband/bringup/ndr/data-collect-IB.sh",
       "sha256": "8644a62f68b15ed9f4e859048588ed3b99c8eb1abb12664867f4a094bdcedec0"
     },
+    "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py": {
+      "canonical": "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
+      "sha256": "35d0178bfa12841acf7d57cba418f42cadccfc486b06a6c6dd83094e6b5e275b"
+    },
     "infiniband/bringup/xdr-initial-setup/initial-setup.py": {
       "canonical": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-      "sha256": "fbc62cf6836f71e7f6e26c91596074fca139f168a67a69ec1a69401f61830f49"
+      "sha256": "971ae80d3fc59f30fc2cfccbc853a86a263138138ebe2fdf05a746b2b843c65b"
+    },
+    "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh": {
+      "canonical": "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh",
+      "sha256": "af00db39f5cfeda342f15e197dc69fb2208e9b01afa29cb982d15d1f50250bed"
+    },
+    "infiniband/bringup/xdr-upgrade/upgrade-component.sh": {
+      "canonical": "infiniband/bringup/xdr-upgrade/upgrade-component.sh",
+      "sha256": "53de009cb6031d2892b631475797c64238bff0599d8c062214b33107ee3cbc5f"
+    },
+    "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh": {
+      "canonical": "infiniband/bringup/xdr-upgrade/upgrade-owned-runner.sh",
+      "sha256": "cb9cc7d68fda9e24972e6335e58e5c6fa196e8d685532d949b78e290e654e1e2"
+    },
+    "infiniband/bringup/xdr-upgrade/upgrade.py": {
+      "canonical": "infiniband/bringup/xdr-upgrade/upgrade.py",
+      "sha256": "437ad6b44bfb3a43f5d9d4bf894775a32d4431219a4a55017318613a6c1432c2"
     },
     "infiniband/bringup/xdr-upgrade/upgrade.sh": {
       "canonical": "infiniband/bringup/xdr-upgrade/upgrade.sh",
-      "sha256": "6901850a245a7d4e5c1746bedc83b41b81381a764f9bfcc1b0992ce0e5b83cdf"
+      "sha256": "0ddbbf01f920bb3f4d6dcd9406083c8ca407d8edba94aad49669b8bb36899e65"
+    },
+    "infiniband/bringup/xdr-upgrade/upgrade2.py": {
+      "canonical": "infiniband/bringup/xdr-upgrade/upgrade2.py",
+      "sha256": "a8995fd2bb11169ac09587fef4546a39cd9723ae39b22ffd8a53c6b97bf42334"
     },
     "infiniband/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "a5b26668539ffd40a4ab54c3099be56e7783e592e6df360646092ef2008ea8f2"
+      "sha256": "3b413687fdbb040c6927faa21b6438d7afa29de033093d4225189b83bb81f1e0"
+    },
+    "infiniband/monitor/post-collect.py": {
+      "canonical": "infiniband/monitor/post-collect.py",
+      "sha256": "73280b702370397aecad35f5260ccd4a5b36562b61bdd2b4a77184fcac7867bf"
     },
     "infiniband/monitor/sw-info.sh": {
       "canonical": "ethernet/monitor/sw-info.sh",
-      "sha256": "481c30bc6673b2f0cb56ba37c6761488af64fce97557f7c1c5234d41ddbffebb"
+      "sha256": "c6bcd3a88ef064a0eb353da6aa5947e323268d453bbceaf51c65c852ced7be83"
     },
     "infiniband/monitor/sw-link.sh": {
       "canonical": "ethernet/monitor/sw-link.sh",
-      "sha256": "27936d354e759f15067a17cdc2263c9c128121ee3eaf0e6733b6c38db8852922"
+      "sha256": "86d39b2f23ee29cba6b13f419a90c1ee063fc90fc5ab9f7d23c979a4f89b7d2b"
+    },
+    "infiniband/monitor/ufm-ibdiagnet.sh": {
+      "canonical": "infiniband/monitor/ufm-ibdiagnet.sh",
+      "sha256": "7db99cc4758a80f488c19c6ae1129ca6d288b3af4730ff6fe94e6a0c5ed56441"
+    },
+    "infiniband/monitor/ufm-info.sh": {
+      "canonical": "infiniband/monitor/ufm-info.sh",
+      "sha256": "2bbe4bfc847b38830bc4aeb3c66c760aaf1861ad4c5f1b8c2005aad0dfa7730f"
     },
     "infra/check_infra.py": {
       "canonical": "infra/check_infra.py",
-      "sha256": "db32e9c87cd91338d60ef54e90bd4758d362c38b0ff04b9282033593dfd9e1f0"
+      "sha256": "ab9442213f0089ee59e07265b566219f3fe61159dec1f93d134e9102da9eea51"
     },
     "infra/deploy_infra.py": {
       "canonical": "infra/deploy_infra.py",
-      "sha256": "56857d96cc4cb037bf9a14b1630f93c68a22689bbe19233348402e66c4323661"
+      "sha256": "041a11692d5082ff1d1d5b86a259d2873c9a3fd0e0bd639168ccddc32c4d55a6"
+    },
+    "infra/deps.py": {
+      "canonical": "infra/deps.py",
+      "sha256": "846bcdeaebaacddfdf4d6a310e4d9cd857ba9a6ea6efe02878ac55aceedc922d"
     },
     "infra/docker/activate.py": {
       "canonical": "infra/docker/activate.py",
-      "sha256": "f2989c377b432346c31f12461a06a00cbb9747d3ac6ea07485ec2c591761052b"
+      "sha256": "a61b30e478b4dea66056a3653e938aae4b0fcd7fa1426c8263c63b1b9ab1253f"
     },
     "infra/docker/deploy.sh": {
       "canonical": "infra/docker/deploy.sh",
@@ -102,29 +169,33 @@
       "canonical": "infra/docker/management_ssh_key.py",
       "sha256": "0daca1bbfbad4dee2720bb6bdb175c837e7e6a34ebd0a1e063b56a28dc9edc30"
     },
+    "infra/infra-setup.py": {
+      "canonical": "infra/infra-setup.py",
+      "sha256": "71d4e9767d0a245d210b73aafe9b024bf67c896eb5522353d5a2904e07aeca99"
+    },
     "infra/infra-setup.sh": {
       "canonical": "infra/infra-setup.sh",
       "sha256": "31103b34a5701a07b7f8047a4a1cea44dc5bd28980ac1b96c0696411941d3fcf"
     },
     "infra/infra-teardown.sh": {
       "canonical": "infra/infra-teardown.sh",
-      "sha256": "faf473d86c563116a77a879fed433a8136fd735777aa0f70b5ca8d9628283e6f"
+      "sha256": "d8a9c9b8ba28d459b06da7a196c2ca8b5d99091bf9b6fe233f5beabdbff38099"
+    },
+    "infra/ubuntu24_host.py": {
+      "canonical": "infra/ubuntu24_host.py",
+      "sha256": "9fffd8c75cb09ce76a517c94943fe69f4f30aa283b4671a43cc9b041116be864"
     },
     "infra/ufm_jump_transport.py": {
       "canonical": "infra/ufm_jump_transport.py",
-      "sha256": "13f27515374a5d01f96367ec7f0a7a1aa3c68ae33100c2b5c1b536cd4d0af5e6"
+      "sha256": "edca08e2eb0c5811a258dae93cec53a6813b75a37c5087f0abdddcfc0d6575a8"
     },
-    "monitor/collection_ib_cycle_binding.py": {
-      "canonical": "monitor/collection_ib_cycle_binding.py",
-      "sha256": "9286f90ddd874179fe5cf70e1e5f86d0f9e9d8c9b1914971f898d68479db4ca7"
-    },
-    "monitor/collection_ib_producer.py": {
-      "canonical": "monitor/collection_ib_producer.py",
-      "sha256": "a594a96b42ec2feb0caf00d1b4150c06914d90fa6caa787b4a719763037b129f"
+    "monitor/collection_ufm_run_binding.py": {
+      "canonical": "monitor/collection_ufm_run_binding.py",
+      "sha256": "874417691e00e1b97e0437acf21125bf91afed4d9626a2e697ae73e2bc637dc1"
     },
     "monitor/collection_v2_emitter.py": {
       "canonical": "monitor/collection_v2_emitter.py",
-      "sha256": "c22c9c289c964d50fb20cfd3dc876c38dc291ec51dcbe38541f8efe1ff7e7839"
+      "sha256": "6ed318dee9a44be9ba12a5defe23afbc6befed10ecc1e14821c612cf22f38fdd"
     },
     "monitor/dot_to_html.py": {
       "canonical": "monitor/dot_to_html.py",
@@ -132,227 +203,43 @@
     },
     "monitor/generate-monitor-html.py": {
       "canonical": "monitor/generate-monitor-html.py",
-      "sha256": "8123a474fba65cd64e0ae4616139740c543c5fc951654cec6b18d8ba997d874c"
+      "sha256": "9069b2e89cb2baf49e158d2345015b0125ddf36a35a82f42fe5fc4b8d87924c6"
     },
-    "monitor/issue-tracker-control.cgi": {
-      "canonical": "monitor/issue-tracker-control.cgi",
-      "sha256": "7f5074d5f2ce7b3372050fee26a671d07cc80fbcc9b08dc3ff50b43748786609"
+    "monitor/issue-tracker/cabletracker/cabletracker_runner.py": {
+      "canonical": "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
+      "sha256": "3ae523fa8d3cecd2af387a1b57188a036cee807e52ac12e2f7dc194a11ac8f00"
+    },
+    "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py": {
+      "canonical": "monitor/issue-tracker/cabletracker/ibdiagnet/__init__.py",
+      "sha256": "6f626ffc9882ef74a66a34db0979249b4d10eb102aafab264653d0d1689088ad"
+    },
+    "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py": {
+      "canonical": "monitor/issue-tracker/cabletracker/ibdiagnet/generate_report.py",
+      "sha256": "58abe6c983d3372d26f79c3f75a04930bdb596cd0dd0f98c4aaa0df8c5978e5d"
+    },
+    "monitor/issue-tracker/format_precheck.py": {
+      "canonical": "monitor/issue-tracker/format_precheck.py",
+      "sha256": "fbb28528f302f4b91b5c12147b5cedd38a03e88d89fbd364da007b0df3977f75"
+    },
+    "monitor/issue-tracker/issue-tracker-sync.py": {
+      "canonical": "monitor/issue-tracker/issue-tracker-sync.py",
+      "sha256": "ee85395ea0612eb7ef3b32d94aa5f82a7d7aca3dce22c1ab47afd8b0b82164ed"
+    },
+    "monitor/issue-tracker/switch-status.py": {
+      "canonical": "monitor/issue-tracker/switch-status.py",
+      "sha256": "4a5e70db7d9551d217af15d16d136f790b2fb6e53f2e207b5a97419e837c2d9e"
+    },
+    "monitor/issue-tracker/update-engine.py": {
+      "canonical": "monitor/issue-tracker/update-engine.py",
+      "sha256": "58c21c64bca485583209447cef06b38083e1dc4da45edc084f7bf533e1232259"
     },
     "monitor/issue_tracker_activity_source.py": {
       "canonical": "monitor/issue_tracker_activity_source.py",
       "sha256": "60be694026b9ae8b080fafa0a5c2392e794f8b2f415cfcdef2019f2162a734b7"
     },
-    "monitor/issue_tracker_admission.py": {
-      "canonical": "monitor/issue_tracker_admission.py",
-      "sha256": "e989a4975e1203c107d4a4fc195059d7f8ee81eb56ff041f891e8607304ed798"
-    },
-    "monitor/issue_tracker_attempt_journal.py": {
-      "canonical": "monitor/issue_tracker_attempt_journal.py",
-      "sha256": "983772f3a0088c3bfa763a2ddc5520a6ce8578e6d7c40576d64d2c57acbea0c4"
-    },
-    "monitor/issue_tracker_attempt_supervision.py": {
-      "canonical": "monitor/issue_tracker_attempt_supervision.py",
-      "sha256": "26c2de9c436fe1b2ea4e9c1f5aef96586d387e79b26d144416cabecb333dabf1"
-    },
-    "monitor/issue_tracker_credential_shape.py": {
-      "canonical": "monitor/issue_tracker_credential_shape.py",
-      "sha256": "72b95d1e17058c18d088cce365c3de004192c6dff82b541f960d38f806ee3ecc"
-    },
     "monitor/issue_tracker_cycle_source.py": {
       "canonical": "monitor/issue_tracker_cycle_source.py",
-      "sha256": "f0f5036c612bfb73c576cb641ba576a57dbc72289e66b3b06a3c854d9cd1bda6"
-    },
-    "monitor/issue_tracker_enrollment_journal.py": {
-      "canonical": "monitor/issue_tracker_enrollment_journal.py",
-      "sha256": "ec98405a6c8ee5e065b3e404cc226f8d2f970370baa54f5b8c6f36ecc0984b6b"
-    },
-    "monitor/issue_tracker_global_attempt_journal.py": {
-      "canonical": "monitor/issue_tracker_global_attempt_journal.py",
-      "sha256": "d5e688467c813723cdfb3717748fb8a9d95025dbe773140f6264bd9bd819e81d"
-    },
-    "monitor/issue_tracker_history_preread_journal.py": {
-      "canonical": "monitor/issue_tracker_history_preread_journal.py",
-      "sha256": "fddb4328f0fb4f8d6021de5d50330f6dde26ee27c5249bcdb0b222124846cb7f"
-    },
-    "monitor/issue_tracker_history_read_launcher.py": {
-      "canonical": "monitor/issue_tracker_history_read_launcher.py",
-      "sha256": "d9b675d91059b87d2507acac5187395dce176bf260893325aa4ba14e6cb78e17"
-    },
-    "monitor/issue_tracker_ib_per_key_source.py": {
-      "canonical": "monitor/issue_tracker_ib_per_key_source.py",
-      "sha256": "42558bdaefeef8a5feb2201be1eafa4835e448c56e216355af94be2c174ec30a"
-    },
-    "monitor/issue_tracker_ib_runtime.py": {
-      "canonical": "monitor/issue_tracker_ib_runtime.py",
-      "sha256": "bc15cc5c695b40f83bfefd7126e73370576d430ed0f23bd330e127c962e6535e"
-    },
-    "monitor/issue_tracker_k_chain.py": {
-      "canonical": "monitor/issue_tracker_k_chain.py",
-      "sha256": "6abe3640be14280554d32246a993475567ee958ed3e4c1d4809050fbb84b1ded"
-    },
-    "monitor/issue_tracker_k_store.py": {
-      "canonical": "monitor/issue_tracker_k_store.py",
-      "sha256": "dd7df8c0b49e269ced8b0dbddf1148a03ea8a42022e44e65d6c5e48f7743a087"
-    },
-    "monitor/issue_tracker_local_commit.py": {
-      "canonical": "monitor/issue_tracker_local_commit.py",
-      "sha256": "f51944e572d443370e7a1878bf136622a4999e1fc778b5b2618445fae122a42b"
-    },
-    "monitor/issue_tracker_local_recovery.py": {
-      "canonical": "monitor/issue_tracker_local_recovery.py",
-      "sha256": "d62526eee6f02857e288bbac61792b8d8b4f25a2fe973082d8a7bf8a454ec56e"
-    },
-    "monitor/issue_tracker_local_workbook.py": {
-      "canonical": "monitor/issue_tracker_local_workbook.py",
-      "sha256": "08a4c706897aa6facef7d9ca80918dbcfae6eee762cefedecc9af0ca39532659"
-    },
-    "monitor/issue_tracker_local_workbook_commit.py": {
-      "canonical": "monitor/issue_tracker_local_workbook_commit.py",
-      "sha256": "0e1c45ce6e2cd9ed462d361a4c3922da8860da3cce37df2d2604138bafa1f81c"
-    },
-    "monitor/issue_tracker_manifest.py": {
-      "canonical": "monitor/issue_tracker_manifest.py",
-      "sha256": "7e91557b9faf3ad7605942c2dc91859e650651975df3d8b5d1696f0e57baae5d"
-    },
-    "monitor/issue_tracker_manual_channel.py": {
-      "canonical": "monitor/issue_tracker_manual_channel.py",
-      "sha256": "935730503e4166512a777b2ac4a4c75d8c41dffb8bf280e317bae67b0bc55f48"
-    },
-    "monitor/issue_tracker_manual_listener.py": {
-      "canonical": "monitor/issue_tracker_manual_listener.py",
-      "sha256": "ef01486cab2ab123f57817fa5b5d8495a4ba472a85dab38be544183d3cb000ef"
-    },
-    "monitor/issue_tracker_manual_preview.py": {
-      "canonical": "monitor/issue_tracker_manual_preview.py",
-      "sha256": "61311daeb25c2010a01439b3b165dc78962671207fbdd79bbe4e60b5aff14e2e"
-    },
-    "monitor/issue_tracker_metadata_capacity.py": {
-      "canonical": "monitor/issue_tracker_metadata_capacity.py",
-      "sha256": "fe4dd2d4cf9cb35d547b585d0ecedba34e88afcf5fdd3f89dbcbab8402548a76"
-    },
-    "monitor/issue_tracker_metadata_reservation.py": {
-      "canonical": "monitor/issue_tracker_metadata_reservation.py",
-      "sha256": "b729f0c040c6fb0bf1a3372b74a44b3716ece1aed2107442f95171f4fc02d21c"
-    },
-    "monitor/issue_tracker_mutation_launcher.py": {
-      "canonical": "monitor/issue_tracker_mutation_launcher.py",
-      "sha256": "e771aa41b86cae74e0ccccb7a419e97910bdc89982c0631574754c78f8611c8d"
-    },
-    "monitor/issue_tracker_mutation_rejection.py": {
-      "canonical": "monitor/issue_tracker_mutation_rejection.py",
-      "sha256": "df96b11973ee7b244bd9cf4af5e1bc924e0aafc8c46008a6723962de41df344b"
-    },
-    "monitor/issue_tracker_nv_reservation.py": {
-      "canonical": "monitor/issue_tracker_nv_reservation.py",
-      "sha256": "2a6dc591e798ada8b7c95a166f3d50ecf78feee2e23284c39c84cdeec500857e"
-    },
-    "monitor/issue_tracker_online_cells.py": {
-      "canonical": "monitor/issue_tracker_online_cells.py",
-      "sha256": "7fe545202419f674212d22629a57ac7086a78a77df6f1f197c247c7c76cb3eaa"
-    },
-    "monitor/issue_tracker_online_nv_ids.py": {
-      "canonical": "monitor/issue_tracker_online_nv_ids.py",
-      "sha256": "6ffbeeb3dde85bdf455ee27ad8bc60e06259bfa837b4debc42ddf9202f0a972a"
-    },
-    "monitor/issue_tracker_online_rows.py": {
-      "canonical": "monitor/issue_tracker_online_rows.py",
-      "sha256": "cb2ba07d95115ea6786a5702a9c92087afd3d7c469fdc7185aef68784bb3493e"
-    },
-    "monitor/issue_tracker_online_target.py": {
-      "canonical": "monitor/issue_tracker_online_target.py",
-      "sha256": "dab8bd001cfcdb974442e0440533cd282355b53bfe6273d27bcecb356370b14d"
-    },
-    "monitor/issue_tracker_online_whitelist_read.py": {
-      "canonical": "monitor/issue_tracker_online_whitelist_read.py",
-      "sha256": "f0c4403d9ad6d01b2468a7b9ff35dd8d0de91f2b3242001d76f2a5994a5643c9"
-    },
-    "monitor/issue_tracker_per_key_source.py": {
-      "canonical": "monitor/issue_tracker_per_key_source.py",
-      "sha256": "a201c4dcccd05c2a6736309a8dc0ea692e2313ff794f984f7437eab12af78579"
-    },
-    "monitor/issue_tracker_publish_runtime.py": {
-      "canonical": "monitor/issue_tracker_publish_runtime.py",
-      "sha256": "398d6bcec4f09bf6a4ef30bf3f4f5e7a73f75eef20ce3ef2e0e1e5604eb9d0a7"
-    },
-    "monitor/issue_tracker_qualification.py": {
-      "canonical": "monitor/issue_tracker_qualification.py",
-      "sha256": "13b97a35b9f4c0bec554a9590e9f11437972de2bb299d242bd96efaec87a0256"
-    },
-    "monitor/issue_tracker_receipt_snapshot.py": {
-      "canonical": "monitor/issue_tracker_receipt_snapshot.py",
-      "sha256": "20ca3de8684a7583256c68123f0c5af49a3fd8781b439a6f62cb2b1c011c670d"
-    },
-    "monitor/issue_tracker_remote_history_match.py": {
-      "canonical": "monitor/issue_tracker_remote_history_match.py",
-      "sha256": "996eec698f71c2ce22f4fb4f61d879c88917c1b8cc26b44de6274c9eb7117b24"
-    },
-    "monitor/issue_tracker_sdk_authentication.py": {
-      "canonical": "monitor/issue_tracker_sdk_authentication.py",
-      "sha256": "12a575cf27de276c764c66a465f12ad3617e4a697923c98c66e50739046dfef8"
-    },
-    "monitor/issue_tracker_send_intent.py": {
-      "canonical": "monitor/issue_tracker_send_intent.py",
-      "sha256": "ad5ae5911ec29ff8273ddb9c7646ac0e44d66429d4f6c3156050d8beae641a06"
-    },
-    "monitor/issue_tracker_send_unit.py": {
-      "canonical": "monitor/issue_tracker_send_unit.py",
-      "sha256": "7de3c0d17aa1b82dd88b746dce141f1a6d521e6598c89556646179c4e38085f5"
-    },
-    "monitor/issue_tracker_settings_audit_allocation.py": {
-      "canonical": "monitor/issue_tracker_settings_audit_allocation.py",
-      "sha256": "6f3f054658657d7859a6c4fddc57adb6ed9b0492f8544deeabd9f770ce384a0e"
-    },
-    "monitor/issue_tracker_sheets_read_decode.py": {
-      "canonical": "monitor/issue_tracker_sheets_read_decode.py",
-      "sha256": "a7d7824588dea8a18c51d4dffcf3979a26cbb142c6e945d1069d2f2983d8325b"
-    },
-    "monitor/issue_tracker_sheets_read_plan.py": {
-      "canonical": "monitor/issue_tracker_sheets_read_plan.py",
-      "sha256": "23f028742c56fdc6f74a6de905770d9f7aafc28ba774ffc4d006f99870b37aa9"
-    },
-    "monitor/issue_tracker_spreadsheet_owner.py": {
-      "canonical": "monitor/issue_tracker_spreadsheet_owner.py",
-      "sha256": "01f59f98bad2b21636b92858de3125ca3d8f3a1675feeeba4a232549d867f0c1"
-    },
-    "monitor/issue_tracker_stage_l_consumer.py": {
-      "canonical": "monitor/issue_tracker_stage_l_consumer.py",
-      "sha256": "20233dd3409cf4fe446f25f67b6515da934be2838e3142ee713c1d6b6b08834f"
-    },
-    "monitor/issue_tracker_state_owner.py": {
-      "canonical": "monitor/issue_tracker_state_owner.py",
-      "sha256": "4e31cbcd1a468d92a22aa588ee2e3d590942b70e6c723a94707baf04710db62a"
-    },
-    "monitor/issue_tracker_switch_info_source.py": {
-      "canonical": "monitor/issue_tracker_switch_info_source.py",
-      "sha256": "9d8d3d3c9085557d630625b61fba35e8f323c100322df556e3541a5423bbe531"
-    },
-    "monitor/issue_tracker_switch_per_key_source.py": {
-      "canonical": "monitor/issue_tracker_switch_per_key_source.py",
-      "sha256": "e19c1f8a82b272bd7dfce55db06852a12bef9e374762ca61d64876d160706131"
-    },
-    "monitor/issue_tracker_switch_runtime.py": {
-      "canonical": "monitor/issue_tracker_switch_runtime.py",
-      "sha256": "b356c9101036af26b24cb631b70e4f4cc1c43bbae6d5fb53fbd4a0486615227a"
-    },
-    "monitor/issue_tracker_tls_inputs.py": {
-      "canonical": "monitor/issue_tracker_tls_inputs.py",
-      "sha256": "21bc7fb2e3f99417322590dd6b7e069459ea7f1f4f8519e905ef5d2c0a90efe9"
-    },
-    "monitor/issue_tracker_token_launcher.py": {
-      "canonical": "monitor/issue_tracker_token_launcher.py",
-      "sha256": "40c4d51319f617cf963a09dca42ece59ef414e3da451f1ecec8c139fcb254e50"
-    },
-    "monitor/issue_tracker_topology_derivation.py": {
-      "canonical": "monitor/issue_tracker_topology_derivation.py",
-      "sha256": "3b9bfd8b70f71b4f6e8e4a43ee3fa2d08a3569f94db0201a8b90dc4258b89805"
-    },
-    "monitor/issue_tracker_whitelist.py": {
-      "canonical": "monitor/issue_tracker_whitelist.py",
-      "sha256": "d3b185673927205360444ac18dffc0e7c3a16279d20fd918a643c7a90f1d393e"
-    },
-    "monitor/issue_tracker_whitelist_workbook.py": {
-      "canonical": "monitor/issue_tracker_whitelist_workbook.py",
-      "sha256": "33c699bc99fada2ffbb1d3cdf0b23b72afc690188e3f31dec129df26e12d03fe"
+      "sha256": "3c2419cc326150df5fe047ad8ffcb25c3492c77aeac449d30a315b9845ecf793"
     },
     "monitor/manual-ztp-control.cgi": {
       "canonical": "monitor/manual-ztp-control.cgi",
@@ -368,7 +255,7 @@
     },
     "monitor/switch-collection-worker.py": {
       "canonical": "monitor/switch-collection-worker.py",
-      "sha256": "352a72ab31a68a50160d3ae50c4a30b58826eff8c6e45699806ab57cb3ffd9a1"
+      "sha256": "a87a00c6ecd60cdee1b00692c973af3b2420f4a40b35d09de0ed23abc5585f4c"
     },
     "monitor/switch_collection_gate.py": {
       "canonical": "monitor/switch_collection_gate.py",
@@ -380,23 +267,27 @@
     },
     "nvlink/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "a5b26668539ffd40a4ab54c3099be56e7783e592e6df360646092ef2008ea8f2"
+      "sha256": "3b413687fdbb040c6927faa21b6438d7afa29de033093d4225189b83bb81f1e0"
     },
     "nvlink/monitor/sw-info.sh": {
       "canonical": "ethernet/monitor/sw-info.sh",
-      "sha256": "481c30bc6673b2f0cb56ba37c6761488af64fce97557f7c1c5234d41ddbffebb"
+      "sha256": "c6bcd3a88ef064a0eb353da6aa5947e323268d453bbceaf51c65c852ced7be83"
     },
     "nvlink/monitor/sw-link.sh": {
       "canonical": "ethernet/monitor/sw-link.sh",
-      "sha256": "27936d354e759f15067a17cdc2263c9c128121ee3eaf0e6733b6c38db8852922"
+      "sha256": "86d39b2f23ee29cba6b13f419a90c1ee063fc90fc5ab9f7d23c979a4f89b7d2b"
     },
     "tools/_package_common.py": {
       "canonical": "tools/_package_common.py",
-      "sha256": "6c18ed4e01bf7b0a04e338f67494910d42651f54d097171e28d804319f8a5290"
+      "sha256": "a3c55bfe13a831d75e01516cbb238c44eb756166005a49c78adf76705b73e2ef"
     },
     "tools/collect-ztp-diagnostics.py": {
       "canonical": "tools/collect-ztp-diagnostics.py",
-      "sha256": "ab94d26f8d9e885d66efa60e236fa59e4b214d7bd72992970f5136393a2839dc"
+      "sha256": "0bcd08688903b8b139f210022e4f3fa7ebf36a2f76ae4e0dfdcb45e087bc2cd6"
+    },
+    "tools/collection_archive.py": {
+      "canonical": "tools/collection_archive.py",
+      "sha256": "efa177c0b00e168a403e34fbc58d478a34c6a9f0f40b8677da86b4e81ea0a17d"
     },
     "tools/control-auth.py": {
       "canonical": "tools/control-auth.py",
@@ -416,7 +307,11 @@
     },
     "tools/deployment_prewrite_guard.py": {
       "canonical": "tools/deployment_prewrite_guard.py",
-      "sha256": "46af60b5b4ed3c3df6e3ad0f0a0b1fee5c8af60ceea8c6e60e08de5580481256"
+      "sha256": "0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33"
+    },
+    "tools/f01_ssh_dependency_identity.py": {
+      "canonical": "tools/f01_ssh_dependency_identity.py",
+      "sha256": "18c7360c24e0a8a4efea6053873faf7e4ee9a9cc3ef8bbb65c34dc12eee561f4"
     },
     "tools/finish-project.py": {
       "canonical": "tools/finish-project.py",
@@ -429,6 +324,30 @@
     "tools/finished_project_state.py": {
       "canonical": "tools/finished_project_state.py",
       "sha256": "66095b52eb2af34b7a6686cdc7f1d1a628fd2984d9181d01e1964a445ded105a"
+    },
+    "tools/fleet_distribution.py": {
+      "canonical": "tools/fleet_distribution.py",
+      "sha256": "dfd1c3525e809cb8d94e2807d8031d824193ecc7d7fa21d5152b148c549e8903"
+    },
+    "tools/fleet_engine.py": {
+      "canonical": "tools/fleet_engine.py",
+      "sha256": "0154e331cd12f5dccef607600fe16c9829f157b7d974c994b63b70f2e9ce4d66"
+    },
+    "tools/fleet_fetch_helper.py": {
+      "canonical": "tools/fleet_fetch_helper.py",
+      "sha256": "ec41c9531fe562e8cdfb00d99092c64ed9bb5653b358c82949ea3a7548ca0630"
+    },
+    "tools/fleet_link.py": {
+      "canonical": "tools/fleet_link.py",
+      "sha256": "a6e505ad684e465024686a2a60d333cb33759e86d0c460f2a9d397775ebf7b79"
+    },
+    "tools/fleet_probe.py": {
+      "canonical": "tools/fleet_probe.py",
+      "sha256": "37602e669309a55ab327ab6373acb7e5e16ac70b820ebc95c8ee5caa79cd3921"
+    },
+    "tools/fleet_ssh.py": {
+      "canonical": "tools/fleet_ssh.py",
+      "sha256": "d388e61aa21a06f82309abc5871ac395fd0f1aaf75dcf19451e02ff076ce091b"
     },
     "tools/generation_report.py": {
       "canonical": "tools/generation_report.py",
@@ -514,6 +433,10 @@
       "canonical": "tools/ib-tool-Jie/ib_tool_box/scripts/validate_ib_topology.py",
       "sha256": "e15fcd5d35be28da00bd460c5973103815ff77dd516001a7bdc2e1cff3485717"
     },
+    "tools/ib_bringup_runtime_guard.py": {
+      "canonical": "tools/ib_bringup_runtime_guard.py",
+      "sha256": "f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594"
+    },
     "tools/ibdiagnet-analyze-tool/analyze.py": {
       "canonical": "tools/ibdiagnet-analyze-tool/analyze.py",
       "sha256": "844ca68c190d259791591b8e93df588aff543e8600cfd978a403e7fb24be1d51"
@@ -576,7 +499,7 @@
     },
     "tools/ibdiagnet-analyze-tool/lib/topology.py": {
       "canonical": "tools/ibdiagnet-analyze-tool/lib/topology.py",
-      "sha256": "b942be213421fbdda2f2e3e76f30a2e5917c06d3c268621c2ac00c6fe6e04a8d"
+      "sha256": "7e727cd5edc1c08bc5994a09b279733eddd6795dd5ba7b20b790dd2214f9e303"
     },
     "tools/ibdiagnet-analyze-tool/scripts/check_hca_ooo_sl_mask.py": {
       "canonical": "tools/ibdiagnet-analyze-tool/scripts/check_hca_ooo_sl_mask.py",
@@ -610,17 +533,65 @@
       "canonical": "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py",
       "sha256": "e2aa5255883de1c98deb21b608721dc0d8a286a349b874b6da4321f595d1f1db"
     },
+    "tools/ibsw_upgrade_access.py": {
+      "canonical": "tools/ibsw_upgrade_access.py",
+      "sha256": "67eb3f6f30ab347e2860905dc1ac42e34acb8929074ce64975781b8f5e295858"
+    },
+    "tools/ibsw_upgrade_component.py": {
+      "canonical": "tools/ibsw_upgrade_component.py",
+      "sha256": "95339d60968b36ccf6139e0349d0e0cdfcd8a0d5829c7039b4e41852c817795d"
+    },
+    "tools/ibsw_upgrade_contract.py": {
+      "canonical": "tools/ibsw_upgrade_contract.py",
+      "sha256": "e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b"
+    },
+    "tools/ibsw_upgrade_driver.py": {
+      "canonical": "tools/ibsw_upgrade_driver.py",
+      "sha256": "374d552c1c9c0bee6b83977fd1665b3b5102c7f64e85f3695d17d1b708ad595a"
+    },
+    "tools/ibsw_upgrade_executor.py": {
+      "canonical": "tools/ibsw_upgrade_executor.py",
+      "sha256": "6edf4f6655a6b18e137f5447abe36999eddbcf80000a6b1c47dbe771baab022e"
+    },
+    "tools/ibsw_upgrade_inputs.py": {
+      "canonical": "tools/ibsw_upgrade_inputs.py",
+      "sha256": "75c700e576b9fb6bd8ce5a117aa2f0c0f6e7ea96f9a1a12bc973ef814a13cbae"
+    },
+    "tools/ibsw_upgrade_observer.py": {
+      "canonical": "tools/ibsw_upgrade_observer.py",
+      "sha256": "46614501ad84e3d0d6b98fa83c9671df55431ee64e3e31901159152e5e67ece9"
+    },
+    "tools/ibsw_upgrade_pipeline.py": {
+      "canonical": "tools/ibsw_upgrade_pipeline.py",
+      "sha256": "38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb"
+    },
+    "tools/ibsw_upgrade_schedule.py": {
+      "canonical": "tools/ibsw_upgrade_schedule.py",
+      "sha256": "547f957b99e7df2c8d1dfe682e501a37c31cf03e601f86564135d9bc3a287fb2"
+    },
+    "tools/ibsw_upgrade_scp.py": {
+      "canonical": "tools/ibsw_upgrade_scp.py",
+      "sha256": "685cae25a02fae9cb447528c7a5e57abd3dc459f3247f9b5c5015662af7536d1"
+    },
+    "tools/ibsw_v2_device.py": {
+      "canonical": "tools/ibsw_v2_device.py",
+      "sha256": "ce088eb346faa6b494264f0d6254daee36fc0714ac708213c992a6a2848aa8ca"
+    },
     "tools/import-from-download.py": {
       "canonical": "tools/import-from-download.py",
       "sha256": "c1b1d5efcbcbf18b386e6bd06fd1fd48866a2ced2a5cb2bc56f927efb5231c09"
     },
     "tools/lldp-analyze-tool/analyze_lldp.py": {
       "canonical": "tools/lldp-analyze-tool/analyze_lldp.py",
-      "sha256": "a94ad812b62ddb3e10040df02b2a6db9d3f61ff0833ed8d5dfa0697d5e10db1f"
+      "sha256": "b5c3c7478a7efb2a0eee657999ecc4e270ccd68f86545104b1739016fd6f580c"
     },
     "tools/lldp-analyze-tool/build_report.py": {
       "canonical": "tools/lldp-analyze-tool/build_report.py",
       "sha256": "91d3b7b08fa3fa3dc5262de6841e6020842ed69d7f083c84a0e97af7aa9c7bbd"
+    },
+    "tools/log_rotation.py": {
+      "canonical": "tools/log_rotation.py",
+      "sha256": "a3d314bbe30be4711dcca3f5b9eb720154b710c4d9c4405c2ea4fddfc63c02fd"
     },
     "tools/package-project-image.py": {
       "canonical": "tools/package-project-image.py",
@@ -636,15 +607,11 @@
     },
     "tools/project_contract.py": {
       "canonical": "tools/project_contract.py",
-      "sha256": "0be8bc579e1603a4b17992bf7fe91c2a2b76dc0997938a8a435f5c4ea50ce749"
+      "sha256": "cff03898c923d83989ebb3677b079392f68e1e7559b00afdbf79ea3f700febb6"
     },
     "tools/rehydrate-finished.py": {
       "canonical": "tools/rehydrate-finished.py",
       "sha256": "c42af207984d8f0239a995134a481af94b616b13e3c0ab526e526328aa3230a1"
-    },
-    "tools/req7_dependency_contract.py": {
-      "canonical": "tools/req7_dependency_contract.py",
-      "sha256": "fbc452a6e356b4130c52900714ce5f3fd6c1f2caccef3a88d03e846515d0802a"
     },
     "tools/ssh_key_preparation.py": {
       "canonical": "tools/ssh_key_preparation.py",
@@ -652,7 +619,7 @@
     },
     "tools/sync-code.py": {
       "canonical": "tools/sync-code.py",
-      "sha256": "1cbab1b99fbca7559f5c52e0056df50f5eb3ec28e3730fcb57d230a0933cbe12"
+      "sha256": "451b77e6af98b262eb3ee457b0608e06ab252d86034a866da25052637723236b"
     },
     "tools/tar-for-download.py": {
       "canonical": "tools/tar-for-download.py",
@@ -660,35 +627,51 @@
     },
     "tools/tar-for-upload.py": {
       "canonical": "tools/tar-for-upload.py",
-      "sha256": "413b435c45e29cd5054e22ad156c4c72cecba37491b2b5f43486ec7537c52698"
+      "sha256": "d6590fef07ff591030f1ca43d9abe33b67597153a7e2672d3861801d15c209d6"
     },
     "tools/ufm-discover.py": {
       "canonical": "tools/ufm-discover.py",
       "sha256": "584dfa275cb40e81354591e5043a9f895a5b5886deedabe4dbea9639806a0405"
     },
-    "tools/ufm_collection_agent.py": {
-      "canonical": "tools/ufm_collection_agent.py",
-      "sha256": "1ae442354f3cfec51741b142bb04ad0a3e66f8d2ad7825669886edc5fe9c82c1"
+    "tools/ufm_bootstrap_auth_adapter.py": {
+      "canonical": "tools/ufm_bootstrap_auth_adapter.py",
+      "sha256": "676efccdd26041cf2f0c0369190d761d7851396a5d9f27cf31473ff98fd5ff79"
     },
     "tools/ufm_collection_contract.py": {
       "canonical": "tools/ufm_collection_contract.py",
-      "sha256": "3e84cc5bbbdb81e6e2d2e054a9e23887f1d0f38e62e8a0b4e3ad034d101be6f9"
+      "sha256": "93c06eda29d0e5383737ba06b4fbb741cf5815725541c25d6f366b2653c48763"
     },
-    "tools/ufm_collection_pipeline.py": {
-      "canonical": "tools/ufm_collection_pipeline.py",
-      "sha256": "3fce1790de7a48ce5e0d9de46a8166e3c423627417372466e32c37e38a09d42f"
+    "tools/ufm_deployment_script_builder.py": {
+      "canonical": "tools/ufm_deployment_script_builder.py",
+      "sha256": "1cce8fabf60c81687782fd1a65abb90ee14dacace4b52011455d17ffdb8db87e"
+    },
+    "tools/ufm_deployment_script_syntax.py": {
+      "canonical": "tools/ufm_deployment_script_syntax.py",
+      "sha256": "cc7b6ac012ca6e4719260960d986ea2aec8b28ec0ed06354527e8227ddae3b5a"
+    },
+    "tools/ufm_deployment_staging_owner.py": {
+      "canonical": "tools/ufm_deployment_staging_owner.py",
+      "sha256": "9b4c955b4ab2843143586d5949104e99770d140d9eb391e66e8f9479af1f8d72"
+    },
+    "tools/ufm_deployment_staging_sftp.py": {
+      "canonical": "tools/ufm_deployment_staging_sftp.py",
+      "sha256": "24f5ecf6586f023ed8d5bcf1e09a8d969fedc0af19fda5e1c916c8e0ca9ba4ea"
     },
     "tools/ufm_identity_binding.py": {
       "canonical": "tools/ufm_identity_binding.py",
-      "sha256": "cfe5727f5b101213e5d954b664c62f112b355034d9a1d13d8ced4dd092bbe6e7"
+      "sha256": "a7e72a443fac693aff6ac57d441d5c65a0a58f5019a023f1d8fdb14f38becb60"
+    },
+    "tools/ufm_initial_setup.py": {
+      "canonical": "tools/ufm_initial_setup.py",
+      "sha256": "ee0895bb69d86d011021e8b8c23cf9e2e294a782e6ff28417645c6d5162cf3fd"
     },
     "tools/ufm_input_contract.py": {
       "canonical": "tools/ufm_input_contract.py",
-      "sha256": "b4ee1b67945b2214aa06514383348fd198f16e01d6e864d50fc8a53482fad2c4"
+      "sha256": "8905db1e2240865df616487c10d33996b816a9d0ed82ee384d0887d4a9f936f8"
     },
-    "tools/ufm_remote_producer.py": {
-      "canonical": "tools/ufm_remote_producer.py",
-      "sha256": "876f6e2e05800063c8113ae690d40a667597b536a3df141334a240618647d757"
+    "tools/ufm_project_key_install.py": {
+      "canonical": "tools/ufm_project_key_install.py",
+      "sha256": "d4cc28c68651558198b7b333a0cec9159dde78c0058e74fa77a394d945da2f48"
     },
     "tools/update-root-readme.py": {
       "canonical": "tools/update-root-readme.py",
@@ -696,11 +679,19 @@
     },
     "tools/update-user-manual.py": {
       "canonical": "tools/update-user-manual.py",
-      "sha256": "8fe570d9289ca817b76cd4797468bc8772e4df07c6e88baea5b95586fedc2e23"
+      "sha256": "5012afb9b1c94b389dc0219e588eabbcae03c4b761c7c14041f724b31447a5c5"
     },
     "tools/ztp_service_runtime.py": {
       "canonical": "tools/ztp_service_runtime.py",
-      "sha256": "ccc25fb35fa84f8fead589b601be811a6011ba1163460cad9df68c69fa7b4779"
+      "sha256": "bdf849c930dd3d5db75c1c121b370eb68f986b88b3a8393546ea66723d634e4c"
+    },
+    "ztp/backup/_bounded_process.py": {
+      "canonical": "ztp/backup/_bounded_process.py",
+      "sha256": "3ec254c596423a0fc93ef895f6226c62584672ec37a878c068524b30f30d221e"
+    },
+    "ztp/backup/_bounded_process_launcher.py": {
+      "canonical": "ztp/backup/_bounded_process_launcher.py",
+      "sha256": "2ef142cf049d1496d8d5321015529592576d6a724c4b9c6b5b50c5c551a8c1fa"
     },
     "ztp/backup/permission-sweep.py": {
       "canonical": "ztp/backup/permission-sweep.py",
@@ -708,15 +699,15 @@
     },
     "ztp/backup/yaml-collect.py": {
       "canonical": "ztp/backup/yaml-collect.py",
-      "sha256": "f2ef340fc4538e2e8820606d6e92eab2c605453615abb9b4ae218ac61a8883f2"
+      "sha256": "2f8185ae5f7fdfdbce299b554caab57a39d2b77330924c78975bb5c1fcebb86e"
     },
     "ztp/config/cumulus/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
-      "sha256": "58e3a8e80d66eeec77d9602299681b835be51a7fc9acb27acfc92b79f12fffec"
+      "sha256": "a8cc723adcbc064a9723e1a68b0d897530489b902220fd4482dde5511c4fa2eb"
     },
     "ztp/config/cumulus/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "a8c2a6ee8a1d34824a1e62e6498ae9d870cf3566c7d3a161c86130b5111561f3"
+      "sha256": "53165ec31746ad7fa6d711fc9723ae1882c1a0f7ce6866fbca0660cc7fdc14cd"
     },
     "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py": {
       "canonical": "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
@@ -724,23 +715,23 @@
     },
     "ztp/config/ib_topology_provenance.py": {
       "canonical": "ztp/config/ib_topology_provenance.py",
-      "sha256": "12b70ee3db4d47c9e5c5464005ddd1380c3dac5c5b916fa1425edc18cb1f37f0"
+      "sha256": "5c1978a4d73e3115f88214076c391766e34aa22d33dea38c6df715f9d939ea6f"
     },
     "ztp/config/isc-dhcp-server/c1-generate_dhcp.py": {
       "canonical": "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
-      "sha256": "b4e1531b030071c36206fef4c5d381cdb8581e20c11eddb407c6ab945959d38c"
+      "sha256": "133dcee3859025e11dff1ff67ac75356faeda9bba341db9badf01c52b9d8ce66"
     },
     "ztp/config/nvos/d-hostname2mac.py": {
       "canonical": "ztp/config/cumulus/d-hostname2mac.py",
-      "sha256": "58e3a8e80d66eeec77d9602299681b835be51a7fc9acb27acfc92b79f12fffec"
+      "sha256": "a8cc723adcbc064a9723e1a68b0d897530489b902220fd4482dde5511c4fa2eb"
     },
     "ztp/config/nvos/template/90-c2-generate_configs.py": {
       "canonical": "ztp/config/cumulus/template/90-c2-generate_configs.py",
-      "sha256": "a8c2a6ee8a1d34824a1e62e6498ae9d870cf3566c7d3a161c86130b5111561f3"
+      "sha256": "53165ec31746ad7fa6d711fc9723ae1882c1a0f7ce6866fbca0660cc7fdc14cd"
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
-      "sha256": "5a28d96ad752cfbaff2588e66e6c68dba0603ee171d48a3e90542e559b63dc72"
+      "sha256": "86a64c4d3b0ee514e425d2da5d4a155ca17354917e4a64fd011601f5b272094b"
     },
     "ztp/config/topology_rules.py": {
       "canonical": "ztp/config/topology_rules.py",
@@ -748,7 +739,7 @@
     },
     "ztp/config_sync_authority.py": {
       "canonical": "ztp/config_sync_authority.py",
-      "sha256": "1ac989efe753c43b6f5f7964d8db6e1225bddd720daede404d6e41ae8fc4e667"
+      "sha256": "15922d0aa106681c2f084b3bd4881d0c064980cb4b7d2373d2d45702b0e23413"
     },
     "ztp/dhcp_runtime_inventory.py": {
       "canonical": "ztp/dhcp_runtime_inventory.py",
@@ -768,7 +759,7 @@
     },
     "ztp/manual-ztp.py": {
       "canonical": "ztp/manual-ztp.py",
-      "sha256": "ff5e64f780f84487d5b990e99ad4dbb1f63760380539a0d6b131c662b86760df"
+      "sha256": "7cb70b76ffeebd9e8498998f0b0d0093de2cb466c9a488ca5fdcc613e33a7bda"
     },
     "ztp/nvue_normalizer.py": {
       "canonical": "ztp/nvue_normalizer.py",
@@ -788,14 +779,14 @@
     }
   },
   "support": {
-    ".dockerignore": "6c8e32553af17464f1fd621c787e654c9ce539da9fd3af8f5f8aa1c74a7e2b5b",
+    ".dockerignore": "80073bf014ab3dc44407ca316254892dd490517d88c0cd42b1e44f8a9642d648",
     ".gitattributes": "d7bfa1a8596479c7b28ac39bb094b2a389fc8dcf9c3cd923b66a95eff96d9f97",
     ".github/workflows/monitor-authority-root.yml": "e2149e9b78f70bff197973bebf8609cb923925064671a363072c39e8a7b37e38",
     ".github/workflows/tests.yml": "a0db50165094f82ef45b87d7dfe42c4f6ed91bb7fa7b4060b6f22a03a9e02335",
-    ".gitignore": "121ed8178b2dc6461a9ad8aaa3576707bcd11229460b8da8009a1c208159b8e4",
+    ".gitignore": "15b9bd8bcd14c957a443c1443b3deaf3635e6b64414bab03822c9f2f14809dad",
     "AGENTS.md": "29cbf02d9d849e8a6007c7bab182d8b8de2bdc445f85c12ee01cd6d4928aad9f",
     "DAY0-Prepare/template/.management-pubkeys": "6bbef498c3d3a8a46290347f0d849048e16de36f906c85f08b49038c97c08f67",
-    "DAY0-Prepare/template/01-global.yaml": "96bfb0ec9281a0558c9749c0ec43c70bea9d3dbe494419a58216c7a1d4d9ac96",
+    "DAY0-Prepare/template/01-global.yaml": "6a891cef3d2ecf8bb72a5caf1f7791b27b438d6fb7434bf9609c831a0d011b99",
     "DAY0-Prepare/template/02-devices_config.csv": "3f0f797ccdf4a9c8103ab92d0edcd9e77ec29718f29c33ffef7637a6604a92cb",
     "DAY0-Prepare/template/02-dhcp-subnet_config.csv": "511e576cde88ac1240f3ce49512093150f938c0daf0f8930dcd78cd229527f20",
     "DAY0-Prepare/template/99-output-backup/.gitkeep": "b8d5f8d9d6fbc9a6148dffadb85c5afdc65cd1b705ecc858f761afa902a98f44",
@@ -822,45 +813,115 @@
     "SECURITY.md": "f674177fb724aba0c1a6834afadcf0a2813395bbf661bdf900569b5ab01c8b56",
     "docs/README.md": "e646ad967d9bd418451f152fd2c48f41fe3415dc7acea55e434ae610ff1b57fd",
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
-    "docs/deployment/BUNDLE_WORKFLOWS.md": "9aeabcfbadd720fb0e3ff53bc86b642d8cc4240b3315a07855f875210ce5de73",
-    "docs/deployment/README.md": "7e12ea5ce77afffb8db351a230e32e2c252f332252026eb05b16a6063c05cc25",
-    "docs/operations/README.md": "8cc2b32322094b5c4d1b4b5c407fb9f510e4fb53083e4a2818a1917f34a4bfd4",
+    "docs/deployment/BUNDLE_WORKFLOWS.md": "dbb123d55214521cf7cde4f84a67e2f87cb1ef6f4c316436bfa192158aa85895",
+    "docs/deployment/README.md": "e390600ab1baf60005e4bc4dab75fcc865a8d27f2f8a6102a9f319b12ae94730",
+    "docs/operations/README.md": "709bb1f1c2803b652e43c771067f5e4b1713674b4c8c81efdfa9f0fdb7e2500e",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "2a2ee457e01074db1994363a2f8ed62029a9febb14d7c4ea92243b93ec61d98f",
     "examples/public-project/01-global.yaml.example": "539fc9ba304e21c465e2dcbbb1bdb8e2afb1063d421e3f947b05add144733928",
     "examples/public-project/02-devices_config.csv.example": "29be52a23309b415d8cbd9b314844aa4a4e6a0ad70f32b7bcce510a13fa39fd1",
     "examples/public-project/02-dhcp-subnet_config.csv.example": "f99e2e7e1ff7b7fb2089c1fe6bda42ac24394c0d04f89bfab3cc0dacd72b097c",
     "index.html": "10c6efe01148b08298618419e2a0a2a82c156737f0ec6c73548521d23ed26ade",
-    "infra/docker/.dockerignore": "6c8e32553af17464f1fd621c787e654c9ce539da9fd3af8f5f8aa1c74a7e2b5b",
+    "infiniband/bringup/xdr-initial-setup/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
+    "infiniband/bringup/xdr-upgrade/requirements.txt": "c423e2d749ccb1ca7e5434c36f465a3906a874e3fe46f5e1abd9649861eb17e7",
+    "infra/dependencies.json": "296015ba2684dffb7ad80c65513814621077c49a96cab76e85f44513fa3d74f0",
+    "infra/docker/.dockerignore": "80073bf014ab3dc44407ca316254892dd490517d88c0cd42b1e44f8a9642d648",
     "infra/docker/.gitignore": "03394eeaa859f29613573e39813103ea3c725ef58bfe1843732c976a2cf9f60f",
-    "infra/docker/Dockerfile": "86e70eb5345ec9675bc456f254df7bae7deaeac7900078eba865d43d7a3c7d6d",
-    "infra/docker/Dockerfile.dockerignore": "6c8e32553af17464f1fd621c787e654c9ce539da9fd3af8f5f8aa1c74a7e2b5b",
-    "infra/docker/README.md": "494905f7e7ba0ef8ec88038236b2a744f4c3116a1b9f495fef6378e2557c3c27",
+    "infra/docker/Dockerfile": "7f21718d65e34216de016808c5e8070f204fd654057a642b8481665ef67e60b8",
+    "infra/docker/Dockerfile.dockerignore": "80073bf014ab3dc44407ca316254892dd490517d88c0cd42b1e44f8a9642d648",
+    "infra/docker/README.md": "d4e4a87b265b44729a54203ea22e1db1897502f0195f2ca3625783f7afdf137d",
     "infra/docker/apache-ztp.conf": "616629333ac16e4bc0c076a499d98864959372b5a24bee3c0d4257c1aa9d15fb",
     "infra/docker/compose.yaml": "05903d374662f26e82ac10910f56d58c3fa8eb08528c40e2fd179dbd2fc72d2b",
     "infra/docker/container.env.example": "05dd7f35d66bd865550e14e3a91759ef906071679144988284ef25f80bbf1b8f",
     "infra/docker/logrotate-http-ztp.conf": "40a40f0274aa31b8500fa3bcf97c78f0099f778778294fdc7b16756d4c8b62be",
-    "infra/docker/req7-dependency-policy.json": "4e0fa1652f94999c657e92b0e3d81162538449b6d4c6ceae527580bd47d4cd32",
-    "infra/docker/requirements-req7-online.txt": "b10a83b5f4b6c767b5dc7c80e0353179f2136fd651a8cb6cc838e23b7692bfbe",
+    "infra/docker/requirements-issue-tracker-engine.txt": "a61ddec33a76627447fde78fab81ca9bf3f3b8df4bb9357b0776c0ccbc5312f3",
     "infra/docker/rsyslog-dhcp.conf": "4453aa8f83f19e796f30fa2f96255db3172abd5633a9fa6948ba9198b6d97a5b",
     "infra/docker/runtime-contract.json": "bc3a6fff802d6a413e5b28b59b4f98385ee5cdcab061b64ce7fd1a278fc5a707",
     "infra/docker/supervisord.conf": "368f60a2510fa3126eef58098ce5287d70e4b30b662e421f29aa80c007957b01",
     "infra/infra-neutral.conf": "238bec3c9be34fc5a7bf097e36012133da4a30b90cabdf17d758796ecdab24f8",
+    "infra/requirements-ibsw-upgrade-macos-cp39.txt": "3b903f0084cf0a7f3be5934a25d37964742de4a23ec18f5840280d200406eff3",
+    "infra/requirements-ibsw-upgrade.txt": "7e970e6becdbbf0d81fcfcecdd5cedae4e1978793fdc1a59d0b6b1f76c1b8db3",
+    "monitor/issue-tracker/cabletracker/mapping_v4.json": "fa8ec80d39c6a968b74059cd79978fef5bee6ec823dd4a6b2321191acd4300f7",
+    "monitor/issue-tracker/engine.lock.json": "b5f398e0ff773e7236b512685b81178296ddbc33d4a9b3f3ee175c72626bd307",
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
-    "test_cases/REAL_ENVIRONMENT.md": "f2cb0170a2eef1f45965e91fe83c9cc6bed67aca4f9cad48019db7c2f854609e",
-    "test_cases/audit_public_tree.py": "3c9cefbabdb0eb7816201c67f5c98ac715b1cd8ea81720b6a24659bdaaebfc0f",
-    "test_cases/module_loader.py": "ef1e9b44f0272209378788ed6682b8a6a68c95a76a6d545c001ddc4762471ecf",
-    "test_cases/monitor_authority_root_warden.py": "f4ac61acc04af33168aa01ba295a74fe036202b9179ad65f10e9db87375a2c4c",
-    "test_cases/monitor_authority_source_guard.py": "4c3a6a668c98c01fb7822085c2aaffcbafa024fcdbf04b04f6a6566d78797c7b",
+    "requirements-f01-ssh.lock": "16562dd9f3598038afc4c915c849d397fce86b4d902cb7f90db580a31a981d8a",
+    "test_cases/REAL_ENVIRONMENT.md": "c3d7029a2ac8f2f1ccba79c437d25ed76321d4c63ff511fd08c621bef6c507ce",
+    "test_cases/audit_public_tree.py": "079b143124bc2cc82b9621386d6a0b6b9c016e15c35b52a775364efd2a827105",
+    "test_cases/f01_sdk_venv.py": "473b19609ad58635dec1389a772698bd2b7dfd24a557303e8c9ac6098e263c0b",
+    "test_cases/fixtures/bounded_inner_fd_fixture.py": "bac0c68a18a313b60297c720d64d416a5d405c80c089b411b8a8fc6dbc1b64b9",
+    "test_cases/fixtures/ibsw3-source-inverse/display/before/infiniband/bringup/xdr-upgrade/upgrade.py.txt": "95f325fadff8d294b3917e23efbdf5540413c12b0d0571911dc268b89a94596f",
+    "test_cases/fixtures/ibsw3-source-inverse/display/candidate/infiniband/bringup/xdr-upgrade/upgrade.py.txt": "5fc48f933cdeaa4defd4414941c5e29d2f7e4836095dae4bb97b31ed29232efe",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt": "a2bde38c42ff14cc73ed5c5cbd3859701e93a8193eb78ae67f2bd5575393b502",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_component.py.txt": "1ab3b4b6bb75f11a01816f35ef788b701df2e16489e4c8054709502fd8f2f2d1",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_driver.py.txt": "887a3faf2808cfd2107849825cea2a14fe041f9468987249c5bba07c39030f01",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/before/tools/ibsw_upgrade_executor.py.txt": "1736c076376873e2de2a2ce14639cde357bf15f058f0e486fcbf176b5ef02f51",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/infiniband/bringup/xdr-upgrade/upgrade-component.sh.txt": "53de009cb6031d2892b631475797c64238bff0599d8c062214b33107ee3cbc5f",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_component.py.txt": "95339d60968b36ccf6139e0349d0e0cdfcd8a0d5829c7039b4e41852c817795d",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_driver.py.txt": "0f3670ad74a46147bd13d29d894aa5bb554ed8574ba4bd51239e0913d99a0dd5",
+    "test_cases/fixtures/ibsw3-source-inverse/os22/candidate/tools/ibsw_upgrade_executor.py.txt": "31bb2577b9817a7cf3e105e64119bc6b1d49f3fbc8531e83ae1664526741036f",
+    "test_cases/fixtures/native-cpld-template-pre-os22.sh.txt": "a2bde38c42ff14cc73ed5c5cbd3859701e93a8193eb78ae67f2bd5575393b502",
+    "test_cases/fixtures/native-cpld-template-with-os22.sh.txt": "53de009cb6031d2892b631475797c64238bff0599d8c062214b33107ee3cbc5f",
+    "test_cases/fixtures/nvos-25.02.8008-system-version.txt": "22287db514fd0059cafb5d64b61ac89dae3a793de0e14c2c5408543d817561aa",
+    "test_cases/fixtures/nvos-six-cpld-firmware.txt": "ae2c5f4871f99f71f4b5eedfc5aa2360ae39773a7a47cb56c43c5053070c99ba",
+    "test_cases/fixtures/nvos-system-health.txt": "befdfeebb9b93d4516f6363ee392231cf6af8bd6761b591f63cbf39606c55818",
+    "test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py": "5fd3296b4859302de5a4432d868c89ea08b64f46b0fb00527549eed12e72319d",
+    "test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py": "bd728ca77aee1dc299787cbba172b106cda1f1338da2b4932de97c01a594af3f",
+    "test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py": "654b9dcd94867ab086cfc7bca9771f096a8870d3dc3b1c082688401576b875d5",
+    "test_cases/ibsw225_fixture_support/_fixture_test_health_upgrade_gate.py": "4ac91147e3b0e1a5dcb8c970586c9bd072ca1ab199521d43b5deaeb567d77dc4",
+    "test_cases/ibsw225_fixture_support/_fixture_test_input_isolation.py": "a3c8c032928bf3b63b89c942509349a6c6508d345bb39f731b96b448a18ec9f9",
+    "test_cases/ibsw225_fixture_support/_fixture_test_known_hosts.py": "4e202c240121adff393826b8a0d71c6ceba9a8b7ef572e13eb58ed6c0c53a17a",
+    "test_cases/ibsw225_fixture_support/_fixture_test_manual_execution.py": "9361177af8f01d044730b07179a531ae036d518b49ade02d6b5255888b2baa82",
+    "test_cases/ibsw225_fixture_support/_fixture_test_nvos_observations.py": "bd77c61b0138abdd5e79aca3c31ff6c9b42db8e5a899c62a4e28dc287ef379ea",
+    "test_cases/ibsw225_fixture_support/_fixture_test_os_alternatives.py": "2a4f05524392c428a7ca24d1d989dddf44a8d1400b34787265d9c3c98c5917a1",
+    "test_cases/ibsw225_fixture_support/_fixture_test_os_download_telemetry.py": "5d9a04200a6dd2094a238c7031a29210afae3e8033df6b56eaf32024aaabd055",
+    "test_cases/ibsw225_fixture_support/_fixture_test_runtime_budgets.py": "8f5c859cbad87bc55c729751d63f445288a29036a02a82379af2f1bdd7be6831",
+    "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py": "606c335090cae39b647f2e677fc0a5e3881143c61ccfc9398aea0f22acb0c3e1",
+    "test_cases/ibsw225_fixture_support/_fixture_test_three_component_workflow.py": "574c64c2bdeaa1eed943a1185fa1e0487f96edaa9ec25111a91f3d55bf9c77fe",
+    "test_cases/ibsw225_fixture_support/_fixture_test_upgrade_cli.py": "d4884ace97256fc5d8fede7cf3f68ebfeb43721b4e7921c56b6d7e845650b34f",
+    "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py": "56cc79e3a66fbf81319605ce87fe3d8556d51805ae8182f27484692ed307b551",
+    "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py": "870e4493ede5cb44a6c8445a42dedc35e394f1f21b6c0a10f823e20d1955a392",
+    "test_cases/ibsw225_fixture_support/runtime_source_support.py": "6c7ab3fc83792d2c827a2237922749e8ad626f02a52271fc90dc7061ca450600",
+    "test_cases/ibsw3_scp_cpld_test_isolation.py": "574f48df03504fed9d4ccb585bd5eb6683ac0cf67c9207f9b1a25c15e003d2e3",
+    "test_cases/ibsw3_scp_request_test_isolation.py": "34870179bf9cbcfaf2d5cc7b0194fc674679c6db79ebe98eaddd664c79afa29c",
+    "test_cases/ibsw3_scp_test_isolation.py": "ee0a23c4c16e83244f2c6178bcf6f0331d68b0a05807ab6f1017d0dde12d6705",
+    "test_cases/ibsw_v2_switch_sim.py": "b463cc283f8c993bbacbd6bbfc003ec53fee92797097900e28eaf3f65d7ef176",
+    "test_cases/issue_tracker_template.py": "028fc524ac9afa0c9fba4311f35c955c8a40f6dde95eb39861c408c8cd3beba9",
+    "test_cases/module_loader.py": "4b96ad4b8b6d7b894081683b277b7383cb4d2ac4895167210eaa16f04921f150",
+    "test_cases/monitor_authority_root_warden.py": "9952ea5b61457df939b2fa33677710321dcf7f90255b2aaadfcaff95dc8f8d47",
+    "test_cases/monitor_authority_source_guard.py": "67be6ba5b653545500c20c7820d92758f3599789e5d2c6207e99b3ff91f45ec5",
+    "test_cases/native_bios_flow.py": "3b11044077e88a26c23bc338b8449713b2bdb4156cf2bcc08081830b3cc6583d",
+    "test_cases/native_bios_isolation.py": "73a0746c47d59066ced364caa6a27ca1ecb7ea3ad1f00f33ffc50cbd6792d940",
+    "test_cases/native_bios_physical_io.py": "a16acec92ab5515c15a70d280922b2e62fdbade18fa5a94dc81fb6fff3f6d9c1",
+    "test_cases/native_bios_safe_image.py": "700e626490ab9243f82567f72cb52488436d2e84f74189b2d60e7c164d08ca87",
+    "test_cases/native_bios_stub_sources.py": "2ae45c6673c4f905f90abc97b3bca0f400f14e2a8c8ce6d779cd5e3928d75aef",
+    "test_cases/native_cpld_physical_io.py": "8bed165772ad8d529f27c438d17522b8795392d8ff7253bf6fbbf7d35c4e0dd5",
+    "test_cases/native_cpld_safe_image.py": "7989a7ce6cf77401e7caf8847bdbee1bba4899e412663c1822447df64ec0b2f7",
+    "test_cases/native_cpld_stub_sources.py": "2fb9ca70f182fb84b91e7b6a10dd5fed20946b54f77cc7a8a6dd8bddbe660016",
+    "test_cases/native_os_dual_channel.py": "065599df2df8961af5d76e395c9d2fbca08b6ad15a7e1317dd80ea40cdce2aa1",
+    "test_cases/native_os_physical_bridge.py": "8668a244db768709493f739415418166d0960512d89ff655e1251ecd711d62f9",
+    "test_cases/native_os_safe_image.py": "22988e6ce494a196dedc58ab45bcae1aace6c8b9a8ef680b350c4df6a9e104fa",
+    "test_cases/native_os_stub_sources.py": "56d66684ff42fb58911b484aba7529817e1b264a8b866231767489bd5090b8c7",
+    "test_cases/native_os_test_isolation.py": "42a9919c7342d81179bf8c9625bd0277b1ef91b5b1d93519231d3614f2870822",
+    "test_cases/private_public_fixture_input.py": "526cf837ed8b294a2ce8cce113616a91a80207a2b38d209df2abed148fb09d48",
+    "test_cases/project_image_owned_guard_outer.py": "842e44ed0a7a5261327a5f2f4ef8fde3e7d8df3628faefba5884ecf24f2a124e",
     "test_cases/public_project_fixture.py": "744c3d2b8dc0e1b6c0c64b314e5fe7862684a08ce177c94baa1736a5e5a2aef8",
-    "test_cases/run_monitor_authority_entrypoints.sh": "fe081b5f79247da24937f2f3342ab6a9104c88b437ef206f2f39807832b13599",
-    "test_cases/run_related_tests.py": "40afac9f83b8d3698ce8e3e7e861807e4a7e6e382a31f3ed977b0526d67db5b9",
-    "test_cases/run_vm_validation.py": "e50eec4f92f09df15878e7c45d2b9db88e5ee6a1b90bd7fecd530bbc11d2bb10",
+    "test_cases/run_monitor_authority_entrypoints.sh": "9d8145073a383a7bc91e75b2c809f402d71bbf5f7a4c2260d983d5ce8a182e76",
+    "test_cases/run_related_tests.py": "0081a8f03f5ac0a4c7d0e296d24de8065e07e2fcbd95a928ec84f4b27f904a82",
+    "test_cases/run_vm_validation.py": "15c1cc08e77ddf2e62b4500278e5c7e7940c943b1093b8b39662e9ad901ee99f",
+    "test_cases/scp_foreign_probe_fixture.py": "2b44253186ce81891a6871ca5e593f311ab1a3c621652bed5205f08256aaea3f",
+    "test_cases/scp_main_selector_fixture.py": "6d6691edb34013295a8b9c01ebf8c08aac98dc722fae3c82d4fd205a493f47de",
+    "test_cases/scp_native_cli_fixture_v2.py": "f19f10e655a96bcecc6899c8f8076f5cbecc37fabc92595f7175cb25eab791d5",
+    "test_cases/scp_native_cpld_bridge_fixture.py": "dd018a1e284d4f716f866ea41b8dedfd8aec3995de14c6b26ddfa8bbfbf84adf",
+    "test_cases/scp_native_cpld_bridge_isolation.py": "8eb19fe0f91165481bccd9a4a5182680a2d6a350d57324bb1af3ad932cb0ebef",
+    "test_cases/scp_native_os_manager_fixture.py": "1834c2674200ffb8e28162ef54e859179fa873eae8f6d8465e7b172bfa10294f",
+    "test_cases/scp_native_source_preflight_fixture.py": "da142e91677047a540fd52f41ac19daaf41d4c469ce02256e95951152fb7670b",
+    "test_cases/scp_source_cli_fixture.py": "6d78f7a39cb309e4a06342ba5f8eb5abec8eba114ec95952fe696a8354d0d326",
+    "test_cases/scp_stdin_cpld_protocol_fixture.py": "ea0dfd09e6036c5967310b315f76ead3b3e4902a9e34728653a7b480f830ff71",
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "01fc3dd9df1a7508c60b45f9694bddf0f2e35d5c13d3fd47cae62a3dc63453ce",
+    "user-manual.html": "31fc499c02f84720d9538b0b3c868eff4c9b045cef2b3f25d1011b50ded12d03",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -887,7 +948,7 @@
     "ztp/config/cumulus/template/03-templates-j2/tan-leaf.yaml.j2": "0a01c0d7987fdddf133ffc4e96b9f4675dfa7d40245ccda0a70fd71b5f98c7e1",
     "ztp/config/cumulus/template/03-templates-j2/tan-spine.yaml.j2": "66af12b2980068d03d1fbabd27d9c8ac3c3839c4121cb7814cf41a9588619c61",
     "ztp/config/cumulus/template/03-templates-j2/tan-su-leaf.yaml.j2": "f644bad3948a6e3df51333c57208dacf75d76a423748ecc33f6a46bc61f92499",
-    "ztp/config/cumulus/template/P2P/01-inventory.log": "e03c07e5b97bc0b6cc603b954394a0e7aebdf78305020f382c6ad0c0c79f4e8f",
+    "ztp/config/cumulus/template/P2P/01-inventory.log": "4fc5c1f35896136dc74f09415faaaec88d098ad36ef68969868cb9e08210e083",
     "ztp/config/cumulus/template/P2P/02-port-mapping.log": "a0f7da9cb1fc752efc468e97456c8e49b51266d89066da26eacaca43a0444431",
     "ztp/config/cumulus/template/P2P/03-splitter.log": "60a3cb49f0825b72e1d070c9ebbdfc8c5da1b8d3c46a627d7ea6d2508350fffb",
     "ztp/config/cumulus/template/P2P/air-template-no-oob.json": "12f1f91d93c1fcaef1ff0dfdf782577d3ec65067fba4fa35f402bad648ad7d20",
@@ -895,7 +956,7 @@
     "ztp/config/cumulus/template/P2P/lldpq-template.dot": "daecb807b08077aef957611694af12376e10eb1c0252a4b6f779cf9dfcf04184",
     "ztp/config/nvos/default.yaml": "409eac77f041fc129cd474f2c89fc1c015f90997bee469466f489b744ef88fc4",
     "ztp/config/nvos/disable-password-hardening.nv": "9f1de1c892297259ada4fdadb78be352df02c5418cf707c816dd56941c3f8a5d",
-    "ztp/config/nvos/template/P2P/01-inventory.log": "5aec6d61e266d87c690c9ada893e3c3da3f8bc67b15bea60f8c1ae84d9eb3d2b",
+    "ztp/config/nvos/template/P2P/01-inventory.log": "57acdece506d18655dc68a67846174986d7d9edc08f7726a09cc277d4ba4ab46",
     "ztp/config/nvos/template/P2P/02-port-mapping.log": "5c06ebd493374a42df80a53fd060615402cd988597492d5bf5468c89d6b41a49",
     "ztp/config/nvos/template/P2P/03-splitter.log": "f5f09d824119a202dbd06844eb9a4de8bd1b12ee47e79d53ceea829dc87894bb",
     "ztp/templates/ztp.json": "1a2c06ee0b25a657e0718698ebc3b7177c00e10d062471a6bcc6909a186abf83"
@@ -903,32 +964,40 @@
   "tests": {
     "test_cases.test_air_link_endpoint_contract": "50e4888d658f92d82750b55b6f3504393dd9054a517beda729be63dd00b1e9b9",
     "test_cases.test_air_retained_servers_contract": "b596435ca51fcdd0b711e7f4b20eecaf842f33c39705f15e5e6d504f8e0c4ddd",
-    "test_cases.test_all_script_entrypoints": "abdd61915eecc23dfcfe82128b0a1659f897a54193b74e0799259ab94f1ce709",
-    "test_cases.test_apache_publication_boundary": "28360f5960fedf21f67496180b408e4ec60a4f81b4a2a86da5e9fee1d00dbb3e",
-    "test_cases.test_backup_auth_transport_workflow": "e77cde061a7b180f627adadb4e2cf5de5ac6e5d0806057a460295d4d2ee603e2",
+    "test_cases.test_all_script_entrypoints": "9fc3b3556e7853153280569d5ecf0f1e727432013e5e0337e948dd09fd3e4808",
+    "test_cases.test_apache_publication_boundary": "f1ff1b3097d6aa49fd42401ed35c90c9e4e54bd1ca895e00bc5161601f1ba801",
+    "test_cases.test_backup_auth_transport_workflow": "2b6498c4e0bc332f773412426cec1f968a2ae571cf96213ce96c9bec262e185a",
+    "test_cases.test_backup_bounded_delivery": "75fb40ae202008d38b327029aa730ab03e5b56e791ebf56bbed6baf23e125e5b",
+    "test_cases.test_backup_bounded_process": "de9cfafe7ce0fd9df4687035c73c2436d756ece10107d73aeac8fbd3909fbc03",
+    "test_cases.test_backup_bounded_process_workflow": "428c359c02c8bbd4925e1dacb2eb9a5c55231b25569178807d0676b737fcc467",
+    "test_cases.test_backup_bounded_protocol": "8b421a78cad3dda13739666dfb80e7bd555fcb539807f1bc1f174ad75ece9325",
     "test_cases.test_backup_permission_convergence_workflow": "8b8a462c62535a86bdb05d15d68ac74ceb7a8598dd000cbc33b50ae76611c54c",
     "test_cases.test_backup_zero_target_contract": "61091b3fb5f478af457692e9afff3475b9b88aa1f724f6af3a0e7ee19d84a3c2",
     "test_cases.test_bootstrap_config_fetch_contract": "e765f0df17bedc9ce4c5b163e2d2c0b7673ff359c3eabcc74fecfa9e8dd4cba2",
     "test_cases.test_bootstrap_config_fetch_workflow": "9be3667421d0f6fc008156631334d8e4d7eb07893d7e26248030b75270ab0149",
-    "test_cases.test_change_aware_test_runner": "695686d3fe409386ff7dffc7ce286a4efb7c6db500b9538ab16998053a7a36b8",
+    "test_cases.test_change_aware_test_runner": "c8269d5fb4ed9842dfc2fcbe8607d8347398eb28a15d93858a7bd379343bef1f",
+    "test_cases.test_collection_archive": "ff3704783d0f832b2eac7cc98908c218d6e92d8cf748c69e8430d49f4757add0",
     "test_cases.test_collection_cycle_contract": "2ecb0d71c6e3d7e78fc54824e6bfadbaf6864ff2c9e37457874afefdbf1785cb",
-    "test_cases.test_collection_cycle_handoff_workflow": "c82efe66322f33a67dc15d856bc294e4270eda30615a4762445f10b6d2f02c9b",
+    "test_cases.test_collection_cycle_handoff_workflow": "d9d0731d5eb653748675a05966da48ca0a559d5bca15f800ffafa0551b42acd6",
     "test_cases.test_collection_cycle_persistence": "97c259061c9565f7b0fbb19e33660a898db692f2bef211c065318fd7f3274689",
-    "test_cases.test_collection_cycle_worker_contract": "d0a078ebb93cfe1ce193226c666d5766860b2d8ed00ae8a301e4496dba442981",
-    "test_cases.test_collection_ib_cycle_binding": "cf5152eb5d1a6195b093cf1fce882a5f9f964534743e94e63413ba49c009ad8e",
-    "test_cases.test_collection_ib_cycle_binding_workflow": "7a65743ec9b86f18897583b295f94a6e395355072e3d7c46dd28d844b7ab6e2b",
-    "test_cases.test_collection_ib_producer": "5f01b29e23554b45ed09e4bc6c2917f36fc8ce180580fee96f9d552e8511e5a2",
-    "test_cases.test_collection_ib_producer_workflow": "2edea3eb4c126e0eab248f98d2e81ee8cca42955d1bb3a6c40ee6c98d0943b26",
-    "test_cases.test_collection_v2_emitter_contract": "b8bdeeea46e8e6803af69fc27e78c7bc809d2b8b9251bf6d49d60d480081821e",
+    "test_cases.test_collection_cycle_worker_contract": "4cf86b6e7be5b2950d03ebdebce4514d83c95d3499a05fc6a91266772eb9c9bd",
+    "test_cases.test_collection_d70_retirement": "c8547bf5eaee982306e2a1b602bc5e54f4347de62dca195fd3d436980b4561ad",
+    "test_cases.test_collection_d70_retirement_workflow": "a35968207fdebaa03339da4f00e512232d12521af5c41fa9811d4975fc697189",
+    "test_cases.test_collection_ufm_run_binding": "e2b0bff4d5436b8d36d80cdbe5ec30c49598fe0d7aae71e894689bbdb37e6799",
+    "test_cases.test_collection_v2_emitter_contract": "c0a1b67ab96c8f2d258082778241cb99f34831578e502ff4b159164840dffef7",
     "test_cases.test_collector_inventory_pubkey": "e7ba6ebe5f7e17446c2db9eaf0a91ebac09e93b5f35a2b3af340fe3369e1f791",
     "test_cases.test_collector_inventory_pubkey_workflow": "f8aea67074085b49488e58959382e6762d38a4ec3c76b5d94b684d46657d20f5",
-    "test_cases.test_config_sync_authority": "2bd9f5317c07393a19b2b8c5332788bbec3489d7bc9c1c5db8b456f6ae5847bf",
+    "test_cases.test_collector_publication": "132c93ea6dc07dc22e94bd08ab46bc4d139ef98b9c34f278c58c6d877f6704f6",
+    "test_cases.test_collector_retrieval": "1cc72320d765833f6f910d0fbeee5a8a1a12825a3b0e0777830d6a7acdf451c4",
+    "test_cases.test_config_sync_authority": "3fa5d374bded7c038895c7e5004ebe225425c4cfdda29d9d1b28398d21371c6f",
     "test_cases.test_config_sync_authority_workflow": "37f2a873a7687da475ed1b32c02eb2f2c828efe68a50fdff44a76aeabaed690c",
     "test_cases.test_continuous_interval_handoff_workflow": "bbeeba908269873df3c6ecae9fd8860cf1acca7c6dd45787d24be52109613c4d",
     "test_cases.test_control_auth": "da27975ed095e2c7e88d32f4fd1cf0352a050541a6750b3548b3e5dffa6f092c",
     "test_cases.test_cumulus_snippet_rendering": "a9dc63b808ad3dce40f8ec831bc2ab1b50b5cfdec095280ea1511ec99b1f225c",
     "test_cases.test_deploy_upload_archive": "cfed12fc5484490f8f9419a870deaeb14ee8e054c44a360142931d43bc15b6e3",
-    "test_cases.test_deployment_writer_lock": "a8f9109deab713c9be68a14e1d5ea9c28ee16aaf3686ae8148720c4e983fe023",
+    "test_cases.test_deployment_writer_lock": "68dfd247ad9cc046104f503086c411fe2efb1b876a805a9f416ff400165ea75b",
+    "test_cases.test_deps_table": "7f63fb29da7cf6838010b8fce176b7b6d6773edffabbf7fcbdc90b0dd152c274",
+    "test_cases.test_deps_table_workflow": "0c1630b3106079b47ea915565c6ee5aae57db2b2396ce96defd99a866ec4acc7",
     "test_cases.test_dhcp_optional_contract": "5869dec5798ad107187ce1116c4273de652c8ca4b0d7c4251d81642ff9fb4441",
     "test_cases.test_dhcp_optional_workflow": "ae4cf39469416075867024af4867911442fddb0525ecde65faa1ab8d228123d5",
     "test_cases.test_dhcp_runtime_reassignment": "7ed63b5140210a46570d522cc115dcafe0daaabcfa758df47cf86002246c0bcf",
@@ -937,17 +1006,31 @@
     "test_cases.test_diagnostic_bundle": "6dad3ce7d5193059ba42ae351a05311021d13ad7a2f49aa697cea40e243a0578",
     "test_cases.test_docker_destructive_confirmation": "19d6611b10ee4e5683af0d64598875b806a9667dd622c2b8cd41c60db566ebe9",
     "test_cases.test_docker_destructive_confirmation_workflow": "b470ede5b50261700ab5bed68e5abe7c5b5caa4f296b6eac270672fdf21d5b54",
-    "test_cases.test_docker_management_ssh_key": "deaf89b122463b8a97371f375830902e88e2caa7bca23fff432fa253a736de33",
-    "test_cases.test_documentation_catalog": "c038e8d3c4f563c3f56dcd6b3653ea2a0820f2bce441ca37d458e3cd9e766015",
+    "test_cases.test_docker_management_ssh_key": "422450fe23ef6fd1765822394c9cd56b700acf7a8206bf84ecdcd3af50fdf94b",
+    "test_cases.test_documentation_catalog": "0ae2cc55d7b9dcf14ee8ee9dfa193c272ebd0352f8443ad0866d07c8734775a8",
     "test_cases.test_download_cli_contract": "ea3921e61b8b53251c232de0fae872e7104192ad7fa96f09ead4e8c565cdf18f",
     "test_cases.test_eth_activity_cycle_handoff_workflow": "f0cdcd24f3e6102329dc161e8cdf3b74c97d4a98069bb2e96b741e4160a57c6a",
-    "test_cases.test_eth_jump_duplicate_identity": "75a38d712fb2d2ffe6ed997c434727befbeeb6bf0fc0ab4fda4a3b3ce14d44f6",
-    "test_cases.test_eth_jump_transport_contract": "e7026f184ddcc1899a97c1a7a9113acbc3470d78224bd5c8d7d6c425b38b754c",
+    "test_cases.test_eth_jump_duplicate_identity": "1410d62b31f682cddfe07063e5c02bca056b3adeb887684973ea3f768ba46b33",
+    "test_cases.test_eth_jump_transport_contract": "8005ab49a51be10a48f4588a6a2c25d2c8d432050a8ce41aaffbc2d1fe3fc40c",
     "test_cases.test_eth_jump_transport_workflow": "67b2afa6c11ca7042203ce75456b4dcde42cfc80e7df92336d4a642a80e53030",
-    "test_cases.test_eth_jump_zero_config_contract": "4e3eaa03f33abe2bf0e294f3ea1c16bc62124e8145f74832edba5cd619ad4774",
+    "test_cases.test_eth_jump_zero_config_contract": "692d0d6252d30494226758249ae42ca42d854fa955c98a43add48d0bb890eed3",
     "test_cases.test_eth_jump_zero_config_workflow": "8aa9945ecda0c0f19208ee120d1a843c19555d12dfce5a4e8c389ee9cae8a5bc",
-    "test_cases.test_feedback_global_writeback": "1e907e02385425c106d3ffa0007103e032f9a6a7b5311148047ab9ac36430e9f",
-    "test_cases.test_feedback_global_writeback_workflow": "f1ebc7eef180c4e9e2dce35f12c111afb0f599f62d0da64a30280f78a1eaec77",
+    "test_cases.test_f01_identity_read_cleanup_priority": "b99c1d85e1aec0dbdfea952a4e1d3af8ae2c40ffc441a98e33996795f1bfe27e",
+    "test_cases.test_f01_initial_setup_entry": "4e966a7ea540faed48987cba6e59dc815cb03032dcab771da2e3d07cc0d0deb1",
+    "test_cases.test_f01_initial_setup_live_gate": "480257d2fe3033da965529f549e6b39113af247606be1ce72b49599d16ee9f7a",
+    "test_cases.test_f01_recovery_project_key_backup_durable_workflow": "c3f54311ccc86d1c8d10a3ff9a80404b8c9ebcff2bde5b00b47159067fa0ea50",
+    "test_cases.test_f01_recovery_project_key_install": "18054aff78a486d4491c54548f19fea7f03c537203153ecf454c39d4a40cb992",
+    "test_cases.test_f01_recovery_project_key_install_bash_workflow": "3e76992a4690776dab971f9936510c05fa97331b2829fe5cab56abe0f721a4f3",
+    "test_cases.test_f01_recovery_project_key_original_save": "1b9e089b1f30aa1b4b9c604e681c880d0998e10f2e338111adaf0e94a6382b0a",
+    "test_cases.test_f01_recovery_stage_script_builder": "f1b4a3a8e428b1b176bc439383b8464df3de708581caf4720666abf94d443d7f",
+    "test_cases.test_f01_recovery_stage_script_syntax": "53272ab9333ec56be33c87163eb71068e546d8cf347f5bea1219ad07195862c4",
+    "test_cases.test_f01_recovery_staging_owner": "fb334a7cf9aa0820a52979b2f6c0e89447e0f5d4e30061b798eef1af2dd5a115",
+    "test_cases.test_f01_recovery_staging_sftp": "0f56102adf90cfffc30544f615daaaddec80338f18306cf7fc601bb3de20e266",
+    "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow": "67536d13b6f32b6509c3ecff93b70cfaf61e79053b84bc5a82dc8d5454fe8aa0",
+    "test_cases.test_f01_restored_direct_ipv4_identity": "2151a76ec0c4f182f043c22efb2d6a201ad1fa97e144939db876d02cf39f36a1",
+    "test_cases.test_f01_ssh_dependency_identity": "5558fb791a6567f75aa09c6314b80101b5a5a59b836b03ec76131aecd86e74e5",
+    "test_cases.test_feedback_global_writeback": "0ed17f957fac1a4fc33b85fbfc2e81e0107ca49a6812b6d249af6444dca5e15f",
+    "test_cases.test_feedback_global_writeback_workflow": "44b82d45f758c5604b78021e6257c85b15cb14b3e603adb02dd88f92e30dc794",
     "test_cases.test_finish_deployment_interlock": "7e5f9372ac0d215eca2bbfa7e5b55d95f285ba5675721af0b8b68e3f06fceeaa",
     "test_cases.test_finish_docker_workflow": "e6bac65170b919fe2aaa326a2f47c2c35c2daceb704330fa9702ca914b89f602",
     "test_cases.test_finish_native_workflow": "585e953473e39e5e9079a6097d486b008ebfb884c465e6f3713f7405098889bb",
@@ -957,209 +1040,289 @@
     "test_cases.test_finished_project_import": "0c3f88e5066e5c8fae203d2522d40bd8b3007569dfc1fab5db89625027dbfe1d",
     "test_cases.test_finished_project_lifecycle": "f57b0a9ed7a3835154179c617a97aeddcf4334e36ef90a53181f3b50cf1e322c",
     "test_cases.test_finished_project_rehydrate": "185fb326a65672e502d7e4f7543dfa053d7ee77ab54b9385f666dbdae3b32388",
+    "test_cases.test_fleet_distribution": "9db293a9eb23a239e4dcf8aea27fe70b5fc3549cadc62d25a92eafcee7e1fd31",
+    "test_cases.test_fleet_engine": "2006f03619fdacad3fdffffd23c6dbb346d7ad1431894f26eb07ab5d64082ffb",
+    "test_cases.test_fleet_link": "a963831c3e44fe5d2dbd2ba85e7274cbeb98d865eb560fec0dcd5c79554c4e3d",
+    "test_cases.test_fleet_probe": "1f125069cd1cc9903a27de0b4c6c58e752428849758dbfbe43f814816891d4f4",
+    "test_cases.test_fleet_ssh": "6453e15a12be40336440ca16e780188cf8f2638d0dc4fa273f418bab85a5a181",
     "test_cases.test_flow_release_platform_matrix": "07735bba34994d19592cc71d641400bb8647ded0f40159673ebab782242ce1d1",
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_generation_report_contract": "2817b522b5a202ca2217eaad2bf948822a0e7f3e14077e7e1af3344285b8c482",
     "test_cases.test_generation_report_workflow": "d1b4a361c074fa75f56309a7a304ff4f7c5508c9eb362be6929eee0521a2c4f1",
+    "test_cases.test_h_aliased_receiver_escape": "54908f77f8ba568e7a43778e3480de97ce41507b536b23e310412294da88c0c8",
+    "test_cases.test_h_comprehension_receiver_dependency": "bcd098f21552570a3a7f70edf6f772a9c4e961fa3440ac8e5995b12bf9c883f9",
+    "test_cases.test_h_enter_formal_identity": "d87e030a6d870e4a15900062fbe12b20150556cec550632dc241e3410b3e478c",
+    "test_cases.test_h_expression_container_wrappers": "a004e6492733f2d3cacefa00038a6ee0830abc9ea512f0956cf5c1782b0c1e02",
+    "test_cases.test_h_feedback_real_lock_recovery_workflow": "fe339d32ffa0d3b5593b6f11df716aa932450a39c2df13c0de9dfac66884de54",
+    "test_cases.test_h_finite_receiver_attributes": "4d7913f97cec1a0d5a704b36ae09e175b8883caa901da875ade8289e89ae11ea",
+    "test_cases.test_h_graph_local_scope_memo": "48664a7906730d37d389fb87289f156ef43ad1599e350eda6664c47af58be9ad",
+    "test_cases.test_h_literal_container_update_forms": "5f7fc11b86ce0b2f23da0bc3f804e4c078cf6720ada40c4c2367887af35b0176",
+    "test_cases.test_h_nested_receiver_escape": "e8543a3fd03fdc51390c4f3b83aae245e38f93a1d6b841e0fe8bad52e8ad2c66",
+    "test_cases.test_h_owned_attribute_destination": "87fbdc4d80a4e33d55bfde455f6454d30f161bc266d71f5e423610e61319e935",
+    "test_cases.test_h_owned_call_graph": "b6ef572f066685a9c3e4de0570cd2a41ffbfc7d68f232504a9db8a121d453f55",
+    "test_cases.test_h_owned_collision_consumers": "e7f3e3215d0a232120dfdc30baaf550dce78ea9db3eb131fb6aeaa3c001f04cd",
+    "test_cases.test_h_owned_dispatch_boundaries": "58fdd5e06c4d2a6980fb6c4211f67f5ee92217c3f93e4cd1e85781882c52d773",
+    "test_cases.test_h_owned_entry_projection": "3e89cf2ccfbaae459b697f06a8d523d1567fb55cd93519a4ca01c6ad62b5e073",
+    "test_cases.test_h_owned_graph_definition_index": "89c29ca132451a6251558e7fec507465d9ca1693b1c172d69cdbd873bf82a016",
+    "test_cases.test_h_owned_order_phases": "5e991d1e7e0e02d7595e1c86b34afd262a80c6afcb6f0e2d725755cb909f62ed",
+    "test_cases.test_h_owned_receiver_proof_boundaries": "b063a8e6b708999d21ba21925cc47f0e849ae710fd3131486fbf6b24e3edfd5b",
+    "test_cases.test_h_owned_scope_phase_boundaries": "ccece1c4c08c286b8cf4250b099876e5d45c134e421161195add56f6e9db78ef",
+    "test_cases.test_h_owned_stop_provenance": "e1d3b15a145c8e5cc5847a7f9c2dec5aa84485ea7aeef2736d270dbd1d1a36d7",
+    "test_cases.test_h_quiesce_census_sources": "dc841a715d55dc0743fc4517525ff73ed154d1bc8e8b0385f29691db76703dbf",
+    "test_cases.test_h_same_interpreter_cache": "732972d25ee9f7d66880131a86a15d51ec8a186199b773e01ae209e278ee4bfa",
+    "test_cases.test_h_special_receiver_namespace": "ef41a6e6a63d7bf0d203fd111a8b97f36842dd41baa729d618b06b620fb5ba52",
+    "test_cases.test_h_static_receiver_scope": "364e4f3ab99d8e1b3da453c061d123a241d63e48d2a7059d9eae5c4a99360723",
+    "test_cases.test_h_two_hop_receiver_handoff": "ba054f48f29e2a618612afab71a031e2d4fc18d03a76a13726d03f09a9398fd0",
     "test_cases.test_http_port_contract": "14ab61654da551f44b5b9f468c25bd13780af643972a973d6ab7f0841d45536f",
-    "test_cases.test_http_port_workflow": "84ba3e8ceb8a069504d148f03b57275f65b4e64b04a5637f292bfeb6531c6767",
-    "test_cases.test_ib_analysis_domain": "a305748cdde9b69b50a55a34c4c1d54c381aa56b0181af0831a5a96cf9185964",
-    "test_cases.test_image_context_safety": "bfbdf7676f38c7da416d206cde2f5e04a802fe84d215a582377bd6e33a5f2777",
+    "test_cases.test_http_port_workflow": "6c29cc56a0c3c15746cd3883865d1d4bd9544bae644be74e941bedbd9e0916ad",
+    "test_cases.test_ib_analysis_domain": "20e79105e62c4fd0db7c11543e2c6011851f3b7cca4ef8865ffa816ca34cb65b",
+    "test_cases.test_ib_cvt_project_output": "b21e0300121bcc508fa30112fa031f488437a6d1d7db0b7e3fe80fd93c2612b1",
+    "test_cases.test_ib_post_collect": "ccb5dae64e9af747a33bdc70bec628583bd9f8389d959ea40e557c51600b7799",
+    "test_cases.test_ibsw225_access_recovery": "04dc92b2a157514fd3f48066822a1bbcd1ee067ac74b9bb7f62cefdc3dd4d150",
+    "test_cases.test_ibsw225_cooperative_pipeline": "c15ee8d824f10535c36accdd942f6a06ce79f8ffbc57cd8de9f4e2ccd7e5c25e",
+    "test_cases.test_ibsw225_delayed_owned_exit_witness": "b0ddf6d73dc91a44867232d528573785e37a82c14d4a2e372fbf877821af7a31",
+    "test_cases.test_ibsw225_device_globs": "5a9eea2236ad7c07711f9b65598dbfa24ab0453fccd043ab8c8f45abefe0272c",
+    "test_cases.test_ibsw225_flat_tools_layout": "13dd0599cc6a520afdb66eeed5879c28bef273db6444ce065bbeb8a4e489f844",
+    "test_cases.test_ibsw225_genuine_fixture_discovery_contract": "42280074a42cd17f18e2c17ec271cac3467bebf202239751c15b086e68f0ca0d",
+    "test_cases.test_ibsw225_http_initializer_guard_protocol": "2c406151d383ea58cc805f0783834c452ca3c2185234a6bffdbea794adf98fd8",
+    "test_cases.test_ibsw225_ib_alias_derivation_workflow": "6b94eca17bed8e64525d54123decf8ef32d3f23cc3144672aae9abb8288c3467",
+    "test_cases.test_ibsw225_initializer_help_guard": "03a15b4e9c8b951aa265f46e6cc9383ab18d89a580a5581545240da629c62677",
+    "test_cases.test_ibsw225_initializer_report_finally_direct": "dc6384a95ae64892d4d2793f2527a06ba5c0bc4e502d893c1f11961d05d285b1",
+    "test_cases.test_ibsw225_input_isolation": "e72b65d5eb9773b0e0d60f41374c7ca10702a54c86a1eb411857062626bbba1d",
+    "test_cases.test_ibsw225_known_hosts": "6c1dcf49880e08096c4659bfb432ab08ec7e1dfc4a180466c746b8bf41c5a178",
+    "test_cases.test_ibsw225_managed_outer_guard_workflow": "9717f8f3a3e0e1f4a6d65b8c13a168bc7b51673f7a682e7b2ca65a6141568b17",
+    "test_cases.test_ibsw225_os_alternatives": "20be5a815194885d6cc9f1f8a0c6dcb1288faaeb2250c3ca510122954bad27df",
+    "test_cases.test_ibsw225_os_canary_coverage": "7cd7cbbfdb9898e402a735252bc406c69621f61be3743e6e5b04d67fd6776839",
+    "test_cases.test_ibsw225_runtime_bootstrap_identity": "18209633ffad02303e558d542daab5c3581f3a825e7d85aab1d01830b00dd03a",
+    "test_cases.test_ibsw225_runtime_guard_exception_priority": "326281015227d5b2c556f2e8d82b28bfb2612be4f428e8865d055f7b9f7029d3",
+    "test_cases.test_ibsw225_runtime_source_manifest_contract": "a1cd73c29c2e0b534a121b55ab4b10f8ec87496c5565884d09bf327a42331bec",
+    "test_cases.test_ibsw225_three_component_workflow": "d69a1d6c8fa8f879da8969991de3478bc36781fb7521fda2b10a1506039e8960",
+    "test_cases.test_ibsw3_cpld_os22_template_gate": "b0d0f5c2d6d6e62073391d9268ffa138df67916772cea4df5693b2b03c46496d",
+    "test_cases.test_ibsw3_main_transfer_choice": "f01537e8cb1acb8f2ee1763c608c8bbb04c4356aa6f5b2ed1d05927fb533d013",
+    "test_cases.test_ibsw3_native_bios_bridge": "b771cb2a44c8563d1724fe399dab47d175c39ae2a03e199433cfeeae5008004f",
+    "test_cases.test_ibsw3_native_borrow_hybrid_provenance": "5e82654a8533345e46045d6f7d8810a48c125ee0a79df952da018fb253cbb1dc",
+    "test_cases.test_ibsw3_native_borrow_phase_boundary": "6e43f7bcb5abee22d04a9030d8f9c015a5b3c898006c1cea5c6cbb3462bd17ea",
+    "test_cases.test_ibsw3_native_cpld_bridge": "cbf5e50e096de8001c58b172c7da05bee718cebdee664807e37a60852314f9cd",
+    "test_cases.test_ibsw3_native_foreign_probe_regression": "d48ee8699f8d24e58ae93120ea21d65523c0384970d20d8a18441fc0045b690f",
+    "test_cases.test_ibsw3_native_os_canonical_carrier_contract": "2913051adbe430c81f1def8c54cfdd5e47b77af76fb27d0e63d226206d56c862",
+    "test_cases.test_ibsw3_native_os_event_clock": "b172fdfafcd92172e5343f67b5368c0c4fceac0b71bfa9262f6552ea3b7b5932",
+    "test_cases.test_ibsw3_native_os_manager_workflow": "4b422198912a955a011d520979873cb3cd051e3c30154d53929699059c0c5047",
+    "test_cases.test_ibsw3_native_probe_target_query_stop": "22697068009023121433a865e634f36986a15c5ea50bce714f9c79f6dd1051c1",
+    "test_cases.test_ibsw3_native_scp_cli_borrow_capability": "8ccccb0e80477c1d0fc6c38ce3d1a8ab5627414978214d917f7b4198ef064de3",
+    "test_cases.test_ibsw3_native_scp_landing_docs": "d7e68a504c3ce7cfe269d44d14203e26842215ca59c273b52c49b93a974c7b8d",
+    "test_cases.test_ibsw3_native_scp_launch_context": "a2ed14664a205d7dae864fedb35d8db80bde339edf55699ebef0318f47df5fa0",
+    "test_cases.test_ibsw3_native_scp_no_write_capability": "cc0adc0ff79a9b7f88ee2655f3d839d2bb45fe70e4e079c39b2aae43ee905b6e",
+    "test_cases.test_ibsw3_native_source_preflight_workflow": "2fdc7f100174e5235786b122f08793b406c0d48d500747817f25122d0a78e4f9",
+    "test_cases.test_ibsw3_scp_component_data_protocol": "4fc812d24ff15e3496bf10b04edcfd71a31a24f69f9c0789679a7275677eda3e",
+    "test_cases.test_ibsw3_scp_download_display": "c77a4bc6a6022486fead1f09df468f115b85d1a91380a96d74b4148e66083dbb",
+    "test_cases.test_ibsw3_scp_empty_wire_shell_boundary": "a5531f2d91f94edf999e5a632566e50b50ce5be94e03e221ce0e3f3e3fc25346",
+    "test_cases.test_ibsw3_scp_native_declaration_capability": "b5d5d8dcf9915bd9123e061cc5fa98cea8f6042af1c513328333c8c28edf50c0",
+    "test_cases.test_ibsw3_scp_parent_cleanup_boundary": "4332a9e85d6186721bd492ec9fa324329c950cc7d4237951e4120baaaa3e217c",
+    "test_cases.test_ibsw3_scp_parent_content_owner": "c24fe7adda2628c07f77bfd4deda9532fa0fe812b8e54f03d1a38e596cf56c75",
+    "test_cases.test_ibsw3_scp_parent_source_binding": "8386388bbe6c2ae41a79a3ab7ca9dabafe706ad1264055e8ccfdf495ac818a76",
+    "test_cases.test_ibsw3_scp_probe_api_python_model": "3b110be2cb5de00e04a2da88d45ad4fcb1909942b2ab32533362c8a13251df85",
+    "test_cases.test_ibsw3_scp_probe_shared_hold": "00ce319c17a22ee67b947eb079c6f62aa51f9659dcb123fadb5c167307ec3620",
+    "test_cases.test_ibsw3_scp_provider_absent": "cefba297b94d3e5381aec328e1c740fd50084787ede6d99d78eacb1a73094a26",
+    "test_cases.test_ibsw3_scp_provider_cache": "33b02c209bf61e8103385f0acba993671f63f443acae98863b6e3f891d7b9692",
+    "test_cases.test_ibsw3_scp_provider_close": "3c52ceb0d649524069d4bdba7b83f823d61838877f02f7836d27fd6527b87636",
+    "test_cases.test_ibsw3_scp_provider_source": "aca7b2f989abd4c33e0136a0690c4ba7568845ba4afc71e37b8308ed88c68beb",
+    "test_cases.test_ibsw3_scp_request_cpld_sources": "14092836fbd46d9008f3895efafa374a5efc5b5c2e5a649f677cceec6d7174ac",
+    "test_cases.test_ibsw3_scp_scope_request_content": "67d3cd7b93c8b6d77f9339abe03d341aa4a0c6f0237594a82ce32242b91030ec",
+    "test_cases.test_ibsw3_scp_source_api_close": "050bd90e068848e4758127609f8227ce034ea8ec6ad71aebee604481e84ef9e4",
+    "test_cases.test_ibsw3_scp_source_api_python_model": "a5aad1f93b8cf53015f4be0b218e207fab2f15b893a6e69e95b896f2b441df77",
+    "test_cases.test_ibsw3_scp_source_binding": "130244c3d52c3741c690e4552647022d5d48a2ef9e93c2dfcc8cea082f4354e7",
+    "test_cases.test_ibsw3_scp_source_cli_prompt_binding": "9d4d309ac0f1d5c6bb2cc5087bbfe5a422ea06119e79fc4cccbbafe85a64ab19",
+    "test_cases.test_ibsw3_scp_source_constructor_semantics": "33c3d481fa770fe4f6ab3c463c78355268b51e392af58ae4fe6adb6a2ed64e8c",
+    "test_cases.test_ibsw3_scp_source_dependency_faults": "5961a5e55a6f1a47e27bc73ad73f73f352cb5f5cda492083e232320cee5274ed",
+    "test_cases.test_ibsw3_scp_source_factory_provenance": "f082d7fc5a56b20d40933a5cf9ad0abf8756867f28fe2e06f1c01c2e9c7de2c7",
+    "test_cases.test_ibsw3_scp_source_probe_channel": "d8ba24287cf6b9c0169ea483efcc5820af8f7396853f22b7cdc5196abadf4a64",
+    "test_cases.test_ibsw3_scp_stage_constructor": "98da30a38c998b53dfdb746dfcb5dfb34198967feadafa2dfd0bc159fdb0f269",
+    "test_cases.test_ibsw3_scp_stage_durability": "4e7c79c2c88e7b6826b0256a6a0628c30c9b852acd2c4a5f0e9074cda271bb53",
+    "test_cases.test_ibsw3_scp_stage_scope": "56b532909cf8a4e5e210c395e46985bb966ac051e884e7f0d4b449a83a02bdbf",
+    "test_cases.test_ibsw3_scp_stdout_packet_direct": "83ff9beb3465de929a299a42729ea18092a98200fdd88066c25a0d01ce73cba0",
+    "test_cases.test_ibsw3_source_inverse_fixture_portability": "f15ba1ab12862e530a634cc4b6b115e3e2e4700fc9017ad210d325f204324fc3",
+    "test_cases.test_ibsw3_stdin_owned_cpld_protocol": "ad421c74cbe440b43a96a1c50a4386889df61c81d57ecd1d46c3325ea02e4c15",
+    "test_cases.test_ibsw3_transfer_method_selector": "cc2878cb7ebce21c27225a3717f7457c73883bb7474f26240d5c716deed8d47d",
+    "test_cases.test_ibsw_upgrade_usability": "20b09aa46fb6fe99b5da91669d4e3b47137f09ad2ba1eae840b6da9bfca515ce",
+    "test_cases.test_ibsw_upgrade_usability_workflow": "7cddcfcd27db0d2f552bc7db8f7f394515598d023f8fdc1654a324fb5b72c8df",
+    "test_cases.test_ibsw_v2_device": "0467dab5b8d29f2104047dd696f038799ed0d2acad2018c30ef08e761637466a",
+    "test_cases.test_ibsw_v2_device_scripts": "2e8165d156e61c35acbaf4e0d135e2842ce38c081557fe82eba21ceed9e2280f",
+    "test_cases.test_ibsw_v2_entry": "b7f38e5f19a169509151e56da2cb06331976ffdbbbe1c8a287ba5f6170a1f5e5",
+    "test_cases.test_ibsw_v2_workflow": "61ed302728ffef6e8aebb83d796c3610f9714e365278705a56473131fd621f75",
+    "test_cases.test_image_context_safety": "dfecd4fb0093efa9b6c5e14f37c3ebac11d26b89d946e14661465d7fda964b89",
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
     "test_cases.test_infra_check_and_manual_reset": "cebabd196a9c01f250a6ccd728838d8fcbe8eb8cc5eab60f7d76f30aa2d36e42",
-    "test_cases.test_infra_neutral_defaults": "9ada5d6ca1b7bf71bafe769c058e8e74d796e1f051e6c2f9943032c46826f69f",
+    "test_cases.test_infra_neutral_defaults": "a5205df04844473be8bb5832a6cbebf4ec1bd496d4637a15a18478cd7396a580",
+    "test_cases.test_infra_setup_py": "24bd26cc0e82b33c699aedb65f20aa264a596a90443592661a540771a7383b60",
+    "test_cases.test_infra_setup_py_workflow": "1ea6b31a93f9192754a0b7348757c937694f558b311748ca30431593ac12eb87",
+    "test_cases.test_initial_setup_authorized_key_quoted_options": "519869aebf30f939f01cd3357ab09231a5e00815a89610e93240c8861e45d04f",
+    "test_cases.test_initial_setup_authorized_key_shell_workflow": "232e3401d289f299286c870f7935979616bb3c724853b7673cbba63f4e65b133",
+    "test_cases.test_initial_setup_auto_credentials_writer": "234ab7b457f5a9721cb69381b13bd766bbf0a38ddc8ee023697b7f2db9878232",
+    "test_cases.test_initial_setup_auto_early_common_pause_workflow": "c7928d6333ddaaf93d85e9fefd49a63022bcd7657195d817980156ddf7a4e8c3",
+    "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow": "abeedebfea881251d018040701017f2c8b56dd73eed778f1aed8075e3c377931",
+    "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow": "72b4a4ca8ca7f55cc203ab75e1a563757106da0e8612a2daf199d48d2ea2cfb7",
+    "test_cases.test_initial_setup_auto_oob_tail_latch_workflow": "bd6a3e816988e5fcd4d2728b5e8da4206b1b2ab1d766c81de8266b9c3089396d",
+    "test_cases.test_initial_setup_auto_policy_fact": "0716b873887886d2bb03a39548d5d50294106999dfc42db0cd25d1c572199d3d",
+    "test_cases.test_initial_setup_auto_watch_pause": "1ebb2b59ec928163516a824251b10cba852ec6eb94e0db4b7f0c72ba61430aae",
+    "test_cases.test_initial_setup_bare_expiry_readonly": "b28032085e94a37d6cb0ce5d767abe13b6f55a287105f0a030a278ee413d0731",
+    "test_cases.test_initial_setup_cache_admission_mode_auto_workflow": "31d56e381c1f305d25c69c8d74b28fc4c9615695783593fc05d91e94cd3c739f",
+    "test_cases.test_initial_setup_cache_admission_output": "a944d208d843616e75f06784a6dd7c933e3625c2cfcf45e9f8ee190678ed29f9",
+    "test_cases.test_initial_setup_explicit_consumer_context": "ec0438cc51dc9199edf9db66dd5a62efb83083e0bc8bf4cc0c7774de9ed0d19c",
+    "test_cases.test_initial_setup_handoff_transport": "5380974f3d172a69e00c70ead35cf15e82d91487306bf2ae43f610f2d96acb36",
+    "test_cases.test_initial_setup_handoff_transport_workflow": "d7e9c2f3efc93edeaf507bee8eb6b5647c65f46bcb4c1936e880cf72471b198f",
+    "test_cases.test_initial_setup_ib_phase_protocol": "f5df7fe88b57402875b35d107164ef631d1d8e27d2508e71fa544155d912a06e",
+    "test_cases.test_initial_setup_initial_closed_facts": "279a816ff4a224c82ba91428d439df023ec3ce79751065dfd4b615b01848ad6d",
+    "test_cases.test_initial_setup_key_receipt_consumer": "0a376ccb1396ef257ac311b9e2e2873525ceee5ababf095e6a5cbc2d483539eb",
+    "test_cases.test_initial_setup_key_receipt_workflow": "8e0f0dff976bcd9c4603523e6960a751218382cb6df5fc769e348830da55398a",
+    "test_cases.test_initial_setup_main_caller_precommit": "33409d2543042cc735e64de3ae2f743aacf4eca616eb9499e6381241322b509b",
+    "test_cases.test_initial_setup_main_profile_custody": "d75eb9c9d9978ad2fb756c0646b725c88233c9783fb15ade0b63638dd30903d9",
+    "test_cases.test_initial_setup_managed_merge_contract": "5d5ca047eb982d2b36425c505102cf445c79842be9a85fbc9b9943e7509c098e",
+    "test_cases.test_initial_setup_managed_neutral_source": "352d8858d2a3ee3808737a7d5edf9042fe8e4f9fa88612994796598a2cf6a2b0",
+    "test_cases.test_initial_setup_management_network": "2b8f80e0340c095ce6042efb6a1b5bf9292f01c8a5e915fdc545e6ac83671712",
+    "test_cases.test_initial_setup_management_stage_roles": "456634ce39df44d8cac0086a5b4aa9561c1ac7b62e5b58cb677ce288a757ecfc",
+    "test_cases.test_initial_setup_network_diagnostics": "686dc60205ad3996f802fb43cb67519a1b816e97407debe9c8171cdbdc25db0e",
+    "test_cases.test_initial_setup_ntp_membership": "a35fede4fa2804923e2b4b78cea89b835449b35edec26d7b4f32e1309e1a47ab",
+    "test_cases.test_initial_setup_nvos_argv": "29c6315ebbf850e26de5f6305ea914bba27e182e0d50e52a48b35147975f47c6",
+    "test_cases.test_initial_setup_pending_diff": "d1019ab37d66629feddae26054cbe676d4dadfffe88e9a169cddd73027d3208e",
+    "test_cases.test_initial_setup_pty_cleanup": "bf4398075ad8a0c775988e6fbfe5645ba195513ba308c15d92208c16c5cbc60d",
+    "test_cases.test_initial_setup_selfcontained_neutral": "da1cfc21cb430d1c0f8249fabcedb1aa848dc5f5996bcd1ae29a78c85c849323",
+    "test_cases.test_initial_setup_target_credentials_workflow": "a824627841a0ff5a68212b50884c7ce20576f2c36994f888ff27523e6e1d74a0",
+    "test_cases.test_initial_setup_target_outcome_summary": "97474527ad6743cc90fcad8d18d43585337241fe35f71f8751d6968e4233e7dc",
+    "test_cases.test_initial_setup_target_password_policy": "fa614f2c3816baede89734b32e10b2d834f510a0dc4fe730f9d851fe8f290ff2",
     "test_cases.test_issue0007_role_link_contract": "e2f03fd2ae172ff5a3cec48034c80fcb53d444997d5b90b91a33592597add298",
     "test_cases.test_issue0007_role_link_workflow": "8b4de3c87adeaa82a42b8ca81a2b70358adb4a6686a4b99bd34304125cb8bacc",
     "test_cases.test_issue_tracker_activity_source": "8c1e1702d7642b7dbd5ad5e28c7f996cb7701d8232a6ca50ad5f48c1a624e244",
     "test_cases.test_issue_tracker_activity_source_workflow": "cde15769c9fe44d08f8c132b0136e931301b0d5abb1b13e120bc7fdb4924aefe",
-    "test_cases.test_issue_tracker_admission": "dcbec852c9337bd0ffb0f18bd7daf7be62f4ccba6afda1a7b183b08327650cb6",
-    "test_cases.test_issue_tracker_cabling_projection": "9c1c1283e92ba510d301b326c8456c350f9ecbee36ab2f0b213f7f0591334a5e",
-    "test_cases.test_issue_tracker_credential_fd": "fd5026c2d7028c7e9c80636664d803b148da48f017f2d1fab8eb5f1a94bad44a",
-    "test_cases.test_issue_tracker_credential_shape": "77e0c6995fff81d1a0b569a83e709c384348348911b374e5c4ca2f361c35a106",
-    "test_cases.test_issue_tracker_cycle_source": "cd6918b1bca3ff3ce5e2f0e1aea42e2f8f8c86517e2ed588808301c304ec54da",
+    "test_cases.test_issue_tracker_cycle_source": "9b7b68c830a63b67e774604fd59663ef8f0d9ee406137bdb7ccb41d375cd2d10",
     "test_cases.test_issue_tracker_cycle_source_workflow": "321ebee054d464b3c6af434d94ca28d73da86395e2599a4cc2e7e4d60463c0d5",
-    "test_cases.test_issue_tracker_ib_per_key_source": "2fcb1eb21e779cbbc51bc302ef2ed5a4a84a8ac3c2b7d6267e2199384180ee02",
-    "test_cases.test_issue_tracker_ib_per_key_source_workflow": "ad0c3f31faffd804ba080a65e3d28e670f4483831eda5eee73202c09d6aa9d3f",
-    "test_cases.test_issue_tracker_ib_runtime": "165a6c0b8c836c83a13e850e0a5842a93d47a226831fa709689c795368e3a286",
-    "test_cases.test_issue_tracker_ib_runtime_workflow": "0c9a9aff6179de68650569e53d6e12a707b3b833ab83f7365565e0e5ec0073c7",
-    "test_cases.test_issue_tracker_k_chain": "a50e75b20c3cb239315821ab33d7fdd0a0f8e16fbfc13d41da066718ab774fd0",
-    "test_cases.test_issue_tracker_k_chain_workflow": "642db1c918632e8b1110328459a9bc6568b0432e10fe8ba7189c2a3e27584e99",
-    "test_cases.test_issue_tracker_k_store": "64fce5c81aa44a4136bed870212df9c147d2f9f2046998d7a79537871b1a4283",
-    "test_cases.test_issue_tracker_k_store_workflow": "2dc30f8acdc7d549129c1d6627798b8800e5c5f81e76118196773d283357fcea",
-    "test_cases.test_issue_tracker_local_commit": "58fcac873f55d7326c66a6d2e4e478e254ed6342b81b05252f9308088e067ab1",
-    "test_cases.test_issue_tracker_local_commit_workflow": "6b660b9041a8b72138bbc1b3c56ff88fe8a7376c9ffbd66e846416582064ee4f",
-    "test_cases.test_issue_tracker_local_recovery": "3ecfceb7de609ce69604c3ce1db95fb47194c52c6e2ac325bf22cd21376cf3fb",
-    "test_cases.test_issue_tracker_local_recovery_workflow": "0b33301319a011b055685edd4e7510e6241ed5a8379d9e305c7523e468bf0baa",
-    "test_cases.test_issue_tracker_local_workbook": "e6dde7e3cb668b2dd5abc18bf651c35277a9422165fc558a2ba373c4787eb559",
-    "test_cases.test_issue_tracker_local_workbook_commit": "326afe367790dd35fa92ed2107cce1e141a920b85c5a65477f37ebc3e4d8134a",
-    "test_cases.test_issue_tracker_local_workbook_commit_workflow": "5cc72887babd4ec8719d8bacf40ad2f248f1fd26b1fe484bfe0c19c634fc0b99",
-    "test_cases.test_issue_tracker_local_workbook_workflow": "05d66eae2ba7c1ae7716cb49ffdcf5812df534af9d5f58f51a6467eb13df8165",
-    "test_cases.test_issue_tracker_manifest": "8c99d36d2f42bb72f57e9e00e986cc7268af6f89cf5a4786e4dc914ee4b91a08",
-    "test_cases.test_issue_tracker_manifest_workflow": "2991c3171ac0e32ea74a77d6e50da9fe5cf4050e286faf35bd329e01a913cc02",
-    "test_cases.test_issue_tracker_manual_channel": "d2d938cb9e66f329714bc4eef7b488dc90a0f98b715adfcbc7f7c0a758113551",
-    "test_cases.test_issue_tracker_manual_channel_workflow": "dbeaf6dc41dfbffe2d7375eb01d04ff09815ae041ffded423c0f94eeab3ec693",
-    "test_cases.test_issue_tracker_manual_listener": "406bb5163cc468b14e1349295d4d3a2ba1232f7171c98c6769e7718f416bbfd2",
-    "test_cases.test_issue_tracker_manual_listener_workflow": "bb70f15eb2291b5717bbc1a9bb2e63381a7b5116804decad5189080028266673",
-    "test_cases.test_issue_tracker_manual_panel_workflow": "8509f04a958013cf020e7456e54b3585403d554d9f769b562b33d9f30cddd130",
-    "test_cases.test_issue_tracker_manual_preview": "c6c82de3e90ca36cdd4ed3d2f14314c9c66f25ba8fba9c523b8c2bd030b10360",
-    "test_cases.test_issue_tracker_manual_preview_workflow": "625c68eb265f2e91b695a19427039613399b70c2dfb1494db2c8a8e2ac9c5741",
-    "test_cases.test_issue_tracker_manual_ui": "800af102af4d4f9c8590e2d46c1c04c8dffead09510dc1abf7e065706d137546",
-    "test_cases.test_issue_tracker_manual_ui_workflow": "de36ccfce52991b257b530cc9efe76ce132e2c89058e8d7387c0b9ff4d580299",
-    "test_cases.test_issue_tracker_online_cells": "895cf4542897b8eebe94d8d447bc5fd909e860b43bd2b0fe9b6d5c22b7bf276b",
-    "test_cases.test_issue_tracker_online_nv_ids": "16f5b28a41719280fefa8af2078abe174aed0174f3686a8e9b29cfa51aa593de",
-    "test_cases.test_issue_tracker_online_rows": "b75d59ce2709008f0388d3f035129f6f660644f17f5e8c35cdeb02648c992331",
-    "test_cases.test_issue_tracker_online_target": "cc7be0ed980431cb84d21546ac582dbda1404c4259fe1afa9db749a8165b645b",
-    "test_cases.test_issue_tracker_online_target_workflow": "5ea8ba91e9b238b2e74729376de87c6de8d2ea5120b88151973c7e86ac3e914d",
-    "test_cases.test_issue_tracker_per_key_source": "278739a4bc7b746feba3349808f0e547a2a9e56dc40bd474372b4de04239902d",
-    "test_cases.test_issue_tracker_per_key_source_workflow": "c9479d93ce66372eaa69600a2465a8aa06f96e58a31edf76427d31f7523d5cef",
-    "test_cases.test_issue_tracker_per_key_status_contract": "50d217f75787a20e3690ac5a1fab6008cb61c98d7b114691c3d476c1b7728079",
-    "test_cases.test_issue_tracker_per_key_status_contract_workflow": "b917844d777121bbee66384903c35d2a361bba0fd97982a0f113e3b0151e5595",
-    "test_cases.test_issue_tracker_publish_runtime": "9690633dcc3047d595169df06aff52139e3ff1fa54ea3a4589a38cc91c38774f",
-    "test_cases.test_issue_tracker_publish_runtime_workflow": "a3ba0db234515f53e4a2d7d782c193d3c117e8f8c34940b96c324bfc581c05e8",
-    "test_cases.test_issue_tracker_qualification": "1651dda3beb3ed56b24e8ab54b9f0601b179aa0313905031ac3199c100ba4d13",
-    "test_cases.test_issue_tracker_receipt_snapshot": "22d1ddf3033c74011821083528c0d69e1d99a4fa69845d13148560a6fca9c1b3",
-    "test_cases.test_issue_tracker_receipt_snapshot_workflow": "f14e78525cd86b57244c5a220190d576d5196a816f864b707e9298b281746756",
-    "test_cases.test_issue_tracker_stage_l_consumer": "4ba4ef9013c54e4fb6275f355d60cb1c710af2232adea74a3bd78adb4fe612ae",
-    "test_cases.test_issue_tracker_stage_l_consumer_workflow": "256f2108cd2b05c6f617aa8d780664c2c0eccb908b24d6771fe237e7284f6e6f",
-    "test_cases.test_issue_tracker_stage_l_status_per_key_contract": "5c9a70addfdb6b7ff5a2b0e0bbd19fcfe17e3f7dd325a2f989c023368f503104",
-    "test_cases.test_issue_tracker_stage_l_status_per_key_contract_workflow": "953badc5971f12d3bce3ba0d77a44200cc00b0775641fa0e40d7a2c9f34d9e2a",
-    "test_cases.test_issue_tracker_state_owner": "37827c74c997f3203d5a75f7b9d73be3672d9631f41299db9bf8935d5d38afa5",
-    "test_cases.test_issue_tracker_state_owner_workflow": "85cbc5bcef96012ae69c2d118e4af3a64b23064ea34a2a83a1b3456a2d552c16",
-    "test_cases.test_issue_tracker_switch_info_source": "81f1b399cb426360958682096b41c9d0b62e788f429fe3ae15b3199c08c00416",
-    "test_cases.test_issue_tracker_switch_info_source_workflow": "c56651b7cfb2df4e92fb1f04b951f58e211cac1821a413eb80235f7cea71558b",
-    "test_cases.test_issue_tracker_switch_per_key_source": "817b526f1e7b60f21875fc95866cba11acf53d6bba911744b4de3b8a68294a4c",
-    "test_cases.test_issue_tracker_switch_per_key_source_workflow": "cdfd1d108cf46a943fb89f17775d3aab85e8eb65774505023feb944ed58c8a76",
-    "test_cases.test_issue_tracker_switch_projection": "e445025b3db69ed4d5a347b63f611b1ca2e63f0c37fa2765047deb98b9eae1b1",
-    "test_cases.test_issue_tracker_switch_runtime": "4b3823d515cbf2afbfea7505fdea98737d369b23d88540b700d2c385a0d6711b",
-    "test_cases.test_issue_tracker_switch_runtime_workflow": "c0a0b2cf37293c1f520f8e868ed5e41394d0c10282ad1235dde80c0b691b8ed9",
-    "test_cases.test_issue_tracker_topology_derivation": "77df4153bd6d0cfac2fa79f879ee6d7aa55815578d7b7df2f7048c3123782209",
-    "test_cases.test_issue_tracker_topology_derivation_workflow": "9d26dccaf17c90089f1ef041445064d0f1c543dbb9d5228410e9be3675da2f43",
-    "test_cases.test_issue_tracker_whitelist": "9832269de40d40461fa6ed8641e0a925a44aebab2edef9c4a9b6d71d1a193435",
-    "test_cases.test_issue_tracker_whitelist_workbook": "6c4fd8bceec23e1fbfa1b9d8ecad78853058ee7f3ef93bd90b5f7906923c6eac",
-    "test_cases.test_issue_tracker_whitelist_workbook_workflow": "2cc91998f5ee6c704f7b17b95bcc404dbfde4737092430a306485e5a39ace919",
-    "test_cases.test_issue_tracker_whitelist_workflow": "b22e238ef2e8eedf29977486a6c170c7cf9158a126d7797d145109acf726c353",
-    "test_cases.test_load_release_transaction": "223d54b1987427f2419297035170e537cf02abf80c5f25b4ebe1621aa331f6e0",
+    "test_cases.test_issue_tracker_engine_runtime": "03ac464c3181b455db9888d33875f96fc180e76a041cf65c335a919b63848517",
+    "test_cases.test_issue_tracker_sync": "c3686673baaf667eeb5ee1bd46cc315ccacdde5aa4af40ff8e4d86abaebeaa16",
+    "test_cases.test_issue_tracker_sync_workflow": "6c60d04377fc158d3fb92b34934065060185ea4e0c35a0a97731a13e6c7d04c6",
+    "test_cases.test_load_ib_cvt": "495c6005a9b231646e897040ad800de50a758cfad6201cb8b5476e02d0bb4f1d",
+    "test_cases.test_load_release_transaction": "d14f169bef9e53380fa6a65f85ce912d5ae20d5633e6c753815914bc64cea8a9",
+    "test_cases.test_log_rotation": "d9078c1eba2af8da430cd83194816b2c34b5d8c7d0d4fb68fa8904438ea0ba1e",
     "test_cases.test_manual_applied_config": "1dc0c5e9872fd5164f170e92b8f94c4ef1ee62b5dd9b934165769476791c4b77",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
-    "test_cases.test_monitor_authority_entrypoints": "b40ed42fdac6c5fbc8a685514ad69452685e37691d7ada9458b6d5f4e1c302ae",
-    "test_cases.test_monitor_authority_semantic_workflow": "b765255a9466397076cb21f68a35d1ccebb94360cdda4ad38c89fdc99d4b973b",
-    "test_cases.test_monitor_authority_source_guard": "bb1fd10fc83f7e4de2ae8c87c39cb5c3fd304fdfbc8a8404087e271d25db156e",
-    "test_cases.test_monitor_stack_review": "8509f3f29550edccdf7f8eb0fc9244a1b6187c1c769c755a1ecf8aee9a60ebdf",
+    "test_cases.test_module_loader_contract": "70f5910689d83a83367c6618aad27c8ec94884b175e1188e4f34eea7dccbbcc0",
+    "test_cases.test_monitor_authority_entrypoints": "09c2403652de442745908b64240a1f22a169ecaa3fa1caae166f48ddf23ef530",
+    "test_cases.test_monitor_authority_semantic_workflow": "deb7d1f5697bc77c0c79209930dbf5bcafc4fea49b2a71674a0b84480fc72265",
+    "test_cases.test_monitor_authority_source_guard": "378669f4ab8c0910f8902eb9e83b050d36d0ef9fc2e44dbc4186a1cc42ce99ce",
+    "test_cases.test_monitor_legacy_tracker_retirement": "c246156e708e3b4596f448711358ee856caf72bd13e9d65a7c55407d247aaff7",
+    "test_cases.test_monitor_legacy_tracker_retirement_workflow": "966f1cf1683154e3bd28abc14da2d7f550256ee380f70bc0fe0ee0fbf9cd944b",
+    "test_cases.test_monitor_stack_review": "a73c150ddc62722de0a3414932d8974f0243b4e05da41186d57eac289c195522",
+    "test_cases.test_monitor_ufm_status": "df330d6d60c54b2741b973e089185f0cacbb22f19f82cd7a1116112a1b190944",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
-    "test_cases.test_monitor_writer_quiesce_workflow": "679d393f2650a20b0c5b8af326065b2e43bb72b390bdfe8645eec99c5ef2bb33",
+    "test_cases.test_monitor_writer_quiesce_workflow": "607a8002448260dc2965f006cb2e84b390afd8bb6e98467598ac0004194a771b",
+    "test_cases.test_native_bios_os22_consumer_compatibility": "74e7d2187ddc2d933024e5c3fee6af641a7a64725230c5e4c6a5c703bae923b5",
+    "test_cases.test_native_bios_shared_source_inverse": "c183703252d8ba9b6e8ba32e9b07d43829c19307b6553b711b90ceb9bd8dbba3",
+    "test_cases.test_native_cpld_safe_image_fail_closed": "dc7f90b25e68d50a50e1b9fee0e169c7529292b44303c4d7e41421056d7d735f",
+    "test_cases.test_native_display_source_inverse": "5f5fe031318308b646f110da64313f0c14462fae127232b018094bd851f4f130",
+    "test_cases.test_native_os_cancel_boundary": "74dd63cea7c46c7a13c4a1eba6990eb55f5f5d7215e3205029e788427cf5b85f",
+    "test_cases.test_native_os_fixture_timeout": "d979745ae4765193851b2ed6be75d5ae5b6a2f9234e8dd2c179f0c027f66c68a",
+    "test_cases.test_native_os_source_inverse": "c4b5c01a2f0cfa5d59c2a6d644287f34c04dd94f9390d6eb9272ed1b79c16a13",
+    "test_cases.test_new_current679d_alias_fixedpoint": "83be1862774a9e83af063d02480634afc651adafd56c9ad159bc95280f18cf51",
+    "test_cases.test_new_owned_directive_boundaries": "978a99beaf92299d62616e3213f2683332dbd6c5b3812354ab51770fb990100e",
+    "test_cases.test_new_owned_function_identity_consumer": "55d0093bdc07cc3a0f5ea9483b40a368ee4da16785169d927b9c2ce8f1d95ae8",
+    "test_cases.test_new_owned_nested_global_regression": "d4030c3308ff51dfa8907c53d3f9bdd056739615c530ebbd424fd39b8385e80b",
+    "test_cases.test_new_owned_parameter_flow_regression": "7df31638247ebc8229024d01a837351a57e71f09730d7c5389c3d4c753064f84",
+    "test_cases.test_new_owned_return_boundaries": "b09efaab223bcfb66de076a1eae7b3f22d408a06294cc4b9f73ea61a17479b0c",
+    "test_cases.test_new_owned_return_flow_regression": "0b4def95cb40dd02af8e13f6a229fe3ce595c0f07bfabdc0316854867a9d2183",
+    "test_cases.test_new_owned_routing_use_and_chain_boundaries": "72d88b6624027e5afa6737767c0a0673c7edfa7201432218dd9927fa09926899",
+    "test_cases.test_new_owned_scope_directive_regression": "3ecd7d2168b6f6105fba5d06d45b3c9d09b67070345486b96d1b32a4375f8f25",
+    "test_cases.test_new_owned_source_scope_boundaries": "6f9b2e20fb8143786bb132bd384fd1cb0e96d743fdbac8e68c5742fa41dee62a",
+    "test_cases.test_new_scanner_classifier_conflict_writer": "6ce00495c227de9358d3a6c63671bf9358a33ef4801f198e0c83fde1f8fd0fcf",
+    "test_cases.test_new_uninstrumented_alias_finite_closure": "3029dd322c5eec3b44a9febc06564a1638363ec585c00f90087000d1aa716cfa",
+    "test_cases.test_new_unknown_formal_callee": "3f8aa2bc403aff42aadb07ed063a3702d1ba1730662a9b30c7a2918d789a7ff5",
     "test_cases.test_nvue_normalizer": "6e22f0f89353d0042391330675e4cce387931e896f4b44f57911e2dccb85b230",
-    "test_cases.test_ops_deployment_review": "65ada29ce23301ff22b42b6b03103498086a7861968b21c28a90196454e1d5a4",
+    "test_cases.test_ops_deployment_review": "013c6f8bfbaa902982e495bb3081663d0e5ad9cca371d5f0619fec108c56821f",
     "test_cases.test_optimize_output_layout": "b37ffae7f3f1c81af403c33efd981976e766ee1face193a43410a57fa4dd6b7f",
     "test_cases.test_p2p_selection_contract": "285efe456cb58ff312a3d9b1a64f34dac7350e14713030db11eaa08538f50945",
     "test_cases.test_p2p_selection_workflow": "428c1d5dbe604a1553b840e7382dd95411a1287980d8d9a48c9c325f8ed037db",
     "test_cases.test_password_update": "2fe3f3e1f500ee8cc72dafbfdac14869f5642c6b84e1a7060c21e243587771f1",
     "test_cases.test_predeploy_test_gate": "314149df6dec9c995f2ae629aad7f2f0ab4d792316c8c219b4da0de20a9e6a90",
     "test_cases.test_private_documentation_contract": "aea19926f10fe1a6a1f2df2c33658f40bbfc16b3074df0cc2febe2f5f3cf2dc8",
-    "test_cases.test_project_contracts": "04efb7765ff077d97074b4975e010482536fb6049ac638984e585efe354dcc93",
-    "test_cases.test_project_image_bundle": "4dea8b031fbcbc8b88f344c1bc15faaf4ccf4522d605bf5442fa2dd7c22ae09b",
+    "test_cases.test_private_public_fixture_input": "be24362d2616b37d199bc4227772707b1e40b1794ef6843989031395de6a8212",
+    "test_cases.test_project_contracts": "95833bf0328ab460b92c076ae1d7e1aaed33621efcbee5bc432048ee80083a0c",
+    "test_cases.test_project_image_bundle": "8fbc76a17ea425ef5194c0e5008965b2bd4f79224e186d1401b55f6297432c38",
+    "test_cases.test_project_image_owned_guard": "1eb7587f29ea4ad9adb93b500e1d20994f713e7cdfbc62a5ddbeeef4cfe0cbd5",
     "test_cases.test_public_clean_clone_contract": "f8b978c0c0a29e7dc83590b8306b647e1f191fef26101f093fca34bfe73abb75",
     "test_cases.test_public_clean_clone_workflow": "41f80694e3decc93e03ec4ddc412c11cf856b1060421630328d87d0a7beefea9",
     "test_cases.test_public_project_fixture_contract": "f4b142962882a296a79fe13e249403e72a583d500c237a76bb125cfcd70d38f2",
     "test_cases.test_public_project_fixture_workflow": "6c70eea6eddffe26f072d0c27a55ffbacfc9aca0c26b147601a156213fca3755",
     "test_cases.test_public_publication_contract": "0858c0d6aa7df0f4dd2a696614de41500fb9682ebcd04a6ab4b72791a0f9291c",
-    "test_cases.test_public_publication_v3_overlap": "2ce6af38b4f22eaca800709b1c8326f2dcaf45ef452f5f7f708811675148c32a",
-    "test_cases.test_public_publication_workflow": "0d7b487a28bf7d0e9249c8a2ffc84a6fde298db947661a405ddd6d353865f53b",
-    "test_cases.test_public_repository_contract": "0bb24c3a4710971d8c45bdb1dfb11c99c1f2e163b807a60d2823c56333df098e",
+    "test_cases.test_public_publication_v3_overlap": "1612bf44447150dfbea4aec0172ae590c0cad75844c8ce1d512eb2070b88bc54",
+    "test_cases.test_public_publication_workflow": "3ff29101368324a4e8cb52347fda62ab816e2c62e21aaf5f639aeca40715b501",
+    "test_cases.test_public_repository_contract": "ea330a53015cdc3f5d1313a40d58f340c15cd72b00161c563307684a8d27fb01",
     "test_cases.test_public_s_phase_contract": "78c1f2207f7b7d8a461ed414eae9bb16a803a9acc4dd8f86e3f1aad81aaf9e04",
     "test_cases.test_public_s_phase_workflow": "d0b3845269e8b99a6390f4b36da5ea11726c9edfaa9fd4dfc6d7a5522b4d77e3",
     "test_cases.test_qos_evpn_uplink_generation": "35b8f6285be154b383030a7e6f479e99483f5bf51bbe18871a13079be5618638",
-    "test_cases.test_reference_only_path_disposition": "3ed87c3b4437da622e73d3ffcdec95b17905f41a352dbdaf012ddc0d284e912b",
-    "test_cases.test_reference_only_selector_workflow": "555fecb2632f014176d0790df9a1ac706143161e13118cee038d4a3bd532fe86",
-    "test_cases.test_req10b_global_link_contract": "48fc1067d97ea89ee90c66b5350df98827c91cece1fb557bd6cc81bfb8f9395f",
+    "test_cases.test_reference_only_path_disposition": "dfb5fca6ae39d7d6edb701d36c3c652a2748aa70e5cda4ed7459913a58386a23",
+    "test_cases.test_reference_only_selector_workflow": "f577b88c51f092688b3a719e8c5c3de8b12c899370a70c535fe2858ae95e966c",
+    "test_cases.test_req10b_global_link_contract": "8412f34f047151683bbb306351695c073f1ae620def31a3b9fa0a588721d9ca4",
     "test_cases.test_req10b_global_link_workflow": "a5a8521ba84b140f1cd89384964bc04a2e5bcc68d74f91700c5f10ab20681d27",
-    "test_cases.test_req10b_services_keys_contract": "b3124ff5e9c0e9c5dbb3d3e3e5e48b0df421cf00fed1c878dbcaa0442b0a14a9",
-    "test_cases.test_req10b_services_keys_workflow": "1a053caac9793f27cb04d1a2d2ceef4c187fc02f17018f670b7cf7e4649ddce0",
-    "test_cases.test_req10c_auto_contract": "ba4b6f85e089160eab61725dba6f85bd1add07f9db8c40f271d830f0c9bb4f64",
-    "test_cases.test_req10c_auto_workflow": "42da3b376a473575974b5fad24dac0c31f5466ae723d0e5769a0af92220451fd",
+    "test_cases.test_req10b_services_keys_contract": "e724bb5a45fd7519795bd7516c10f3dfb0fab3f5a4508f395026352b1e05c004",
+    "test_cases.test_req10b_services_keys_workflow": "587ab60845f7f67a15094ae12cc8bdafcd9153a9ced8e9bb087047fd7630ac05",
+    "test_cases.test_req10c_auto_contract": "985b4ec270da74b9a985e6101b62695f9a202a8ade0ec6579231ab464cb16554",
+    "test_cases.test_req10c_auto_workflow": "3ea94bdf3ed8fac8a01fdce48e88ea2f34aaf631905b6229966adb470555d871",
     "test_cases.test_req14_active_provenance_workflow": "23fceb66c4ce89b30f3cdf34fa1fad205912a83dddd8fb0b6e51b46f7d22474a",
     "test_cases.test_req14_splitter_hostname_binding": "e17ce6fcfb2939be52f3f6ac042839f2c8ef6ccc835cde6689e0c15c72c14543",
-    "test_cases.test_req19_infra_log_contract": "5675f3d645bf70118ab2f816e94c8245e6346d2e5ff2079153b380803ac6acd7",
-    "test_cases.test_req19_infra_log_workflow": "c368030722ae8be76497ec695529a87857eaa41f1791318b1decd209580b30bb",
+    "test_cases.test_req19_infra_log_contract": "31c0725f793b03d37f47c94af234b16be763bb267b69eee5585da92a88f0fcc4",
+    "test_cases.test_req19_infra_log_workflow": "9286faf44d6bed9eccea11a4a5bf501fb6b163468f9cab554c5421c4dc18fc50",
     "test_cases.test_req22_runtime_contract": "b3a2edcc24c316db393754a52c36eab8187fdb4c89f6935bedb96388c9cb53d0",
     "test_cases.test_req22_setup_contract": "75680f7da3a79b73da1dbf70b920b5e2d09eba16f42d8addc8450a92022f3c85",
-    "test_cases.test_req7_activity_discovery": "951f518582d011dd701687c139f7fad0a34201d3c71606ff6fb92881a656e14c",
-    "test_cases.test_req7_attempt_journal": "f72c29a820ab756d3ea94be71ae0784e5f825b2360ddc725f327e8560b5b9d2a",
-    "test_cases.test_req7_attempt_supervision": "86a727c893806c91dfca4525cc293d0844381df607799ddf5c51e8d7baff3fed",
-    "test_cases.test_req7_auth_documentation_candidate": "a926f1a6d05862f077d788bf71277830c1e8b137da883aba757a1fd23672f594",
-    "test_cases.test_req7_dependency_contract": "18509d780485ec9f280b87c44d23185960e1dd46a2d8105780afea3e36202397",
-    "test_cases.test_req7_dependency_workflow": "3edf03bf9e3ab67dae3d298ede7d5dac622733ef27b777cbd7d0d003d0f0006b",
-    "test_cases.test_req7_enrollment_journal": "376527e38d65a0778ad86118cc6d3339544753b54b19c0f2ac1e04ac2b9be54a",
-    "test_cases.test_req7_global_attempt_journal": "45f53ba279bf05294d17ee07ee336ef73f9249387a0dc1b6e27db18748aa13dc",
-    "test_cases.test_req7_history_preread_journal": "91b2d5685ef438d350728025dfe7b6b4337a00c82951467a6ad83bb46b6dc2f8",
-    "test_cases.test_req7_history_read": "65416b3489c2f3758276806ddd0b5dd59d40d146ffc3fbf9e684456e58f341f3",
-    "test_cases.test_req7_history_read_launcher": "25375d0f0be74c6057ffd499701821dc5c25a247d52d8685f116216810aba41c",
-    "test_cases.test_req7_ib_provenance": "ba2e06111fcade5ae198de3599461d8d3312d3a810ffdc7b997dee743dcd9418",
-    "test_cases.test_req7_ib_provenance_workflow": "67a450733b795cdba8bb5b079e2917095f743ec5ad32d9a5b30a90204503710b",
-    "test_cases.test_req7_metadata_capacity": "bce21e73f796b2d4d7e70917c3a3fbbba57d397826742bd887eaa3b0f1052af1",
-    "test_cases.test_req7_metadata_reservation": "993f53856228288384fa375d64662237d1605c4c85a46f88de30c31a51b6b547",
-    "test_cases.test_req7_mutation_launcher": "32934658056e8860d0d799c5288b7c69559f6a0b0fdb8efd81ae1ed992d51725",
-    "test_cases.test_req7_mutation_rejection": "31ee7c6f84c6a4d5e1b717fe3312490063fea054f27dac65b3c65b3c479e1777",
-    "test_cases.test_req7_native_supervised_workflow": "5f51b609929aebb39d67a25969c80693a532b3d233bc60d414d34a2a34a6a465",
-    "test_cases.test_req7_native_tls_wire": "2aa80143644523a50f5fab21aec1be33f688d2df67bae36c547c327f2e780e99",
-    "test_cases.test_req7_nv_reservation": "b67e395eefb7f194890c45bd5db2a10c296dba412aaf4b823b47ac3af37a3463",
-    "test_cases.test_req7_online_whitelist_read": "3feb1be8f29de4a8cea3a27b477062a4babf5c3cc70f08afce0a563047d943e6",
-    "test_cases.test_req7_remote_history_match": "c59c8e9c0437f3e7bb7752bbf9e072ce3c743ae5d257e231791baf72402213bb",
-    "test_cases.test_req7_sdk_authentication": "5c70835a157c6c6d269a546fc49f60636acd521d647206eeb3be4dbce667cac5",
-    "test_cases.test_req7_send_intent": "a1d547c632ff9f236d177118031504ee7cfdd0d60de878a6a79060aea59ab627",
-    "test_cases.test_req7_send_unit": "db22a8e549172961c94ea7a6458e982be8f8259f0b4577861d0ce5a75a0f2a34",
-    "test_cases.test_req7_settings_audit_allocation": "f7e9d9a8c39477b799b046d1249b68a90c850a86a34a439e752115429e06d3f6",
-    "test_cases.test_req7_shared_retry_admission": "077dee0c8e824c557556ae7413a86efe016eef8df10fd68a9aa30ced7f3020e0",
-    "test_cases.test_req7_sheets_read_decode": "f288eb9bbdf565068adcd0b8f121a788d6b713c8e8fb9dd823a2031a92387a9a",
-    "test_cases.test_req7_sheets_read_plan": "a53a015fc27fb8d77684fe55c0502646e4a6f684d04be08070374eda95751989",
-    "test_cases.test_req7_spreadsheet_owner": "975cc4f85c4366a23af931c5e2a7307c77a052ea3a3f986b8815600e185870f2",
-    "test_cases.test_req7_tls_inputs": "fd9734f4d25a5b2b9669f63d57820d3a6115cb00a8979683e3b39baff9c4469d",
-    "test_cases.test_req7_token_launcher": "36cc5309f0aeb10dba148f1255b08343434bc0bdde8955eaeadb96284f460e6b",
-    "test_cases.test_req7_transport_manifest": "4d7c3e48da6d8b6b687e5f883c3a33e6aca45802398fdaae10cbe2cd994bfc68",
-    "test_cases.test_req8_public_cli_help_contract": "3d3e622eab7728a7b36184fb18ba50040e80cab6dc1915a9b89965b1a96a501b",
+    "test_cases.test_req7_ib_provenance": "3ee96ccbae8b60e8be6c83ec4d88123099dfd2f5af2158ff6acdfec77b9269c7",
+    "test_cases.test_req7_ib_provenance_workflow": "82032596df03fc20ce05d716718a69b27ebc4c4aae89b067934a57182e67b089",
+    "test_cases.test_req8_public_cli_help_contract": "93e4bacbf3215015473f952ad8d74f74f34d57c9a5950eb11cd3bf8d8ec66a88",
     "test_cases.test_req8_template_refactor_contract": "02ba6af1423bed60335c41e0829af17ea83f4ed4981d806353bf34b37fd71b44",
     "test_cases.test_req9_manual_preservation_workflow": "9a042a6329593bfbaeb16a2235368350deee8059ec099e19a3cbee7c3f72290c",
-    "test_cases.test_runner_preflight": "d76de45e31347785dbeb7779353c7b8c1c8cd57faae3dfb9e6cd5b09abce7a70",
+    "test_cases.test_runner_preflight": "a80ed49401e0198f4cab614e3bf04c13f8f0beac4063b645c7bd081ec468c2bf",
+    "test_cases.test_server_device_types": "f3563a06b35ece11ddd5eac2e9f17fbde0e4f648d34403a599981f24eff0ed67",
+    "test_cases.test_server_device_types_workflow": "5b2c2587dda2b2da847befdf571c5127146ee81163b10a164c8842d1c0bdca5a",
     "test_cases.test_service_endpoint_convergence": "0b4133e1a14ea40382dea16e68900422a956b9b5b9fce2803012bdd7328cd304",
-    "test_cases.test_shared_artifact_bundle": "643bff65d670c65f30710ef061c7ee5f3da2bb0208faa289c0e418ed9ae74c49",
+    "test_cases.test_setup_collection_link_evidence_workflow": "94950516fca00bf85e7a68f5e2e84443e2f3f3fcaececdefe72090b5327b2589",
+    "test_cases.test_setup_ufm_links_workflow": "6f7f81a38dbceb5ac96d0d59cb2dc7c6278f1fc3e07f7185e262169561cf2051",
+    "test_cases.test_shared_artifact_bundle": "47350a552e4178f9adc6d0d4f44d95f5f6b8f0a3c27eedb57771018fbff5e63a",
     "test_cases.test_splitter_profile_breakout": "5fe0566fc1a2a6614e8ce19706effe97e9a5b1aea8be56422b2a66bd3b82872f",
     "test_cases.test_splitter_profile_breakout_workflow": "6f12acec85f5540bde3de1ddf9670df2eeb3af56c150d8d52c6f6ba341285e75",
-    "test_cases.test_ssh_key_preparation_contract": "affc0bf82ec5decd9840b7d0febd603f2aeee6f7c4b7b82ce868f97ad83eca8c",
-    "test_cases.test_ssh_key_preparation_workflow": "10356d57847ca7deb5f5dcbda97dee40f0366cb8c12b8d5235cb512d6ad60fb4",
+    "test_cases.test_ssh_key_preparation_contract": "0d68fb5bf2041b4456e318b4b4b0f9b1ad3540f9d2eca408ca04be17d9c5028b",
+    "test_cases.test_ssh_key_preparation_workflow": "aa9a0a86ec86b5db5d6addef1e3da1b16b6d53f14954f30d90939af78d8fe566",
+    "test_cases.test_switch_status": "05308c68ca064f3a28a43ddb42ed72c16804209e5c21701f58a56780b3341a1a",
+    "test_cases.test_switch_status_workflow": "0ab4d383ea6feaeba9a5eaad311ad4c8d922ada298d0dc6b096052d52aa170de",
     "test_cases.test_terminal_l2_stp_generation": "fa322a659446400a75ae877a5badf73bfc939ad0345aa7717098bedd7689aa6e",
-    "test_cases.test_test_case_repository": "08b668eff643ca9d60ab9db4577f1324489e2cd9f57eba3553e5df6e9727c7cc",
+    "test_cases.test_test_case_repository": "13bb7a325afcea9d05124b3e9cd127351c2105f98300aa0e7d788599c813c4ef",
     "test_cases.test_topology_consistency": "2ac10dfe93626f0302b12cf4fab5f36eeee73e6c624242307fafb59990fd46fb",
-    "test_cases.test_ufm_collection_agent": "3ea34ce91866881926d822453d253546a0bea27b7cfd8cc3f78d6d46383fcbe6",
+    "test_cases.test_ubuntu24_host": "292715fa4fcecb430fcadb276117f557e7c61a1db7b4cd3fb8bb0eab68c976c0",
     "test_cases.test_ufm_collection_archive_retrieval": "da8f9eac91164cbd2db4bc79a0d1a6ec1fc6ee83a97fd214f9b95be6399f0c47",
     "test_cases.test_ufm_collection_contract": "81aa59af3c4626eb91dcf88e34ae8da0351bea52368fa4db1b23848479699464",
-    "test_cases.test_ufm_collection_pipeline": "275583a2248aabef70b1817e2eca9eb752b0c453daea7cfddbab87ac6f45e084",
-    "test_cases.test_ufm_collection_pipeline_workflow": "444b3acfb59bf39a005150540f18f84b06b3d18c0e4b2d13169d1f64db5b227d",
-    "test_cases.test_ufm_ibdiagnet_pipeline": "6d58729b3e526aabdb06ee6ab74239d3c7c1979a57557ea3b75e9f7665ba8a00",
-    "test_cases.test_ufm_ibdiagnet_pipeline_workflow": "eed0e1ece7c1f292ac49f0669434d8d9638eb73b6d02ad1add8ea9aab8561f8c",
+    "test_cases.test_ufm_ha_status_parity": "eaffcab49e53a24d3ae44c4ddb6142fe72b661ac171436f1715d235709266801",
     "test_cases.test_ufm_identity_binding": "569f88a2ebc821d121a34a165f1e2a712a4c3a226ef61908096988e8a18ef9e4",
-    "test_cases.test_ufm_identity_binding_workflow": "7c9de1914d01e9134a945726a12e6eb67314b9d3cb616ca2537235c885dadb1e",
+    "test_cases.test_ufm_identity_binding_workflow": "9100386f9019666afdd50b41105f5089004daf051be37c0d5ff988a70c98bce0",
     "test_cases.test_ufm_input_contract": "b72f9ec80c2b52d2cdc02007b83439bd13e38e16c5d12835b1c3c61958fde200",
     "test_cases.test_ufm_jump_transport": "092a403c7f8956147d834df9900585e25da73846680fd4871a6adae956cffda4",
     "test_cases.test_ufm_jump_transport_workflow": "935f48d5e809f1590668bb5a49c8164bccfe0f45e1aea861cde32c5b421e57d8",
-    "test_cases.test_ufm_local_archive_workflow": "c43cfa2ae5988c50b2d3519cdb20c534cc13c5b0228ab7b2ed5b7b90334587c9",
-    "test_cases.test_ufm_remote_producer": "38363c09546951664c58c3a8ea13666a7681f7d620daff2b47384fa372e09ad6",
-    "test_cases.test_ufm_remote_producer_workflow": "0af8e841718064e149d2d8b1c49b85800c3644b17b3f5b3284809ef196a994c1",
-    "test_cases.test_upload_package_contract": "e42562d4422414c34a16d6350d394605cc6ae7cafcc44af31a5bb4284126ffae",
+    "test_cases.test_ufm_monitor_cron_workflow": "c3fc69a6577dca7685cc36217c14840ed4bada48fc43bab6801b79f4cafbaa11",
+    "test_cases.test_ufm_monitor_scripts": "b755de9a1393f4ab853f0c17a0c549b0dc426be9dc1de71701076064c7016273",
+    "test_cases.test_ufm_req7_ib_cycle_workflow": "ae6292d43dc0848a62723e5ac2adfc9e33e002926a98e76ced5be86f7fd731ec",
+    "test_cases.test_ufm_setup_upgrade": "ce399c0cabefda78d6d90b5a77b09eb8b87530b7442458d452965a76e9de98ef",
+    "test_cases.test_ufm_setup_upgrade_workflow": "24bb0c76ea850c042b753ae7525e8e8945bc54936fb8e9194890c78e5ba280e7",
+    "test_cases.test_ufm_worker_collection": "60967bb8034b9ebbb97b26c389d2d2da61a94e90646983b98bc1ce54f999ab19",
+    "test_cases.test_upload_package_contract": "00dbc083834f20cf1482506779558c06de9267219ce400255a1205afb921ef0a",
     "test_cases.test_v2_generation_flow": "d95bbe2477f01555c378395e9e25eb72c800ef4498b739a4f0a03ef8183ec369",
-    "test_cases.test_v2_project_schema": "db6c08192df76f4a1de40fe147d464dfaabfbb3197bc8c8b5cca941dae63cbfb",
-    "test_cases.test_vm_validation_runner": "e3cea3bccb662d899f748421598feb95298142b47928bc1c077909bb1af2c505",
+    "test_cases.test_v2_project_schema": "caf86d6d374218ca2fd80c9090deed8ed9716db8c66d5b4ebb17656609ec3694",
+    "test_cases.test_vm_validation_runner": "0bea9b12775da17d35529998e43d01f56795b97048bc58037610159960ff0b92",
     "test_cases.test_xlsx_zero_row_fail_closed": "35f8ce99b16df677082d97aa7c8b8bf64dbebc56b7d79627d05d342b14e3ed79",
     "test_cases.test_xlsx_zero_row_workflow": "2b8d7da1ed8eef6547f22ab229d716bca3f9e0723495257a8c65de2950463a2a",
-    "test_cases.test_ztp_applied_receipt": "bb0d5b8625fe4e38120952ed5395009b7748b3ee7515f5029b85d23e1e39dd1d",
+    "test_cases.test_ztp_applied_receipt": "903c20e71cade0ce121f8b3f6e8b356b4cea4946b4c14938913a3fb75147ac97",
     "test_cases.test_ztp_collection_attribution": "d0cd46a5123fd18349b393725a218021599e6707378e37dc1e0e1aa3b7a17fa2",
     "test_cases.test_ztp_collection_attribution_workflow": "63026c63df17330d29e0952cbc6653326dfba1c89a806223f02123e8287ca9ad",
-    "test_cases.test_ztp_container_runtime": "adf7f3d6233c2e6e8963f4185a76601c86fe204deed9b5b01adf24f2167daeb3",
-    "test_cases.test_ztp_group_handoff": "cb3ce7599864f409e92ddb3323ffdc8981cc32702df56200f8f2b0de17bc7e4c",
+    "test_cases.test_ztp_container_runtime": "876f9cbe9a549d31c214f682b8fe0215feafd8eff320077ee17eaafeb198e99d",
+    "test_cases.test_ztp_group_handoff": "84a079d69747ed294bfbe89232f9ca93a5b2d12a3db44f303b9cfff64576f832",
     "test_cases.test_ztp_group_handoff_display": "a8b8f5830b758d72780ae49717fa077f3398df296ba81a6044869dafdbd370b3",
     "test_cases.test_ztp_http_identity_binding": "304c24916962898a69b2f09d185cbae7a2b56d18777c23905f3ffe04f4581951",
     "test_cases.test_ztp_monitor_watch_resilience": "37fe88121f88892a5b5336eaa2e4257424156450f5deaf8fd998360b724d3ade",
-    "test_cases.test_ztp_monitor_watch_runtime_workflow": "f68fa02c79056f29d9c1f9ae78c30a0e716fc055cbf67224015688baca1aac4c",
+    "test_cases.test_ztp_monitor_watch_runtime_workflow": "ab8a536b103c7b6abf064b028b40710b66574125d90dc4efec61c3a48a05399c",
     "test_cases.test_ztp_prefix_runtime_boundary": "76a0c556fe2d570b60241a6d43e34aa591787596833d5a894deef19f7853bf90",
-    "test_cases.test_ztp_release_core_review": "c36549a98b6c22262628a449b0f0e3b971941476e85231e40e4775d29e9ac6dc",
+    "test_cases.test_ztp_release_core_review": "be346070f5faf0e93a2851d31b3aaeb6227bb6faec9025acc06f291bb2695878",
     "test_cases.test_ztp_service_runtime": "12d88f700545fd3d97d7fa4c4850858fdc4496034c77d9f5463ec20a61be4035"
   }
 }
