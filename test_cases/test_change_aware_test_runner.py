@@ -2742,30 +2742,59 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             self.assertFalse(timing_path.exists())
 
 
-# PROP-14 / G5Q-RA landing: the six load-sensitive cases moved to the quiet phase and the
-# twelve quiet modules, frozen here from the lab RA preregistration (v670/g5q-ra-src
-# expected/assignment.json wq), independent of the runner and of the plan file.
+# DEV re-derivation (v3.1.0 step 3, 2026-11-06): the quiet phase of the DEV plan, frozen here from the
+# reviewed decision list (v3.1 docs scripts/shard/dev_shard_config.py, with the evidence per item),
+# independent of the runner and of the plan file.  TEST's twelve modules and six cases were re-checked on
+# DEV: five issue-tracker modules and the gib cases do not exist here, collection_cycle_worker_contract
+# lost its failing case and runs in parallel; DEV adds the host-wide runtime-guard users and the DEV
+# timing hazards found by the census.
 FROZEN_QUIET_MODULES = tuple("test_cases.test_" + name for name in (
-    "collection_cycle_worker_contract", "docker_management_ssh_key", "issue_tracker_k_store",
-    "issue_tracker_k_store_workflow", "issue_tracker_local_commit_workflow",
-    "issue_tracker_state_owner", "issue_tracker_state_owner_workflow",
-    "monitor_authority_semantic_workflow", "monitor_stack_review", "req10c_auto_workflow",
+    "backup_bounded_process_workflow", "collector_retrieval", "config_sync_authority",
+    "config_sync_authority_workflow", "docker_management_ssh_key",
+    "f01_recovery_project_key_backup_durable_workflow",
+    "f01_recovery_staging_sftp_encrypted_workflow", "ibsw3_native_cpld_bridge",
+    "ibsw3_native_os_event_clock", "ibsw3_scp_parent_content_owner", "ibsw3_scp_source_binding",
+    "ibsw3_stdin_owned_cpld_protocol", "monitor_authority_semantic_workflow",
+    "monitor_stack_review", "req10b_services_keys_workflow", "req10c_auto_workflow",
     "ztp_monitor_watch_resilience", "ztp_release_core_review",
 ))
 FROZEN_QUIET_CASES = (
-    "test_cases.test_bootstrap_config_fetch_workflow::test_cases.test_bootstrap_config_fetch_workflow."
-    "RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated",
-    "test_cases.test_collection_cycle_handoff_workflow::test_cases.test_collection_cycle_handoff_workflow."
-    "CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed",
-    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
-    "GenerationInputBindingWorkflowTests.test_real_setup_a_archive_rename_death_cold_repeats_health_and_retains_inodes",
-    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
-    "GenerationInputBindingWorkflowTests."
-    "test_real_setup_q_commit_death_cold_a_dhcp_retirement_keeps_complete_original_transaction",
-    "test_cases.test_generation_input_binding_workflow::test_cases.test_generation_input_binding_workflow."
-    "GenerationInputBindingWorkflowTests.test_real_setup_q_commit_independent_infra_cold_a_restores_original_members",
-    "test_cases.test_public_publication_workflow::test_cases.test_public_publication_workflow."
-    "PublicPublicationWorkflowTests.test_formal_children_share_one_isolated_dependency_capsule",
+    "test_cases.test_bootstrap_config_fetch_workflow::"
+    "test_cases.test_bootstrap_config_fetch_workflow.RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated",
+    "test_cases.test_collection_cycle_handoff_workflow::"
+    "test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed",
+    "test_cases.test_ibsw225_three_component_workflow::"
+    "test_cases.test_ibsw225_three_component_workflow.ThreeComponentWorkflowTests.test_nine_devices_five_real_workers_overlap_after_native_canary",
+    "test_cases.test_manual_applied_config::"
+    "test_cases.test_manual_applied_config.MonitorLiveConfigTransportTests.test_actual_private_shell_monitor_and_manual_observe_same_raw_live_bytes",
+    "test_cases.test_public_publication_workflow::"
+    "test_cases.test_public_publication_workflow.PublicPublicationWorkflowTests.test_formal_children_share_one_isolated_dependency_capsule",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_backspace_and_line_kill_edit_the_input",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_ctrl_c_cancels",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_no_key_within_the_deadline_counts_as_enter",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_the_first_key_cancels_the_deadline",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_typed_password_is_read_without_echo",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_without_a_terminal_there_is_no_answer",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_defaults_to_no_after_the_deadline",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_echoes_and_accepts_y",
+    "test_cases.test_ufm_setup_upgrade::"
+    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_without_a_terminal_is_no",
+    "test_cases.test_ufm_worker_collection::"
+    "test_cases.test_ufm_worker_collection.UfmWorkerCollectionWorkflowTest.test_the_worker_plan_reaches_the_ufm_phase_and_the_switch_result_still_qualifies",
+    "test_cases.test_ztp_applied_receipt::"
+    "test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_receipt_stage_without_blocking",
+    "test_cases.test_ztp_applied_receipt::"
+    "test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_yaml_stage_without_blocking",
+    "test_cases.test_ztp_applied_receipt::"
+    "test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_before_stage_fsync_without_blocking",
 )
 P_SHARED_GROUP = (
     "test_cases.test_public_project_fixture_workflow",
@@ -2928,9 +2957,7 @@ class FullShardDirectTests(unittest.TestCase):
         }
         self.assertEqual(1, len({lanes[module] for module in P_SHARED_GROUP}))
         split_modules = set(plan["slices"]) | {unit.split("::", 1)[0] for unit in FROZEN_QUIET_CASES}
-        self.assertEqual(
-            {"test_cases.test_generation_input_binding_workflow"}, set(plan["slices"]),
-        )
+        self.assertEqual({"test_cases.test_ufm_setup_upgrade"}, set(plan["slices"]))
         for module in sorted(split_modules):
             with self.subTest(module=module):
                 tree = ast_module.parse(
@@ -3759,35 +3786,24 @@ class FullShardS0FixTests(unittest.TestCase):
             ["outputs/elsewhere/a.py"], RUNNER.full_shard_unreviewed_leftovers(["outputs/elsewhere/a.py"], allowlist),
         )
 
-    def test_real_plan_reviews_only_the_unobservable_s0_leftover_shapes(self):
-        # S0 and the serial armG run left the same 611 ignored files in four shapes.  The
-        # two retained fixture trees under outputs/test-diagnostics are reviewed: after
-        # batch A no test-side whole-checkout walk enters outputs/ (governed_tree_paths),
-        # the serial source discovery skips it, and the product walks that do enter it
-        # (packaging's special-node check, its printed workspace size, the README
-        # catalogue, which drops outputs/ paths) cannot observe regular files, directories
-        # or symlinks there (integration F6 census).  Before A the quiesce workflow parsed
-        # the download-parent-red *.py (ROOTCAUSE G4).  The two lock files are read through
-        # product packaging (test_upload_package_contract asserts
-        # monitor/.generate-monitor-html.lock is not packaged; serial creates it before
-        # that test, a lane may not): they are not reviewed, so a sharded run needs them to
-        # exist in the main checkout beforehand.
+    def test_real_plan_reviews_no_leftover_shape_on_dev(self):
+        # DEV re-derivation (v3.1.0 step 3, 2026-11-06).  TEST reviewed two retained fixture
+        # trees under outputs/test-diagnostics because, after its batch A, no test-side
+        # whole-checkout walk entered outputs/.  DEV has no test that writes
+        # outputs/test-diagnostics (static census: only the runner and its own tests name it)
+        # and no batch A (governed_tree_paths), so the DEV plan reviews nothing: every ignored
+        # leftover a lane leaves fails the run until a diagnostic sharded run shows the actual
+        # DEV shapes and they are reviewed one by one.  The two lock files stay unreviewed, as
+        # on TEST: a sharded run needs them to exist in the main checkout beforehand.
         plan = RUNNER.load_full_shard_plan(ROOT)
-        allowlist = plan.get("leftover_allowlist")
-        self.assertEqual({
-            "outputs/test-diagnostics/collector-prefix-feedback-*",
-            "outputs/test-diagnostics/download-parent-red-*",
-        }, set(allowlist))
-        self.assertTrue(all(isinstance(reason, str) and reason.strip() for reason in allowlist.values()))
-        reviewed = [
+        self.assertEqual({}, plan.get("leftover_allowlist"))
+        leftovers = [
+            ".deployment.lock",
+            "monitor/.generate-monitor-html.lock",
             "outputs/test-diagnostics/download-parent-red-26amxbnl/http/DAY0-Prepare/13-unload.py",
-            "outputs/test-diagnostics/download-parent-red-26amxbnl/http/DAY0-Prepare/customer/README.md",
-            "outputs/test-diagnostics/download-parent-red-_82x1swl/safe",
             "outputs/test-diagnostics/collector-prefix-feedback-65y3krn9/bin/ssh",
         ]
-        self.assertEqual([], RUNNER.full_shard_unreviewed_leftovers(reviewed, allowlist))
-        unreviewed = [".deployment.lock", "monitor/.generate-monitor-html.lock"]
-        self.assertEqual(unreviewed, RUNNER.full_shard_unreviewed_leftovers(unreviewed, allowlist))
+        self.assertEqual(sorted(leftovers), RUNNER.full_shard_unreviewed_leftovers(leftovers, {}))
 
     def test_serial_post_run_check_of_a_checkout_restores_sys_path(self):
         # Second review E1: the post-run check executes the checkout's deployment
