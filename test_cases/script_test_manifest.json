@@ -1200,7 +1200,9 @@
         "test_cases.test_p2p_selection_contract",
         "test_cases.test_p2p_selection_workflow",
         "test_cases.test_predeploy_test_gate",
-        "test_cases.test_reference_only_selector_workflow"
+        "test_cases.test_reference_only_selector_workflow",
+        "test_cases.test_load_release_transaction",
+        "test_cases.test_finished_project_rehydrate"
       ]
     },
     {
@@ -1228,7 +1230,8 @@
       "tests": [
         "test_cases.test_diagnostic_bundle",
         "test_cases.test_p2p_selection_contract",
-        "test_cases.test_p2p_selection_workflow"
+        "test_cases.test_p2p_selection_workflow",
+        "test_cases.test_load_release_transaction"
       ]
     },
     {
@@ -2393,7 +2396,8 @@
         "tools/collect-ztp-diagnostics.py"
       ],
       "tests": [
-        "test_cases.test_p2p_selection_workflow"
+        "test_cases.test_p2p_selection_workflow",
+        "test_cases.test_load_release_transaction"
       ]
     },
     {
@@ -2845,7 +2849,8 @@
         "test_cases.test_diagnostic_bundle",
         "test_cases.test_predeploy_test_gate",
         "test_cases.test_load_release_transaction",
-        "test_cases.test_reference_only_selector_workflow"
+        "test_cases.test_reference_only_selector_workflow",
+        "test_cases.test_finished_project_rehydrate"
       ]
     },
     {
@@ -3902,7 +3907,8 @@
       "tests": [
         "test_cases.test_finished_project_import",
         "test_cases.test_finished_project_lifecycle",
-        "test_cases.test_public_repository_contract"
+        "test_cases.test_public_repository_contract",
+        "test_cases.test_finished_project_rehydrate"
       ]
     },
     {
