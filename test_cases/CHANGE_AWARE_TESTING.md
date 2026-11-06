@@ -596,3 +596,29 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 `UNIQUE` 应替换为本次运行的唯一标识。成功的 validation-only 证明仍不是正式发布证明；
 计时文件不进入结果 JSON、批准 ledger 或证明指纹，计时写入失败时全量运行 fail closed。
 不得因计时输出修改已知 FAIL 判定或 proof 的输入输出。
+
+在没有并行 full proof、且当前 checkout 可供测试创建临时制品时，也可以单独运行一次诊断
+（不执行正式 runner 的 preflight/approval 流程，不更新 ledger）：
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest \
+  /tmp/http-full-result-UNIQUE.json -v \
+  --timings /tmp/http-full-timings-UNIQUE.jsonl
+jq -s 'sort_by(.duration_seconds) | reverse | .[:20]' /tmp/http-full-timings-UNIQUE.jsonl
+```
+
+两个路径都不能预先存在。诊断命令的非零退出码和结果 JSON 中的 FAIL/ERROR/SKIP 必须如实保存。
+记录诊断时同时保存命令、UTC 时间、当前 HEAD、Python/平台身份、结果 JSON、计时 JSONL、
+`Ran ... in ...` 摘要，以及是否有其他重型进程；先核对 JSON 的 `tests_run` 等于计时行数且
+测试 ID 无重复，否则不能形成新基线。
+
+性能优化的判定（原 TEST `FULL_PROOF_PERFORMANCE.md`，该文件已并入本节）：
+
+1. 先按逐测试与阶段耗时确定当前可修改的热点；固定历史重放（`@_historical_p_method`）
+   不会因当前源码的小改动变快，不得为提速改写历史锚点、跳过重放或弱化断言。
+2. 对候选热点做小范围前后微基准，确认确实降低总墙钟；不根据文件行数、`sleep` 计数或
+   CPU 核数推算收益；记录同一机器、解释器和负载条件。
+3. 实现前独立写好正反测试；保留完整测试集合、身份与内容核验、恶意改写/竞态负例、
+   异常处理和相同的 FAIL/SKIP 语义；任何新 ERROR、额外 SKIP 或映射缺口都阻断采用。
+4. 批准账本始终只有一个写者；不得以多个 runner 并发写 ledger 来「加速证明」。
+   分片全量（`--all --sharded`）是 runner 自己的单写者模式，见本文件的分片章节。
