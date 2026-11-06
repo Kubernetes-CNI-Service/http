@@ -4,6 +4,17 @@
 真实环境执行的验收案例；测试文件不得散落到其他源码目录，也不提供旧 `tests/` 别名，避免
 同一个案例被 discovery 重复加载。
 
+每个 TestCase 类只由其定义模块被 canonical discovery 收集一次（G1；DEV 2026-11-06 落地，依据 owner
+原话「在3.1.0里面把所有性能优化方案落地」）。测试模块复用另一测试模块的 TestCase 夹具时，只能绑定模块
+（`from test_cases import test_x as X`，在函数体内使用 `X.SomeTests`）或在函数内导入；不得在模块级
+import、重命名、星号导入或赋值另一测试模块的 TestCase 类，也不得子类化一个带测试方法且已被收集的
+TestCase（共享夹具放进不含测试方法的基类或 mixin）。`test_test_case_repository` 的守卫按 canonical
+discovery 的真实收集来源检查这一点，并要求每个已发现模块顶层定义的、带测试方法的 TestCase 类仍由该
+模块收集；`test_change_aware_test_runner` 要求 manifest 中列出原借用模块的每个映射项同时列出其定义
+模块，使 related 选测保留原来经借用顺带运行的类。去掉的只是同一测试在同一夹具下的第二次执行，不删除、
+合并或跳过任何测试方法、subTest 或断言；详见 `CHANGE_AWARE_TESTING.md` 的「2026-11-06 canonical
+discovery 去重（G1，DEV 落地）」。
+
 本目录中的自动化测试不连接设备、不修改项目运行数据，重点检查跨目录接口，而不是替代
 真实交换机、Docker 或端到端部署测试。
 

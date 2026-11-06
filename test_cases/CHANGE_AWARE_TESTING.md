@@ -141,6 +141,48 @@ macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` �
 
 ## Full proof 性能诊断记录
 
+### 2026-11-06 canonical discovery 去重（G1，DEV 落地）
+
+依据：owner 2026-11-06 原话「在3.1.0里面把所有性能优化方案落地」「关于性能优化方案的落地你自己拿主意
+就行，不用问我」。做法与 http-test 树 2026-10-23 的 G1（`3e80c91`、`42a5fc6`、`7d0f7d8`、`37d2b35`）
+相同，下面的数字都是在 DEV 上测得的，不受下方 2026-10-25 合入说明的限制。opt-in 分片全量给车道分配
+用例时要求每个测试类只由定义模块收集（`apply_full_shard_plan`），所以 G1 先于第一次分片运行落地。
+本小节修改下文 2026-10-09 判定表中「删掉重复 case ID」的结论，其余条款不变。
+
+问题（DEV `29232ec`，`test_test_case_repository` 守卫的 origin-tagging loader 实测）：
+
+| 借用模块 | 被重复执行的类（定义模块） | 多执行 |
+| --- | --- | --- |
+| test_p2p_selection_workflow | ReleaseTransactionTests（test_load_release_transaction） | 123 |
+| test_private_documentation_contract | DocumentationCatalogTests、ManualPF2InvocationFactsTests、PF2ReadFailureContracts、ManualPF2CurrentCliWorkflowTests（test_documentation_catalog；后三个经星号导入） | 27+5+4+2 |
+| test_finished_project_lifecycle | FinishedProjectRehydrateTests（test_finished_project_rehydrate） | 15 |
+| test_ufm_setup_upgrade（DEV 独有） | CablingCheckTest 子类化 AddressOccupancyTest，再跑其 11 个方法 | 11 |
+
+合计每次 canonical full 多执行 187 次（176 次在定义模块之外的重复收集，11 次子类重跑），canonical
+行由 5745 降为 5558。176 与 DEV `eea8deb` 串行全量计时日志里的重复出现次数相同。
+test_switch_status_workflow 绑定的 UfmCronCase 没有测试方法，不产生执行，保持不变。
+
+做法（只改测试侧与 manifest，不改生产脚本或 runner）：
+1. 三个借用模块改为绑定定义模块（`from test_cases import test_x as X`，在函数体内用 `X.SomeTests`）；
+   星号导入改为显式导入实际用到的 5 个名字。symtable 静态检查：改后没有借用模块读取未绑定的全局名，
+   注入的三个对照名都被检出。
+2. UFM：`BMC`、`switches()`、`answering()`、`verdicts()` 原样移到不含测试方法的基类
+   `AddressOccupancyCase(ConfiguredPairCase)`，两个测试类都继承它。CablingCheckTest 没有覆盖这些
+   成员，也没有覆盖 setUp，所以它继承来的 11 次执行与 AddressOccupancyTest 的同一测试在同一夹具下
+   完全相同，不是额外覆盖。断言、夹具值和测试体不变，11+5 个场景各跑一次。
+3. 守卫：`test_test_case_repository` 与 TEST 相同（没有类在定义模块之外被收集、没有重复 case ID、
+   没有子类重跑另一已收集类的方法、每个顶层带测试方法的类仍由其模块收集）。
+   `test_change_aware_test_runner` 的 `FORMER_REEXPORT_EDGES` 是 DEV 三条借用边的字面普查；manifest
+   5 个映射项追加 6 个定义模块，正是守卫测出的 6 个缺口。
+
+与「不得删除、跳过、弱化测试」的关系：去掉的是同一测试方法在同一夹具下的第二次执行（176 次是同一类
+对象、同一 case ID；11 次是子类在未改变的夹具下重跑父类方法），没有删除、合并或跳过任何测试方法、
+subTest 或断言，每个场景仍执行一次。三个借用模块没有 `setUpModule`/`tearDownModule`/`load_tests`。
+
+已知并接受的代价：只改借用模块本身时，related 不再顺带运行定义模块；`test_suites` 仍是每个模块唯一
+主 suite，不变；related 闭包按模块选择，选中原借用模块的路径改为运行整个定义模块（DEV 上没有重算
+静态方法数）。跨越 G1 比较 full 墙钟时必须注明工作量差（少 187 次执行）。
+
 > 合入 http dev 主树时的说明（2026-10-25）：本节只收录随性能单元合入 DEV 的条目；条目内的测量和运行证据都来自 http-test 树（TEST），不是在 DEV 上测得的；DEV 合入后的验证见合并窗口记录。
 
 ### 2026-10-23 P 族原始对象按调用作用域闭合批量读取（C09）
@@ -512,7 +554,7 @@ S0 修订（2026-10-24，第一次真实分片运行，诊断而非证明）：
 | mtime/stat 驱动哈希缓存、alias 合并 | proof 必须发现同 inode/mtime 的 ABA、链接及来源变化 | 不采用；不能用 metadata 替代原字节检查 |
 | 复用已导入生产模块或修改导入路径 | module loader 保留 fresh module 与生产模块 lazy import 路径；当前 manifest profile 的三个 selector 加载合计约 0.040 秒 | 不缓存模块/namespace；下方纯编译结果缓存是独立方案，不复用运行对象 |
 | 纯编译结果缓存 | 五轮交替，每轮真实 LOAD/SETUP 共 12 次 fresh import；完整函数 code 字段相同；0.595356→0.123089 秒 | 每次重读源字节，最多 8 项、单源 2MiB；只缓存 code，每次重新执行新模块；不读取或写入磁盘 pyc |
-| 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 不采用；不以优化改写历史合同或去重真实执行次数 |
+| 历史 P replay 合并、删掉重复 case ID | 固定历史 SHA、原 fixture/进程边界和 discovery 出现次数是被测合同 | 历史 P replay 合并：不采用，不以优化改写历史合同。删掉重复 case ID：2026-11-06 起采用两种，即源码级消除模块级 TestCase 再导出造成的第二次收集，以及子类在未改变的夹具下重跑另一已收集类的方法（G1，见上文同名小节）；不删除、合并或跳过任何测试方法，其他重复来源不在此列 |
 | 移除 fsync、批间身份校验或发布末端重核 | 冷恢复、unknown-object 保留、held-FD/权限和可回滚证明依赖这些边界 | 不采用；不削弱恢复能力换速度 |
 | 并行 SHA、扩大有状态 suite 并发 | 当前普通 SHA 阶段约 0.1 秒；固定历史回放、共享锁/项目与真实 loopback 的完整隔离尚未证实 | 不引入线程/进程池；小工作量不抵启动/调度成本，重型 suite 不因名字而获隔离资格。2026-10-23 起唯一例外是上文「opt-in 两阶段分片全量」小节的 `--all --sharded`：受管计划、私有 clone、覆盖等价与全部门禁，候选状态，默认串行不变 |
 
