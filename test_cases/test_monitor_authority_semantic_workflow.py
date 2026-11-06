@@ -396,6 +396,23 @@ def run_shell(
     )
 
 
+def warm_up_fresh_helper(helper: Path) -> None:
+    """Execute a freshly written helper once, untimed, before a short-deadline case.
+
+    On the macOS host the first execution of a new executable file takes 0.39 s median and up
+    to about 2 s (endpoint scanning, the CLT python3 shim), the next one about 0.05 s (probe of
+    2026-11-06, scripts/shard/probe_fresh_helper_latency.py in the v3.1 docs).  The deadline
+    cases shorten the production 11 s deadline to 0.75-1.5 s, so that one-time cost must stay
+    outside the timed window.  The helper exits at once when HTTP_TEST_HELPER_WARMUP is set,
+    before any fork, write or signal change; the deadline and every assertion are unchanged.
+    """
+    subprocess.run(
+        [os.fspath(helper)], env={**os.environ, "HTTP_TEST_HELPER_WARMUP": "1"},
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=30, check=True,
+    )
+
+
 def cleanup_recorded_test_processes(pid_file: Path) -> None:
     """Kill every fixed-fixture PID and prove disappearance by two seconds."""
 
@@ -3421,6 +3438,8 @@ printf 'capture=%s rc=%s token=<%s> holder=%s\\n' \
                 helper.write_text(
                     "#!/usr/bin/python3\n"
                     "import os\n"
+                    "if os.environ.get('HTTP_TEST_HELPER_WARMUP'):\n"
+                    "    raise SystemExit(0)\n"
                     "from pathlib import Path\n"
                     "import signal\n"
                     "import sys\n"
@@ -3460,6 +3479,7 @@ printf 'capture=%s rc=%s token=<%s> holder=%s\\n' \
                     encoding="utf-8",
                 )
                 helper.chmod(0o755)
+                warm_up_fresh_helper(helper)
                 capture = decision_capture_shell(script, portable=False)
                 self.assertEqual(
                     3, capture.count("/usr/bin/timeout --signal=KILL 11"),
@@ -3539,6 +3559,8 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                 helper.write_text(
                     "#!/usr/bin/python3\n"
                     "import os\n"
+                    "if os.environ.get('HTTP_TEST_HELPER_WARMUP'):\n"
+                    "    raise SystemExit(0)\n"
                     "from pathlib import Path\n"
                     "import signal\n"
                     "import sys\n"
@@ -3564,6 +3586,7 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                     encoding="utf-8",
                 )
                 helper.chmod(0o755)
+                warm_up_fresh_helper(helper)
                 capture = (
                     decision_capture_shell(script, portable=False)
                     + failed_capture_holder_cleanup_shell()
@@ -3883,6 +3906,8 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             helper.write_text(
                 f"#!{sys.executable}\n"
                 "import os\n"
+                "if os.environ.get('HTTP_TEST_HELPER_WARMUP'):\n"
+                "    raise SystemExit(0)\n"
                 "from pathlib import Path\n"
                 "import signal\n"
                 "import sys\n"
@@ -3899,6 +3924,7 @@ printf 'timeout rc=%s\n' "$timeout_rc"
                 encoding="utf-8",
             )
             helper.chmod(0o755)
+            warm_up_fresh_helper(helper)
             started = time.monotonic()
             alive = []
             try:
@@ -3937,6 +3963,8 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             helper.write_text(
                 f"#!{sys.executable}\n"
                 "import os\n"
+                "if os.environ.get('HTTP_TEST_HELPER_WARMUP'):\n"
+                "    raise SystemExit(0)\n"
                 "from pathlib import Path\n"
                 "import signal\n"
                 "import sys\n"
@@ -3956,6 +3984,7 @@ printf 'timeout rc=%s\n' "$timeout_rc"
                 encoding="utf-8",
             )
             helper.chmod(0o755)
+            warm_up_fresh_helper(helper)
             failed_kills = []
 
             def failed_holder_kill(holder_path, identities):
