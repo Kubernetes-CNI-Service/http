@@ -3000,9 +3000,9 @@ class HaPostConfigPureTest(unittest.TestCase):
         self.assertEqual(ufm.evaluation_expiry(rows), "2026-11-21")
 
 
-class AddressOccupancyTest(ConfiguredPairCase):
-    """Owner 2026-10-20: input addresses must not be in use by other devices; probed from the OOB
-    Leaf/Spine that owns the subnet (here oob-leaf117 vlan1000), BMC ownership from oob-leaf115's FDB."""
+class AddressOccupancyCase(ConfiguredPairCase):
+    """Switch fixtures of the address and cabling probes. It has no test methods, so the two test classes
+    below share it without running each other's cases a second time (G1 single collection)."""
     BMC = {"ufm01": "02:00:00:00:b0:01", "ufm02": "02:00:00:00:b0:02"}
 
     def switches(self):
@@ -3021,6 +3021,11 @@ class AddressOccupancyTest(ConfiguredPairCase):
 
     def verdicts(self, result):
         return {item["kind"]: item["outcome"] for item in result.facts["address_check"]}
+
+
+class AddressOccupancyTest(AddressOccupancyCase):
+    """Owner 2026-10-20: input addresses must not be in use by other devices; probed from the OOB
+    Leaf/Spine that owns the subnet (here oob-leaf117 vlan1000), BMC ownership from oob-leaf115's FDB."""
 
     def test_own_devices_answering_are_not_conflicts(self):
         self.answering({"198.51.101.130": "02:00:00:00:01:01", "198.51.101.132": "02:00:00:00:02:01",
@@ -3133,7 +3138,7 @@ class AddressOccupancyTest(ConfiguredPairCase):
         self.assertNotEqual(results["ufm01"].status, "ADDRESS_CONFLICT")
 
 
-class CablingCheckTest(AddressOccupancyTest):
+class CablingCheckTest(AddressOccupancyCase):
     """ib-initial-setup v15 rule: the MAC learned on the P2P OOB Leaf port of eth0 must be the CSV eth0_mac.
     Owner 2026-10-20: otherwise show the details and ask whether to continue (default no, 15 s)."""
     SWAPPED = ("02:00:00:00:02:01 dev swp17 vlan 1000 master br_default\n"
