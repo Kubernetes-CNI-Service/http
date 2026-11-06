@@ -3,13 +3,13 @@
  "description": "Two-phase full-suite shard plan (G5Q-RA shape, re-derived on the current canonical discovery). Correctness never depends on balance: the runner checks exact coverage.",
  "derivation": {
   "status": "provisional",
-  "weights": "DEV serial full-run per-test seconds (weights-eea8deb.json)",
-  "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0596",
+  "weights": "per-test seconds measured inside the lanes of the v3.1.0 step-4 diagnostic sharded run (step4-diag1, candidate 117d19f, 7 contended phase-A lanes; phase B alone)",
+  "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0819",
   "rerun": "re-derive from a timing log of the tree the plan is for before any timed comparison (B-6)",
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
   "dev_rederivation": "DEV re-derivation (v3.1.0 step 3, 2026-11-06) on the post-G1 tree from the canonical-discovery census; quiet lane = TEST's quiet units re-checked on DEV plus the DEV hazard census (scripts/shard/dev_shard_config.py in the v3.1 docs lists the evidence per item)",
   "tlrt": "DEV's test_load_release_transaction is 2.9 s before the 11-load batch, so it has no lane of its own",
-  "ufm": "test_ufm_setup_upgrade (about 2000 s serial, no class or module fixtures) is cut into 3 contiguous slices"
+  "ufm": "test_ufm_setup_upgrade (about 2000 s, no class or module fixtures) is cut into 2 contiguous slices and the rest into 5 free lanes: on the diagnostic run's contended weights this gives the smallest phase-A maximum of the 7-lane layouts tried (3 slices + 4 free lanes: 1168 s; 2 + 5: 1061 s)"
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -102,7 +102,12 @@
     "test_cases.test_h_enter_formal_identity",
     "test_cases.test_h_expression_container_wrappers",
     "test_cases.test_h_feedback_real_lock_recovery_workflow",
-    "test_cases.test_h_finite_receiver_attributes",
+    "test_cases.test_h_finite_receiver_attributes"
+   ]
+  },
+  {
+   "lane": "w1",
+   "units": [
     "test_cases.test_h_graph_local_scope_memo",
     "test_cases.test_h_literal_container_update_forms",
     "test_cases.test_h_nested_receiver_escape",
@@ -143,12 +148,7 @@
     "test_cases.test_ibsw225_os_canary_coverage",
     "test_cases.test_ibsw225_runtime_bootstrap_identity",
     "test_cases.test_ibsw225_runtime_guard_exception_priority",
-    "test_cases.test_ibsw225_runtime_source_manifest_contract"
-   ]
-  },
-  {
-   "lane": "w1",
-   "units": [
+    "test_cases.test_ibsw225_runtime_source_manifest_contract",
     "test_cases.test_ibsw225_three_component_workflow",
     "test_cases.test_ibsw3_cpld_os22_template_gate",
     "test_cases.test_ibsw3_main_transfer_choice",
@@ -196,7 +196,12 @@
     "test_cases.test_ibsw_v2_device",
     "test_cases.test_ibsw_v2_device_scripts",
     "test_cases.test_ibsw_v2_entry",
-    "test_cases.test_ibsw_v2_workflow",
+    "test_cases.test_ibsw_v2_workflow"
+   ]
+  },
+  {
+   "lane": "w2",
+   "units": [
     "test_cases.test_image_context_safety",
     "test_cases.test_import_from_download_target",
     "test_cases.test_infra_check_and_manual_reset",
@@ -233,12 +238,7 @@
     "test_cases.test_initial_setup_nvos_argv",
     "test_cases.test_initial_setup_pending_diff",
     "test_cases.test_initial_setup_pty_cleanup",
-    "test_cases.test_initial_setup_selfcontained_neutral"
-   ]
-  },
-  {
-   "lane": "w2",
-   "units": [
+    "test_cases.test_initial_setup_selfcontained_neutral",
     "test_cases.test_initial_setup_target_credentials_workflow",
     "test_cases.test_initial_setup_target_outcome_summary",
     "test_cases.test_initial_setup_target_password_policy",
@@ -258,7 +258,12 @@
     "test_cases.test_mlag_evpn_generation",
     "test_cases.test_module_loader_contract",
     "test_cases.test_monitor_authority_entrypoints",
-    "test_cases.test_monitor_authority_source_guard",
+    "test_cases.test_monitor_authority_source_guard"
+   ]
+  },
+  {
+   "lane": "w3",
+   "units": [
     "test_cases.test_monitor_legacy_tracker_retirement",
     "test_cases.test_monitor_legacy_tracker_retirement_workflow",
     "test_cases.test_monitor_ufm_status",
@@ -302,14 +307,14 @@
     "test_cases.test_public_project_fixture_workflow",
     "test_cases.test_public_publication_contract",
     "test_cases.test_public_publication_v3_overlap",
-    "test_cases.test_public_publication_workflow"
+    "test_cases.test_public_publication_workflow",
+    "test_cases.test_public_repository_contract",
+    "test_cases.test_public_s_phase_contract"
    ]
   },
   {
-   "lane": "w3",
+   "lane": "w4",
    "units": [
-    "test_cases.test_public_repository_contract",
-    "test_cases.test_public_s_phase_contract",
     "test_cases.test_public_s_phase_workflow",
     "test_cases.test_qos_evpn_uplink_generation",
     "test_cases.test_reference_only_path_disposition",
@@ -378,21 +383,15 @@
    ]
   },
   {
-   "lane": "w4",
-   "units": [
-    "test_cases.test_ufm_setup_upgrade#0/3"
-   ]
-  },
-  {
    "lane": "w5",
    "units": [
-    "test_cases.test_ufm_setup_upgrade#1/3"
+    "test_cases.test_ufm_setup_upgrade#0/2"
    ]
   },
   {
    "lane": "w6",
    "units": [
-    "test_cases.test_ufm_setup_upgrade#2/3"
+    "test_cases.test_ufm_setup_upgrade#1/2"
    ]
   }
  ],
@@ -439,8 +438,7 @@
  },
  "slices": {
   "test_cases.test_ufm_setup_upgrade": [
-   "test_cases.test_ufm_setup_upgrade.SimulatedPhasesTest.test_config_upgrade_converges_fresh_and_manually_configured_nodes_in_one_pass",
-   "test_cases.test_ufm_setup_upgrade.SimulatedUpgradeAndHaTest.test_check_reports_an_ipmi_failure_after_every_other_check"
+   "test_cases.test_ufm_setup_upgrade.SimulatedPhasesTest.test_later_commands_report_only_the_password_they_tried"
   ]
  },
  "same_lane": [
