@@ -784,5 +784,5 @@ REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-syn
 - `monitor/issue_tracker_activity_source.py`：ETH 活动证据，`post-collect.py`、`analyze_lldp.py`、emitter 和 worker 仍在用。`monitor/issue_tracker_cycle_source.py`：几个保留测试用它读取已完成周期。
 - `tools/ufm_collection_contract.py`：F01 的 `infra/ufm_jump_transport.py::retrieve_collection_archive` 仍导入它；`tools/ufm_remote_producer.py` 删除后，这条取回链在生产中已没有调用者。
 - `ztp/config/ib_topology_provenance.py` 的独立读取路径。借用旧 REQ7 和 D-70 读取范围的分支已在第 1、2 批删除。
-- `monitor/99-output-ufm` 链接和 `<项目>/99-output-ufm` 目录：v3.1.1 起已删除（需求文档 R-013 第 3 条，owner 2026-11-03 确认）。setup 不再建立它们，链接规格表、`DAY0-Prepare/01-a-setup.py` 的 `OUTPUT_DIRS` 和三个 dockerignore 都已去掉这一项；已有项目里的旧目录不动。
+- `monitor/99-output-ufm` 链接和 `<项目>/99-output-ufm` 目录：v3.1.1 起已删除（需求文档 R-013 第 3 条，owner 2026-11-03 确认）。setup 不再建立它们，链接规格表、`DAY0-Prepare/01-a-setup.py` 的 `OUTPUT_DIRS` 和三个 dockerignore 都已去掉这一项；旧版留下的 `monitor/99-output-ufm` 链接由 setup 和 unsetup 删除（`project_contract.RETIRED_SETUP_LINKS`；那个位置是真实文件或目录时不删）；已有项目里的旧目录不动。
 - worker 不再写 `issue-tracker-online.status.json`、`issue-tracker-stage-l.status.json`；已部署主机上留下的旧文件没有读者。控制 CGI 对 `view=issue_tracker_online`、`view=issue_tracker_stage_l` 返回 400。

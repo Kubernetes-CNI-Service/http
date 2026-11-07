@@ -522,8 +522,9 @@ README.txt
 
 已不再使用的输出目录：
   99-output-ufm/ 原来对应已退役的 D-70 UFM 采集链。v3.1.1 起 setup 不再建这个目录和
-  monitor/99-output-ufm 链接（R-013）；UFM 数据写在 99-output-monitor/infiniband/ufm-info/、
-  ufm-ibdiagnet/。已有项目里的旧 99-output-ufm/ 不会被改动。
+  monitor/99-output-ufm 链接（R-013）；旧版留下的 monitor/99-output-ufm 链接由 setup 和
+  unsetup 删除；那个位置是真实文件或目录时不删（setup 只提示，unsetup 报错并以 1 退出）。UFM 数据写在
+  99-output-monitor/infiniband/ufm-info/、ufm-ibdiagnet/。已有项目里的旧 99-output-ufm/ 不会被改动。
 
 
 三、维护约束
