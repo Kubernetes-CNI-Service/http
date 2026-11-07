@@ -11698,7 +11698,9 @@ class _I03LiteralManager:
             if self.fault_point == "prepare-only":
                 raise LOAD.LoadError("I03_OWNED_PREPARE_SENTINEL")
             return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if any(part.endswith("/infra-setup.sh") for part in argv):
+        # The second (installer) command is the active setup entry
+        # infra/infra-setup.py (DEV 5c5f24f); infra-setup.sh has no caller.
+        if any(part.endswith("/infra-setup.py") for part in argv):
             self.events.append(("infra-attempt", self.phase, argv))
             self.phase = "install-attempted"
             raise LOAD.LoadError("I03_OWNED_INSTALLER_SENTINEL")

@@ -576,15 +576,21 @@ class ApachePublicationBoundaryTests(unittest.TestCase):
             load_source.index("def preflight_services("):
             load_source.index("\ndef ztp_url_network_requirements(")
         ]
+        # preflight_services runs its steps through the checked() wrapper
+        # (checked(verify_control_auth, ...)), so match the helper's name,
+        # not one call spelling; a direct call matches the same way.
+        control_auth = re.compile(r"\bverify_control_auth\b")
+        preflight_auth = control_auth.search(preflight)
+        self.assertIsNotNone(preflight_auth)
         self.assertLess(
-            preflight.index("verify_control_auth("),
+            preflight_auth.start(),
             preflight.index('sudo_command("apache2ctl", "configtest")'),
         )
         start = load_source[
             load_source.index("def start_services("):
             load_source.index("\ndef validate_inputs(")
         ]
-        self.assertNotIn("verify_control_auth(", start)
+        self.assertIsNone(control_auth.search(start))
         main = load_source[load_source.index("def main("):]
         self.assertLess(
             main.index("preflight_services("), main.index("start_services("),
