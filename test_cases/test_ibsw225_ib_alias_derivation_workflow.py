@@ -27,7 +27,8 @@ OLD_WORKSPACE = {
 }
 NETWORK_CSV = (
     ("ethernet/eth.csv", "02-devices_config.csv"),
-    ("infiniband/ib.csv", "02-devices_config.csv"),
+    # R-016 §10.2 decision E (owner 2026-11-04「按照默认处理」; v3.1.1 WP-12, O4 左列): the project's ib.csv.
+    ("infiniband/ib.csv", "ib.csv"),
     ("nvlink/nvsw.csv", "02-devices_config.csv"),
 )
 INVENTORY_LINKS = (

@@ -95,6 +95,8 @@ PUBLIC_DAY0_TEMPLATE_FILES = frozenset(
         "DAY0-Prepare/template/01-global.yaml",
         "DAY0-Prepare/template/02-devices_config.csv",
         "DAY0-Prepare/template/02-dhcp-subnet_config.csv",
+        # R-016 §10.2 (decision E, owner 2026-11-04; v3.1.1 WP-12): the default ib.csv -> 02-devices_config.csv.
+        "DAY0-Prepare/template/ib.csv",
         "DAY0-Prepare/template/README.txt",
         "DAY0-Prepare/template/p2p/README.txt",
         *ZERO_BYTE_PLACEHOLDERS,

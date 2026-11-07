@@ -148,6 +148,9 @@ NEW_ROWS = {
 }
 # 需求文档 R-013 第 3 条 (owner 2026-11-03 「现在一起确认 R-013」; v3.1.1 WP-8): setup no longer makes it.
 REMOVED_ROWS = {"monitor/99-output-ufm"}
+# R-016 §10.2 decision E (owner 2026-11-04「按照默认处理」; 详细工作指导 WP-12, AP-c): the IB inventory stands on
+# the project's own ib.csv; appendix A measured it on 02 before AP-c.  Its repository aliases follow it.
+AP_C_ROWS = {"infiniband/ib.csv": ("project", "ib.csv")}
 # Link texts the guide writes out for the new repository aliases.
 NEW_ALIAS_TEXTS = {
     "ethernet/monitor/01-global.yaml": "../01-global.yaml",
@@ -213,6 +216,8 @@ class LinkSpecificationTableTest(unittest.TestCase):
         self.assertLessEqual(REMOVED_ROWS, set(expected))
         for path in REMOVED_ROWS:
             del expected[path]
+        self.assertLessEqual(set(AP_C_ROWS), set(expected))
+        expected.update(AP_C_ROWS)
         for path, (base, target, _role) in NEW_ROWS.items():
             expected[path] = (base, target)
         # 74 − monitor/99-output-ufm (WP-8, R-013) + 6 structure + 3 networks' 02 + 3 alias tables + 4 status

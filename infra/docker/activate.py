@@ -3146,6 +3146,11 @@ def published_link_identity(settings: Settings) -> dict:
 
     def project_terminal(relative: Path, *, regular: Optional[bool] = None) -> Path:
         expected = project / relative
+        # R-016 §10.2 (decision E, owner 2026-11-04; v3.1.1 WP-12): the IB inventory may be exactly the
+        # template's default link ib.csv -> 02-devices_config.csv; its terminal is then the project's 02.
+        if (relative == Path("ib.csv") and expected.is_symlink()
+                and os.readlink(expected) == "02-devices_config.csv"):
+            expected = project / "02-devices_config.csv"
         try:
             metadata = expected.lstat()
             resolved = expected.resolve(strict=True)

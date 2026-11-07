@@ -1338,9 +1338,12 @@ SETUP_LINK_SPECS = (
     SetupLinkSpec("monitor/99-output-monitor", "99-output-monitor", "dir", "prepared",
                   note="REQ7: the issue tracker's prepared data and log (owner 2026-10-23)",
                   view="monitor", published=True),
-    # Network inventories, and the collectors' aliases of them.
-    *(SetupLinkSpec(network + "/" + csv, "02-devices_config.csv", "file", "required",
-                    view="network-csv", published=True)
+    # Network inventories, and the collectors' aliases of them.  R-016 §10.2 (decision E, owner 2026-11-04):
+    # infiniband/ib.csv stands on the project's own ib.csv, so every alias of it (monitor, xdr-upgrade,
+    # ufm-setup-upgrade, xdr-initial-setup) reaches it too; the template's default ib.csv links
+    # 02-devices_config.csv.  eth.csv and nvsw.csv stay on 02 (owner 2026-11-03: not split yet).
+    *(SetupLinkSpec(network + "/" + csv, csv if network == "infiniband" else "02-devices_config.csv", "file",
+                    "required", view="network-csv", published=True)
       for network, csv, *_outputs in NETWORK_MONITOR_SPECS),
     *(SetupLinkSpec(network + "/monitor/" + csv, network + "/" + csv, "file", "required", base="repository",
                     view="network-inventory", published=True)

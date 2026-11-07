@@ -91,7 +91,9 @@ P2P_INPUT_LINK = (
     BASE_DIR.parent / "ztp/config/cumulus/template/P2P/p2p.xlsx"
 )
 ETH_LOG      = DEVICES_CSV
-IB_LOG       = DEVICES_CSV
+# R-016 §10.2 (decision E, owner 2026-11-04): the IB/UFM inventory is the project's ib.csv, through the
+# collectors' alias (by default a link to 02-devices_config.csv, so unsplit projects read the same rows).
+IB_LOG       = BASE_DIR.parent / "infiniband/monitor/ib.csv"
 NV_LOG       = DEVICES_CSV
 
 def load_display_timezone(path: Path = GLOBAL_FILE):

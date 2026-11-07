@@ -92,9 +92,12 @@ MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
 # 可以是用户建的链接。setup、打包、sync 各在入口用 read_project_input_links 解析一次并按真实
 # 文件校验；打包和 sync 把内容作为同名普通文件带走，打包在 LINKED_INPUTS_RECEIPT_NAME 里记下
 # 来源链接、真实路径和 sha256。R22 的两个必需输入（01-global.yaml、02-dhcp-subnet_config.csv）
-# 不在名单里，本身仍不接受链接。按名单扩展：WP-12 加 "ib.csv"。p2p.xlsx 不在名单里，它走自己的
-# 选择与去图注入（project_p2p_user_link、select_upload_p2p）。
-PROJECT_MATERIALIZED_INPUTS = frozenset({"02-devices_config.csv", "*.pub"})
+# 不在名单里，本身仍不接受链接。p2p.xlsx 不在名单里，它走自己的选择与去图注入
+# （project_p2p_user_link、select_upload_p2p）。
+# ib.csv（v3.1.1 WP-12；R-016 §10.2，owner 2026-11-04 决定 E）：模板默认是指向 02 的链接，用户可换成自己的
+# 文件或链接；普通文件和链接都作为普通文件进包。它不并进 PROJECT_DEPLOYMENT_INPUTS，也不是包的必需成员
+# （R22 必需输入不接受链接的合同不变）；R22 只绑它的字节（_read_package_ib_inventory）。
+PROJECT_MATERIALIZED_INPUTS = frozenset({"02-devices_config.csv", "*.pub", "ib.csv"})
 LINKED_INPUTS_RECEIPT_NAME = "03-linked-inputs.json"
 REPRODUCIBLE_ARCHIVE_MTIME = 0
 
@@ -1785,6 +1788,10 @@ class PackageFilter:
                     filename in PROJECT_DEPLOYMENT_INPUTS
                     or filename == AIR_TOPOLOGY_POLICY_NAME
                     or filename == MINI_AIR_DEVICES_NAME
+                    # A user's own regular ib.csv (WP-12); link forms were rejected above and are
+                    # injected as regular files by create_package.
+                    or any(fnmatch.fnmatchcase(filename, pattern)
+                           for pattern in PROJECT_MATERIALIZED_INPUTS)
                 ):
                     return info
                 if filename.casefold().endswith(".pub"):
@@ -2213,8 +2220,24 @@ def _bind_package_project_inputs(
     return bound
 
 
+def _read_package_ib_inventory(project: Path, *, maximum_size: int | None) -> bytes | None:
+    """R22's byte snapshot of the project's ib.csv (v3.1.1 WP-12; R-016 §10.2, owner 2026-11-04 decision E).
+
+    Read through the link when it is one (the template default links 02-devices_config.csv; a user's own
+    may point out of the project, R-014 第 3 条), then bound like the other R22 inputs.  Bytes only: load
+    never reads the network inventories (owner 2026-11-05), so nothing is parsed.  None when the project
+    has no ib.csv: it is not a required member.
+    """
+    path = project / "ib.csv"
+    if not os.path.lexists(path):
+        return None
+    real_path = path.resolve(strict=True)
+    return _read_package_project_input(real_path.parent, real_path.name, maximum_size=maximum_size).payload
+
+
 def _recheck_package_project_inputs(
     bound: dict[str, tuple[_BoundProjectInput, ...]],
+    ib_inventories: dict[Path, bytes] | None = None,
 ) -> None:
     for inputs in bound.values():
         for item in inputs:
@@ -2225,6 +2248,9 @@ def _recheck_package_project_inputs(
                     or fresh.identity != item.identity
                     or fresh.payload != item.payload):
                 raise ValueError(f"package input drifted before publication: {item.project / item.name}")
+    for project, payload in (ib_inventories or {}).items():
+        if _read_package_ib_inventory(project, maximum_size=None) != payload:
+            raise ValueError(f"package input drifted before publication: {project / 'ib.csv'}")
 
 
 def create_package(
@@ -2313,6 +2339,12 @@ def create_package(
             "sha256": sha256(selected_p2p),
         })
     linked_records.sort(key=lambda record: record["name"])
+    # v3.1.1 WP-12: R22 also binds the project's ib.csv, by bytes only.  The archive must carry exactly
+    # them, and they may not drift before publication (_recheck_package_project_inputs).
+    ib_inventory = _read_package_ib_inventory(
+        project, maximum_size=(package_filter.max_file_size or None),
+    ) if artifact_kind != "download" and not day0_all else None
+    ib_inventories = {project: ib_inventory} if ib_inventory is not None else {}
     output.parent.mkdir(parents=True, exist_ok=True)
     directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                        | getattr(os, "O_NOFOLLOW", 0)
@@ -2543,6 +2575,15 @@ def create_package(
                 )
                 if extracted is None or extracted.read() != item.payload:
                     raise RuntimeError(f"packaged linked input differs: {member_name}")
+            if ib_inventory is not None:
+                member_name = f"./{package_filter.project_rel}/ib.csv"
+                member = archive.getmember(member_name) if member_name in names else None
+                extracted = (
+                    archive.extractfile(member)
+                    if member is not None and member.isfile() else None
+                )
+                if extracted is None or extracted.read() != ib_inventory:
+                    raise RuntimeError(f"packaged ib.csv differs from its bound bytes: {member_name}")
             for inputs in bound_inputs.values():
                 for item in inputs:
                     member = archive.getmember(item.member_name)
@@ -2607,7 +2648,7 @@ def create_package(
             else:
                 if not stat.S_ISREG(existing.st_mode):
                     raise ValueError("--force can replace only a regular archive")
-            _recheck_package_project_inputs(bound_inputs)
+            _recheck_package_project_inputs(bound_inputs, ib_inventories)
             if artifact_kind == "download":
                 visible = output.parent.lstat()
                 if (not stat.S_ISDIR(visible.st_mode)
@@ -2616,7 +2657,7 @@ def create_package(
             os.replace(temporary_name, output.name,
                        src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         else:
-            _recheck_package_project_inputs(bound_inputs)
+            _recheck_package_project_inputs(bound_inputs, ib_inventories)
             if artifact_kind == "download":
                 visible = output.parent.lstat()
                 if (not stat.S_ISDIR(visible.st_mode)

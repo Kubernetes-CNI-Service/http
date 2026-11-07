@@ -220,18 +220,38 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
     infiniband/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     nvlink/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ethernet/eth.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
-    infiniband/ib.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     nvlink/nvsw.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ethernet/monitor/eth.csv -----> ../eth.csv
-    infiniband/monitor/ib.csv -----> ../ib.csv
     nvlink/monitor/nvsw.csv -----> ../nvsw.csv
-    infiniband/bringup/xdr-upgrade/ib.csv -----> ../../ib.csv
-    infiniband/bringup/xdr-initial-setup/ib.csv -----> ../../ib.csv
-    infiniband/bringup/ufm-setup-upgrade/ib.csv -----> ../../ib.csv
   p2p-to-validation.py 用 P2P 目录下这份清单的设备名选出 P2P 的名称列。
   监控、ZTP、backup、Feedback 统一读取本文件并按 type 过滤；infra 只选择 type=server 或
   type=server_mgmt 行；type=server_ufm 不进入 infra 部署，只由
   infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py 和监控处理，其余脚本直接跳过服务器行。
+
+ib.csv
+  作用：InfiniBand（含 UFM）的设备清单。infiniband/ib.csv 及其别名指向它：IB/UFM 采集
+        （cron.sh、采集 worker）、监控页的 IB/UFM 清单、采集门禁里 ib 类型的设备，以及
+        bringup 工具目录下的 ib.csv（xdr-initial-setup、xdr-upgrade、ufm-setup-upgrade）。
+        load 和配置生成不读它，只读 02-devices_config.csv。xdr-upgrade 的 v1 升级库选中
+        ib.csv 后仍读 02-devices_config.csv，ufm-discover 和 UFM 部署工具也仍读
+        02-devices_config.csv（这几处将退役，不改）。
+  默认：模板里的 ib.csv 是指向同目录 02-devices_config.csv 的链接。项目里没有 ib.csv 时，
+        setup 和 load 补齐模板会复制这个默认链接，不拆清单的项目照旧使用总清单。
+  换成自己的：IB 需要单独清单时（例如 ETH 走 ZTP、IB 走 bringup），把 ib.csv 换成自己的
+        普通文件，或指向项目外文件的链接（见下文「用户链接输入」）。换过以后 setup 不再改动它。
+        自己的 ib.csv 必须是 02-devices_config.csv 的子集：表头相同；每一行在总清单里都有同一
+        hostname 的行，各列的值相同；唯一允许的不同是总清单里的以太网设备（例如 oob-leaf）在
+        ib.csv 里的 type 写成 eth_jump；总清单多出的行不管（需求文档 R-016，owner 2026-11-05）。
+        这条规则以后由 bringup 系列脚本在开始时比对，不一致就整次退出（随各自版本接入，本版
+        还不比对）。
+  打包与同步：tar-for-upload、sync-code 把 ib.csv 作为普通文件带走（是链接时带链接指向的内容）；
+        它不是必需输入，项目里没有时照常打包。
+  可能创建的连接：
+    infiniband/ib.csv -----> DAY0-Prepare/<项目>/ib.csv
+    infiniband/monitor/ib.csv -----> ../ib.csv
+    infiniband/bringup/xdr-upgrade/ib.csv -----> ../../ib.csv
+    infiniband/bringup/xdr-initial-setup/ib.csv -----> ../../ib.csv
+    infiniband/bringup/ufm-setup-upgrade/ib.csv -----> ../../ib.csv
 
 02-dhcp-subnet_config.csv
   作用：ISC DHCP 的 shared-network、subnet、地址池、网关，以及每个网段的 ZTP 声明。
@@ -347,8 +367,8 @@ README.txt
   作用：本说明文件。它也会被复制到每个真实项目，但不会创建运行时软链接。
 
 用户链接输入
-  02-devices_config.csv、*.pub 可以是指向项目外文件的链接（例如 laptop.pub -> 自己的
-  公钥）；P2P 用 p2p.xlsx -> p2p/<工作簿>.xlsx，p2p/ 本身可以链到外部资料目录。
+  02-devices_config.csv、ib.csv、*.pub 可以是指向项目外文件的链接（例如 laptop.pub -> 自己的
+  公钥，ib.csv -> p2p/ib.csv）；P2P 用 p2p.xlsx -> p2p/<工作簿>.xlsx，p2p/ 本身可以链到外部资料目录。
   setup、tar-for-upload、sync-code 各在入口跟随链接一次，按真实文件校验：目标不存在或
   不是非空普通文件时报错停止，setup 不顺着链接往项目外写。tar-for-upload 把链接内容作为
   同名普通文件带进上传包（P2P 为去图后的根目录工作簿），并在

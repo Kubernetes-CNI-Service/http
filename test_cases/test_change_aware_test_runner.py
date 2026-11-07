@@ -1188,6 +1188,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
                 "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
                 "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
+                "DAY0-Prepare/template/ib.csv",
             ],
             manifest["tracked_support"],
         )

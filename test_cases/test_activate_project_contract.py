@@ -1280,8 +1280,9 @@ class WP4CheckTemplateTests(unittest.TestCase):
 
     def test_link_members_count_like_files(self):
         # WP-12 adds template/ib.csv -> 02-devices_config.csv, the template's first link: never an error.
+        # (R-016 §10.2 decision E, owner 2026-11-04; v3.1.1 WP-12: the repository template now carries it.)
         template = self.copy_template()
-        os.symlink("02-devices_config.csv", template / "ib.csv")
+        self.assertEqual("02-devices_config.csv", os.readlink(template / "ib.csv"))
         (template / "01-global.yaml").rename(template / "global-source.yaml")
         os.symlink("global-source.yaml", template / "01-global.yaml")
         code, printed = wp4_run_main(self.root, ["--check-template"], template)

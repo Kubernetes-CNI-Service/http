@@ -99,6 +99,11 @@ FILE_PURPOSE_OVERRIDES = {
     "test_cases/script_test_approved_hashes.json": "正式 runner 成功后原子更新的批准字节身份；禁止手工编辑。",
     "test_cases/REAL_ENVIRONMENT.md": "无法在本机安全自动化的 VM、AIR、Docker、服务和物理设备验收案例。",
     "test_cases/CASE_TEMPLATE.md": "新增真机/破坏性验证案例时必须填写的证据模板。",
+    "DAY0-Prepare/template/ib.csv": (
+        "InfiniBand（含 UFM）设备清单的默认值：指向同目录 02-devices_config.csv 的链接，不拆清单的项目照旧"
+        "使用总清单。项目可换成自己的文件或链接，内容必须是 02-devices_config.csv 的子集（只允许以太网设备"
+        "的 type 改成 eth_jump）；打包和同步把它作为普通文件带走。"
+    ),
     "infra/docker/Dockerfile": "Ubuntu 24.04 HTTP ZTP 容器镜像定义，安装运行依赖并固定镜像合同。",
     "infra/docker/compose.yaml": "Docker Compose 表达的容器用户、网络、bind、tmpfs、capability 和 health 合同。",
     "infra/docker/runtime-contract.json": "Docker 容器运行身份、路径、服务和安全设置的机器可读合同。",

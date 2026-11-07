@@ -122,33 +122,40 @@ def project_inventory_targets(project: str, scope: str) -> Optional[tuple[str, .
         accepted = allowed[scope]
     except KeyError as exc:
         raise CollectionGateError(f"invalid collection scope: {scope}") from exc
-    inventory = Path(project) / "02-devices_config.csv"
-    if not inventory.is_file():
+    devices = Path(project) / "02-devices_config.csv"
+    if not devices.is_file():
         return None
-    try:
-        lines = inventory.read_text(encoding="utf-8-sig", errors="strict").splitlines()
-        if not lines:
-            raise CollectionGateError(f"active inventory is empty: {inventory}")
-        header = tuple(
-            value.strip().casefold() for value in _first_two_csv_fields(lines[0])
-        )
-        if header != ("hostname", "type"):
-            raise CollectionGateError(
-                f"active inventory must begin with hostname,type: {inventory}"
+    # R-016 §10.2 (decision E, owner 2026-11-04): the ib rows come from the project's own ib.csv.  A
+    # project without one reads them from 02, which is what the template's default ib.csv link gives.
+    ib_inventory = Path(project) / "ib.csv"
+    sources = [(devices, accepted)]
+    if "ib" in accepted and os.path.lexists(ib_inventory):
+        sources = [(devices, accepted - {"ib"}), (ib_inventory, frozenset(("ib",)))]
+    targets = []
+    for inventory, types in sources:
+        try:
+            lines = inventory.read_text(encoding="utf-8-sig", errors="strict").splitlines()
+            if not lines:
+                raise CollectionGateError(f"active inventory is empty: {inventory}")
+            header = tuple(
+                value.strip().casefold() for value in _first_two_csv_fields(lines[0])
             )
-        targets = []
-        for line in lines[1:]:
-            if not line.strip() or line.lstrip().startswith("#"):
-                continue
-            hostname, device_type = _first_two_csv_fields(line)
-            hostname = hostname.strip()
-            device_type = device_type.strip().casefold()
-            if hostname and not hostname.startswith("#") and device_type in accepted:
-                targets.append(hostname)
-    except CollectionGateError:
-        raise
-    except (OSError, UnicodeError) as exc:
-        raise CollectionGateError(f"cannot read active inventory: {inventory}: {exc}") from exc
+            if header != ("hostname", "type"):
+                raise CollectionGateError(
+                    f"active inventory must begin with hostname,type: {inventory}"
+                )
+            for line in lines[1:]:
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                hostname, device_type = _first_two_csv_fields(line)
+                hostname = hostname.strip()
+                device_type = device_type.strip().casefold()
+                if hostname and not hostname.startswith("#") and device_type in types:
+                    targets.append(hostname)
+        except CollectionGateError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise CollectionGateError(f"cannot read active inventory: {inventory}: {exc}") from exc
     return tuple(dict.fromkeys(targets))
 
 

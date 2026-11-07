@@ -2669,3 +2669,81 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 不允许：项目目录里的用户文件或用户链接被改写、删除；工作区出现指向项目外的写入；服务器上只跑 setup 切换（R16-16）。
 - 证据：每一步的命令输出、退出码、上述清单与 SHA-256 前后对比。
 - 清理与风险：本机用 `-y` 切回原项目并核对清单；服务器恢复快照。未执行前为 NOT RUN，不得写 PASS。
+
+## TC-REAL-IB-CSV-001 — 混合场景（ETH 走 ZTP、IB 走 bringup）下的独立 ib.csv
+
+### 基本信息
+
+- Case ID：`TC-REAL-IB-CSV-001`。
+- 名称：IB 用项目自己的 `ib.csv`（总清单的子集）时，本机 setup、本机正式 load、上传与同步、服务器 load、IB/UFM
+  采集和监控页都使用这份清单；ETH 照常走 ZTP。
+- 类型：real-environment / scenario。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：R-016 详细设计 v1.1 §10.2（owner 2026-11-04 决定 E「按照默认处理」）；需求文档 R-016 的
+  2026-11-05 一段（`ib.csv` 是 `02-devices_config.csv` 的子集，只允许以太网类型改成 `eth_jump`；使用方是 bringup
+  系列和采集，不是 load）；v3.1.1 详细工作指导 WP-12（AP-c）。
+- 自动化文件与测试方法：`test_cases/test_independent_ib_csv_workflow.py`：
+  `IndependentIbInventoryWorkflowTests` 的三个用例（setup → load `--dry-run` → 打包 / 安装校验 / 同步 → 读者；三种
+  形态；R22 字节绑定），以及 `IndependentIbInventoryDirectTests`。
+- 适用平台：local（macOS 本机）/ management-server（Native，AIR 管理服务器 Ubuntu 22.04）/ AIR。
+
+### 风险与目标
+
+- 要防止的故障：IB 的采集、监控页或 bringup 工具仍读总清单，看到不属于 IB 清单的设备；`ib.csv` 是链接时，上传或
+  同步后服务器上留下悬空链接；`ib.csv` 在打包后被改动，服务器拿到的与本机审过的不是同一份；没有 `ib.csv` 的旧项目
+  打包失败。
+- 涉及的模块和状态边界：`DAY0-Prepare/01-a-setup.py`（模板补齐、`infiniband/ib.csv` 链接）、`DAY0-Prepare/11-load.py`、
+  `tools/_package_common.py`（物化、R22 字节绑定）、`tools/tar-for-upload.py`、`tools/sync-code.py`、
+  `tools/deploy-upload-archive.py`、`monitor/generate-monitor-html.py`、`monitor/switch_collection_gate.py`、
+  `infiniband/monitor/cron.sh` 与采集 worker（读 `infiniband/monitor/ib.csv`）。
+- 成功标准：`infiniband/ib.csv` 及其 4 个别名都到达项目的 `ib.csv`；服务器项目里的 `ib.csv` 是普通文件，字节与本机
+  一致；监控页 IB/UFM 区和采集只出现 `ib.csv` 里的设备；ETH 的 ZTP、DHCP 输出与不拆清单时相同。
+
+### 前置条件与输入
+
+- owner 授权的隔离 AIR 管理服务器和项目副本；当前源码的正式 full proof。
+- 项目的 `02-devices_config.csv` 含 ETH（ZTP）设备和 IB 设备；`ib.csv` 是它的子集：总清单的一部分 IB 行，加上
+  type 改成 `eth_jump` 的 oob-leaf。另准备 `ib.csv -> p2p/ib.csv`（`p2p/` 链到项目外资料目录）的同一项目副本。
+- 外部依赖：AIR 仿真里的 ETH 交换机走 ZTP；IB 交换机和 UFM 可达（bringup 的真实写操作不在本卡）。
+- 所需权限：本机操作员；服务器上 load 的正常权限。
+- 初始状态：记录本机与服务器上 `02-devices_config.csv`、`ib.csv` 的 sha256，以及服务状态。
+
+### 步骤
+
+1. 本机：普通文件形态的 `ib.csv`，跑 setup、本机正式 load。核对 `infiniband/ib.csv`、`infiniband/monitor/ib.csv`、
+   `infiniband/bringup/{xdr-upgrade,ufm-setup-upgrade,xdr-initial-setup}/ib.csv` 的 realpath 都是项目的 `ib.csv`；
+   `ethernet/eth.csv`、`nvlink/nvsw.csv` 仍到 `02-devices_config.csv`。
+2. `tar-for-upload.py` 打包，受控部署到 AIR 管理服务器，服务器 load。
+3. 等 IB/UFM 采集至少一轮，打开监控页；查看采集门禁的 yaml-backup 目标。
+4. 改本机 `ib.csv` 的一行（仍是子集），`sync-code.py` 同步，服务器 load，重复第 3 步。
+5. 换成 `ib.csv -> p2p/ib.csv` 的项目副本，重复第 1～3 步。
+6. 换成不拆的项目（删掉项目里的 `ib.csv` 后跑 setup，得到模板默认链接 `ib.csv -> 02-devices_config.csv`），重复
+   第 1～3 步。
+
+### 预期结果
+
+- 正向结果：每一步 setup、load 返回 0；服务器项目里的 `ib.csv` 是普通文件，sha256 等于本机 `ib.csv`（或链接
+  目标）的 sha256；链接形态时包内 `03-linked-inputs.json` 有 `ib.csv` 一条（链接原文、真实路径、sha256）；监控页
+  IB/UFM 区和采集只有 `ib.csv` 里的设备，总清单里多出的 IB 行不出现；第 6 步与拆分前的行为相同（IB 设备来自总清单）。
+- 拒绝/失败结果：打包过程中改动 `ib.csv`（或它的链接目标），打包以「package input drifted before publication」或
+  「packaged ib.csv differs from its bound bytes」拒绝，不留下包。
+- 不允许发生的副作用：setup 不改写用户自己的 `ib.csv` 或链接；不往 `p2p/` 指向的外部资料目录里写；服务器上没有
+  指向打包机路径的悬空 `ib.csv` 链接；ETH 的 ZTP、DHCP 输出不因 `ib.csv` 改变。
+- 需要保存的证据：完整终端；各链接的 realpath；本机与服务器 `ib.csv` 的 sha256；包的成员清单与
+  `03-linked-inputs.json`；监控页截图或生成的 IB/UFM 设备清单；采集日志里本轮的设备名单。不记录任何秘密。
+
+### 故障注入与清理
+
+- 输入篡改：只在隔离副本上做「打包过程中改 `ib.csv`」；`ib.csv` 不是子集时的比对随 bringup 系列接入（D1b、A2、
+  B0、BU1.3），不在本卡。
+- 清理/回滚验证：恢复隔离副本与服务前像；服务器项目里的 `ib.csv` 按需求是用户文件，清理时按 unload 卡处理，不单独
+  删除。
+- 重复执行与幂等性：同一输入重复 setup、load、打包，`ib.csv` 字节和包成员一致；setup 不改动已有的 `ib.csv`。
+- 风险：AIR 地址冲突、服务切换；失败时服务保持停止，按 load 的提示重跑。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_independent_ib_csv_workflow.py`。
+- [x] 修复前能够稳定失败（实现前 20 处红在预期断言上）。
+- [x] 修复后通过。
+- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。

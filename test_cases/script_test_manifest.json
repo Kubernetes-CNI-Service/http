@@ -202,7 +202,8 @@
         "test_cases.test_activate_project_air_contract",
         "test_cases.test_activate_project_air_workflow",
         "test_cases.test_activate_project_workflow",
-        "test_cases.test_activate_project_status_workflow"
+        "test_cases.test_activate_project_status_workflow",
+        "test_cases.test_independent_ib_csv_workflow"
       ]
     },
     {
@@ -689,7 +690,8 @@
     "DAY0-Prepare/template/99-output-monitor/infiniband/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
-    "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep"
+    "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
+    "DAY0-Prepare/template/ib.csv"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -3953,6 +3955,23 @@
         "test_cases.test_activate_project_air_workflow",
         "test_cases.test_activate_project_workflow",
         "test_cases.test_activate_project_status_workflow"
+      ]
+    },
+    {
+      "id": "independent_ib_inventory",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/_package_common.py",
+        "tools/tar-for-upload.py",
+        "tools/sync-code.py",
+        "tools/deploy-upload-archive.py",
+        "monitor/generate-monitor-html.py",
+        "monitor/switch_collection_gate.py",
+        "infra/docker/activate.py"
+      ],
+      "tests": [
+        "test_cases.test_independent_ib_csv_workflow"
       ]
     }
   ],

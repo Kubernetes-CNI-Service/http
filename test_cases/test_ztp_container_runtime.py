@@ -225,12 +225,14 @@ REQUIRED_PUBLISHED_LINKS = {
     "ethernet/monitor/eth.csv": (
         "../eth.csv", "02-devices_config.csv", "file",
     ),
+    # R-016 §10.2 decision E (owner 2026-11-04「按照默认处理」; v3.1.1 WP-12): the IB inventory and its
+    # aliases end in the project's own ib.csv (Docker side a mechanical sync, 开发计划 :112 owner 2026-11-06).
     "infiniband/ib.csv": (
-        "../DAY0-Prepare/activate-project/02-devices_config.csv",
-        "02-devices_config.csv", "file",
+        "../DAY0-Prepare/activate-project/ib.csv",
+        "ib.csv", "file",
     ),
     "infiniband/monitor/ib.csv": (
-        "../ib.csv", "02-devices_config.csv", "file",
+        "../ib.csv", "ib.csv", "file",
     ),
     "nvlink/nvsw.csv": (
         "../DAY0-Prepare/activate-project/02-devices_config.csv",
@@ -281,7 +283,7 @@ REQUIRED_PUBLISHED_LINKS = {
         "../DAY0-Prepare/activate-project/99-output-monitor", "99-output-monitor", "dir",
     ),
     # IBSW 2.25 upgrade inventory alias (NETWORK_INVENTORY_LINKS).
-    "infiniband/bringup/xdr-upgrade/ib.csv": ("../../ib.csv", "02-devices_config.csv", "file"),
+    "infiniband/bringup/xdr-upgrade/ib.csv": ("../../ib.csv", "ib.csv", "file"),
     "nvlink/monitor/nvsw-info": (
         "../../DAY0-Prepare/activate-project/99-output-monitor/nvlink/nvsw-info",
         "99-output-monitor/nvlink/nvsw-info", "dir",
