@@ -37,7 +37,8 @@ ALLOWED = (
 # Fixture membership/target strings come from producer authority, never from
 # the image deny predicate. The permitted controls above remain independent.
 PRODUCER_CONTRACT = load_source("image_context_producers", ROOT / "tools/project_contract.py")
-RUNTIME_TARGETS = dict(PRODUCER_CONTRACT.runtime_link_specs())
+# R-016 §2 (O4 左列): project rows name DAY0-Prepare/activate-project, the same text native and Docker.
+RUNTIME_TARGETS = dict(PRODUCER_CONTRACT.pointer_link_specs())
 RUNTIME_MEMBERS = tuple(RUNTIME_TARGETS)
 RUNTIME_FORMS = ("regular", "resolving", "dangling")
 EMPTY_DENIED_DIRS = (
@@ -115,10 +116,14 @@ def live_shaped_tree(root, runtime_form="regular"):
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
         if runtime_form != "regular" and name in RUNTIME_TARGETS:
-            project = "site-a" if runtime_form == "resolving" else "missing-site"
-            path.symlink_to(RUNTIME_TARGETS[name].format(project=project))
+            path.symlink_to(RUNTIME_TARGETS[name])
         else:
             path.write_bytes(b"synthetic denied marker\n")
+    if runtime_form != "regular":
+        # The pointer setup keeps beside the projects: it resolves to site-a or dangles.
+        pointer = root / "DAY0-Prepare/activate-project"
+        pointer.symlink_to("site-a" if runtime_form == "resolving" else "missing-site")
+        expected.add("DAY0-Prepare/activate-project")
     if runtime_form == "resolving":
         project_root = (root / "DAY0-Prepare/site-a").resolve()
         for name in RUNTIME_MEMBERS:
@@ -291,14 +296,15 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
 
     def test_shared_producer_contract_retains_independent_target_examples(self):
         expected = {
-            "monitor/ethernet": "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
+            "monitor/ethernet": "../DAY0-Prepare/activate-project/99-output-monitor/ethernet",
             "monitor/ztp-status": "../ztp/status",
             "ethernet/monitor/eth.csv": "../eth.csv",
-            "ethernet/monitor/eth-info": "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/eth-info",
+            "ethernet/monitor/eth-info": "../../DAY0-Prepare/activate-project/99-output-monitor/ethernet/eth-info",
             "ztp/config/cumulus/latest_yaml": "template/99-output/latest",
             "ztp/config/nvos/latest_yaml": "template/99-output-ib_nvl/latest",
-            "ztp/config/cumulus/template/P2P/output-p2p": "../../../../../DAY0-Prepare/{project}/99-output-p2p",
-            "ztp/config/nvos/template/P2P/ib-info": "../../../../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-info",
+            "ztp/config/cumulus/template/P2P/output-p2p": "../../../../../DAY0-Prepare/activate-project/99-output-p2p",
+            "ztp/config/nvos/template/P2P/ib-info":
+                "../../../../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ib-info",
         }
         for name, target in expected.items():
             with self.subTest(name=name):
@@ -465,11 +471,15 @@ class ImageContextSafetyWorkflowTests(unittest.TestCase):
     def test_setup_real_monitor_and_latest_producers_consume_the_shared_contract(self):
         setup = load_source("image_context_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
         project = ROOT / "DAY0-Prepare/site-a"
-        for name, target in setup._monitor_link_paths(str(project)) + setup._monitor_inventory_link_pairs():
+        # Since v3.1.1 WP-3 setup writes every table row with _spec_link_text through the reconcile engine.
+        for row in setup.SETUP_LINK_SPECS:
+            if row.view == "monitor":
+                self.assertIn(row.path, RUNTIME_TARGETS)
+                self.assertEqual(RUNTIME_TARGETS[row.path], setup._spec_link_text(row))
+        for name, target in setup._monitor_inventory_link_pairs():
             relative = Path(name).relative_to(ROOT).as_posix()
             self.assertIn(relative, RUNTIME_TARGETS)
-            self.assertEqual(RUNTIME_TARGETS[relative].format(project="site-a"),
-                             os.path.relpath(target, os.path.dirname(name)))
+            self.assertEqual(RUNTIME_TARGETS[relative], os.path.relpath(target, os.path.dirname(name)))
         with mock.patch.object(setup, "_latest_cumulus_publish_dir", return_value="synthetic-cumulus-release"), \
                 mock.patch.object(setup, "_latest_nvos_publish_dir", return_value="synthetic-nvos-release"), \
                 mock.patch.object(setup, "_make_exact_link") as link:

@@ -166,19 +166,29 @@ for pending in "$base"/.logs-migration.*; do
     exit 1
   fi
 done
+# R-016 §5.2: read DAY0-Prepare/activate-project once, check it names one plain
+# project, and print that name.
+active_project_name() {
+  [ -L "$1/activate-project" ] || return 1
+  name=$(readlink -- "$1/activate-project") || return 1
+  case "$name" in
+    ''|.*|*/*|*[!A-Za-z0-9._-]*|template|activate-project|tests|test_cases|dumps) return 1 ;;
+  esac
+  [ -d "$1/$name" ] && [ ! -L "$1/$name" ] || return 1
+  printf '%s\n' "$name"
+}
 # The lexical shape is part of ownership: merely resolving to a directory
 # would also accept an unrelated symlink outside the selected DAY0 project.
 if [ -L "$base/logs" ]; then
   target=$(readlink -- "$base/logs") || exit 1
-  case "$target" in
-    ../DAY0-Prepare/*/99-output-infra) ;;
-    *) echo 'ERROR: infra/logs is not a managed project link' >&2; exit 1 ;;
-  esac
-  project=${target#../DAY0-Prepare/}
-  project=${project%/99-output-infra}
-  case "$project" in
-    ''|.|..|*/*|*[!A-Za-z0-9._-]*) echo 'ERROR: invalid infra log project component' >&2; exit 1 ;;
-  esac
+  if [ "$target" != "../DAY0-Prepare/activate-project/99-output-infra" ]; then
+    echo 'ERROR: infra/logs is not a managed project link' >&2
+    exit 1
+  fi
+  if ! project=$(active_project_name "$base/../DAY0-Prepare"); then
+    echo 'ERROR: invalid infra log project component: DAY0-Prepare/activate-project selects no project' >&2
+    exit 1
+  fi
   project_root="$base/../DAY0-Prepare/$project"
   output_root="$project_root/99-output-infra"
   if [ -L "$base" ] || [ -L "$base/../DAY0-Prepare" ] ||
@@ -505,6 +515,9 @@ def collect_local(output_dir: Path) -> dict[str, object]:
             )
             if project is None:
                 raise DeployError(f"foreign infra log link: {runtime_log_dir}")
+            if project.name == "activate-project":  # R-016 Q7: the managed link dangles after unsetup
+                raise DeployError(f"no active project for infra logs (DAY0-Prepare/activate-project): "
+                                  f"{runtime_log_dir}")
             physical_log_dir = project / "99-output-infra"
             owner = {
                 "kind": "project", "project": str(project.resolve()),

@@ -456,6 +456,18 @@ exec 9>"$lock_file"
 flock -x 9
 
 log_dir="${runtime_dir}/logs"
+# R-016 §5.2: read DAY0-Prepare/activate-project once, check it names one plain, real project
+# directory, and print that name.
+active_project_name() {
+  local day0="$1" name
+  [[ -L "${day0}/activate-project" ]] || return 1
+  name=$(readlink -- "${day0}/activate-project") || return 1
+  case "$name" in
+    ''|.*|*/*|template|activate-project|tests|test_cases|dumps) return 1 ;;
+  esac
+  [[ -d "${day0}/${name}" && ! -L "${day0}/${name}" ]] || return 1
+  printf '%s\n' "$name"
+}
 log_root_lock="${runtime_dir}/.logs.lock"
 if [[ -L "$log_root_lock" || ( -e "$log_root_lock" && ! -f "$log_root_lock" ) ]]; then
   echo "ERROR: invalid infra log-root lock" >&2
@@ -476,16 +488,15 @@ for pending in "${runtime_dir}"/.logs-migration.*; do
 done
 if [[ -L "$log_dir" ]]; then
   log_target=$(readlink -- "$log_dir") || exit 1
-  case "$log_target" in
-    ../DAY0-Prepare/*/99-output-infra) ;;
-    *) echo "ERROR: infra/logs is not a managed project link" >&2; exit 1 ;;
-  esac
-  log_project=${log_target#../DAY0-Prepare/}
-  log_project=${log_project%/99-output-infra}
-  case "$log_project" in
-    ''|.|..|*/*) echo "ERROR: invalid infra log project" >&2; exit 1 ;;
-  esac
+  if [[ "$log_target" != "../DAY0-Prepare/activate-project/99-output-infra" ]]; then
+    echo "ERROR: infra/logs is not a managed project link" >&2
+    exit 1
+  fi
   projects_root="${runtime_dir}/../DAY0-Prepare"
+  if ! log_project=$(active_project_name "$projects_root"); then
+    echo "ERROR: invalid infra log project: DAY0-Prepare/activate-project selects no project" >&2
+    exit 1
+  fi
   physical_log_dir="${projects_root}/${log_project}/99-output-infra"
   if [[ -L "$projects_root" || -L "${projects_root}/${log_project}" ||
         -L "$physical_log_dir" || ! -d "$physical_log_dir" ]]; then

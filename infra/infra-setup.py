@@ -695,16 +695,21 @@ class InfraSetup:
                     print("ERROR: infra log migration state is pending", file=sys.stderr)
                     raise SetupExit(1)
             if log_dir.is_symlink():
-                target = os.readlink(log_dir)
-                if not (target.startswith("../DAY0-Prepare/") and target.endswith("/99-output-infra")
-                        and len(target) > len("../DAY0-Prepare/") + len("/99-output-infra") - 1):
+                # R-016 §2, §5.2: setup links infra/logs through DAY0-Prepare/activate-project.  Read the
+                # pointer once and check it names one plain project; this script stays self-contained
+                # (remote clients get it without tools/), so it reads the pointer itself.
+                if os.readlink(log_dir) != "../DAY0-Prepare/activate-project/99-output-infra":
                     print("ERROR: infra/logs is not a managed project link", file=sys.stderr)
                     raise SetupExit(1)
-                project = target[len("../DAY0-Prepare/"):-len("/99-output-infra")]
-                if project in ("", ".", "..") or "/" in project:
-                    print("ERROR: invalid infra log project", file=sys.stderr)
-                    raise SetupExit(1)
                 projects_root = runtime / "../DAY0-Prepare"
+                pointer = projects_root / "activate-project"
+                project = os.readlink(pointer) if pointer.is_symlink() else ""
+                if (project in ("", "template", "activate-project", "tests", "test_cases", "dumps")
+                        or project.startswith(".") or "/" in project
+                        or (projects_root / project).is_symlink() or not (projects_root / project).is_dir()):
+                    print("ERROR: invalid infra log project: DAY0-Prepare/activate-project selects no project",
+                          file=sys.stderr)
+                    raise SetupExit(1)
                 physical = projects_root / project / "99-output-infra"
                 if (projects_root.is_symlink() or (projects_root / project).is_symlink()
                         or physical.is_symlink() or not physical.is_dir()):

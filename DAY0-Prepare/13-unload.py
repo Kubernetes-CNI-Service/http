@@ -28,6 +28,8 @@ if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 from project_contract import (  # noqa: E402
     ZTP_PREFIX_PUBLICATION_MARKER,
+    ActiveProjectPointerError,
+    active_project_dir,
     ztp_prefix_publication_relative,
 )
 from deployment_lock import (  # noqa: E402
@@ -42,7 +44,6 @@ from ztp_service_runtime import (  # noqa: E402
     stop_native_ztp_monitors,
 )
 
-MANIFEST_FILE = ZTP_DIR / ".setup_manifest"
 UNSETUP_SCRIPT = HERE / "02-unsetup.py"
 INFRA_TEARDOWN = HTTP_ROOT / "infra/infra-teardown.sh"
 MONITOR_SCRIPT_NAME = "12-ztp-monitor.py"
@@ -147,14 +148,11 @@ def _inside(path: Path, root: Path) -> bool:
 
 
 def active_project() -> Path | None:
-    if not MANIFEST_FILE.is_file():
-        return None
-    for raw_line in MANIFEST_FILE.read_text(encoding="utf-8").splitlines():
-        if raw_line.startswith("# setup manifest ") and "proj:" in raw_line:
-            candidate = Path(raw_line.split("proj:", 1)[1].strip()).resolve()
-            if candidate.is_dir() and _inside(candidate, HERE):
-                return candidate
-    return None
+    """The project DAY0-Prepare/activate-project selects (R-016 §5.1); None without a pointer."""
+    try:
+        return active_project_dir(HTTP_ROOT)
+    except ActiveProjectPointerError as exc:
+        raise UnloadError(f"活动项目指针无效，请先重跑 setup：{exc}") from exc
 
 
 def resolve_project(argument: str | None) -> Path | None:

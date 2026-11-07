@@ -2763,7 +2763,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         for name in before:
             alias = published / name
             alias.unlink()
-            alias.symlink_to(os.path.relpath(flat / name, published.resolve()))
+            alias.symlink_to(self._pointer_publication(published, "99-output-dhcp/" + name))
         for name, payload in {
             "ztp-bootstrap_oob.sh": b'A oob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
             "ztp-bootstrap_oobofoob.sh": b'A oobofoob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
@@ -3970,6 +3970,21 @@ print("actual-copied-validator-selected-B")
         finally:
             LOAD.discard_prepared_release(prepared)
 
+    def _activate_pointer(self) -> Path:
+        """setup's DAY0-Prepare/activate-project selecting this project (R-016 §2, §4.2 step 4).
+
+        Load names the active project by this pointer only, never by the setup manifest (R-016 §5.1).
+        """
+        pointer = self.project.resolve().parent / "activate-project"
+        if not os.path.lexists(pointer):
+            pointer.symlink_to(self.project.name)
+        return pointer
+
+    def _pointer_publication(self, published: Path, fixed_name: str) -> str:
+        """setup's link text through the pointer (R-016 §2, O4 左列): a tree link names the pointer,
+        never the project directory; the receipt readers admit only that form (详细工作指导 WP-9 class 1)."""
+        return os.path.relpath(self._activate_pointer() / fixed_name, published.resolve())
+
     def _publish_a_with_runtime_rollback_receipt(self, *, prepare_receipt=True, original_upgrade_policy=None,
                                                 qualified_health=False):
         parent = LOAD.validate_and_publish_release(self.project, self.inputs)
@@ -4036,7 +4051,7 @@ print("actual-copied-validator-selected-B")
             leaf = published / name
             (source / name).write_bytes(leaf.read_bytes())
             leaf.unlink()
-            leaf.symlink_to(os.path.relpath(source / name, published))
+            leaf.symlink_to(self._pointer_publication(published, "99-output-dhcp/" + name))
         return generation, LOAD.prepare_runtime_rollback_receipt(self.project, generation)
 
     def test_runtime_receipt_accepts_only_project_bound_dhcp_publication_links(self):
@@ -4169,7 +4184,7 @@ print("actual-copied-validator-selected-B")
             source.write_bytes(payload)
             leaf = self.ztp / "config/publickey" / name
             leaf.unlink()
-            leaf.symlink_to(os.path.relpath(source.resolve(), leaf.parent.resolve()))
+            leaf.symlink_to(self._pointer_publication(leaf.parent, name))
         return generation, LOAD.prepare_runtime_rollback_receipt(self.project, generation)
 
     def test_runtime_receipt_preserves_managed_project_key_link_on_restore(self) -> None:
@@ -4245,7 +4260,7 @@ print("actual-copied-validator-selected-B")
         source.symlink_to(foreign)
         leaf = self.ztp / "config/publickey/laptop.pub"
         leaf.unlink()
-        leaf.symlink_to(os.path.relpath(source, leaf.parent))
+        leaf.symlink_to(self._pointer_publication(leaf.parent, "laptop.pub"))
         with self.assertRaisesRegex(LOAD.LoadError, "public key source"):
             LOAD.prepare_runtime_rollback_receipt(self.project, generation)
         self.assertEqual(b"operator key must not become rollback authority\n", foreign.read_bytes())

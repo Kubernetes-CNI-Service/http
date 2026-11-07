@@ -204,7 +204,8 @@
         "test_cases.test_activate_project_workflow",
         "test_cases.test_activate_project_status_workflow",
         "test_cases.test_independent_ib_csv_workflow",
-        "test_cases.test_activate_project_services_workflow"
+        "test_cases.test_activate_project_services_workflow",
+        "test_cases.test_activate_project_readers_workflow"
       ]
     },
     {
@@ -3963,7 +3964,8 @@
         "test_cases.test_activate_project_air_workflow",
         "test_cases.test_activate_project_workflow",
         "test_cases.test_activate_project_status_workflow",
-        "test_cases.test_activate_project_services_workflow"
+        "test_cases.test_activate_project_services_workflow",
+        "test_cases.test_activate_project_readers_workflow"
       ]
     },
     {

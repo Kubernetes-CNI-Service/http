@@ -37,8 +37,9 @@ INVENTORY_LINKS = (
     ("nvlink/monitor/nvsw.csv", "nvlink/nvsw.csv"),
     (CSV_NAME, "infiniband/ib.csv"),
 )
-GLOBAL_TARGET = "../../../DAY0-Prepare/{project}/01-global.yaml"
-TOP_CSV_TARGET = "../DAY0-Prepare/{project}/02-devices_config.csv"
+# R-016 §2 (O4 左列): project links name DAY0-Prepare/activate-project; aliases keep their text.
+GLOBAL_TARGET = "../../../DAY0-Prepare/activate-project/01-global.yaml"
+TOP_CSV_TARGET = "../DAY0-Prepare/activate-project/ib.csv"  # decision E (owner 2026-11-04), WP-12
 LOCAL_CSV_TARGET = "../../ib.csv"
 
 
@@ -49,7 +50,7 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
         self.assertIn(GLOBAL_MAPPING, contract.SETUP_WORKSPACE_INPUT_MAPPINGS)
         self.assertEqual(tuple(contract.NETWORK_CSV_MAPPINGS), NETWORK_CSV)
         self.assertEqual(tuple(contract.NETWORK_INVENTORY_LINKS), INVENTORY_LINKS)
-        runtime = dict(contract.runtime_link_specs())
+        runtime = dict(contract.pointer_link_specs())
         self.assertEqual(runtime.get(GLOBAL_NAME), GLOBAL_TARGET)
         self.assertEqual(runtime.get(CSV_NAME), LOCAL_CSV_TARGET)
         self.assertEqual(runtime.get("infiniband/ib.csv"), TOP_CSV_TARGET)
@@ -58,7 +59,7 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
         self.assertIn("infiniband/bringup", contract.IMAGE_HOST_STATE_SUBTREES)
         published = {name: (target, source)
                      for name, target, source in contract.published_runtime_link_specs()}
-        self.assertEqual(published.get(CSV_NAME), (LOCAL_CSV_TARGET, "02-devices_config.csv"))
+        self.assertEqual(published.get(CSV_NAME), (LOCAL_CSV_TARGET, "ib.csv"))
         self.assertNotIn(GLOBAL_NAME, published, "nonmonitor workspace global is NOT implicitly published")
         tree = ast.parse((ROOT / "tools/project_contract.py").read_text())
         positions = {}
@@ -83,32 +84,37 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
             csv_bytes = b"hostname,type\nsynthetic-ib,ib\n"
             (project / "01-global.yaml").write_bytes(global_bytes)
             (project / "02-devices_config.csv").write_bytes(csv_bytes)
+            # The template's default ib.csv -> 02-devices_config.csv (R-016 §3.3, decision E).
+            (project / "ib.csv").symlink_to("02-devices_config.csv")
+            # Setup's switch step selects the project; these producers only write the links (R-016 §4.2).
+            (workspace / "DAY0-Prepare/activate-project").symlink_to("site-a")
             # Relocate actual fixed producer names, not producer results.
             net_paths = [(str(workspace / name), target)
                          for name, target in setup.NETWORK_CSV_MAPPINGS]
             with patch.multiple(setup, HTTP_BASE=str(workspace), HERE=str(workspace),
                                 ZTP=str(workspace / "ztp"), _DRY_RUN=False,
                                 _LINK_ERRORS=0, _NET_CSV_LINKS=net_paths), redirect_stdout(io.StringIO()):
-                for name, target, kind in setup.WORKSPACE_INPUT_MAPPINGS:
-                    if name == GLOBAL_NAME:
-                        setup._process_mapping(str(project), name, target, kind, link_root=str(workspace))
-                setup._process_net_csv_links(str(project))
+                # The reconcile engine writes the table rows (WP-3 §2.7: _process_mapping and
+                # _process_net_csv_links are gone).
+                setup._reconcile_links([(str(workspace / row.path), setup._spec_link_text(row))
+                                        for row in setup.SETUP_LINK_SPECS
+                                        if row.path == GLOBAL_NAME or row.view == "network-csv"])
                 for name, target in setup._monitor_inventory_link_pairs():
                     setup._make_exact_link(name, target)
                 self.assertEqual(setup._LINK_ERRORS, 0)
             # Literal lexical text and original bytes, not resolve-only ownership.
             self.assertTrue((workspace / GLOBAL_NAME).is_symlink(), "real producer missed IB global alias")
             self.assertEqual(os.readlink(workspace / GLOBAL_NAME),
-                             "../../../DAY0-Prepare/site-a/01-global.yaml")
+                             "../../../DAY0-Prepare/activate-project/01-global.yaml")
             self.assertEqual(os.readlink(workspace / "infiniband/ib.csv"),
-                             "../DAY0-Prepare/site-a/02-devices_config.csv")
+                             "../DAY0-Prepare/activate-project/ib.csv")
             self.assertTrue((workspace / CSV_NAME).is_symlink(), "real producer missed local CSV alias")
             self.assertEqual(os.readlink(workspace / CSV_NAME), LOCAL_CSV_TARGET)
             self.assertEqual((workspace / GLOBAL_NAME).read_bytes(), global_bytes)
             self.assertEqual((workspace / CSV_NAME).read_bytes(), csv_bytes)
             self.assertEqual((project / "01-global.yaml").read_bytes(), global_bytes)
             self.assertEqual((project / "02-devices_config.csv").read_bytes(), csv_bytes)
-            runtime = dict(contract.runtime_link_specs())
+            runtime = dict(contract.pointer_link_specs())
             self.assertEqual(runtime.get(GLOBAL_NAME), GLOBAL_TARGET)
             self.assertEqual(runtime.get(CSV_NAME), LOCAL_CSV_TARGET)
             self.assertIn(GLOBAL_NAME, contract.IMAGE_HOST_STATE_PATHS)
@@ -123,7 +129,7 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
                              ROOT / "tools/project_contract.py")
             published = {str(name): (target, str(source))
                          for name, target, source in activate.PUBLISHED_RUNTIME_LINKS}
-            self.assertEqual(published.get(CSV_NAME), (LOCAL_CSV_TARGET, "02-devices_config.csv"))
+            self.assertEqual(published.get(CSV_NAME), (LOCAL_CSV_TARGET, "ib.csv"))
             self.assertNotIn(GLOBAL_NAME, published)
             for name, target in INVENTORY_LINKS[:3]:
                 self.assertTrue((workspace / name).is_symlink())

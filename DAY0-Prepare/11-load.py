@@ -107,11 +107,13 @@ from infra_components import encode_load_components, select_load_components
 import ssh_key_preparation as ssh_keys
 from project_contract import (
     GLOBAL_SCHEMA_VERSION,
+    ActiveProjectPointerError,
     PublicationPlan,
     ServiceEndpoint,
     SWITCH_CREDENTIAL_FAMILY_ORDER,
     SWITCH_CREDENTIAL_PATHS,
     SWITCH_SCHEMA_FAMILIES,
+    active_project_dir,
     detect_global_schema_version,
     device_visible_urls,
     normalize_issue_tracker_policy,
@@ -3812,13 +3814,11 @@ def prepare_images(
 
 
 def active_project() -> Path | None:
-    if not MANIFEST.is_file():
-        return None
-    first = MANIFEST.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
-    if not first or "proj:" not in first[0]:
-        return None
-    project = Path(first[0].split("proj:", 1)[1].strip())
-    return project.resolve() if project.is_dir() else None
+    """The project DAY0-Prepare/activate-project selects (R-016 §5.1); None without a pointer."""
+    try:
+        return active_project_dir(HTTP_ROOT)
+    except ActiveProjectPointerError as exc:
+        raise LoadError(f"活动项目指针无效：{exc}") from exc
 
 
 def sync_marker_present(path: Path) -> bool:
@@ -3834,7 +3834,12 @@ def activate_project(
     no_upgrade: bool = False,
 ) -> None:
     host_role = resolve_host_role(host_role)
-    current = active_project()
+    try:
+        current = active_project()
+    except LoadError as exc:
+        # setup re-points DAY0-Prepare/activate-project; an invalid one is repaired, not fatal here.
+        warn(f"{exc}；setup 将重建指针")
+        current = None
     if current == project:
         mode = "严格" if strict else "配置准备/no-upgrade（跳过部署门禁）"
         info(f"当前活动项目就是目标项目；重新执行{mode} setup 以检查并修复全部链接")
@@ -3878,7 +3883,7 @@ def activate_project(
         setup_key_context=server_delegated_setup,
     )
     if not dry_run and active_project() != project:
-        raise LoadError("01-a-setup.py 返回成功，但活动项目清单未指向目标项目")
+        raise LoadError("01-a-setup.py 返回成功，但 DAY0-Prepare/activate-project 未指向目标项目")
     if not dry_run:
         canonical = project / "p2p.xlsx"
         if not canonical.is_symlink():
@@ -5611,16 +5616,27 @@ def _runtime_key_identity(metadata: os.stat_result) -> dict[str, int]:
     return {field: getattr(metadata, field) for field in _RUNTIME_KEY_IDENTITY_FIELDS}
 
 
+def _selected_through_pointer(project: Path, lexical: Path, relative: str) -> bool:
+    """Whether a SETUP link's lexical target is DAY0-Prepare/activate-project/<relative> beside this
+    canonical project, and that pointer selects it (R-016 §2: the text names the pointer, the pointer
+    names the project)."""
+    try:
+        selected = active_project_dir(project.parent.parent)
+    except ActiveProjectPointerError:
+        return False
+    return lexical == project.parent / "activate-project" / relative and selected == project
+
+
 def _runtime_key_source(path: Path, project: Path, target: object) -> Path:
     """Admit only SETUP's relative publication of this project's same-name key."""
     if (not isinstance(target, str) or not target or os.path.isabs(target)
             or os.path.normpath(target) != target or not path.name.endswith(".pub")):
         raise LoadError("rollback public key source link is invalid")
-    source = project.resolve(strict=True) / path.name
+    canonical = project.resolve(strict=True)
     lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    if lexical != source:
+    if not _selected_through_pointer(canonical, lexical, path.name):
         raise LoadError("rollback public key source escaped its owning project")
-    return source
+    return canonical / path.name
 
 
 def _read_runtime_key_source(source: Path) -> tuple[bytes, int, dict[str, int]]:
@@ -5743,9 +5759,11 @@ def _runtime_dhcp_link_source(project: Path, path: Path, target: object) -> Path
             or not isinstance(target, str) or not target or os.path.isabs(target)
             or os.path.normpath(target) != target):
         raise LoadError("rollback DHCP publication link is invalid")
-    source = project.resolve(strict=True) / "99-output-dhcp" / path.name
+    canonical = project.resolve(strict=True)
+    source = canonical / "99-output-dhcp" / path.name
     lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    if lexical != source or source.parent.resolve(strict=True) != source.parent:
+    if (not _selected_through_pointer(canonical, lexical, "99-output-dhcp/" + path.name)
+            or source.parent.resolve(strict=True) != source.parent):
         raise LoadError("rollback DHCP publication escaped its owning project")
     return source
 

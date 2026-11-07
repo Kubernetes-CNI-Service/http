@@ -148,6 +148,9 @@ class GenerationReportContract(unittest.TestCase):
         self.published.mkdir(parents=True, mode=0o700)
         self.laptop = public_line("ssh-ed25519", 31, "laptop")
         self.management = public_line("ssh-ed25519", 47, "management")
+        # R-016 §2, §3.2: setup's pointer selects the project; each key link names the pointer.
+        self.pointer = self.root / "DAY0-Prepare/activate-project"
+        self.pointer.symlink_to("demo")
         for name, content in (
             ("laptop.pub", self.laptop),
             ("mgmt-server.pub", self.management),
@@ -155,7 +158,7 @@ class GenerationReportContract(unittest.TestCase):
             leaf = self.project / name
             leaf.write_bytes(content)
             leaf.chmod(0o644)
-            (self.published / name).symlink_to(leaf)
+            (self.published / name).symlink_to(os.path.relpath(self.pointer / name, self.published))
         self.parent = parent_release(self.project)
         self.output = self.project / "99-output-ztp"
         self.output.mkdir(mode=0o700)
@@ -311,6 +314,36 @@ class GenerationReportContract(unittest.TestCase):
         published.unlink()
         published.write_bytes(self.laptop)  # A copied regular leaf is not the published link.
         with self.assertRaises(Exception):
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+
+    def test_published_key_links_bind_through_the_pointer_to_this_project(self):
+        # R-016 §3.2, §11 (v1.1): a key link is relpath(DAY0-Prepare/activate-project/<key>) and counts
+        # only while the pointer selects this project; the direct form of the same project is not it.
+        helper = report_helper()
+        self.assertEqual("../../../DAY0-Prepare/activate-project/laptop.pub",
+                         os.readlink(self.published / "laptop.pub"))
+        self.assertEqual(2, len(helper.build_report(self.project, self.parent,
+                                                    published_dir=self.published)["public_keys"]))
+        other = self.root / "DAY0-Prepare/other"
+        other.mkdir(mode=0o700)
+        for name, content in (("laptop.pub", self.laptop), ("mgmt-server.pub", self.management)):
+            (other / name).write_bytes(content)
+        self.pointer.unlink()
+        self.pointer.symlink_to("other")
+        with self.assertRaisesRegex(helper.GenerationReportError, "another project"):
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+        self.pointer.unlink()
+        with self.assertRaisesRegex(helper.GenerationReportError, "another project"):
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+        self.pointer.symlink_to("missing")
+        with self.assertRaisesRegex(helper.GenerationReportError, "pointer is invalid"):
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+        self.pointer.unlink()
+        self.pointer.symlink_to("demo")
+        direct = self.published / "laptop.pub"
+        direct.unlink()
+        direct.symlink_to(os.path.relpath(self.project / "laptop.pub", self.published))
+        with self.assertRaisesRegex(helper.GenerationReportError, "another project"):
             helper.build_report(self.project, self.parent, published_dir=self.published)
 
     def test_missing_empty_duplicate_and_changed_published_keys_fail_closed(self):

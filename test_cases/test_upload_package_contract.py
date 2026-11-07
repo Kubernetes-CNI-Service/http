@@ -948,7 +948,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 )
                 for name, target in (
                     ("infiniband/bringup/xdr-initial-setup/01-global.yaml",
-                     "../../../DAY0-Prepare/customer/01-global.yaml"),
+                     "../../../DAY0-Prepare/activate-project/01-global.yaml"),
                     ("infiniband/bringup/xdr-initial-setup/publickey",
                      "../../publickey"),
                 ):
@@ -1769,10 +1769,10 @@ class UploadPackageContractTests(unittest.TestCase):
                 "// local dependency cache\n", encoding="utf-8",
             )
             (lldp_tool / "99-output-p2p").symlink_to(
-                "../../DAY0-Prepare/customer/99-output-p2p",
+                "../../DAY0-Prepare/activate-project/99-output-p2p",
             )
             (lldp_tool / "99-output-monitor").symlink_to(
-                "../../DAY0-Prepare/customer/99-output-monitor",
+                "../../DAY0-Prepare/activate-project/99-output-monitor",
             )
             # Root-only exclusions must not turn into an unanchored filter for
             # a legitimate same-named directory in a deployable code tree.
@@ -1945,7 +1945,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 target = analyzer / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(f"fixture: {relative}\n", encoding="utf-8")
-            (analyzer / "99-output-p2p").symlink_to("../../DAY0-Prepare/customer/99-output-p2p")
+            (analyzer / "99-output-p2p").symlink_to("../../DAY0-Prepare/activate-project/99-output-p2p")
             lldp = workspace / "tools/lldp-analyze-tool"
             lldp.mkdir()
             (lldp / "analyze_lldp.py").write_text("# deployable runtime\n", encoding="utf-8")

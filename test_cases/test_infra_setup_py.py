@@ -1197,7 +1197,8 @@ class InfraSetupPyInputs(unittest.TestCase):
         project = box.http / "DAY0-Prepare/proj"
         project.mkdir(parents=True)
         (project / "01-global.yaml").write_text(GLOBAL, encoding="utf-8")
-        (box.infra / "01-global.yaml").symlink_to("../DAY0-Prepare/proj/01-global.yaml")
+        (box.http / "DAY0-Prepare/activate-project").symlink_to("proj")  # R-016 §2
+        (box.infra / "01-global.yaml").symlink_to("../DAY0-Prepare/activate-project/01-global.yaml")
         result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertIn("DNS=160.250.70.5 8.8.8.8\n", box.read("etc/systemd/resolved.conf"))
@@ -1254,7 +1255,9 @@ class InfraSetupPyLogBinding(unittest.TestCase):
             logs.unlink()
             output = box.http / "DAY0-Prepare/proj/99-output-infra"
             output.mkdir(parents=True)
-            logs.symlink_to("../DAY0-Prepare/proj/99-output-infra")
+            # R-016 §2, §5.2: infra/logs names the pointer, which selects the project.
+            (box.http / "DAY0-Prepare/activate-project").symlink_to("proj")
+            logs.symlink_to("../DAY0-Prepare/activate-project/99-output-infra")
             (box.infra / ".logs-migration.json").write_text("{}", encoding="utf-8")
             result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
             self.assertEqual(1, result.returncode)
@@ -1263,6 +1266,50 @@ class InfraSetupPyLogBinding(unittest.TestCase):
             result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertEqual(1, len(list(output.glob("infra-setup-*.log"))))
+
+    def test_log_root_is_the_output_of_the_project_the_pointer_selects(self):
+        # R-016 §2, §5.2: infra/logs -> ../DAY0-Prepare/activate-project/99-output-infra; the writer
+        # reads the pointer once and writes into the project it selects, never another one.
+        with tempfile.TemporaryDirectory(prefix="infra-setup-py-pointer-") as directory:
+            box = Sandbox(Path(directory))
+            day0 = box.http / "DAY0-Prepare"
+            outputs = {name: day0 / name / "99-output-infra" for name in ("site-a", "site-b")}
+            for output in outputs.values():
+                output.mkdir(parents=True)
+            (day0 / "template/99-output-infra").mkdir(parents=True)
+            pointer = day0 / "activate-project"
+
+            def point(name):
+                if os.path.lexists(pointer):
+                    pointer.unlink()
+                if name is not None:
+                    pointer.symlink_to(name)
+
+            logs = box.infra / "logs"
+            logs.symlink_to("../DAY0-Prepare/activate-project/99-output-infra")
+            for selected in ("site-a", "site-b"):
+                with self.subTest(selected=selected):
+                    point(selected)
+                    result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual(1, len(list(outputs[selected].glob("infra-setup-*.log"))))
+            written = {name: len(list(output.glob("infra-setup-*.log"))) for name, output in outputs.items()}
+            for target, fault in ((None, "no pointer (unsetup, R-016 Q7)"), ("template", "excluded name"),
+                                  ("missing", "missing project")):
+                with self.subTest(fault=fault):
+                    point(target)
+                    result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
+                    self.assertEqual(1, result.returncode)
+                    self.assertIn("ERROR: invalid infra log project", result.stderr)
+            self.assertEqual(written, {name: len(list(output.glob("infra-setup-*.log")))
+                                       for name, output in outputs.items()})
+            # The direct form of an earlier setup is not the managed link any more (O4 左列：R-016).
+            point("site-a")
+            logs.unlink()
+            logs.symlink_to("../DAY0-Prepare/site-a/99-output-infra")
+            result, _calls, _spy, _chown = box.apply("--client", "--non-interactive")
+            self.assertEqual(1, result.returncode)
+            self.assertIn("ERROR: infra/logs is not a managed project link", result.stderr)
 
 
 class InfraSetupPyManagement(unittest.TestCase):

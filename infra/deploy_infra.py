@@ -124,6 +124,8 @@ def _bound_log_root():
             )
             if project is None:
                 raise DeployError(f"foreign or invalid infra log link: {log_link}")
+            if project.name == "activate-project":  # R-016 Q7: the managed link dangles after unsetup
+                raise DeployError(f"no active project for infra logs (DAY0-Prepare/activate-project): {log_link}")
             physical = project / "99-output-infra"
         elif stat.S_ISDIR(link_stat.st_mode):
             physical = log_link

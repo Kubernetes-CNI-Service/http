@@ -30,12 +30,14 @@ import sys
 from typing import Any
 
 try:
+    from tools.project_contract import ActiveProjectPointerError, active_project_dir
     from tools.ssh_key_preparation import PUBLIC_KEY_LIMIT, public_key_identity_bytes
 except ModuleNotFoundError as exc:
     if exc.name != "tools":
         raise
     # Direct execution as `python3 tools/generation_report.py` places tools/
     # rather than the repository root on sys.path.
+    from project_contract import ActiveProjectPointerError, active_project_dir
     from ssh_key_preparation import PUBLIC_KEY_LIMIT, public_key_identity_bytes
 
 
@@ -252,8 +254,14 @@ def _public_key(project: Path, published: Path, name: str) -> tuple[str, str]:
         raise GenerationReportError(f"published key missing or unreadable: {name}") from exc
     if not stat.S_ISLNK(link_before.st_mode):
         raise GenerationReportError(f"published key is not a link: {name}")
+    # R-016 §3.2: a published key links through DAY0-Prepare/activate-project, which selects this project.
+    try:
+        selected = active_project_dir(project.parent.parent)
+    except ActiveProjectPointerError as exc:
+        raise GenerationReportError(f"active project pointer is invalid: {exc}") from exc
     target_path = Path(os.path.normpath(os.path.join(published, target)))
-    if target_path != leaf.absolute():
+    if (target_path != project.parent.absolute() / "activate-project" / name
+            or selected != Path(os.path.realpath(project))):
         raise GenerationReportError(f"published key targets another project or role: {name}")
     if (not stat.S_ISREG(leaf_before.st_mode) or leaf_before.st_nlink != 1
             or leaf_before.st_size <= 0 or leaf_before.st_size > PUBLIC_KEY_LIMIT):

@@ -33,6 +33,7 @@ import yaml
 
 from project_contract import (
     DEPLOYABLE_TOOL_SUBTREES,
+    active_project_dir,
     FINISHED_HISTORY_DIR_NAME,
     REHYDRATE_COMMIT_NAME,
     REHYDRATE_READY_NAME,
@@ -59,6 +60,7 @@ from project_contract import (
 TOOLS_DIR = Path(__file__).resolve().parent
 ROOT = TOOLS_DIR.parent
 DAY0 = ROOT / "DAY0-Prepare"
+# setup's derived record (R-016 Q5).  Packaging reads neither its project line nor its links (R16-14).
 MANIFEST = ROOT / "ztp/.setup_manifest"
 RESERVED_UPGRADE_GLOBAL_ALIAS = "infiniband/bringup/xdr-upgrade/01-global.yaml"
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
@@ -815,7 +817,7 @@ def _package_uses_stored_gzip(
     if getattr(args, "exclude_project_images", False):
         return False
     projects = (
-        (item for item in DAY0.iterdir() if item.is_dir())
+        (item for item in DAY0.iterdir() if item.is_dir() and not item.is_symlink())
         if day0_all else (project,)
     )
     return any(
@@ -1324,21 +1326,11 @@ def strip_xlsx_images(source: Path, destination: Path) -> dict[str, int]:
 
 
 def active_project() -> Path | None:
-    if not MANIFEST.is_file():
-        return None
-    first = MANIFEST.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
-    if not first or "proj:" not in first[0]:
-        return None
-    candidate = Path(first[0].split("proj:", 1)[1].strip()).expanduser()
-    try:
-        candidate = candidate.resolve()
-        candidate.relative_to(DAY0.resolve())
-    except (OSError, ValueError):
-        return None
-    if not candidate.is_dir():
-        return None
-    require_project_eligible(candidate)
-    return candidate
+    """The project DAY0-Prepare/activate-project selects (R-016 §5.1); None without a pointer.
+
+    An invalid pointer raises project_contract.ActiveProjectPointerError, a ValueError naming the reason.
+    """
+    return active_project_dir(ROOT)
 
 
 def resolve_project(value: str | None) -> Path:
@@ -1356,8 +1348,8 @@ def resolve_project(value: str | None) -> Path:
             if len(candidates) != 1:
                 names = ", ".join(item.name for item in candidates) or "none"
                 raise ValueError(
-                    "cannot determine the project without a valid setup manifest; "
-                    f"use --project (candidates: {names})"
+                    "cannot determine the project without an active project "
+                    f"(DAY0-Prepare/activate-project); use --project (candidates: {names})"
                 )
             project = candidates[0]
     try:

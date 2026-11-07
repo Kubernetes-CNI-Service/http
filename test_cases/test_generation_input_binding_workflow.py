@@ -605,6 +605,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         with mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)), \
                 mock.patch.object(SETUP, "HTTP_BASE", str(root)):
             SETUP._write_manifest(str(project.resolve()))
+        fixture._activate_pointer()  # R-016 §5.1: load names the active project by the pointer
         preimage = manifest.read_bytes()
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
                                  ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
@@ -680,11 +681,12 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
             source = project / "99-output-dhcp"
             source.mkdir(exist_ok=True)
             links = []
+            pointer = fixture._activate_pointer()  # R-016 §2: setup's links name the pointer
             for name in DHCP_OUTPUTS:
                 leaf = published / name
                 (source / name).write_bytes(leaf.read_bytes())
                 leaf.unlink()
-                SETUP._make_exact_link(str(leaf), str(source / name))
+                SETUP._make_exact_link(str(leaf), str(pointer / "99-output-dhcp" / name))
                 self.assertTrue(leaf.is_symlink())
                 links.append(str(leaf))
             with mock.patch.object(SETUP, "HTTP_BASE", str(root)):
@@ -725,6 +727,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
                                     _DRY_RUN=False, _LINK_ERRORS=0), \
                 self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
+            fixture._activate_pointer()  # R-016 §5.1: load names the active project by the pointer
             for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):
                 (project / name).write_bytes(payload)
                 (ztp / "config/publickey" / name).unlink()

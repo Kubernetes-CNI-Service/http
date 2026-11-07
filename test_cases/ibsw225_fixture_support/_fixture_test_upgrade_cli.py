@@ -363,10 +363,13 @@ class ManagedDefaultWorkflowTests(unittest.TestCase):
             "ztp/status": project / "99-output-ztp",
             "infiniband/bringup/xdr-upgrade/xdr-upgrade-logs": output,
         }
+        # R-016 §2 (O4 左列): setup's links name DAY0-Prepare/activate-project, which selects the project.
+        pointer = workspace / "DAY0-Prepare/activate-project"
+        pointer.symlink_to(project.name)
         for relative, destination in aliases.items():
             link = workspace / relative
             link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(os.path.relpath(destination, link.parent))
+            link.symlink_to(os.path.relpath(pointer / destination.relative_to(project), link.parent))
         (entry / "01-global.yaml").symlink_to("../../01-global.yaml")
         (entry / "ib.csv").symlink_to("../../ib.csv")
         members = [str(workspace / name) for name in aliases] + [str(entry / "01-global.yaml")]

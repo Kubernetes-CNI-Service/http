@@ -35,6 +35,28 @@ def setup_bound_to(infra: Path):
 MAPPING = ("infra/logs", "99-output-infra", "dir")
 
 
+def link_managed_logs(infra: Path, project: Path) -> Path:
+    """setup's infra/logs in the R-016 §2 form with the pointer selecting `project` (O4 左列：R-016).
+
+    The managed text is relpath(DAY0-Prepare/activate-project/99-output-infra, infra); switching projects
+    replaces only the pointer (R-016 §1 第 2 条), see switch_pointer.
+    """
+    pointer = project.parent / "activate-project"
+    if os.path.lexists(pointer):
+        pointer.unlink()
+    pointer.symlink_to(project.name)
+    logs = infra / "logs"
+    logs.symlink_to(os.path.relpath(pointer / "99-output-infra", infra))
+    return logs
+
+
+def switch_pointer(project: Path) -> None:
+    """R-016 §4.2 step 4: a temporary link renamed over DAY0-Prepare/activate-project."""
+    temporary = project.parent / ".activate-project.test.tmp"
+    temporary.symlink_to(project.name)
+    os.replace(temporary, project.parent / "activate-project")
+
+
 def hermetic_probe(infra: Path, temporary: Path) -> str:
     """Execute check's real probe with networking/privileged commands stubbed."""
     fake_bin = temporary / "fake-bin"
@@ -337,7 +359,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             self.assertEqual((link_before.st_dev, link_before.st_ino),
                              (logs.lstat().st_dev, logs.lstat().st_ino))
             self.assertEqual(lexical_before, os.readlink(logs))
-            self.assertEqual(a, SETUP.managed_infra_log_project(logs, root / "DAY0-Prepare"))
+            self.assertEqual(a, CHECK.managed_infra_log_project(logs, root / "DAY0-Prepare"))
             self.assertEqual(payload, (logs / "owned.log").read_bytes())
             self.assertEqual({"owned.log", ".logs-migration-source"},
                              {item.name for item in (a / "99-output-infra").iterdir()})
@@ -347,8 +369,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             root, infra, a, _ = self.fixture(tmp)
             target = a / "99-output-infra"
             (target / "infra-setup-20260924_010203.log").write_bytes(b"owned\n")
-            logs = infra / "logs"
-            logs.symlink_to(os.path.relpath(target, infra))
+            logs = link_managed_logs(infra, a)
             self.assertIn(
                 "log.file=logs/infra-setup-20260924_010203.log",
                 hermetic_probe(infra, Path(tmp)),
@@ -389,7 +410,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             foreign.write_bytes(b"FOREIGN-LOG-CONTENT")
             owned = a / "99-output-infra"
             (owned / "infra-setup-20260924_010203.log").symlink_to(foreign)
-            (infra / "logs").symlink_to(os.path.relpath(owned, infra))
+            link_managed_logs(infra, a)
             probe = "public.status=not_run\nsystem.hostname=isolated-host\n"
             with mock.patch.object(CHECK, "SCRIPT_DIR", infra), mock.patch.object(
                 CHECK.subprocess, "run",
@@ -407,7 +428,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             _root, infra, a, _b = self.fixture(tmp)
             output = Path(tmp) / "collected"
             owned = a / "99-output-infra"
-            (infra / "logs").symlink_to(os.path.relpath(owned, infra))
+            link_managed_logs(infra, a)
             foreign = Path(tmp) / "outside"
             foreign.mkdir()
             (foreign / "infra-setup-20260924_010203.log").write_bytes(b"FOREIGN-SWAP-CONTENT")
@@ -497,7 +518,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="req19-pending-link-") as tmp:
             _root, infra, a, _b = self.fixture(tmp)
             owned = a / "99-output-infra"
-            (infra / "logs").symlink_to(os.path.relpath(owned, infra))
+            link_managed_logs(infra, a)
             (infra / ".logs-migration.json").write_text("{}", encoding="utf-8")
             invoked = []
             with mock.patch.object(DEPLOY, "SCRIPT_DIR", infra), redirect_stdout(io.StringIO()):
@@ -518,7 +539,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="req19-orphan-link-") as tmp:
             _root, infra, a, _b = self.fixture(tmp)
             owned = a / "99-output-infra"
-            (infra / "logs").symlink_to(os.path.relpath(owned, infra))
+            link_managed_logs(infra, a)
             orphan = infra / ".logs-migration.ABC123"
             orphan.write_bytes(b"unpublished receipt bytes\n")
             orphan_inode = orphan.lstat().st_ino
@@ -553,12 +574,10 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             logs = infra / "logs"
             first = a / "99-output-infra"
             second = b / "99-output-infra"
-            logs.symlink_to(os.path.relpath(first, infra))
+            link_managed_logs(infra, a)
 
             def switch_after_open():
-                temporary = infra / ".logs-test-repoint"
-                temporary.symlink_to(os.path.relpath(second, infra))
-                os.replace(temporary, logs)
+                switch_pointer(b)
                 print("AFTER-REPOINT-OLD-OWNER")
                 return 0
 
@@ -611,13 +630,11 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             logs = infra / "logs"
             first = a / "99-output-infra"
             second = b / "99-output-infra"
-            logs.symlink_to(os.path.relpath(first, infra))
+            link_managed_logs(infra, a)
             setup = setup_bound_to(infra)
             with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 setup.open_log()
-                replacement = infra / ".logs-test-repoint"
-                replacement.symlink_to(os.path.relpath(second, infra))
-                os.replace(replacement, logs)
+                switch_pointer(b)
                 self.assertEqual(0, setup.apt_log(["bash", "-c", "printf PY-TEE-OLD-OWNER"]))
             os.close(setup.log_fd)
             written = list(first.glob("infra-setup-*.log"))
@@ -663,7 +680,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 self.assertEqual([], list(outside.iterdir()), script_name)
                 logs.unlink()
                 owned = a / "99-output-infra"
-                logs.symlink_to(os.path.relpath(owned, infra))
+                link_managed_logs(infra, a)
                 accepted = subprocess.run(
                     ["bash", "-c", shell], cwd=infra, capture_output=True,
                     text=True, timeout=10, env=env,
@@ -722,7 +739,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
         self.assertNotEqual(0, open_log())
         self.assertEqual([], list(outside.iterdir()))
         logs.unlink()
-        logs.symlink_to(os.path.relpath(owned, infra))
+        link_managed_logs(infra, owned.parent)
         self.assertEqual(0, open_log())
         self.assertTrue(any(b"OWNED-ONLY" in p.read_bytes() for p in owned.glob("infra-setup-*.log")))
         before = {p.name: p.read_bytes() for p in owned.glob("infra-*.log")}
@@ -875,7 +892,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             logs = infra / "logs"
             first = a / "99-output-infra"
             second = b / "99-output-infra"
-            logs.symlink_to(os.path.relpath(first, infra))
+            link_managed_logs(infra, a)
             args = SimpleNamespace(
                 teardown=True, prepare_only=False, dry_run=False,
                 max_workers=1, devices_file=root / "devices.csv", hosts=None,
@@ -887,9 +904,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
             server = {"hostname": "server-a", "address": "192.0.2.3"}
 
             def switch_and_fail(*_args, **_kwargs):
-                replacement = infra / ".logs-test-repoint"
-                replacement.symlink_to(os.path.relpath(second, infra))
-                os.replace(replacement, logs)
+                switch_pointer(b)
                 raise DEPLOY.DeployError("isolated injected client failure")
 
             with ExitStack() as patches:

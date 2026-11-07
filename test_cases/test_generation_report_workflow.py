@@ -118,6 +118,8 @@ class GenerationReportWorkflow(unittest.TestCase):
         self.project = self.fixture.project
         self.ztp = self.fixture.ztp
         self.published = self.ztp / "config/publickey"
+        # R-016 §2, §3.2: setup's per-key links name DAY0-Prepare/activate-project, selecting this project.
+        self.fixture._activate_pointer()
         for name, content in (
             ("laptop.pub", public_line("ssh-ed25519", 31, "laptop")),
             ("mgmt-server.pub", public_line("ssh-ed25519", 47, "management")),

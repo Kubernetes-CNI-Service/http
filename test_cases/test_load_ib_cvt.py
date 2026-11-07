@@ -38,8 +38,10 @@ def converter_layout(root: Path) -> tuple[Path, Path, Path]:
     (project / "99-output-p2p").mkdir(parents=True)
     write_p2p(project / "fabric-blue.xlsx")
     (project / "p2p.xlsx").symlink_to("fabric-blue.xlsx")
-    (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/fabric-a/p2p.xlsx")
-    (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/fabric-a/99-output-p2p")
+    # setup's links name the pointer, which selects the project (R-016 §2)
+    (root / "DAY0-Prepare/activate-project").symlink_to("fabric-a")
+    (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/activate-project/p2p.xlsx")
+    (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/activate-project/99-output-p2p")
     for name, text in (("01-inventory.log", "[IB-SW]\n*leaf*\n\n[server]\n*server*\n"),
                        ("02-port-mapping.log", ""), ("03-splitter.log", "")):
         (p2p_dir / name).write_text(text, encoding="utf-8")

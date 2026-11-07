@@ -613,7 +613,6 @@ class ActiveProjectDirTests(unittest.TestCase):
         self.assert_invalid()
 
 
-
 # ── v3.1.1 WP-6: unsetup through the pointer (R-016 §4.4, Q7, O14) ───────────────────────────────────────
 # Imports and helpers stay with this section: parallel work packages append their own classes to this file.
 from contextlib import redirect_stdout  # noqa: E402
@@ -1449,6 +1448,160 @@ class WP9aServiceReaderTests(unittest.TestCase):
             self.assertIsNone(services.MANUAL_WORKER.active_project())
             with self.assertRaisesRegex(services.MANUAL.ManualZtpError, "template"):
                 services.MANUAL.resolve_project(None)
+
+
+class WP9bReaderDirectTests(unittest.TestCase):
+    """v3.1.1 WP-9b: load, unload and packaging name the project the pointer selects.
+
+    Expected values come from the design, never from the implementation:
+    - R-016 §5.1: a reader resolves DAY0-Prepare/activate-project once with active_project_dir -- None without
+      a pointer, an error naming the reason when it is invalid -- and no longer reads the setup manifest's
+      first line nor cuts a project name out of a link's text.
+    - R-016 §2: a tree link to a project file is relpath("DAY0-Prepare/activate-project/<name>", its directory).
+    - 详细工作指导 WP-9 class 1 and 2.3: load's same-project rollback receipt admits a public-key or DHCP
+      publication only in that form; only the expected text changes, the receipt flow does not.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="wp9b-readers-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        for name in ("site-p", "site-q"):
+            project = self.day0 / name
+            project.mkdir(parents=True)
+            (project / "01-global.yaml").write_text("common: {}\n", encoding="utf-8")
+            (project / "02-devices_config.csv").write_text("hostname,type\n", encoding="utf-8")
+        self.pointer = self.day0 / "activate-project"
+        # A stale manifest naming the other project: none of these readers may consult it (R-016 §5.1).
+        manifest = self.root / "ztp/.setup_manifest"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(f"# setup manifest — proj: {self.day0 / 'site-q'}\n", encoding="utf-8")
+        self.manifest = manifest
+
+    def point(self, name):
+        if os.path.lexists(self.pointer):
+            self.pointer.unlink()
+        if name is not None:
+            self.pointer.symlink_to(name)
+
+    def link(self, relative, text):
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(text)
+        return path
+
+    def test_packaging_resolves_the_pointer_not_the_manifest(self):
+        from unittest import mock
+        package = load_script("wp9b_readers_package_common", ROOT / "tools/_package_common.py")
+        with mock.patch.multiple(package, ROOT=self.root, DAY0=self.day0, MANIFEST=self.manifest):
+            self.point("site-p")
+            self.assertEqual((self.day0 / "site-p").resolve(), package.active_project())
+            self.assertEqual((self.day0 / "site-p").resolve(), package.resolve_project(None))
+            self.point(None)
+            self.assertIsNone(package.active_project())
+            with self.assertRaisesRegex(ValueError, "activate-project"):
+                package.resolve_project(None)  # two candidate projects and no pointer: ask for --project
+            self.point("missing")
+            with self.assertRaisesRegex(ValueError, "activate-project -> missing"):
+                package.resolve_project(None)
+
+    def test_unload_resolves_the_pointer_not_the_manifest(self):
+        from unittest import mock
+        unload = load_script("wp9b_readers_unload", ROOT / "DAY0-Prepare/13-unload.py")
+        with mock.patch.object(unload, "HTTP_ROOT", self.root):
+            self.point("site-p")
+            self.assertEqual((self.day0 / "site-p").resolve(), unload.resolve_project(None))
+            self.point(None)
+            self.assertIsNone(unload.resolve_project(None))
+            self.point("template")
+            with self.assertRaisesRegex(unload.UnloadError, "activate-project -> template"):
+                unload.resolve_project(None)
+
+    def test_ibsw_managed_inputs_bind_the_pointer_project_and_hold_the_pointer(self):
+        # 详细工作指导 WP-9 class 1/5 and O7: the v1 upgrade library takes the project from the pointer and the
+        # link texts from the table; v1 keeps reading the project's 02 (O7 (c)).
+        inputs = load_script("wp9b_readers_ibsw_inputs", ROOT / "tools/ibsw_upgrade_inputs.py")
+        project = self.day0 / "site-p"
+        (project / "01-global.yaml").write_text(
+            "schema_version: 2\ncommon:\n  mgmt:\n    http:\n      status: enabled\n"
+            "      address: 192.0.2.254\n      port: 8088\n      http_root: /var/www/html\n"
+            "switches:\n- ib:\n    version: '25.03.1010'\n", encoding="utf-8")
+        header = ("hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,"
+                  "lo_ip,bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl")
+        rows = [f"ew-spine{n:02d}.example,ib,NA,192.0.2.{n},24,192.0.2.254,02:00:00:00:00:{n:02x}" + "," * 12
+                for n in (1, 2)]
+        (project / "02-devices_config.csv").write_text("\n".join([header, *rows]) + "\n", encoding="utf-8")
+        (project / "02-dhcp-subnet_config.csv").write_text("header\n", encoding="utf-8")
+        (project / "ib.csv").symlink_to("02-devices_config.csv")  # the template default (decision E)
+        (project / "99-output-ztp").mkdir()
+        (project / "99-output-ib_nvl/bringup/xdr-upgrade-logs").mkdir(parents=True)
+        for relative, fixed in (
+            ("infiniband/01-global.yaml", "01-global.yaml"), ("infiniband/ib.csv", "ib.csv"),
+            ("ztp/config/cumulus/template/01-global.yaml", "01-global.yaml"),
+            ("ztp/config/cumulus/template/02-devices_config.csv", "02-devices_config.csv"),
+            ("ztp/config/isc-dhcp-server/02-subnet_config.csv", "02-dhcp-subnet_config.csv"),
+            ("ztp/status", "99-output-ztp"),
+            ("infiniband/bringup/xdr-upgrade/xdr-upgrade-logs", "99-output-ib_nvl/bringup/xdr-upgrade-logs"),
+        ):
+            self.link(relative, CONTRACT.pointer_link_target(relative, fixed))
+        entry = self.root / "infiniband/bringup/xdr-upgrade"
+        (entry / "01-global.yaml").symlink_to("../../01-global.yaml")
+        (entry / "ib.csv").symlink_to("../../ib.csv")
+        plan = inputs.InputPaths(project=None, csv_path=str(entry / "ib.csv"),
+                                 global_path=str(entry / "01-global.yaml"),
+                                 output_path=str(entry / "xdr-upgrade-logs/run-1/plan.json"))
+        self.point("site-p")
+        with inputs.open_managed_inputs(plan) as scope:
+            self.assertEqual(["ew-spine01.example", "ew-spine02.example"],
+                             [device.hostname for device in scope.inventory().devices])
+            self.point("site-q")  # R-016 §5.1: one run reads one project; a switch is not adopted
+            with self.assertRaises(ValueError):
+                scope.verify()
+        self.point(None)
+        with self.assertRaisesRegex(ValueError, "no active project"):
+            inputs.open_managed_inputs(plan)
+        self.point("site-p")
+        direct = self.root / "infiniband/01-global.yaml"
+        direct.unlink()
+        direct.symlink_to("../DAY0-Prepare/site-p/01-global.yaml")  # an earlier setup's direct form
+        with self.assertRaisesRegex(ValueError, "managed global is not the exact"):
+            inputs.open_managed_inputs(plan)
+
+    def test_load_resolves_the_pointer_and_binds_receipt_links_through_it(self):
+        from unittest import mock
+        load = load_script("wp9b_readers_load", ROOT / "DAY0-Prepare/11-load.py")
+        project = (self.day0 / "site-p").resolve()
+        (project / "laptop.pub").write_text("ssh-ed25519 AAAAsynthetic laptop\n", encoding="ascii")
+        (project / "99-output-dhcp").mkdir()
+        (project / "99-output-dhcp/dhcpd.conf").write_text("# synthetic\n", encoding="ascii")
+        key = self.link("ztp/config/publickey/laptop.pub", "../../../DAY0-Prepare/activate-project/laptop.pub")
+        dhcp = self.link("ztp/config/isc-dhcp-server/dhcpd.conf",
+                         "../../../DAY0-Prepare/activate-project/99-output-dhcp/dhcpd.conf")
+        with mock.patch.multiple(load, HTTP_ROOT=self.root, ZTP_DIR=self.root / "ztp", MANIFEST=self.manifest):
+            self.point("site-p")
+            self.assertEqual(project, load.active_project())
+            self.assertEqual(project / "laptop.pub", load._runtime_key_source(key, project, os.readlink(key)))
+            self.assertEqual(project / "99-output-dhcp/dhcpd.conf",
+                             load._runtime_dhcp_link_source(project, dhcp, os.readlink(dhcp)))
+            self.point(None)
+            self.assertIsNone(load.active_project())
+            self.point("missing")
+            with self.assertRaisesRegex(load.LoadError, "activate-project -> missing"):
+                load.active_project()
+            # The same link text names whatever the pointer selects: another project is not this one's.
+            self.point("site-q")
+            with self.assertRaises(load.LoadError):
+                load._runtime_key_source(key, project, os.readlink(key))
+            with self.assertRaises(load.LoadError):
+                load._runtime_dhcp_link_source(project, dhcp, os.readlink(dhcp))
+            # The direct form an earlier setup wrote is no longer setup's publication (O4 左列：R-016).
+            self.point("site-p")
+            with self.assertRaises(load.LoadError):
+                load._runtime_key_source(key, project, os.path.relpath(project / "laptop.pub", key.parent))
+            with self.assertRaises(load.LoadError):
+                load._runtime_dhcp_link_source(
+                    project, dhcp, os.path.relpath(project / "99-output-dhcp/dhcpd.conf", dhcp.parent))
 
 
 if __name__ == "__main__":

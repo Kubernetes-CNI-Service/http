@@ -129,6 +129,296 @@ class AccessExactSourceCompositionTests(unittest.TestCase):
                 self.assertNotEqual(hashlib.sha256(restored).hexdigest(), hashlib.sha256(expected).hexdigest())
 
 
+# v3.1.1 WP-9b, O7 (a) (owner 2026-11-07 「同意你的建议。」, http dev 转述): R-016 AP-a binds the managed
+# and standalone IB inputs through DAY0-Prepare/activate-project (详细工作指导 WP-9 class 1/5).  FROZEN_SHA256
+# keeps the original 75c700e576b9fb6bd8ce5a117aa2f0c0f6e7ea96f9a1a12bc973ef814a13cbae oracle; these are the
+# two reviewed literal (original, integrated) hunks, not values derived from the tested tree.
+INPUTS_POINTER_COMPOSITION = (
+    (
+        b'''    SETUP_CORE_IDENTITY_LINKS, parse_setup_manifest_layout,
+    require_project_eligible, runtime_link_specs,
+''',
+        b'''    SETUP_CORE_IDENTITY_LINKS, active_project_dir, pointer_link_specs,
+    pointer_link_target, require_project_eligible,
+''',
+    ),
+    (
+        b'''        templates = dict(runtime_link_specs())
+        global_source_alias, global_template = global_alias, _MANAGED_GLOBAL
+        if alias.target == "../../01-global.yaml":
+            # Historical bringup entry: pin BOTH original aliases, not resolve().
+            global_source_alias = workspace / "infiniband/01-global.yaml"
+            alias = self._alias(global_source_alias)
+            global_template = "infiniband/01-global.yaml"
+        prefix, suffix = templates[global_template].split("{project}")
+        if not alias.target.startswith(prefix) or not alias.target.endswith(suffix):
+            raise ValueError("managed global is not the exact direct project link")
+        name = alias.target[len(prefix):-len(suffix)]
+        if not name or "/" in name or name in (".", "..", "template"):
+            raise ValueError("managed input must select one direct DAY0 project")
+        project = workspace / "DAY0-Prepare" / name
+        self._directory(project)
+        self._managed_project = project
+        if plan.project is not None and plan.project != str(project):
+            raise ValueError("explicit project conflicts with original managed input owner")
+        require_project_eligible(project)
+        manifest = self._single_link_file(workspace / "ztp/.setup_manifest", self._metadata_files)
+        try:
+            owner, members = parse_setup_manifest_layout(manifest.payload.decode("utf-8"))
+        except UnicodeError:
+            raise ValueError("setup manifest must be UTF-8") from None
+        if owner != str(project):
+            raise ValueError("setup manifest and original selected alias disagree on project")
+        if any(not Path(member).is_relative_to(workspace) for member in members):
+            raise ValueError("setup manifest name escapes workspace")
+        required = {str(workspace / "ztp" / item[0]) for item in SETUP_CORE_IDENTITY_LINKS}
+        required.add(str(global_alias))
+        required.add(str(global_source_alias))
+        selected_csv = Path(plan.csv_path)
+        if selected_csv == workspace / "infiniband/bringup/xdr-upgrade/ib.csv":
+            self._alias(selected_csv, "../../ib.csv")
+            selected_csv = workspace / _MANAGED_CSV
+        if selected_csv == workspace / _MANAGED_CSV:
+            self._alias(selected_csv, templates[_MANAGED_CSV].format(project=name))
+            required.add(str(selected_csv))
+        elif selected_csv != project / "02-devices_config.csv":
+            raise ValueError("managed CSV must be same-project canonical input or known direct IB alias")
+        if not required.issubset(members):
+            raise ValueError("setup manifest lacks selected aliases or core identity anchors")
+        for relative, target, _label, is_directory in SETUP_CORE_IDENTITY_LINKS:
+            link = workspace / "ztp" / relative
+            self._alias(link, os.path.relpath(project / target, link.parent))
+            if is_directory:
+                self._directory(project / target)
+        self._single_link_file(project / "02-devices_config.csv", self._files)
+        self._single_link_file(project / "01-global.yaml", self._files)
+        self._single_link_file(project / "02-dhcp-subnet_config.csv", self._metadata_files)
+        output_alias = workspace / _MANAGED_OUTPUT
+        if Path(plan.output_path).is_relative_to(output_alias):
+            parent = self._directory(output_alias.parent)
+            try:
+                output_stat = os.stat(output_alias.name, dir_fd=parent.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return  # No output creation or writer permission in this scope.
+            if stat.S_ISLNK(output_stat.st_mode):
+                if str(output_alias) not in members:
+                    raise ValueError("selected managed output lacks setup manifest identity")
+                self._alias(output_alias, templates[_MANAGED_OUTPUT].format(project=name))
+                self._directory(project / "99-output-ib_nvl/bringup/xdr-upgrade-logs")
+
+    @classmethod
+    def _from_standalone_plan(cls, plan):
+        """Bind explicitly selected files/links, never consult active setup state."""
+        scope = cls.__new__(cls)
+        scope._initialize(plan)
+        scope._standalone = True
+        try:
+            final_paths = []
+            for original in (plan.csv_path, plan.global_path):
+                selected, seen = Path(original), set()
+                for _ in range(16):
+                    if not selected.is_absolute() or str(selected) != os.path.normpath(str(selected)) or str(selected) in seen:
+                        raise ValueError("standalone input link cycle or noncanonical source")
+                    seen.add(str(selected))
+                    parent = scope._directory(selected.parent)
+                    named = os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
+                    if not stat.S_ISLNK(named.st_mode):
+                        scope._files.append(_HeldFile(selected, parent))
+                        final_paths.append(selected)
+                        break
+                    alias = _HeldAlias(selected, parent, allow_absolute=True)
+                    scope._aliases.append(alias)
+                    selected = Path(os.path.normpath(os.path.join(str(selected.parent), alias.target)))
+                else:
+                    raise ValueError("standalone input link depth exceeded")
+            # Direct project input identity is derived only from the two chosen
+            # originals. No .setup_manifest, DHCP or active-project lookup.
+            csv_source, global_source = final_paths
+            project_sources = [path for path in final_paths if path.parent.parent.name == "DAY0-Prepare"]
+            if project_sources:
+                project = project_sources[0].parent
+                if (csv_source != project / "02-devices_config.csv"
+                        or global_source != project / "01-global.yaml"):
+                    raise ValueError("standalone inputs select conflicting project sources")
+                if plan.project is not None and str(project) != plan.project:
+                    raise ValueError("standalone inputs conflict with explicit project")
+                if any(source.identity[3] != 1 for source in scope._files):
+                    raise ValueError("project canonical inputs must be single-link regular files")
+                scope._managed_project = project
+                logical = Path(plan.output_path).parent
+                parent = scope._directory(logical.parent)
+                try:
+                    named = os.stat(logical.name, dir_fd=parent.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    named = None
+                if named is not None and stat.S_ISLNK(named.st_mode):
+                    alias = _HeldAlias(logical, parent, allow_absolute=True)
+                    expected = project / "99-output-ib_nvl/bringup/xdr-upgrade-logs"
+                    if os.path.normpath(os.path.join(str(logical.parent), alias.target)) != str(expected):
+''',
+        b'''        # R-016 sec. 2: setup's links name DAY0-Prepare/activate-project; the table holds their exact text.
+        templates = dict(pointer_link_specs())
+        global_source_alias, global_template = global_alias, _MANAGED_GLOBAL
+        if alias.target == "../../01-global.yaml":
+            # Historical bringup entry: pin BOTH original aliases, not resolve().
+            global_source_alias = workspace / "infiniband/01-global.yaml"
+            alias = self._alias(global_source_alias)
+            global_template = "infiniband/01-global.yaml"
+        if alias.target != templates[global_template]:
+            raise ValueError("managed global is not the exact direct project link")  # upgrade.py diagnostic key
+        project = self._through_pointer(workspace / "DAY0-Prepare/activate-project")
+        self._directory(project)
+        self._managed_project = project
+        if plan.project is not None and plan.project != str(project):
+            raise ValueError("explicit project conflicts with original managed input owner")
+        require_project_eligible(project)
+        selected_csv = Path(plan.csv_path)
+        if selected_csv == workspace / "infiniband/bringup/xdr-upgrade/ib.csv":
+            self._alias(selected_csv, "../../ib.csv")
+            selected_csv = workspace / _MANAGED_CSV
+        if selected_csv == workspace / _MANAGED_CSV:
+            self._alias(selected_csv, templates[_MANAGED_CSV])
+        elif selected_csv != project / "02-devices_config.csv":
+            raise ValueError("managed CSV must be same-project canonical input or known direct IB alias")
+        for relative, target, _label, is_directory in SETUP_CORE_IDENTITY_LINKS:
+            link = workspace / "ztp" / relative
+            self._alias(link, pointer_link_target("ztp/" + relative, target))
+            if is_directory:
+                self._directory(project / target)
+        self._single_link_file(project / "02-devices_config.csv", self._files)
+        self._single_link_file(project / "01-global.yaml", self._files)
+        self._single_link_file(project / "02-dhcp-subnet_config.csv", self._metadata_files)
+        output_alias = workspace / _MANAGED_OUTPUT
+        if Path(plan.output_path).is_relative_to(output_alias):
+            parent = self._directory(output_alias.parent)
+            try:
+                output_stat = os.stat(output_alias.name, dir_fd=parent.fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return  # No output creation or writer permission in this scope.
+            if stat.S_ISLNK(output_stat.st_mode):
+                self._alias(output_alias, templates[_MANAGED_OUTPUT])
+                self._directory(project / "99-output-ib_nvl/bringup/xdr-upgrade-logs")
+
+    def _through_pointer(self, path):
+        """R-016 sec. 5.1: <ws>/DAY0-Prepare/activate-project/<rest> means <rest> in the project the pointer
+        selects.  Hold the pointer's text (verify() refuses a later switch) and return the project path."""
+        parts = path.parts
+        for index in range(1, len(parts)):
+            if parts[index - 1:index + 1] == ("DAY0-Prepare", "activate-project"):
+                day0 = Path(*parts[:index])
+                active = active_project_dir(day0.parent)
+                if active is None:
+                    raise ValueError("no active project: DAY0-Prepare/activate-project is absent")
+                self._alias(day0 / "activate-project", active.name)
+                return Path(day0, active.name, *parts[index + 1:])
+        return path
+
+    @classmethod
+    def _from_standalone_plan(cls, plan):
+        """Bind explicitly selected files/links, never consult the setup manifest."""
+        scope = cls.__new__(cls)
+        scope._initialize(plan)
+        scope._standalone = True
+        try:
+            final_paths = []
+            for original in (plan.csv_path, plan.global_path):
+                selected, seen = Path(original), set()
+                for _ in range(16):
+                    if not selected.is_absolute() or str(selected) != os.path.normpath(str(selected)) or str(selected) in seen:
+                        raise ValueError("standalone input link cycle or noncanonical source")
+                    seen.add(str(selected))
+                    # A setup link reaches the project through the pointer: one more held link of the chain.
+                    selected = scope._through_pointer(selected)
+                    parent = scope._directory(selected.parent)
+                    named = os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
+                    if not stat.S_ISLNK(named.st_mode):
+                        scope._files.append(_HeldFile(selected, parent))
+                        final_paths.append(selected)
+                        break
+                    alias = _HeldAlias(selected, parent, allow_absolute=True)
+                    scope._aliases.append(alias)
+                    selected = Path(os.path.normpath(os.path.join(str(selected.parent), alias.target)))
+                else:
+                    raise ValueError("standalone input link depth exceeded")
+            # Direct project input identity is derived only from the two chosen
+            # originals and the pointer on their path. No .setup_manifest or DHCP lookup.
+            csv_source, global_source = final_paths
+            project_sources = [path for path in final_paths if path.parent.parent.name == "DAY0-Prepare"]
+            if project_sources:
+                project = project_sources[0].parent
+                if (csv_source != project / "02-devices_config.csv"
+                        or global_source != project / "01-global.yaml"):
+                    raise ValueError("standalone inputs select conflicting project sources")
+                if plan.project is not None and str(project) != plan.project:
+                    raise ValueError("standalone inputs conflict with explicit project")
+                if any(source.identity[3] != 1 for source in scope._files):
+                    raise ValueError("project canonical inputs must be single-link regular files")
+                scope._managed_project = project
+                logical = Path(plan.output_path).parent
+                parent = scope._directory(logical.parent)
+                try:
+                    named = os.stat(logical.name, dir_fd=parent.fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    named = None
+                if named is not None and stat.S_ISLNK(named.st_mode):
+                    alias = _HeldAlias(logical, parent, allow_absolute=True)
+                    expected = project / "99-output-ib_nvl/bringup/xdr-upgrade-logs"
+                    reached = Path(os.path.normpath(os.path.join(str(logical.parent), alias.target)))
+                    if scope._through_pointer(reached) != expected:
+''',
+    ),
+)
+
+
+def _inputs_upstream_bytes_from_exact_composition(payload):
+    if type(payload) is not bytes:
+        raise TypeError("exact source bytes required")
+    # Every integrated hunk must be present exactly once before any is restored; outside them no byte changes.
+    if any(payload.count(integrated) != 1 for original, integrated in INPUTS_POINTER_COMPOSITION):
+        raise ValueError("missing or duplicate approved inputs pointer hunk")
+    for original, integrated in INPUTS_POINTER_COMPOSITION:
+        payload = payload.replace(integrated, original, 1)
+    if any(payload.count(original) != 1 for original, integrated in INPUTS_POINTER_COMPOSITION):
+        raise ValueError("restored inputs pointer hunk is not unique")
+    return payload
+
+
+class InputsPointerExactCompositionTests(unittest.TestCase):
+    def test_exact_two_literal_hunks_restore_only_the_original_regions(self):
+        (first_old, first_new), (second_old, second_new) = INPUTS_POINTER_COMPOSITION
+        integrated = b"prefix\n" + first_new + b"middle\n" + second_new + b"suffix\n"
+        expected = b"prefix\n" + first_old + b"middle\n" + second_old + b"suffix\n"
+        self.assertEqual(expected, _inputs_upstream_bytes_from_exact_composition(integrated))
+
+    def test_missing_unfixed_deleted_and_duplicate_hunks_are_refused(self):
+        (first_old, first_new), (second_old, second_new) = INPUTS_POINTER_COMPOSITION
+        for malformed in (
+            first_old + second_old,              # Upstream bytes without the pointer binding.
+            first_new + second_old,              # Only the import hunk.
+            first_old + second_new,              # Only the binding hunk.
+            first_new + second_new[:-1],         # A deleted hunk byte.
+            first_new + first_new + second_new,  # Duplicate import hunk.
+            first_new + second_new + second_new, # Duplicate binding hunk.
+            first_old + first_new + second_new,  # Extra original hunk.
+        ):
+            with self.subTest(source=malformed[:40]):
+                with self.assertRaises(ValueError):
+                    _inputs_upstream_bytes_from_exact_composition(malformed)
+        with self.assertRaises(TypeError):
+            _inputs_upstream_bytes_from_exact_composition("not bytes")
+
+    def test_bytes_outside_hunks_are_not_normalized_or_hidden(self):
+        (first_old, first_new), (second_old, second_new) = INPUTS_POINTER_COMPOSITION
+        expected = b"prefix\n" + first_old + second_old + b"suffix\n"
+        integrated = b"prefix\n" + first_new + second_new + b"suffix\n"
+        for drift in (b"extra\n" + integrated, integrated + b"extra\n",
+                      integrated.replace(b"prefix\n", b"changed-prefix\n", 1)):
+            with self.subTest(source=drift[:40]):
+                restored = _inputs_upstream_bytes_from_exact_composition(drift)
+                self.assertNotEqual(expected, restored)
+                self.assertNotEqual(hashlib.sha256(expected).hexdigest(), hashlib.sha256(restored).hexdigest())
+
+
 # Reviewed layout fix only. Original FROZEN_SHA256/access inverse stay unchanged.
 # These are independent literal preimage/postimage hunks, not runtime-derived.
 LAYOUT_APPROVED_COMPOSITION = {
@@ -6157,6 +6447,8 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                     payload = _native_upstream_bytes_from_exact_composition(relative, payload)
                 if relative == "tools/ibsw_upgrade_access.py":
                     payload = _access_upstream_bytes_from_exact_composition(payload)
+                elif relative == "tools/ibsw_upgrade_inputs.py":
+                    payload = _inputs_upstream_bytes_from_exact_composition(payload)
                 elif relative == "tools/ibsw_upgrade_driver.py":
                     payload = _driver_upstream_bytes_from_exact_scp_request_content(payload)
                     payload = _driver_upstream_bytes_from_exact_composition(payload)

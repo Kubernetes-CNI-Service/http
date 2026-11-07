@@ -136,7 +136,12 @@ class Req19InfraLogContractTests(unittest.TestCase):
         backup, receipt = self.seed_pending_backup(root, logs, project, payload)
         destination = project / "99-output-infra"
         os.link(backup / "owned.log", destination / "owned.log")
-        logs.symlink_to(os.path.relpath(destination, logs.parent))
+        # The committed link in setup's R-016 §2 form, the pointer selecting this project (O4 左列：R-016).
+        pointer = project.parent / "activate-project"
+        if os.path.lexists(pointer):
+            pointer.unlink()
+        pointer.symlink_to(project.name)
+        logs.symlink_to(os.path.relpath(pointer / "99-output-infra", logs.parent))
         return backup, receipt
 
     def test_cross_device_rollback_keeps_original_link_backup_and_receipt(self):
@@ -207,7 +212,8 @@ class Req19InfraLogContractTests(unittest.TestCase):
             self.assertFalse(os.path.lexists(logs))
             self.bind(root, a)
             self.assertTrue(logs.is_symlink())
-            self.assertEqual(os.path.relpath(a / "99-output-infra", logs.parent), os.readlink(logs))
+            # R-016 §2 (O4 左列): the link names the pointer, which setup's switch points at the project.
+            self.assertEqual("../DAY0-Prepare/activate-project/99-output-infra", os.readlink(logs))
             self.assertEqual((a / "99-output-infra").resolve(), logs.resolve())
 
     def test_real_directory_migrates_all_bytes_before_link(self):
@@ -642,6 +648,8 @@ class Req19InfraLogContractTests(unittest.TestCase):
                     intermediate.symlink_to(os.path.relpath(old.parent, intermediate.parent))
                     target = "intermediate"
                 elif variant == "broken":
+                    # A dangling link that is not setup's text (R-016 §2): the pointer form cannot be "broken",
+                    # setup's switch repairs its pointer, so this fixture keeps a foreign dangling text.
                     target = "../DAY0-Prepare/gone/99-output-infra"
                 else:
                     target = "logs"
@@ -1157,6 +1165,7 @@ class Req19InfraLogContractTests(unittest.TestCase):
                     bridge.symlink_to(os.path.relpath(owned.parent, bridge.parent))
                     target = "bridge"
                 elif variant == "broken":
+                    # A dangling link that is not setup's text (R-016 §2): see the setup variant above.
                     target = "../DAY0-Prepare/missing/99-output-infra"
                 else:
                     target = "logs"
@@ -1190,7 +1199,8 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 root, logs, a, _ = self.fixture(tmp)
                 owned = a / "99-output-infra/owned.log"
                 owned.write_bytes(b"owned by site-a\n")
-                logs.symlink_to(os.path.relpath(owned.parent, logs.parent))
+                # setup's infra/logs names the pointer (R-016 §2, O4 左列：R-016).
+                logs.symlink_to("../DAY0-Prepare/activate-project/99-output-infra")
                 text = os.readlink(logs)
                 # R-016 §4.4: unsetup <project> runs only while that project is the active one.
                 pointer = root / "DAY0-Prepare/activate-project"
@@ -1220,7 +1230,8 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 destination = a / "99-output-infra"
                 owned = destination / "owned.log"
                 owned.write_bytes(b"committed project bytes\n")
-                logs.symlink_to(os.path.relpath(destination, logs.parent))
+                # setup's infra/logs names the pointer (R-016 §2, O4 左列：R-016).
+                logs.symlink_to("../DAY0-Prepare/activate-project/99-output-infra")
                 link_inode = logs.lstat().st_ino
                 # R-016 §4.4: unsetup <project> runs only while that project is the active one.
                 pointer = root / "DAY0-Prepare/activate-project"
@@ -1329,6 +1340,128 @@ class Req19RealEnvironmentDocumentationTests(unittest.TestCase):
                          "首次转移", "unassigned", "log.owner.project"):
             with self.subTest(expected=expected):
                 self.assertIn(expected, manual)
+
+
+class WP9bInfraLogPointerTests(unittest.TestCase):
+    """v3.1.1 WP-9b: every infra/logs reader resolves DAY0-Prepare/activate-project.
+
+    Expected values come from the design, never from the implementation:
+    - R-016 §2: the managed link is relpath("DAY0-Prepare/activate-project/99-output-infra", "infra"), i.e.
+      ../DAY0-Prepare/activate-project/99-output-infra; the pointer is a link whose text is one plain name, not
+      template / activate-project / tests / test_cases / dumps, not starting with "."; DAY0-Prepare/<name> is
+      a real directory.
+    - R-016 §5.1, 详细工作指导 WP-9: Python resolves the project with active_project_dir and
+      managed_infra_log_project keeps its signature and return meaning (None: not a managed link).
+    - R-016 §5.2: each shell reader has one small function that reads the pointer once and checks it before
+      taking the name.
+    """
+
+    SHELLS = ("infra/infra-setup.sh", "infra/infra-teardown.sh")
+    MANAGED = "../DAY0-Prepare/activate-project/99-output-infra"
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="req19-wp9b-pointer-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.root = self.base / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        for name in ("site-p", "site-q"):
+            (self.day0 / name / "99-output-infra").mkdir(parents=True)
+        self.pointer = self.day0 / "activate-project"
+        self.infra = self.root / "infra"
+        self.infra.mkdir()
+        self.logs = self.infra / "logs"
+        self.logs.symlink_to(self.MANAGED)
+
+    def point(self, name):
+        if os.path.lexists(self.pointer):
+            self.pointer.unlink()
+        if name is not None:
+            self.pointer.symlink_to(name)
+
+    def test_python_owner_is_the_project_the_pointer_selects(self):
+        for name in ("site-p", "site-q"):
+            self.point(name)
+            self.assertEqual(self.day0 / name, CONTRACT.managed_infra_log_project(self.logs, self.day0))
+        # R-016 Q7 (http dev 2026-11-08, WP-6 交接): after unsetup removed the pointer the fixed link dangles
+        # but is still setup's.  It stays managed (a second unsetup and the next setup accept it); its owner
+        # is the pointer path, which no writer can use as a project output.
+        self.point(None)
+        self.assertEqual(self.pointer, CONTRACT.managed_infra_log_project(self.logs, self.day0))
+        self.assertFalse(os.path.lexists(self.pointer / "99-output-infra"))
+        (self.day0 / "template/99-output-infra").mkdir(parents=True)
+        for name in ("missing", "template"):
+            with self.subTest(pointer=name):
+                self.point(name)
+                self.assertIsNone(CONTRACT.managed_infra_log_project(self.logs, self.day0))
+        self.point("site-p")
+        self.logs.unlink()
+        self.logs.symlink_to("../DAY0-Prepare/site-p/99-output-infra")  # an earlier setup's direct form
+        self.assertIsNone(CONTRACT.managed_infra_log_project(self.logs, self.day0))
+
+    def test_python_writer_and_collector_refuse_when_no_project_is_active(self):
+        deploy = load_script("req19_wp9b_deploy_infra", ROOT / "infra/deploy_infra.py")
+        check = load_script("req19_wp9b_check_infra", ROOT / "infra/check_infra.py")
+        owned = self.day0 / "site-p/99-output-infra"
+        with mock.patch.object(deploy, "SCRIPT_DIR", self.infra), mock.patch.object(check, "SCRIPT_DIR", self.infra):
+            self.point("site-p")
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(0, deploy.run_with_log("deploy_infra", lambda: 0))
+            self.assertEqual(1, len(list(owned.glob("deploy_infra-*.log"))))
+            self.point(None)
+            with self.assertRaisesRegex(deploy.DeployError, "no active project"):
+                deploy.run_with_log("deploy_infra", lambda: 0)
+            with self.assertRaisesRegex(check.DeployError, "no active project"), redirect_stdout(io.StringIO()):
+                check.collect_local(self.base / "collected")
+        self.assertEqual(1, len(list(owned.glob("deploy_infra-*.log"))))
+        self.assertFalse(os.path.lexists(self.base / "collected"))
+
+    def test_shell_readers_take_the_name_from_one_checked_pointer_read(self):
+        import subprocess
+        (self.day0 / "template").mkdir()
+        (self.day0 / "tests").mkdir()
+        (self.day0 / ".hidden").mkdir()
+        (self.day0 / "linked").symlink_to("site-p")
+        cases = (("site-p", "site-p"), ("site-q", "site-q"), (None, None), ("template", None),
+                 ("tests", None), (".hidden", None), ("site-p/99-output-infra", None), ("linked", None),
+                 ("missing", None))
+        for relative in self.SHELLS:
+            source = (ROOT / relative).read_text(encoding="utf-8")
+            self.assertIn(f'"$log_target" != "{self.MANAGED}"', source, relative)
+            function = re.search(r"^active_project_name\(\) \{\n.*?^\}\n", source, re.S | re.M)
+            self.assertIsNotNone(function, f"{relative}: R-016 §5.2 small pointer function")
+            for target, expected in cases:
+                with self.subTest(script=relative, pointer=target):
+                    self.point(target)
+                    result = subprocess.run(
+                        ["bash", "-c", function.group(0) + 'active_project_name "$1"', "probe", str(self.day0)],
+                        capture_output=True, text=True, check=False, timeout=30,
+                    )
+                    if expected is None:
+                        self.assertNotEqual(0, result.returncode)
+                        self.assertEqual("", result.stdout)
+                    else:
+                        self.assertEqual((0, expected + "\n"), (result.returncode, result.stdout))
+
+    def test_real_probe_reports_the_project_the_pointer_selects(self):
+        import subprocess
+        from test_cases import test_req19_infra_log_workflow as flow
+        for name in ("site-p", "site-q"):
+            self.point(name)
+            self.assertIn(f"log.owner.project={name}\n", flow.hermetic_probe(self.infra, self.base))
+        for name in (None, "missing", "template"):
+            with self.subTest(pointer=name):
+                self.point(name)
+                with self.assertRaises(subprocess.CalledProcessError) as refused:
+                    flow.hermetic_probe(self.infra, self.base)
+                self.assertIn("invalid infra log project", refused.exception.stderr)
+                self.assertNotIn("log.owner.kind=project", refused.exception.stdout)
+        self.point("site-p")
+        self.logs.unlink()
+        self.logs.symlink_to("../DAY0-Prepare/site-p/99-output-infra")
+        with self.assertRaises(subprocess.CalledProcessError) as refused:
+            flow.hermetic_probe(self.infra, self.base)
+        self.assertIn("not a managed project link", refused.exception.stderr)
 
 
 if __name__ == "__main__":

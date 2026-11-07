@@ -15,8 +15,8 @@ import threading
 
 from _package_common import _package_project_identity, _source_identity
 from project_contract import (
-    SETUP_CORE_IDENTITY_LINKS, parse_setup_manifest_layout,
-    require_project_eligible, runtime_link_specs,
+    SETUP_CORE_IDENTITY_LINKS, active_project_dir, pointer_link_specs,
+    pointer_link_target, require_project_eligible,
 )
 from ibsw_upgrade_contract import InputPaths, snapshot_inventory
 
@@ -409,51 +409,33 @@ class BoundInputSession:
         workspace = global_alias.parents[3]
         self._directory(workspace)
         alias = self._alias(global_alias)
-        templates = dict(runtime_link_specs())
+        # R-016 sec. 2: setup's links name DAY0-Prepare/activate-project; the table holds their exact text.
+        templates = dict(pointer_link_specs())
         global_source_alias, global_template = global_alias, _MANAGED_GLOBAL
         if alias.target == "../../01-global.yaml":
             # Historical bringup entry: pin BOTH original aliases, not resolve().
             global_source_alias = workspace / "infiniband/01-global.yaml"
             alias = self._alias(global_source_alias)
             global_template = "infiniband/01-global.yaml"
-        prefix, suffix = templates[global_template].split("{project}")
-        if not alias.target.startswith(prefix) or not alias.target.endswith(suffix):
-            raise ValueError("managed global is not the exact direct project link")
-        name = alias.target[len(prefix):-len(suffix)]
-        if not name or "/" in name or name in (".", "..", "template"):
-            raise ValueError("managed input must select one direct DAY0 project")
-        project = workspace / "DAY0-Prepare" / name
+        if alias.target != templates[global_template]:
+            raise ValueError("managed global is not the exact direct project link")  # upgrade.py diagnostic key
+        project = self._through_pointer(workspace / "DAY0-Prepare/activate-project")
         self._directory(project)
         self._managed_project = project
         if plan.project is not None and plan.project != str(project):
             raise ValueError("explicit project conflicts with original managed input owner")
         require_project_eligible(project)
-        manifest = self._single_link_file(workspace / "ztp/.setup_manifest", self._metadata_files)
-        try:
-            owner, members = parse_setup_manifest_layout(manifest.payload.decode("utf-8"))
-        except UnicodeError:
-            raise ValueError("setup manifest must be UTF-8") from None
-        if owner != str(project):
-            raise ValueError("setup manifest and original selected alias disagree on project")
-        if any(not Path(member).is_relative_to(workspace) for member in members):
-            raise ValueError("setup manifest name escapes workspace")
-        required = {str(workspace / "ztp" / item[0]) for item in SETUP_CORE_IDENTITY_LINKS}
-        required.add(str(global_alias))
-        required.add(str(global_source_alias))
         selected_csv = Path(plan.csv_path)
         if selected_csv == workspace / "infiniband/bringup/xdr-upgrade/ib.csv":
             self._alias(selected_csv, "../../ib.csv")
             selected_csv = workspace / _MANAGED_CSV
         if selected_csv == workspace / _MANAGED_CSV:
-            self._alias(selected_csv, templates[_MANAGED_CSV].format(project=name))
-            required.add(str(selected_csv))
+            self._alias(selected_csv, templates[_MANAGED_CSV])
         elif selected_csv != project / "02-devices_config.csv":
             raise ValueError("managed CSV must be same-project canonical input or known direct IB alias")
-        if not required.issubset(members):
-            raise ValueError("setup manifest lacks selected aliases or core identity anchors")
         for relative, target, _label, is_directory in SETUP_CORE_IDENTITY_LINKS:
             link = workspace / "ztp" / relative
-            self._alias(link, os.path.relpath(project / target, link.parent))
+            self._alias(link, pointer_link_target("ztp/" + relative, target))
             if is_directory:
                 self._directory(project / target)
         self._single_link_file(project / "02-devices_config.csv", self._files)
@@ -467,14 +449,26 @@ class BoundInputSession:
             except FileNotFoundError:
                 return  # No output creation or writer permission in this scope.
             if stat.S_ISLNK(output_stat.st_mode):
-                if str(output_alias) not in members:
-                    raise ValueError("selected managed output lacks setup manifest identity")
-                self._alias(output_alias, templates[_MANAGED_OUTPUT].format(project=name))
+                self._alias(output_alias, templates[_MANAGED_OUTPUT])
                 self._directory(project / "99-output-ib_nvl/bringup/xdr-upgrade-logs")
+
+    def _through_pointer(self, path):
+        """R-016 sec. 5.1: <ws>/DAY0-Prepare/activate-project/<rest> means <rest> in the project the pointer
+        selects.  Hold the pointer's text (verify() refuses a later switch) and return the project path."""
+        parts = path.parts
+        for index in range(1, len(parts)):
+            if parts[index - 1:index + 1] == ("DAY0-Prepare", "activate-project"):
+                day0 = Path(*parts[:index])
+                active = active_project_dir(day0.parent)
+                if active is None:
+                    raise ValueError("no active project: DAY0-Prepare/activate-project is absent")
+                self._alias(day0 / "activate-project", active.name)
+                return Path(day0, active.name, *parts[index + 1:])
+        return path
 
     @classmethod
     def _from_standalone_plan(cls, plan):
-        """Bind explicitly selected files/links, never consult active setup state."""
+        """Bind explicitly selected files/links, never consult the setup manifest."""
         scope = cls.__new__(cls)
         scope._initialize(plan)
         scope._standalone = True
@@ -486,6 +480,8 @@ class BoundInputSession:
                     if not selected.is_absolute() or str(selected) != os.path.normpath(str(selected)) or str(selected) in seen:
                         raise ValueError("standalone input link cycle or noncanonical source")
                     seen.add(str(selected))
+                    # A setup link reaches the project through the pointer: one more held link of the chain.
+                    selected = scope._through_pointer(selected)
                     parent = scope._directory(selected.parent)
                     named = os.stat(selected.name, dir_fd=parent.fd, follow_symlinks=False)
                     if not stat.S_ISLNK(named.st_mode):
@@ -498,7 +494,7 @@ class BoundInputSession:
                 else:
                     raise ValueError("standalone input link depth exceeded")
             # Direct project input identity is derived only from the two chosen
-            # originals. No .setup_manifest, DHCP or active-project lookup.
+            # originals and the pointer on their path. No .setup_manifest or DHCP lookup.
             csv_source, global_source = final_paths
             project_sources = [path for path in final_paths if path.parent.parent.name == "DAY0-Prepare"]
             if project_sources:
@@ -520,7 +516,8 @@ class BoundInputSession:
                 if named is not None and stat.S_ISLNK(named.st_mode):
                     alias = _HeldAlias(logical, parent, allow_absolute=True)
                     expected = project / "99-output-ib_nvl/bringup/xdr-upgrade-logs"
-                    if os.path.normpath(os.path.join(str(logical.parent), alias.target)) != str(expected):
+                    reached = Path(os.path.normpath(os.path.join(str(logical.parent), alias.target)))
+                    if scope._through_pointer(reached) != expected:
                         raise ValueError("standalone output link conflicts with selected project")
                     scope._aliases.append(alias)
             scope._finish_inventory()

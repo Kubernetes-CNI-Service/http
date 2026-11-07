@@ -140,11 +140,13 @@ class CvtDeviceNameColumnTest(unittest.TestCase):
         write_endpoint_sheets(project / "fabric-blue.xlsx", gpu_rows, switch_rows, name_first=name_first)
         (project / "p2p.xlsx").symlink_to("fabric-blue.xlsx")
         (project / "02-devices_config.csv").write_text(DEVICES_CONFIG, encoding="utf-8")
-        # the links setup creates in the converter's own directory
-        (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/fabric-a/p2p.xlsx")
-        (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/fabric-a/99-output-p2p")
+        # the links setup creates in the converter's own directory, through the pointer (R-016 §2)
+        (root / "DAY0-Prepare/activate-project").symlink_to("fabric-a")
+        (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/activate-project/p2p.xlsx")
+        (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/activate-project/99-output-p2p")
         if devices:
-            (p2p_dir / "02-devices_config.csv").symlink_to("../../../../../DAY0-Prepare/fabric-a/02-devices_config.csv")
+            (p2p_dir / "02-devices_config.csv").symlink_to(
+                "../../../../../DAY0-Prepare/activate-project/02-devices_config.csv")
         for name, text in (("01-inventory.log", INVENTORY_RULES), ("02-port-mapping.log", PORT_RULES),
                            ("03-splitter.log", "")):
             (p2p_dir / name).write_text(text, encoding="utf-8")
@@ -236,9 +238,10 @@ class CvtProjectOutputWorkflowTest(unittest.TestCase):
             output.mkdir(parents=True)
             write_p2p(project / "fabric-blue.xlsx")
             (project / "p2p.xlsx").symlink_to("fabric-blue.xlsx")
-            # the links setup creates in the converter's own directory
-            (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/fabric-a/p2p.xlsx")
-            (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/fabric-a/99-output-p2p")
+            # the links setup creates in the converter's own directory, through the pointer (R-016 §2)
+            (root / "DAY0-Prepare/activate-project").symlink_to("fabric-a")
+            (p2p_dir / "p2p.xlsx").symlink_to("../../../../../DAY0-Prepare/activate-project/p2p.xlsx")
+            (p2p_dir / "output-p2p").symlink_to("../../../../../DAY0-Prepare/activate-project/99-output-p2p")
             for name, text in (("01-inventory.log", "[IB-SW]\n*leaf*\n\n[server]\n*server*\n"),
                                ("02-port-mapping.log", ""), ("03-splitter.log", "")):
                 (p2p_dir / name).write_text(text, encoding="utf-8")

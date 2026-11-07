@@ -1181,31 +1181,37 @@ SETUP_WORKSPACE_INPUT_MAPPINGS = (
 
 def managed_infra_log_project(log_path: str | os.PathLike[str],
                               projects_root: str | os.PathLike[str]) -> Path | None:
-    """Return the direct DAY0 project owning an exact, real infra/logs link.
+    """Return the owner of an exact, real infra/logs link, spelled under projects_root; None if not managed.
 
-    A resolved directory alone is not evidence of ownership: the lexical
-    target, every ancestor, project, and output directory must also have the
-    expected shape without an intervening symlink.
+    R-016 §2, §5.2: the link text is the pointer form relpath(<projects_root>/activate-project/
+    99-output-infra, its directory).  While DAY0-Prepare/activate-project selects a project (active_project_dir)
+    the owner is <projects_root>/<name>: the link's directory, projects_root, the project and its output
+    directory must be real directories and the link must reach that output.  Without a pointer (unsetup
+    removed it and the fixed link dangles, R-016 Q7) the link is still setup's, so the owner is the pointer
+    path <projects_root>/activate-project itself: no project directory, nothing to write into.  An invalid
+    pointer, another text or a non-link is not managed: None.
     """
     link = Path(os.path.abspath(log_path))
     projects = Path(os.path.abspath(projects_root))
+    pointer = projects / "activate-project"
     try:
-        if not stat.S_ISLNK(link.lstat().st_mode):
+        if (not stat.S_ISLNK(link.lstat().st_mode)
+                or os.readlink(link) != os.path.relpath(pointer / "99-output-infra", link.parent)):
             return None
-        lexical = os.readlink(link)
-        if os.path.isabs(lexical):
-            return None
-        target = Path(os.path.normpath(os.path.join(link.parent, lexical)))
-        if (target.name != "99-output-infra" or target.parent.parent != projects
-                or target.parent.name in ("", ".", "..")
-                or lexical != os.path.relpath(target, link.parent)):
-            return None
-        for component in (link.parent, projects, target.parent, target):
+        for component in (link.parent, projects):
+            if not stat.S_ISDIR(component.lstat().st_mode):
+                return None
+        active = active_project_dir(projects.parent)
+        if active is None:
+            return pointer
+        project = projects / active.name
+        target = project / "99-output-infra"
+        for component in (project, target):
             if not stat.S_ISDIR(component.lstat().st_mode):
                 return None
         if link.resolve(strict=True) != target.resolve(strict=True):
             return None
-        return target.parent
+        return project
     except (OSError, RuntimeError, ValueError):
         return None
 
