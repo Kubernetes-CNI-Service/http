@@ -1180,6 +1180,14 @@ class ImpactManifestTests(unittest.TestCase):
                 # 2026-11-07 (v3.1.1 WP-13, I-034): the IB analyzer's port model table ships
                 # with its code until G14-1, so it is deployment authority.
                 "tools/ibdiagnet-analyze-tool/config/port_profiles.csv",
+                # 2026-11-07 (v3.1.1 WP-8, R-013): the template's new directory sentinels.
+                "DAY0-Prepare/template/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs/.gitkeep",
+                "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/.gitkeep",
+                "DAY0-Prepare/template/99-output-monitor/ethernet/.gitkeep",
+                "DAY0-Prepare/template/99-output-monitor/infiniband/.gitkeep",
+                "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
+                "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
+                "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
             ],
             manifest["tracked_support"],
         )

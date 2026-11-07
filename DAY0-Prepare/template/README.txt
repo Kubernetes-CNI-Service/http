@@ -42,7 +42,7 @@ setup 不从模板复制 laptop.pub。所有密码值
 
   http/image/
 
-setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。
+setup 会把它们链接到 ztp/image/cumulus/ 和 ztp/image/nvos/。这些共享链接与项目无关：
 可能创建的连接：
   ztp/image/cumulus/<Cumulus镜像名>.bin -----> http/image/<Cumulus镜像名>.bin
   ztp/image/nvos/<NVOS镜像名>.bin       -----> http/image/<NVOS镜像名>.bin
@@ -52,6 +52,10 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
 `nvosv<A-B-C>amd64.bin` 两种名称；同版本两种名称内容不同时 load 会拒绝，内容相同时
 固定优先前一种新名称。镜像归属由文件名识别；无法识别为 Cumulus 或 NVOS 的 .bin
 文件只告警，不创建链接。
+
+下文每个文件或目录下的「可能创建的连接」合起来，与 tools/project_contract.py 的链接
+规格表（SETUP_LINK_SPECS）逐条一致；箭头右边写的是链接最终到达的项目文件，或仓库内的
+另一个链接（写成相对路径或仓库路径）。
 
 
 一、项目输入文件
@@ -66,26 +70,35 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
   公开模板中的 DNS/NTP、relay、VRL、MLAG 地址及 MAC 均为脱敏示例，必须按
   项目替换；`*` 表示锁定登录，不是可用的默认密码。
   load 前必须补充：
-    common.mgmt.http.status/http_root
-    common.mgmt.ztp.status/ztp_url_prefix；service_ip 从 DHCP subnet 的 URL 推导，
-    不需要在 global 中重复填写
+    common.mgmt.http.status/address/port/http_root
+      address 是本机独立的 HTTP 服务 IPv4。status 为 enabled 时必须填写，setup 和
+      load 都会拒绝缺少 address 的 global。DHCP 下发给设备的 URL（Cumulus 的
+      provision URL、NVOS 的 ztp.json）由 address、port 和 ztp_url_prefix 拼成，
+      bootstrap 里的 ZTP_SERVER 也取 address 和 port；都不从 DHCP subnet 的
+      ztp_service_ip 推导。
+    common.mgmt.ztp.status/ztp_url_prefix
     switches.eth.version、switches.ib.version、switches.nvl.version
   只有 devices CSV 实际包含相应设备类型时，load 才要求该类型的版本镜像；
   eth/eth_spx 使用 Cumulus 镜像，ib/nvl 分别使用其 global version 对应的 NVOS 镜像。
-  DHCP subnet 中的 provision URL 必须使用相应网络角色的服务地址和脚本：
-    prod_oob      -> ztp-bootstrap_oob.sh
-    prod_oobofoob -> ztp-bootstrap_oobofoob.sh
-    air_oob       -> ztp-bootstrap_oob.sh
-    air_oobofoob  -> ztp-bootstrap_oobofoob.sh
-  AIR 与 Production 按网络类别共用上述两份 bootstrap，不再使用单独的
-  ztp-bootstrap_air.sh。
+  ZTP 服务地址（service_ip）和每个网段使用哪份 bootstrap，写在
+  02-dhcp-subnet_config.csv 里，见下文。
+  文件末尾有一段注释掉的 servers: 示例（UFM 的 VIP、IPMI 和各接口地址）。使用 UFM
+  的项目取消注释并替换地址；不用 UFM 的项目保持注释即可。格式见
+  infiniband/bringup/ufm-setup-upgrade/README.md；监控的 UFM 采集读取 servers.ufm.vip。
   可能创建的连接：
     ztp/config/cumulus/template/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     ztp/config/nvos/template/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    ztp/config/isc-dhcp-server/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     infra/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     monitor/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    ethernet/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
     infiniband/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    nvlink/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    infiniband/bringup/xdr-upgrade/01-global.yaml -----> DAY0-Prepare/<项目>/01-global.yaml
+    ethernet/monitor/01-global.yaml -----> ../01-global.yaml
     infiniband/monitor/01-global.yaml -----> ../01-global.yaml（UFM 采集读取 servers.ufm.vip）
+    nvlink/monitor/01-global.yaml -----> ../01-global.yaml
+    infiniband/bringup/xdr-initial-setup/01-global.yaml -----> ../../01-global.yaml（仓库内固定桥接，不由 setup 创建）
     infiniband/bringup/ufm-setup-upgrade/01-global.yaml -----> ../../01-global.yaml（仓库内固定桥接，不由 setup 创建）
   monitor 从 common.switch.system.date-time.timezone 读取页面显示时区；
   也可临时使用 MONITOR_TIMEZONE 环境变量覆盖。
@@ -167,14 +180,22 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
   可能创建的连接：
     ztp/config/cumulus/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ztp/config/nvos/template/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    ztp/config/nvos/template/P2P/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ztp/config/isc-dhcp-server/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ztp/backup/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    monitor/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    infra/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    ethernet/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    infiniband/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    nvlink/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ethernet/eth.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     infiniband/ib.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     nvlink/nvsw.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
-    monitor/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
-    infra/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
-    ztp/config/nvos/template/P2P/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+    ethernet/monitor/eth.csv -----> ../eth.csv
+    infiniband/monitor/ib.csv -----> ../ib.csv
+    nvlink/monitor/nvsw.csv -----> ../nvsw.csv
+    infiniband/bringup/xdr-upgrade/ib.csv -----> ../../ib.csv
+    infiniband/bringup/xdr-initial-setup/ib.csv -----> ../../ib.csv
     infiniband/bringup/ufm-setup-upgrade/ib.csv -----> ../../ib.csv
   p2p-to-validation.py 用 P2P 目录下这份清单的设备名选出 P2P 的名称列。
   监控、ZTP、backup、Feedback 统一读取本文件并按 type 过滤；infra 只选择 type=server 或
@@ -182,7 +203,21 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
   infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py 和监控处理，其余脚本直接跳过服务器行。
 
 02-dhcp-subnet_config.csv
-  作用：ISC DHCP 的 shared-network、subnet、地址池、网关和 ZTP URL 配置。
+  作用：ISC DHCP 的 shared-network、subnet、地址池、网关，以及每个网段的 ZTP 声明。
+  ZTP 声明是每行的三列：
+    ztp_service_ip   本网段使用的 ZTP 服务地址，即管理服务器在这个网络上的地址。load 从
+                     启用 ZTP 的各行推导 service_ip，用它判断本机是否具备这些地址（不具备
+                     时只生成制品），并按地址和网段选择 DHCP 监听接口；设备拿到的 URL 不用
+                     它拼，见 01-global.yaml 的 common.mgmt.http.address。
+    cumulus_profile  oob、oobofoob 或 none：oob 下发 ztp-bootstrap_oob.sh，oobofoob 下发
+                     ztp-bootstrap_oobofoob.sh，none 不给 Cumulus 下发 bootstrap。
+    nvos_ztp         yes 或 no：yes 时给 NVOS 下发 ztp.json。
+  启用了 cumulus_profile 或 nvos_ztp 的行必须填写 ztp_service_ip；两者都不启用时
+  ztp_service_ip 必须为空。同一个 cumulus_profile 只能对应一个 ztp_service_ip，NVOS 的
+  ztp.json 也只能有一个服务地址。旧的 URL 列 bootfile_name、cumulus_provision_url
+  已经废弃，表头里出现就会被拒绝。
+  AIR 与 Production 按网络类别共用上述两份 bootstrap，不再使用单独的
+  ztp-bootstrap_air.sh。
   可能创建的连接：
     ztp/config/isc-dhcp-server/02-subnet_config.csv -----> DAY0-Prepare/<项目>/02-dhcp-subnet_config.csv
 
@@ -197,7 +232,9 @@ p2p.xlsx
         无 --p2p-file 时调和到最新；--p2p-file=<根目录文件名> 可刻意钉选旧版，
         命令会提示最新文件和改名建议。IP Assignment 不参与自动选择。
         原有非空普通 p2p.xlsx 会先无覆盖归档为 p2p-original-时间戳[-N].xlsx；
-        无原子无覆盖移动能力时停止，绝不覆盖客户字节。项目 p2p/ 不参与自动选择。
+        无原子无覆盖移动能力时停止，绝不覆盖客户字节。
+        项目下的 p2p/ 子目录不是 P2P 候选位置：自动选择和 --p2p-file 都只看项目根目录
+        （见 p2p/README.txt）；p2p/ 可以用来存放 P2P 相关资料。
         例外：用户自己建的 p2p.xlsx -> p2p/<工作簿>.xlsx 链接优先，setup 不改写它
         （见下文「用户链接输入」）。
         升级后旧版 current-release 即使 schema_version=1 也缺少真实来源绑定；
@@ -208,10 +245,9 @@ p2p.xlsx
     ethernet/p2p.xlsx                        -----> DAY0-Prepare/<项目>/p2p.xlsx
     infiniband/p2p.xlsx                      -----> DAY0-Prepare/<项目>/p2p.xlsx
     nvlink/p2p.xlsx                          -----> DAY0-Prepare/<项目>/p2p.xlsx
+    infiniband/bringup/xdr-initial-setup/p2p.xlsx -----> ../../p2p.xlsx
     infiniband/bringup/ufm-setup-upgrade/p2p.xlsx -----> ../../p2p.xlsx
-    ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p/
-    ztp/config/nvos/template/P2P/output-p2p    -----> DAY0-Prepare/<项目>/99-output-p2p/
-  P2P 派生结果统一写入项目的 99-output-p2p/。
+  P2P 派生结果统一写入项目的 99-output-p2p/，链接见下文 99-output-p2p/。
 
 03-air-topology-policy.json（可选）
   作用：只调整由 P2P 派生的 AIR 拓扑，不改写原始 P2P、LLDPQ DOT 或生产设备配置。
@@ -221,15 +257,43 @@ p2p.xlsx
   load 会把 01-global.yaml 的 Cumulus 版本显式传给 AIR 转换器；例如版本 5.18 会生成
   cumulus-vx-5.18 节点。策略文件存在时，其 SHA-256 也进入统一 release，manual-ztp
   preflight 会检查新增、删除或内容漂移，防止发布后静默改变 AIR 拓扑。
+  模板不放这个文件：放了空文件就会被当成输入读取。不创建运行时软链接。
+
+04-air-mini-devices.txt（可选）
+  作用：AIR 小拓扑（load --mini）的客户设备清单，只影响 AIR 的 DOT/JSON，不影响
+        Production。每行一个设备名，# 开头的行是注释。文件可以不存在，这时只保留
+        生成器选出的最小代表集。
+  load --mini 不带值时读这个固定名；也可以用 --mini=<文件名>.txt 指定项目根目录下的
+  其他 .txt，生成后那个文件会被换成指向本文件的相对链接。--mini 只用于 AIR/eth，并要求
+  03-air-topology-policy.json 里有 mini_sampling。生成器把本文件改写成
+  [minimum-required] 和 [customer-provided] 两段，客户写的设备保留在后一段；选择报告逐台
+  写明入选原因。文件内容的 SHA-256 进入统一 release。
+  模板不放这个文件，理由同 03。不创建运行时软链接。
+
+04-device-aliases.csv（可选）
+  作用：设备别名表（G14-1）。文件可以不存在，也可以只有表头；有错误的行只报错并被过滤，
+        后面的程序继续使用合法的数据（owner 2026-11-04）。
+  setup 先把三个网络的 monitor 目录链接好；链接悬空不算错误。
+  可能创建的连接：
+    ethernet/monitor/04-device-aliases.csv -----> DAY0-Prepare/<项目>/04-device-aliases.csv
+    infiniband/monitor/04-device-aliases.csv -----> DAY0-Prepare/<项目>/04-device-aliases.csv
+    nvlink/monitor/04-device-aliases.csv -----> DAY0-Prepare/<项目>/04-device-aliases.csv
 
 laptop.pub
   作用：项目电脑 SSH 公钥。本机 setup 从本机 ~/.ssh 选取或必要时生成公钥，
         安全准备真实项目的 laptop.pub；server-delegated setup 不读取服务器 HOME，
         而是校验项目中已有的两把不同、非空的电脑和管理服务器公钥。
+  setup 在 4 个公钥目录里各建一条同名链接；这 4 个目录都是真实目录，不是链接：
   可能创建的连接：
     ztp/config/publickey/laptop.pub   -----> DAY0-Prepare/<项目>/laptop.pub
+    ethernet/publickey/laptop.pub     -----> DAY0-Prepare/<项目>/laptop.pub
+    infiniband/publickey/laptop.pub   -----> DAY0-Prepare/<项目>/laptop.pub
+    nvlink/publickey/laptop.pub       -----> DAY0-Prepare/<项目>/laptop.pub
   使用要求：不可将仓库模板中的 0 字节 laptop.pub 当作项目电脑身份或发布文件；
         管理服务器 load 不得以服务器自己的 HOME 公钥覆盖电脑身份。
+  bringup 工具经仓库内固定桥接 infiniband/bringup/xdr-initial-setup/publickey、
+  infiniband/bringup/ufm-setup-upgrade/publickey（都指向 ../../publickey）读取
+  infiniband/publickey/。
 
 mgmt-server.pub 和 .management-pubkeys
   作用：`mgmt-server.pub` 为空时是管理服务器公钥占位文件；非空时保存管理服务器的真实公钥。
@@ -237,11 +301,15 @@ mgmt-server.pub 和 .management-pubkeys
   macOS 配置准备会保留这个计划路径但不发布空文件；Linux 管理服务器正式 load 时使用
   管理服务器端准备并校验公私一致的独立 Ed25519 公钥注入它，再发布到 ZTP。
   不要手工复制项目电脑公钥到这个文件，两把 key 必须不同。
+  非空时与 laptop.pub 一样，在 4 个公钥目录里各有一条同名链接（见下一条）。
 
 其他 *.pub（可选约定）
-  作用：项目可以增加其他 SSH 公钥，setup 会逐个建立同名 ZTP 链接。
+  作用：项目可以增加其他 SSH 公钥，setup 会在 4 个公钥目录里逐个建立同名链接。
   可能创建的连接：
     ztp/config/publickey/<原文件名>.pub -----> DAY0-Prepare/<项目>/<原文件名>.pub
+    ethernet/publickey/<原文件名>.pub   -----> DAY0-Prepare/<项目>/<原文件名>.pub
+    infiniband/publickey/<原文件名>.pub -----> DAY0-Prepare/<项目>/<原文件名>.pub
+    nvlink/publickey/<原文件名>.pub     -----> DAY0-Prepare/<项目>/<原文件名>.pub
   只有非空且格式合法的公钥才会成为运行时发布文件。
 
 README.txt
@@ -274,6 +342,11 @@ README.txt
 99-output-ib_nvl/
   作用：NVOS 的 <时间戳>-ib、<时间戳>-nvl、校验完成后的 -combine 发布目录，
         以及 InfiniBand bringup 工具按项目归档的日志与生成文件。
+  模板自带 bringup/ 下的日志目录：ndr-upgrade-logs/、xdr-initial-setup-logs/、
+  xdr-upgrade-logs/、ufm-setup-upgrade-logs/，以及 xdr-upgrade-v2-logs/。
+  xdr-upgrade-v2-logs/ 是 upgrade2.py 按项目运行时的证据目录，setup 不为它建链接；
+  日志统一改用 xdr-upgrade-logs/ 以后（A6）去掉。
+  只有用到相应 bringup 工具的项目才会往这些日志目录写东西，链接悬空不算错误。
   可能创建的连接：
     ztp/config/nvos/template/99-output-ib_nvl -----> DAY0-Prepare/<项目>/99-output-ib_nvl
     DAY0-Prepare/<项目>/99-output-ib_nvl/latest -----> <最新完整发布目录>
@@ -285,12 +358,13 @@ README.txt
   latest_yaml 是固定 HTTP 入口；项目内 latest 优先指向同一时间戳的 -combine 目录。
 
 99-output-dhcp/
-  作用：保存 c1-generate_dhcp.py 生成的 DHCP 主配置和设备 hosts 文件。
+  作用：保存 c1-generate_dhcp.py 生成的 DHCP 主配置、设备 hosts 文件和发布清单。
   可能创建的连接：
     ztp/config/isc-dhcp-server/dhcpd.conf -----> DAY0-Prepare/<项目>/99-output-dhcp/dhcpd.conf
     ztp/config/isc-dhcp-server/dhcpd_eth.hosts -----> DAY0-Prepare/<项目>/99-output-dhcp/dhcpd_eth.hosts
     ztp/config/isc-dhcp-server/dhcpd_ib.hosts -----> DAY0-Prepare/<项目>/99-output-dhcp/dhcpd_ib.hosts
     ztp/config/isc-dhcp-server/dhcpd_nvl.hosts -----> DAY0-Prepare/<项目>/99-output-dhcp/dhcpd_nvl.hosts
+    ztp/config/isc-dhcp-server/dhcp-release-manifest.json -----> DAY0-Prepare/<项目>/99-output-dhcp/dhcp-release-manifest.json
 
 99-output-backup/
   作用：保存 yaml-collect.py 拉取的设备配置、采集日志和差异报告。
@@ -299,17 +373,24 @@ README.txt
 
 99-output-p2p/
   作用：保存 P2P 转换产生的 *-lldpq.dot、*-air.dot、上传 NVIDIA AIR 的 *-air.json、
-       HTML 或其他拓扑派生文件。
+       HTML 或其他拓扑派生文件，以及拓扑分析器的报告。
   可能创建的连接：
     ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
     ztp/config/nvos/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
+    ztp/config/isc-dhcp-server/p2p-air.json -----> DAY0-Prepare/<项目>/99-output-p2p/p2p-air.json（只有 AIR 项目有，悬空不算错误）
     monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
+    ethernet/monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
     infiniband/monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p（IB 链路校验读 CVT、写报告）
+    nvlink/monitor/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
+    tools/lldp-analyze-tool/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
+    tools/ibdiagnet-analyze-tool/99-output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p
   90-c2-generate_configs.py 直接扫描上述 output-p2p 目录，不再创建单文件 DOT 软链接。
 
 99-output-monitor/
-  作用：保存 Ethernet/SPX、InfiniBand、NVLink 的采集结果、链路结果和 cron 日志。
-  setup 会创建以下项目子目录：
+  作用：保存 Ethernet/SPX、InfiniBand、NVLink 的采集结果、链路结果和 cron 日志，
+        以及 issue tracker 的准备数据和日志。
+  模板自带 ethernet/、infiniband/、nvlink/，以及 infiniband/ufm-info/、
+  infiniband/ufm-ibdiagnet/，每个目录只有一个 .gitkeep。setup 补建其余项目子目录：
     99-output-monitor/ethernet/eth-info/
       保存 Ethernet 设备信息采集结果。
     99-output-monitor/ethernet/spx-link/
@@ -320,6 +401,10 @@ README.txt
       保存 InfiniBand 设备信息采集结果。
     99-output-monitor/infiniband/ib-link/
       保存 InfiniBand 链路采集和检查结果。
+    99-output-monitor/infiniband/ufm-info/
+      保存 UFM 的设备状态和 HA 状态快照。
+    99-output-monitor/infiniband/ufm-ibdiagnet/
+      保存经 UFM 采集的 ibdiagnet（降级时为 iblinkinfo）结果和运行记录。
     99-output-monitor/infiniband/cronjob.log
       保存 InfiniBand 定时采集任务日志。
     99-output-monitor/nvlink/nvsw-info/
@@ -328,11 +413,15 @@ README.txt
       保存 NVLink 链路采集和检查结果。
     99-output-monitor/nvlink/cronjob.log
       保存 NVLink 定时采集任务日志。
+    99-output-monitor/<网络>/<类型>-status/
+      保存设备状态数据（G14-2），ethernet 下为 eth-status，infiniband 下为 ib-status
+      和 ufm-status，nvlink 下为 nvsw-status。
 
   可能创建的连接包括：
     ethernet/monitor/eth-info -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet/eth-info
     ztp/config/cumulus/template/P2P/eth-info -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet/eth-info
     ethernet/monitor/spx-link -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet/spx-link
+    ethernet/monitor/eth-status -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet/eth-status
     ethernet/monitor/cronjob.log -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet/cronjob.log
     monitor/ethernet -----> DAY0-Prepare/<项目>/99-output-monitor/ethernet
 
@@ -341,25 +430,48 @@ README.txt
     infiniband/monitor/ib-link -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ib-link
     infiniband/monitor/ufm-info -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ufm-info
     infiniband/monitor/ufm-ibdiagnet -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ufm-ibdiagnet
+    infiniband/monitor/ib-status -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ib-status
+    infiniband/monitor/ufm-status -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/ufm-status
     infiniband/monitor/cronjob.log -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband/cronjob.log
     monitor/infiniband -----> DAY0-Prepare/<项目>/99-output-monitor/infiniband
 
     nvlink/monitor/nvsw-info -----> DAY0-Prepare/<项目>/99-output-monitor/nvlink/nvsw-info
     nvlink/monitor/nvsw-link -----> DAY0-Prepare/<项目>/99-output-monitor/nvlink/nvsw-link
+    nvlink/monitor/nvsw-status -----> DAY0-Prepare/<项目>/99-output-monitor/nvlink/nvsw-status
     nvlink/monitor/cronjob.log -----> DAY0-Prepare/<项目>/99-output-monitor/nvlink/cronjob.log
     monitor/nvlink -----> DAY0-Prepare/<项目>/99-output-monitor/nvlink
 
+    monitor/99-output-monitor -----> DAY0-Prepare/<项目>/99-output-monitor（issue tracker 的准备数据和日志）
+    tools/lldp-analyze-tool/99-output-monitor -----> DAY0-Prepare/<项目>/99-output-monitor
+
   各网络目录下的 monitor 链接供采集脚本写入当前项目；http/monitor/ 下的三个
   类型目录链接供 HTML 汇总页面读取相同数据。设备清单不再复制或链接到上述项目
-  输出子目录，而是统一使用：
-    monitor/02-devices_config.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
+  输出子目录，而是统一使用 monitor/02-devices_config.csv（见 02-devices_config.csv）。
 
 99-output-ztp/
   作用：保存 12-ztp-monitor.py 按次生成的 ZTP 状态快照、report.json 和
         latest 发布链接。目录作为完整项目模板的空骨架保留，运行数据
         由 ZTP 监控流程写入，不在 upload/sync 部署时传输。
   可能创建的连接：
+    ztp/status -----> DAY0-Prepare/<项目>/99-output-ztp
+    monitor/ztp-status -----> ../ztp/status
     DAY0-Prepare/<项目>/99-output-ztp/latest -----> <最新完整 ZTP 状态目录>
+
+99-output-infra/
+  作用：保存 infra 部署（deploy_infra.py、infra-setup.py）按项目归档的日志。
+  可能创建的连接：
+    infra/logs -----> DAY0-Prepare/<项目>/99-output-infra
+
+99-output-bringup/
+  作用：一站式 bringup 的状态目录（R-012 BU0.5）。模板里还没有这个目录，R-012 落地时补；
+        setup 先把链接建好。
+  可能创建的连接：
+    infiniband/bringup/99-output-bringup -----> DAY0-Prepare/<项目>/99-output-bringup
+
+已不再使用的输出目录：
+  99-output-ufm/ 原来对应已退役的 D-70 UFM 采集链。v3.1.1 起 setup 不再建这个目录和
+  monitor/99-output-ufm 链接（R-013）；UFM 数据写在 99-output-monitor/infiniband/ufm-info/、
+  ufm-ibdiagnet/。已有项目里的旧 99-output-ufm/ 不会被改动。
 
 
 三、维护约束
@@ -371,3 +483,5 @@ README.txt
    的双身份流程准备、校验，不能把模板空公钥发布为运行时身份。
 4. template 和项目根目录只保留空 `.bin` 名称占位符；真实镜像只放在 http/image/ 中。
 5. 新增模板文件时，应在本 README 中补充用途、维护责任和可能的软链接。
+6. 本 README 的「可能创建的连接」与 tools/project_contract.py 的链接规格表逐条一致，
+   由 test_cases/test_setup_link_spec_contract.py 核对；规格表增删行时同步修改本文件。

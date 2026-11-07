@@ -1321,8 +1321,6 @@ SETUP_LINK_SPECS = (
     # Monitor runtime: the project's inventory, status and collection outputs behind the monitor page.
     SetupLinkSpec("monitor/02-devices_config.csv", "02-devices_config.csv", "file", "required",
                   view="monitor", published=True),
-    SetupLinkSpec("monitor/99-output-ufm", "99-output-ufm", "dir", "prepared",
-                  note="R-013: v3.1.1 WP-8 removes it", view="monitor", published=True),
     SetupLinkSpec("ztp/status", "99-output-ztp", "dir", "prepared", view="monitor", published=True),
     SetupLinkSpec("monitor/ztp-status", "ztp/status", "dir", "prepared", base="repository",
                   view="monitor", published=True),

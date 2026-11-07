@@ -763,7 +763,7 @@ owner 2026-10-22：「把落地代码合入 http，然后开始和 REQ7 对接�
 
 **不在 R1、仍待处理**：
 1. 在线 Cable 链 `monitor/issue_tracker_publish_runtime.py::_cable_hold_cycle_roles` 仍只认 D-70（授权文件、9 角色）——R2。**2026-10-24：不再需要**，旧在线 Cable 链已在退役第 1 批删除（第 16 节）。
-2. 退役 D-70：页面的 `tools.ufm_collection_pipeline` import 与 UFM 证据面板、`collection_ib_producer`、`monitor/99-output-ufm` 链接、`tools/ufm_collection_*`；`tools/ufm_collection_pipeline.py` 里被 REQ7 其他模块借用的持有 FD 辅助函数要先迁出——R3。**2026-10-24：已完成**（退役第 2 批，第 16 节）；`tools/ufm_collection_contract.py` 因 F01 仍导入而保留，`monitor/99-output-ufm` 链接没有读写者，留作单独清理。
+2. 退役 D-70：页面的 `tools.ufm_collection_pipeline` import 与 UFM 证据面板、`collection_ib_producer`、`monitor/99-output-ufm` 链接、`tools/ufm_collection_*`；`tools/ufm_collection_pipeline.py` 里被 REQ7 其他模块借用的持有 FD 辅助函数要先迁出——R3。**2026-10-24：已完成**（退役第 2 批，第 16 节）；`tools/ufm_collection_contract.py` 因 F01 仍导入而保留，`monitor/99-output-ufm` 链接没有读写者，v3.1.1 起已删除（需求文档 R-013 第 3 条）。
 3. **待 owner 决定**：REQ7 的三面板资格目前是合在一起算的（`issue_tracker_stage_l_consumer.py::qualify_prod_stage_l`），IB 缺报告时 Switch、Eth 面板也一起 HOLD。是否改为按面板各自资格。2026-10-24：旧 REQ7 已退役，`issue_tracker_stage_l_consumer.py` 已删除，此问题不再适用。
 4. 跨午夜的 K 窗口：前一天的输入与报告被打进每日包后，旧周期重放失败，该窗口 IB HOLD（fail closed），每天一次、约 K 个周期；之后再加「散文件 + 每日包按 SHA 查」。2026-10-24：K 窗口重放属于旧 REQ7 链，已随第 1 批删除，不再适用。
 5. ~~已知旧问题~~ 已修（R0，2026-10-23）：旧的证据读取一律拒绝路径上的符号链接，而 setup 把 `<网络>/monitor/<输出目录>` 建成了指向项目的链接。实测（`collection_v2_emitter.regular_member` 探针）：经链接的路径被拒「traverses a symlink」，真实路径被拒「location is invalid」——真实管理服务器上 worker 每个 slot 的 v2 证据都会发布失败，REQ7 拿不到任何周期。修法：`tools/project_contract.py::setup_collection_link_hop` 只放行 setup 的采集输出链接本身（文本恰为 `../../DAY0-Prepare/<项目>/99-output-monitor/<网络>/<输出目录>`，目标沿途都是真实目录），emitter `regular_member`、worker `_collection_artifact_path`、REQ7 `issue_tracker_switch_runtime._safe_child` 都改用它，其它链接仍一律拒绝；证据字节仍由 SHA 绑定。测试 `test_setup_collection_link_evidence_workflow`（判定的放行/拒绝、三处读取、真实 emitter 与 completion 经链接完成并重放），5 个变异都让它变红。在线 Cable 链（R2）里的同类读取尚未改。2026-10-24 补注：在线 Cable 链和 `issue_tracker_switch_runtime.py` 已在退役第 1 批删除，上一句不再适用；`setup_collection_link_hop` 仍由 emitter 和 worker 使用。
@@ -784,5 +784,5 @@ REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-syn
 - `monitor/issue_tracker_activity_source.py`：ETH 活动证据，`post-collect.py`、`analyze_lldp.py`、emitter 和 worker 仍在用。`monitor/issue_tracker_cycle_source.py`：几个保留测试用它读取已完成周期。
 - `tools/ufm_collection_contract.py`：F01 的 `infra/ufm_jump_transport.py::retrieve_collection_archive` 仍导入它；`tools/ufm_remote_producer.py` 删除后，这条取回链在生产中已没有调用者。
 - `ztp/config/ib_topology_provenance.py` 的独立读取路径。借用旧 REQ7 和 D-70 读取范围的分支已在第 1、2 批删除。
-- `monitor/99-output-ufm` 链接和 `<项目>/99-output-ufm` 目录仍由 setup/unsetup 建立和拆除，但已没有读写者。删除它们要改字节钉住的 `tools/project_contract.py`、`DAY0-Prepare/01-a-setup.py` 的 `OUTPUT_DIRS` 和三个 dockerignore，留作单独的改动。
+- `monitor/99-output-ufm` 链接和 `<项目>/99-output-ufm` 目录：v3.1.1 起已删除（需求文档 R-013 第 3 条，owner 2026-11-03 确认）。setup 不再建立它们，链接规格表、`DAY0-Prepare/01-a-setup.py` 的 `OUTPUT_DIRS` 和三个 dockerignore 都已去掉这一项；已有项目里的旧目录不动。
 - worker 不再写 `issue-tracker-online.status.json`、`issue-tracker-stage-l.status.json`；已部署主机上留下的旧文件没有读者。控制 CGI 对 `view=issue_tracker_online`、`view=issue_tracker_stage_l` 返回 400。

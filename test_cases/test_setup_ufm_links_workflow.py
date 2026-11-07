@@ -206,31 +206,34 @@ class UfmLinkContractTest(unittest.TestCase):
 
 
 class SetupUfmOutputLinkTest(unittest.TestCase):
-    """setup still makes <project>/99-output-ufm and its monitor/99-output-ufm link, and never replaces an
-    operator-owned regular path there.
+    """setup no longer makes <project>/99-output-ufm or its monitor/99-output-ufm link (需求文档 R-013 第 3 条,
+    owner 2026-11-03 「现在一起确认 R-013」; v3.1.1 详细工作指导 O4 left column), and never replaces an
+    operator-owned regular path where it does make a monitor link.
 
     Moved from the retired test_ufm_collection_pipeline_workflow (7d5518d:566-607; REQ7 retirement batch 2,
-    2026-10-24). The D-70 evidence panel that read the link is gone; the link and directory stay (setup and
-    unsetup keep them symmetric; their removal is a separate change). At 7d5518d the deleted file held the
-    only test calling setup's _make_link on an existing regular path."""
+    2026-10-24). The D-70 evidence panel that read the link is gone, and with v3.1.1 WP-8 the link and the
+    directory are gone too. At 7d5518d the deleted file held the only test calling setup's _make_link on an
+    existing regular path; that guard is kept below on monitor/99-output-monitor, a monitor link setup
+    still makes."""
 
-    def test_setup_maps_the_project_ufm_output_directory_to_its_monitor_link(self):
+    def test_setup_no_longer_maps_a_project_ufm_output_directory(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             project = root / "project"
             project.mkdir()
-            self.assertIn("99-output-ufm", SETUP.OUTPUT_DIRS)
-            (project / "99-output-ufm").mkdir()
+            self.assertNotIn("99-output-ufm", SETUP.OUTPUT_DIRS)
             http = root / "http"
             (http / "monitor").mkdir(parents=True)
             with mock.patch.object(SETUP, "HTTP_BASE", str(http)):
                 pairs = SETUP._monitor_link_paths(str(project))
-                self.assertIn((str(http / "monitor" / "99-output-ufm"),
-                               str(project / "99-output-ufm")), pairs)
-                self.assertIn(str(http / "monitor" / "99-output-ufm"),
-                              SETUP._collect_expected_links(str(project)))
+                expected = SETUP._collect_expected_links(str(project))
+            for link, target in pairs:
+                with self.subTest(link=link):
+                    self.assertNotEqual(str(http / "monitor" / "99-output-ufm"), link)
+                    self.assertNotEqual(str(project / "99-output-ufm"), target)
+            self.assertNotIn(str(http / "monitor" / "99-output-ufm"), expected)
 
-    def test_setup_existing_regular_monitor_path_is_never_replaced(self):
+    def test_setup_leaves_monitor_99_output_ufm_alone_and_never_replaces_a_regular_monitor_path(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             project = root / "legacy-project"
@@ -238,21 +241,23 @@ class SetupUfmOutputLinkTest(unittest.TestCase):
             http = root / "http"
             monitor = http / "monitor"
             monitor.mkdir(parents=True)
-            occupied = monitor / "99-output-ufm"
+            legacy = monitor / "99-output-ufm"
+            legacy.write_text("operator-owned marker", encoding="utf-8")
+            occupied = monitor / "99-output-monitor"
             occupied.write_text("operator-owned marker", encoding="utf-8")
             with mock.patch.object(SETUP, "HTTP_BASE", str(http)), mock.patch.object(
                 SETUP, "_DRY_RUN", False
             ), mock.patch.object(SETUP, "_LINK_ERRORS", 0), redirect_stdout(io.StringIO()):
-                link, target = next(
-                    pair for pair in SETUP._monitor_link_paths(str(project))
-                    if pair[0] == str(occupied)
-                )
-                self.assertEqual(str(occupied), link)
-                self.assertEqual(str(project / "99-output-ufm"), target)
+                pairs = SETUP._monitor_link_paths(str(project))
+                self.assertNotIn(str(legacy), [link for link, _target in pairs])
+                link, target = next(pair for pair in pairs if pair[0] == str(occupied))
+                self.assertEqual(str(project / "99-output-monitor"), target)
                 self.assertEqual("error", SETUP._make_link(link, target))
                 self.assertEqual(1, SETUP._LINK_ERRORS)
+            self.assertEqual("operator-owned marker", legacy.read_text(encoding="utf-8"))
             self.assertEqual("operator-owned marker", occupied.read_text(encoding="utf-8"))
             self.assertFalse((project / "99-output-ufm").exists())
+            self.assertFalse((project / "99-output-monitor").exists())
 
 
 class SetupInventoryAcceptsServerTypesTest(unittest.TestCase):

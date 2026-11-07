@@ -355,10 +355,25 @@ core.*
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-initial-setup-logs/.gitkeep
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/
 !/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-logs/.gitkeep
+# R-013 第 1 条 (owner 2026-11-03): xdr-upgrade-v2-logs goes at A6.
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs/.gitkeep
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/
+!/DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/.gitkeep
 !/DAY0-Prepare/template/99-output-infra/
 !/DAY0-Prepare/template/99-output-infra/.gitkeep
 !/DAY0-Prepare/template/99-output-monitor/
 !/DAY0-Prepare/template/99-output-monitor/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/ethernet/
+!/DAY0-Prepare/template/99-output-monitor/ethernet/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/infiniband/
+!/DAY0-Prepare/template/99-output-monitor/infiniband/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/
+!/DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/
+!/DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep
+!/DAY0-Prepare/template/99-output-monitor/nvlink/
+!/DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep
 !/DAY0-Prepare/template/99-output-p2p/
 !/DAY0-Prepare/template/99-output-p2p/.gitkeep
 !/DAY0-Prepare/template/99-output-ztp/

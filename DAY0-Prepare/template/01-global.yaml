@@ -129,3 +129,27 @@ switches:
           state: disabled
       ztp:
         config-save: enabled
+# Optional UFM servers (R-013), commented out so a project without UFM is
+# unchanged.  For a project with UFM, uncomment and replace every documentation
+# address; the format is described in infiniband/bringup/ufm-setup-upgrade/README.md.
+# vip (the HA address, two nodes only) sits in the server_ufm rows' management
+# subnet, and so does an ipmi address written without a gateway; the other
+# interface addresses must not overlap that subnet.  version is optional: only a
+# declared version upgrades the UFM.
+# servers:
+#   - ufm:
+#       version: "2.6.1-5"
+#       vip: 192.0.2.20
+#       interfaces:
+#         alias:
+#           eth0: eno8303
+#         primary:
+#           ipmi:
+#             address: 192.0.2.21/26
+#           eno8403: 192.0.2.129/30
+#           ib0: 192.0.2.193/27
+#         secondary:
+#           ipmi:
+#             address: 192.0.2.22/26
+#           eno8403: 192.0.2.130/30
+#           ib0: 192.0.2.194/27

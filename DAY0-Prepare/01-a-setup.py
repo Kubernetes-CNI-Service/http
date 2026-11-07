@@ -3556,7 +3556,6 @@ OUTPUT_DIRS = [
     "99-output-monitor",
     "99-output-ztp",
     "99-output-infra",
-    "99-output-ufm",
 ]
 
 

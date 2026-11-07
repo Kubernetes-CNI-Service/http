@@ -147,8 +147,6 @@ monitor/99-output-monitor
 monitor/99-output-monitor/**
 monitor/99-output-p2p
 monitor/99-output-p2p/**
-monitor/99-output-ufm
-monitor/99-output-ufm/**
 monitor/cabletracker-main
 monitor/cabletracker-main/**
 monitor/cabletracker-main.zip

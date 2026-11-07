@@ -196,9 +196,8 @@ REQUIRED_PUBLISHED_LINKS = {
     "monitor/99-output-p2p": (
         "../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
     ),
-    "monitor/99-output-ufm": (
-        "../DAY0-Prepare/{project}/99-output-ufm", "99-output-ufm", "dir",
-    ),
+    # monitor/99-output-ufm left with 需求文档 R-013 第 3 条 (owner 2026-11-03; v3.1.1 WP-8, Docker side a
+    # mechanical sync only, 开发计划 :112 owner 2026-11-06).
     "monitor/ethernet": (
         "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
         "99-output-monitor/ethernet", "dir",

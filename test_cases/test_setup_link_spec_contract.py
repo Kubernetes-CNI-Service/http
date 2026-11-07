@@ -6,19 +6,29 @@ R-016 详细设计 v1.1 §2 (pointer layout), §3.1 (the table and its columns),
 rows (O2, O3 settled by the owner 2026-11-07, 「同意你的建议。」 via http dev), R16-14 (packaging never reads
 the manifest body), O14 (unsetup removes the per-key public-key links) and C99 (TEST 88f9cb3: new public-key
 directories follow the process umask).
+
+v3.1.1 WP-8 adds 需求文档 R-013 (owner 2026-11-03 「现在一起确认 R-013」): monitor/99-output-ufm leaves the
+table (第 3 条), and the template gains the 第 1 条 directories and the commented servers: example, with its
+README listing the table's links (验收: 「template 包含第 1 条的目录和示例」「对 template 做链接清单的对照检查没有
+缺项」; 详细工作指导 WP-8 「模板 README 的链接清单等于规格表名单」).
 """
 
 from __future__ import annotations
 
 from contextlib import ExitStack, redirect_stdout
+from fnmatch import fnmatchcase
 import io
+import ipaddress
 import os
 from pathlib import Path
+import re
 import stat
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
+
+import yaml
 
 from test_cases.module_loader import load_script
 
@@ -136,6 +146,8 @@ NEW_ROWS = {
     "infiniband/bringup/xdr-initial-setup/ib.csv": ("repository", "infiniband/ib.csv", "required"),
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx": ("repository", "infiniband/p2p.xlsx", "required"),
 }
+# 需求文档 R-013 第 3 条 (owner 2026-11-03 「现在一起确认 R-013」; v3.1.1 WP-8): setup no longer makes it.
+REMOVED_ROWS = {"monitor/99-output-ufm"}
 # Link texts the guide writes out for the new repository aliases.
 NEW_ALIAS_TEXTS = {
     "ethernet/monitor/01-global.yaml": "../01-global.yaml",
@@ -198,11 +210,14 @@ class LinkSpecificationTableTest(unittest.TestCase):
         rows = self.table()
         expected = appendix_rows()
         self.assertEqual(74, len(expected))
+        self.assertLessEqual(REMOVED_ROWS, set(expected))
+        for path in REMOVED_ROWS:
+            del expected[path]
         for path, (base, target, _role) in NEW_ROWS.items():
             expected[path] = (base, target)
-        # 74 + 6 structure + 3 networks' 02 + 3 alias tables + 4 status + 99-output-bringup + 2 (O2) = 93;
-        # WP-8 (R-013) removes monitor/99-output-ufm and G14-1 the three tools/ rows later.
-        self.assertEqual(93, len(expected))
+        # 74 − monitor/99-output-ufm (WP-8, R-013) + 6 structure + 3 networks' 02 + 3 alias tables + 4 status
+        # + 99-output-bringup + 2 (O2) = 92; G14-1 removes the three tools/ rows later.
+        self.assertEqual(92, len(expected))
         self.assertEqual(set(expected), set(rows))
         for path, (base, target) in expected.items():
             with self.subTest(path=path):
@@ -415,6 +430,102 @@ class GitIgnoreCoverageTest(unittest.TestCase):
 
     def test_the_template_inventory_link_stays_public(self):
         self.assertEqual(set(), self.ignored(self.PUBLIC))
+
+
+TEMPLATE = ROOT / "DAY0-Prepare/template"
+# R-013 第 1 条: the directories the template gains, each holding only its .gitkeep (详细工作指导 WP-8).
+R013_TEMPLATE_DIRECTORIES = (
+    "99-output-ib_nvl/bringup/ufm-setup-upgrade-logs",
+    # 「A6 时去掉」; a template directory only, never a setup link (详细工作指导 1.3).
+    "99-output-ib_nvl/bringup/xdr-upgrade-v2-logs",
+    "99-output-monitor/ethernet",
+    "99-output-monitor/infiniband",
+    "99-output-monitor/nvlink",
+    "99-output-monitor/infiniband/ufm-info",
+    "99-output-monitor/infiniband/ufm-ibdiagnet",
+)
+# One README link line: "<tree path> -----> <target>", an optional note after the target.
+README_LINK = re.compile(r"^[ \t]+(?P<link>\S+)[ \t]+-{3,}>[ \t]*(?P<target>[^\s（(]+)", re.MULTILINE)
+PROJECT_PREFIXES = ("DAY0-Prepare/<项目>/", POINTER + "/")
+
+
+def readme_links() -> dict:
+    """Tree path -> the targets the template README writes for it; <placeholder> spelled as *."""
+    text = (TEMPLATE / "README.txt").read_text(encoding="utf-8")
+    links = {}
+    for match in README_LINK.finditer(text):
+        name = re.sub(r"<[^<>/]+>", "*", match.group("link"))
+        links.setdefault(name, set()).add(match.group("target").rstrip("/"))
+    return links
+
+
+class TemplateR013Test(unittest.TestCase):
+    def test_readme_link_list_equals_the_table(self):
+        rows = {row.path: row for row in CONTRACT.SETUP_LINK_SPECS}
+        links = readme_links()
+        # 「可能创建的连接」 also shows project-internal publisher pointers (99-output-*/latest): no tree links.
+        tree = {name: targets for name, targets in links.items() if not name.startswith("DAY0-Prepare/")}
+        self.assertEqual([], sorted(set(rows) - set(tree)), "README misses table rows")
+        for path, row in rows.items():
+            if row.base == "project":
+                expected = {prefix + row.target for prefix in PROJECT_PREFIXES}
+            else:
+                expected = {row.target, os.path.relpath(row.target, os.path.dirname(path))}
+            with self.subTest(path=path):
+                self.assertTrue(tree[path] <= expected, (tree[path], expected))
+        # Every other README entry is one of the families outside the project table, written out above.
+        families = (*SHARED_PATHS, *(directory + "/*.pub" for directory in PUBLICKEY_DIRECTORIES),
+                    "ztp/optimize/*-sample/*")
+        others = set(tree) - set(rows)
+        unknown = sorted(name for name in others - TRACKED_BRIDGES
+                         if not any(fnmatchcase(name, pattern) for pattern in families))
+        self.assertEqual([], unknown, "README lists links the table does not have (e.g. a removed row)")
+        for pattern in (*SHARED_PATHS, *(directory + "/*.pub" for directory in sorted(PUBLICKEY_DIRECTORIES))):
+            with self.subTest(family=pattern):
+                self.assertTrue(any(fnmatchcase(name, pattern) for name in others), pattern)
+
+    def test_template_holds_the_r013_directories_each_with_only_a_gitkeep(self):
+        for relative in R013_TEMPLATE_DIRECTORIES:
+            directory = TEMPLATE / relative
+            with self.subTest(directory=relative):
+                self.assertTrue(directory.is_dir() and not directory.is_symlink(), relative)
+                children = {relative + "/" + name for name in os.listdir(directory)}
+                self.assertEqual({relative + "/.gitkeep"} | (children & set(R013_TEMPLATE_DIRECTORIES)), children)
+                self.assertTrue((directory / ".gitkeep").is_file())
+        # .gitignore keeps the sentinels trackable (the template is otherwise ignored).
+        names = ["DAY0-Prepare/template/" + relative + "/.gitkeep" for relative in R013_TEMPLATE_DIRECTORIES]
+        result = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"], cwd=ROOT,
+                                input="\n".join(names) + "\n", capture_output=True, text=True, check=False)
+        self.assertIn(result.returncode, (0, 1), result.stderr)
+        self.assertEqual("", result.stdout)
+        # 1.3: the v2 upgrade log directory gets no setup link.
+        self.assertFalse([row.path for row in CONTRACT.SETUP_LINK_SPECS if "xdr-upgrade-v2-logs" in row.target])
+
+    def test_template_global_carries_a_commented_ufm_servers_example(self):
+        text = (TEMPLATE / "01-global.yaml").read_text(encoding="utf-8")
+        # Commented out: a project without UFM keeps its behaviour (设计 项目模板与gitignore-review §2).
+        self.assertNotIn("servers", yaml.safe_load(text))
+        lines = text.splitlines()
+        self.assertEqual(1, lines.count("# servers:"), "one commented servers: example")
+        start = lines.index("# servers:")
+        block = [lines[start]]
+        for line in lines[start + 1:]:
+            if not line.startswith("#   "):
+                break
+            block.append(line)
+        example = yaml.safe_load("\n".join(line[2:] for line in block))
+        # infiniband/bringup/ufm-setup-upgrade/README.md: `servers:` then `  - ufm:` with vip/interfaces.
+        self.assertEqual(["servers"], list(example))
+        self.assertEqual([["ufm"]], [list(item) for item in example["servers"]])
+        ufm = example["servers"][0]["ufm"]
+        self.assertLessEqual({"vip", "interfaces"}, set(ufm))
+        self.assertLessEqual(set(ufm), {"version", "vip", "interfaces"})
+        documentation = ipaddress.ip_network("192.0.2.0/24")
+        addresses = re.findall(r"(?<![0-9.])(?:[0-9]{1,3}\.){3}[0-9]{1,3}(?![0-9.])", "\n".join(block))
+        self.assertIn(str(ufm["vip"]), addresses)
+        for address in addresses:
+            with self.subTest(address=address):
+                self.assertIn(ipaddress.ip_address(address), documentation, "addresses use 192.0.2.x only")
 
 
 if __name__ == "__main__":

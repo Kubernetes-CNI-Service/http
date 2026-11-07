@@ -675,7 +675,14 @@
     "test_cases/source_tools_fixture.py",
     "test_cases/subprocess_timeout_evidence.py",
     "test_cases/fixtures/mac_spellings.tsv",
-    "tools/ibdiagnet-analyze-tool/config/port_profiles.csv"
+    "tools/ibdiagnet-analyze-tool/config/port_profiles.csv",
+    "DAY0-Prepare/template/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs/.gitkeep",
+    "DAY0-Prepare/template/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/.gitkeep",
+    "DAY0-Prepare/template/99-output-monitor/ethernet/.gitkeep",
+    "DAY0-Prepare/template/99-output-monitor/infiniband/.gitkeep",
+    "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
+    "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
+    "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -4163,7 +4170,8 @@
         "test_cases.test_project_contracts",
         "test_cases.test_upload_package_contract",
         "test_cases.test_v2_generation_flow",
-        "test_cases.test_v2_project_schema"
+        "test_cases.test_v2_project_schema",
+        "test_cases.test_setup_link_spec_contract"
       ]
     },
     {
