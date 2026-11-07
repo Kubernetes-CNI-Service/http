@@ -2281,8 +2281,9 @@ class ReleaseTransactionTests(unittest.TestCase):
         activation_action=None,
         after_parent_commit=None,
         start_services: bool = False,
-        publication_routing: bool = False,
     ):
+        # P7 (T+, 2026-10-25) without its WAL-only real_dhcp_publish option (AP-b): the post-commit
+        # publish is patched here and exercised for real by the test_committed_dhcp_* tests.
         self._http_main_public_source_fixture()
         args = SimpleNamespace(
             skip_doca=False, download_doca=False, dry_run=False,
@@ -2382,12 +2383,12 @@ class ReleaseTransactionTests(unittest.TestCase):
                 LOAD, "snapshot_release_links",
                 return_value={self.project / "99-output-eth/latest": "old-release"},
             ))
+            def generate_fixture(*_args, **kwargs):
+                if lifecycle_events is not None:
+                    lifecycle_events.append("generate")
+
             stack.enter_context(mock.patch.object(
-                LOAD, "generate_configs",
-                side_effect=(
-                    (lambda *_args, **_kwargs: lifecycle_events.append("generate"))
-                    if lifecycle_events is not None else None
-                ),
+                LOAD, "generate_configs", side_effect=generate_fixture,
             ))
             def validate_parent(*_args, **_kwargs):
                 transaction_events.append("parent-validate")
@@ -2480,17 +2481,20 @@ class ReleaseTransactionTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(
                 LOAD, "restore_ztp_prefix_publication", restore_prefix,
             ))
+            def publish_fixture(*args, **kwargs):
+                # T+ (2026-10-25): this transaction fixture isolates main's routing.
+                if lifecycle_events is not None:
+                    lifecycle_events.append("dhcp-publish")
+
+            dhcp_publish = stack.enter_context(mock.patch.object(
+                LOAD, "publish_committed_dhcp_candidate", side_effect=publish_fixture,
+            ))
             try:
                 result = LOAD.main([] if argv is None else argv)
             except BaseException as exc:  # Assert propagation after cleanup below.
                 caught = exc
             if failure_at in {"dhcp", "template", "parent_sync", "publication"}:
                 report_commit.assert_not_called()
-            elif publication_routing:
-                report_commit.assert_called_once()
-                self.assertEqual((staged_report,), report_commit.call_args.args)
-                self.assertEqual({"require_authority"}, set(report_commit.call_args.kwargs))
-                self.assertTrue(callable(report_commit.call_args.kwargs["require_authority"]))
             else:
                 report_commit.assert_called_once_with(staged_report)
             if authority_failure is None and failure_at != "template":
@@ -2508,7 +2512,7 @@ class ReleaseTransactionTests(unittest.TestCase):
                     published_dir=LOAD.ZTP_DIR / "config/publickey",
                 )
                 report_stage.assert_called_once_with(self.project, report_payload)
-                if failure_at == "publication" or publication_routing:
+                if failure_at == "publication":
                     report_discard.assert_not_called()
                 else:
                     report_discard.assert_called_once_with(staged_report)
@@ -2516,12 +2520,17 @@ class ReleaseTransactionTests(unittest.TestCase):
                     "parent-validate", "parent-stage", "report-build",
                     "report-stage", "dhcp-transaction", "report-discard",
                 ]
-                if publication_routing:
-                    expected.remove("report-discard")
                 if failure_at == "publication":
                     expected = ["parent-validate", "parent-stage", "report-build", "report-stage"]
                 self.assertEqual(expected, transaction_events)
+                # T+: the committed candidate is published exactly once, after the
+                # parent (and selector) commit; never on a pre-commit failure path.
+                if failure_at in {"completion", "preflight"}:
+                    dhcp_publish.assert_called_once_with(self.project, private_dhcp, "all")
+                else:
+                    dhcp_publish.assert_not_called()
             else:
+                dhcp_publish.assert_not_called()
                 parent_validate.assert_not_called()
                 parent_stage.assert_not_called()
                 report_build.assert_not_called()
@@ -8435,7 +8444,8 @@ print("actual-copied-validator-selected-B")
         self.assertEqual(1, result)
         self.assertEqual(
             ["freeze-a", "receipt-a", "monitor-authority-attest", "generate", "stage-b",
-             "dhcp-transaction", "report-commit", "select-b", "service-preflight"],
+             "dhcp-transaction", "report-commit", "select-b", "dhcp-publish",
+             "service-preflight"],
             events,
         )
         commit.assert_called_once_with(
@@ -11055,7 +11065,10 @@ print("actual-copied-validator-selected-B")
         project_manifest = self.project / mapped[manifest_rel][0]
         self.assertTrue(runtime_manifest.is_symlink())
         self.assertEqual(project_manifest.resolve(), runtime_manifest.resolve())
-        self.assertEqual(0, project_manifest.stat().st_size)
+        # T+ (dev baseline; owner rule 2026-10-24; T+ agreement 2026-10-25): after the
+        # commit the flat outputs are the committed DHCP child (DEV G2) and a successful
+        # load leaves no private candidate (DEV G20).
+        self.assertGreater(project_manifest.stat().st_size, 0)
         parent = json.loads(
             (self.project / "99-output-ztp/current-release.json").read_text(
                 encoding="utf-8"
@@ -11063,13 +11076,16 @@ print("actual-copied-validator-selected-B")
         )
         self.assertEqual("passed", parent["validation"])
         self.assertEqual({"dhcp", "cumulus"}, set(parent["components"]))
-        retained = self.project / "99-output-dhcp"
-        private_dirs = list(retained.glob(".load-dhcp-candidate-*"))
-        self.assertEqual(1, len(private_dirs))
         self.assertEqual(
-            sha256(private_dirs[0] / "dhcp-release-manifest.json"),
-            parent["components"]["dhcp"]["manifest_sha256"],
+            sha256(project_manifest), parent["components"]["dhcp"]["manifest_sha256"],
         )
+        flat = self.project / "99-output-dhcp"
+        generation = (self.project / "99-output-ztp/current").resolve(strict=True)
+        self.assertEqual(
+            {name: (generation / "dhcp" / name).read_bytes() for name in names},
+            {name: (flat / name).read_bytes() for name in names},
+        )
+        self.assertEqual([], list(flat.glob(".load-dhcp-candidate-*")))
 
         with mock.patch.object(UNSETUP, "ZTP", str(self.ztp)):
             self.assertIn(
