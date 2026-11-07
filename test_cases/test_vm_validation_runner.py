@@ -1791,23 +1791,23 @@ class VmFullSystemdProfileTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
     def test_current_infra_v2_boundary_is_accepted_without_rewriting_bytes(self) -> None:
-        source = ROOT / "infra/infra-setup.sh"
+        source = ROOT / "infra/infra-setup.py"
         payload = VM.expected_apache_boundary(source)
         self.assertIn(b"# HTTP-ZTP-PUBLIC-BOUNDARY-V2\n", payload)
         self.assertNotIn(b"# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n", payload)
         # Independent wire contract: never silently downgrade the emitted policy.
-        self.assertIn(b"APACHE_PUBLIC_BOUNDARY_EOF", source.read_bytes())
+        self.assertIn(b"handle.write(APACHE_PUBLIC_BOUNDARY)", source.read_bytes())
 
     def test_apache_boundary_rejects_unknown_missing_or_duplicate_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            source = Path(temporary) / "infra-setup.sh"
+            source = Path(temporary) / "infra-setup.py"
             for markers in ("", "# HTTP-ZTP-PUBLIC-BOUNDARY-V3\n",
                             "# HTTP-ZTP-PUBLIC-BOUNDARY-V1\n# HTTP-ZTP-PUBLIC-BOUNDARY-V2\n"):
                 with self.subTest(markers=markers):
-                    source.write_text("cat <<'APACHE_PUBLIC_BOUNDARY_EOF'\n" + markers
-                                      + "Options -Indexes\nAPACHE_PUBLIC_BOUNDARY_EOF\n",
+                    source.write_text("APACHE_PUBLIC_BOUNDARY = r'''" + markers
+                                      + "Options -Indexes\n'''\n",
                                       encoding="utf-8")
-                    with self.assertRaises(ValueError):
+                    with self.assertRaisesRegex(ValueError, "版本标记"):
                         VM.expected_apache_boundary(source)
 
     def test_installed_cgi_contract_requires_hash_and_executable_mode(self) -> None:

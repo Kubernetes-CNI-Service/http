@@ -3239,6 +3239,7 @@ print("actual-copied-validator-selected-B")
         from test_cases.test_vm_validation_runner import VM
         document = yaml.safe_load(self.global_file.read_text())
         document["common"]["mgmt"]["http"]["http_root"] = str(self.root.resolve())
+        document["common"]["mgmt"]["http"]["address"] = "192.0.2.40"
         self.global_file.write_text(yaml.safe_dump(document, sort_keys=False))
         self.subnet_file.write_text(
             "shared_network,subnet,netmask,range_start,range_end,routers,"

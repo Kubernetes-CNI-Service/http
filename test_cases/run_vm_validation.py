@@ -202,7 +202,9 @@ def read_regular_bytes(
         raise ValueError(f"文件超过 {max_bytes} bytes 上限: {path}")
     if not allow_empty and before.st_size <= 0:
         raise ValueError(f"文件为空: {path}")
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    # A named regular leaf can become a FIFO between lstat and open. Open
+    # without waiting, then retain the existing regular/inode rejection.
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | os.O_NONBLOCK)
     chunks: list[bytes] = []
     remaining = max_bytes + 1
     try:
@@ -274,6 +276,61 @@ def p2p_input_path(project: Path) -> Path:
     return candidates[0]
 
 
+def generated_input_errors(project: Path, parent: dict[str, Any]) -> list[str]:
+    """Check the optional load-owned derived inventory without trusting aliases."""
+    if "generated_inputs" not in parent:
+        return []
+    generated = parent["generated_inputs"]
+    if not isinstance(generated, dict) or set(generated) != {"effective_devices"}:
+        return ["parent generated_inputs 必须仅包含 effective_devices"]
+    authority = generated["effective_devices"]
+    if not isinstance(authority, dict) or set(authority) != {"path", "sha256"}:
+        return ["parent derived inventory authority 字段无效"]
+    raw_path = authority["path"]
+    wanted = authority["sha256"]
+    if not isinstance(raw_path, str) or "\\" in raw_path:
+        return ["parent derived inventory path 非法"]
+    relative = Path(raw_path)
+    prefix = ".load-inventory-"
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.as_posix() != raw_path
+        or not relative.parts[0].startswith(prefix)
+        or len(relative.parts[0]) == len(prefix)
+        or relative.name != "02-devices_config.csv"
+    ):
+        return ["parent derived inventory path 不安全"]
+    if not isinstance(wanted, str) or not SHA256_RE.fullmatch(wanted):
+        return ["parent derived inventory SHA-256 非法"]
+    try:
+        canonical_project = project.resolve(strict=True)
+        directory = project / relative.parts[0]
+        directory_stat = directory.lstat()
+        if (
+            not stat.S_ISDIR(directory_stat.st_mode)
+            or stat.S_IMODE(directory_stat.st_mode) != 0o700
+            or directory.resolve(strict=True) != canonical_project / relative.parts[0]
+        ):
+            return ["parent derived inventory directory 不安全"]
+        derived = directory / relative.name
+        file_stat = derived.lstat()
+        if (
+            not stat.S_ISREG(file_stat.st_mode)
+            or file_stat.st_nlink != 1
+            or stat.S_IMODE(file_stat.st_mode) != 0o600
+            or derived.resolve(strict=True) != canonical_project / relative
+        ):
+            return ["parent derived inventory file 不安全"]
+        actual = sha256_file(derived)
+    except (OSError, RuntimeError, ValueError):
+        return ["parent derived inventory 无法安全读取"]
+    if actual != wanted:
+        return ["parent derived inventory SHA-256 与 parent release 不一致"]
+    return []
+
+
 def release_input_errors(
     project: Path, parent: dict[str, Any],
 ) -> list[str]:
@@ -311,6 +368,7 @@ def release_input_errors(
                 f"{label} SHA-256 与 parent release 不一致: "
                 f"current={actual}, release={wanted}"
             )
+    errors.extend(generated_input_errors(project, parent))
     return errors
 
 
@@ -348,6 +406,10 @@ def parent_release_errors(
     )
     if schema == 2:
         basis_keys += ("dhcp_status",)
+    if "generated_inputs" in parent:
+        if schema != 2:
+            errors.append("legacy v1 parent release 不允许 generated_inputs")
+        basis_keys += ("generated_inputs",)
     if all(key in parent for key in basis_keys):
         basis = {key: parent[key] for key in basis_keys}
         expected_id = hashlib.sha256(json.dumps(
@@ -363,6 +425,48 @@ def parent_release_errors(
     return errors
 
 
+_VALIDATION_DEPLOYMENT_ROOT: Path | None = None
+
+
+def configure_validation_deployment_root(root: Path) -> None:
+    """Bind consumer imports to the actual --root, not the copied verifier."""
+    global _VALIDATION_DEPLOYMENT_ROOT
+    canonical = root.resolve(strict=True)
+    if not stat.S_ISDIR(canonical.lstat().st_mode):
+        raise ValueError("validation deployment root is not a real directory")
+    _VALIDATION_DEPLOYMENT_ROOT = canonical
+
+
+def deployment_project_contract():
+    root = (_VALIDATION_DEPLOYMENT_ROOT
+            if _VALIDATION_DEPLOYMENT_ROOT is not None else Path(__file__).resolve().parents[1])
+    tools = root / "tools"
+    trusted_uid = root.lstat().st_uid
+    if (tools.resolve(strict=True) != tools or not stat.S_ISDIR(tools.lstat().st_mode)
+            or tools.lstat().st_uid != trusted_uid or tools.lstat().st_mode & 0o022):
+        raise ValueError("deployment tools directory identity/permissions are unsafe")
+    for name in ("project_contract", "generation_report"):
+        path = tools / (name + ".py")
+        owner = path.lstat()
+        if (path.resolve(strict=True) != path or not stat.S_ISREG(owner.st_mode)
+                or owner.st_nlink != 1 or owner.st_uid != trusted_uid or owner.st_mode & 0o022):
+            raise ValueError("deployment contract source is unsafe: " + name)
+        sha256_file(path)
+        cached = sys.modules.get("tools." + name)
+        if cached is not None and Path(getattr(cached, "__file__", "")).resolve() != path:
+            raise ValueError("foreign cached deployment contract: " + name)
+    package = sys.modules.get("tools")
+    if package is not None and {Path(path).resolve() for path in getattr(package, "__path__", ())} != {tools}:
+        raise ValueError("foreign cached deployment tools package")
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from tools import project_contract, generation_report
+    for module, name in ((project_contract, "project_contract"), (generation_report, "generation_report")):
+        if Path(module.__file__).resolve() != tools / (name + ".py"):
+            raise ValueError("deployment contract import did not bind requested --root")
+    return project_contract
+
+
 def validated_parent_dhcp_status(project: Path, parent: dict[str, Any]) -> str:
     """Trust a disabled mode only after canonical parent and current global bind."""
     errors = parent_release_errors(parent, project.name)
@@ -376,11 +480,7 @@ def validated_parent_dhcp_status(project: Path, parent: dict[str, Any]) -> str:
     except ImportError as exc:
         raise ValueError("缺少 PyYAML，无法验证 current global DHCP status") from exc
     try:
-        root = Path(__file__).resolve().parents[1]
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-        from tools.project_contract import safe_load_global_yaml
-        document = safe_load_global_yaml(payload.decode("utf-8"))
+        document = deployment_project_contract().safe_load_global_yaml(payload.decode("utf-8"))
         actual = document["common"]["mgmt"]["dhcp-server"]["status"]
     except (
         ImportError, UnicodeError, KeyError, TypeError, ValueError,
@@ -441,6 +541,192 @@ def parse_dhcp_subnets(path: Path) -> tuple[DhcpSubnet, ...]:
     if not rows:
         raise ValueError("DHCP subnet CSV 没有数据行")
     return tuple(rows)
+
+
+def _single_bootstrap_assignment(text: str, key: str) -> str:
+    assignments = re.findall(
+        r'^[ \t]*(?:export[ \t]+)?' + re.escape(key) + r'[ \t]*=.*$',
+        text, flags=re.MULTILINE,
+    )
+    if len(assignments) != 1:
+        raise ValueError("bootstrap assignment is missing/duplicate: " + key)
+    exact = re.fullmatch(re.escape(key) + r'="([^"\r\n]*)"', assignments[0])
+    if exact is None:
+        raise ValueError("bootstrap assignment is not an exact literal: " + key)
+    return exact.group(1)
+
+
+def strict_bootstrap_upgrade_policy(payload: bytes) -> bool:
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError("bootstrap policy is not UTF-8") from exc
+    value = _single_bootstrap_assignment(text, "ZTP_UPGRADE_ENABLED")
+    if value not in {"true", "false"}:
+        raise ValueError("bootstrap upgrade policy is not true/false")
+    return value == "true"
+
+
+def qualify_bootstrap_template_body(payload: bytes, template_payload: bytes) -> None:
+    """Allow only the producer's exact literal render slots, never shell parsing.
+
+    The caller separately validates actual service/global bindings and the
+    template's root-owned namespace. Everything else remains byte-for-byte
+    identical to that template, including upgrade execution and control flow.
+    """
+    slots = ("ZTP_SERVER", "ZTP_SERVER_HOST", "ZTP_URL_PREFIX",
+             "MANUAL_ZTP_OOB_URL", "MANUAL_ZTP_OOBOFOOB_URL",
+             "TARGET_CL_VER", "ZTP_UPGRADE_ENABLED")
+    def normalized(value):
+        try:
+            text = value.decode("utf-8")
+        except UnicodeError as exc:
+            raise ValueError("bootstrap/template is not UTF-8") from exc
+        for key in slots:
+            literal = _single_bootstrap_assignment(text, key)
+            if any(character in literal for character in ("$", "`", "\\", "\x00")):
+                raise ValueError("bootstrap render slot contains shell expansion: " + key)
+            text, count = re.subn(r'^' + re.escape(key) + r'="[^"\r\n]*"$',
+                                 key + '="@HTTP_RENDER_SLOT@"', text, flags=re.MULTILINE)
+            if count != 1:
+                raise ValueError("bootstrap render slot is ambiguous: " + key)
+        declarations = re.findall(r'^[ \t]*(?:export[ \t]+)?PUBKEY_PATHS[ \t]*=.*$',
+                                  text, flags=re.MULTILINE)
+        blocks = list(re.finditer(r'^PUBKEY_PATHS=\(\n(?P<rows>(?:[^\n]*\n)*?)^\)$',
+                                  text, flags=re.MULTILINE))
+        if len(declarations) != 1 or len(blocks) != 1 or declarations[0] != "PUBKEY_PATHS=(":
+            raise ValueError("bootstrap public-key render block is missing/ambiguous")
+        block = blocks[0]
+        names = []
+        for row in (block.group("rows") or "").splitlines():
+            match = re.fullmatch(r'    "\$\{ZTP_URL_PREFIX\}/config/publickey/([A-Za-z0-9._~-]+\.pub)"', row)
+            if match is None:
+                raise ValueError("bootstrap public-key render block contains nonliteral data")
+            names.append(match.group(1))
+        if not names or len(names) != len(set(names)) or "mgmt-server.pub" not in names:
+            raise ValueError("bootstrap public-key render block is incomplete/duplicate")
+        return text[:block.start()] + "PUBKEY_PATHS=(@HTTP_RENDER_KEYS@)" + text[block.end():]
+    if normalized(payload) != normalized(template_payload):
+        raise ValueError("selected bootstrap executable body differs from current template")
+
+
+def cumulus_runtime_image_required(root: Path, project: Path, parent: dict[str, Any]) -> bool:
+    """Only qualify Cumulus's actual selected runtime; no NVOS extrapolation."""
+    root, project = root.resolve(strict=True), project.resolve(strict=True)
+    if project.parent.parent != root:
+        raise ValueError("bootstrap project is outside actual deployment root")
+    validated_parent_dhcp_status(project, parent)
+    selected = selected_dhcp_authority(project, parent)
+    if selected is None:
+        raise ValueError("no selected generation can qualify no-upgrade policy")
+    inventory = parent.get("inventory")
+    allowed = {
+        "all": {"eth", "eth_spx", "spx", "air", "ib", "nvl"},
+        "eth": {"eth", "eth_spx", "spx", "air"},
+        "ib": {"ib"}, "nvl": {"nvl"},
+    }.get(parent.get("switch_scope"))
+    if (allowed is None or not isinstance(inventory, list) or not inventory
+            or any(not isinstance(row, dict) or row.get("type") not in allowed for row in inventory)
+            or not any(row["type"] in {"eth", "eth_spx", "spx", "air"} for row in inventory)
+            or not isinstance(parent.get("components", {}).get("cumulus"), dict)):
+        raise ValueError("selected scope/inventory does not qualify Cumulus")
+    errors, _checked = component_artifact_errors(project, parent, selected_dhcp=selected)
+    errors.extend(runtime_pointer_errors(root, project, parent, selected_dhcp=selected))
+    if errors:
+        raise ValueError("bootstrap runtime release binding differs: " + "; ".join(errors))
+    deployment_project_contract()
+    from tools.generation_report import release_file_identity
+    tracked = {}
+    tracked_payloads = {}
+
+    def track(path, *, directory=False, uid=None):
+        metadata = path.lstat()
+        if (path.resolve(strict=True) != path or metadata.st_mode & 0o022
+                or uid is not None and metadata.st_uid != uid
+                or (not stat.S_ISDIR(metadata.st_mode) if directory else
+                    not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1)):
+            raise ValueError("bootstrap policy authority is unsafe: " + str(path))
+        identity = release_file_identity(metadata)
+        tracked[path] = identity
+        return identity
+
+    track(root, directory=True)
+    track(root / "ztp", directory=True, uid=root.stat().st_uid)
+    template_directory = root / "ztp/templates"
+    track(template_directory, directory=True, uid=root.stat().st_uid)
+    template_path = template_directory / "ztp-bootstrap.sh"
+    track(template_path, uid=root.stat().st_uid)
+    template_payload = read_regular_bytes(template_path, max_bytes=4 * 1024 * 1024)
+    tracked_payloads[template_path] = hashlib.sha256(template_payload).hexdigest()
+    track(project, directory=True)
+    global_path, subnet_path = project / "01-global.yaml", project / "02-dhcp-subnet_config.csv"
+    for path in (global_path, subnet_path):
+        track(path, uid=project.stat().st_uid)
+    document = deployment_project_contract().safe_load_global_yaml(
+        read_regular_bytes(global_path, max_bytes=4 * 1024 * 1024).decode("utf-8"))
+    http, ztp = document["common"]["mgmt"]["http"], document["common"]["mgmt"]["ztp"]
+    port = http.get("port", 80)
+    if (type(port) is not int or not 1 <= port <= 65535 or http.get("status") != "enabled"
+            or ztp.get("status") != "enabled" or Path(http["http_root"]).resolve(strict=True) != root):
+        raise ValueError("current global does not bind actual HTTP/ZTP runtime")
+    prefix = read_ztp_prefix(global_path)
+    # DEV c395bb6: every rendered bootstrap binds the explicit independent
+    # common.mgmt.http.address, never a subnet ztp_service_ip.
+    if "address" not in http:
+        raise ValueError("current global lacks explicit common.mgmt.http.address")
+    endpoint = deployment_project_contract().validate_service_endpoint(
+        http["address"], port, field="common.mgmt.http.address")
+    switches = document.get("switches")
+    eth = [row["eth"] for row in switches if isinstance(row, dict) and "eth" in row] if isinstance(switches, list) else []
+    if len(eth) != 1 or not isinstance(eth[0], dict):
+        raise ValueError("global Cumulus version basis is missing/ambiguous")
+    version = str(eth[0].get("version") or "").strip() or "0.0.0"
+    roles = {}
+    for row in parse_dhcp_subnets(subnet_path):
+        script = BOOTSTRAP_BY_PROFILE.get(row.cumulus_profile)
+        if script is None or row.configured_service_ip is None:
+            continue
+        address = str(row.configured_service_ip)
+        if script in roles and roles[script] != address:
+            raise ValueError("selected bootstrap role has ambiguous service address")
+        roles[script] = address
+    if not roles:
+        raise ValueError("no current subnet selects a Cumulus bootstrap")
+    policies = set()
+    manual_expected = {
+        "MANUAL_ZTP_OOB_URL": "", "MANUAL_ZTP_OOBOFOOB_URL": "",
+    }
+    for role_name in roles:
+        key = {"ztp-bootstrap_oob.sh": "MANUAL_ZTP_OOB_URL",
+               "ztp-bootstrap_oobofoob.sh": "MANUAL_ZTP_OOBOFOOB_URL"}[role_name]
+        manual_expected[key] = endpoint.origin + prefix + "/" + role_name
+    for name in roles:
+        path = root / "ztp" / name
+        track(path, uid=root.stat().st_uid)
+        payload = read_regular_bytes(path, max_bytes=4 * 1024 * 1024)
+        tracked_payloads[path] = hashlib.sha256(payload).hexdigest()
+        qualify_bootstrap_template_body(payload, template_payload)
+        text = payload.decode("utf-8")
+        expected = {"ZTP_SERVER": endpoint.origin, "ZTP_SERVER_HOST": endpoint.host,
+                    "ZTP_URL_PREFIX": prefix, "TARGET_CL_VER": version}
+        expected.update(manual_expected)
+        if any(_single_bootstrap_assignment(text, key) != value for key, value in expected.items()):
+            raise ValueError("selected bootstrap service/prefix/version differs from current inputs")
+        policies.add(strict_bootstrap_upgrade_policy(payload))
+    if len(policies) != 1:
+        raise ValueError("selected bootstrap upgrade policies conflict")
+    for path, identity in tracked.items():
+        if release_file_identity(path.lstat()) != identity:
+            raise ValueError("bootstrap policy owner changed during qualification")
+        if path in tracked_payloads:
+            payload = read_regular_bytes(path, max_bytes=4 * 1024 * 1024)
+            if (hashlib.sha256(payload).hexdigest() != tracked_payloads[path]
+                    or release_file_identity(path.lstat()) != identity):
+                raise ValueError("bootstrap/template bytes or owner changed during qualification")
+    _recheck_selected_dhcp_authority(project, selected)
+    if release_input_errors(project, parent):
+        raise ValueError("bootstrap parent inputs changed during qualification")
+    return next(iter(policies))
 
 
 def bootstrap_http_assets(
@@ -679,8 +965,52 @@ def devices_csv_errors(path: Path) -> tuple[list[str], dict[str, int], int]:
     return errors, counts, fake_macs
 
 
+def selected_dhcp_authority(project: Path, parent: dict[str, Any]):
+    """Selector presence is authoritative, including dangling/unsafe selectors."""
+    if not os.path.lexists(project / "99-output-ztp/current"):
+        return None
+    return deployment_project_contract().open_selected_dhcp_release(project, expected_parent=parent)
+
+
+def _recheck_selected_dhcp_authority(project: Path, selected):
+    return deployment_project_contract().recheck_selected_dhcp_release(project, selected.binding)
+
+
+def installed_dhcp_errors(
+    project: Path, parent: dict[str, Any], installed_root: Path, *, selected_dhcp=None,
+) -> list[str]:
+    """Compare all four installed byte hashes, never their inode to the source."""
+    try:
+        selected = (selected_dhcp if selected_dhcp is not None
+                    else selected_dhcp_authority(project, parent))
+        if selected is not None:
+            selected = _recheck_selected_dhcp_authority(project, selected)
+            if selected.mode != "pinned":
+                raise ValueError("installed DHCP check requires enabled pinned authority")
+    except (OSError, ValueError) as exc:
+        return [f"selected DHCP authority 无法验证: {exc}"]
+    errors = []
+    for name in DHCP_OUTPUTS:
+        try:
+            expected = (selected.output_hashes[name] if selected is not None
+                        else sha256_file(project / "99-output-dhcp" / name))
+            actual = sha256_file(installed_root / name,
+                                allow_empty=selected is not None and name != "dhcpd.conf")
+            if actual != expected:
+                errors.append(f"{name}: installed DHCP hash 漂移")
+        except (OSError, ValueError, KeyError) as exc:
+            errors.append(f"{name}: {exc}")
+    if selected is not None:
+        try:
+            _recheck_selected_dhcp_authority(project, selected)
+        except (OSError, ValueError) as exc:
+            errors.append(f"selected DHCP authority 检查期间变化: {exc}")
+    return errors
+
+
 def component_artifact_errors(
     project: Path, parent: dict[str, Any], *, dhcp_status: str | None = None,
+    selected_dhcp=None,
 ) -> tuple[list[str], int]:
     errors: list[str] = []
     checked_configs = 0
@@ -698,9 +1028,27 @@ def component_artifact_errors(
         errors.append("disabled parent 不允许 DHCP component")
     elif dhcp_status not in {"enabled", "disabled"}:
         errors.append("parent DHCP status 无效")
+    selected = None
+    selected_failure = False
+    try:
+        selected = (selected_dhcp if selected_dhcp is not None
+                    else selected_dhcp_authority(project, parent))
+        if selected is not None:
+            selected = _recheck_selected_dhcp_authority(project, selected)
+    except (OSError, ValueError) as exc:
+        errors.append(f"selected DHCP authority 无法验证: {exc}")
+        selected_failure = True
     for label, record in components.items():
+        if label == "dhcp" and selected_failure:
+            continue
         if not isinstance(record, dict):
             errors.append(f"component {label} 不是 object")
+            continue
+        if label == "dhcp" and selected is not None:
+            # The shared reader has verified exact manifest/output inventory,
+            # parent hashes and held namespace identities. Do not reread old flat A.
+            if selected.mode != "pinned":
+                errors.append("enabled DHCP component 未绑定 pinned authority")
             continue
         if label == "dhcp":
             manifest_path = project / "99-output-dhcp/dhcp-release-manifest.json"
@@ -776,12 +1124,17 @@ def component_artifact_errors(
             checked_configs += 1
             if actual != expected:
                 errors.append(f"component {label} {config} SHA-256 漂移")
+    if selected is not None:
+        try:
+            _recheck_selected_dhcp_authority(project, selected)
+        except (OSError, ValueError) as exc:
+            errors.append(f"selected DHCP authority 检查期间变化: {exc}")
     return errors, checked_configs
 
 
 def runtime_pointer_errors(
     root: Path, project: Path, parent: dict[str, Any],
-    *, dhcp_status: str | None = None,
+    *, dhcp_status: str | None = None, selected_dhcp=None,
 ) -> list[str]:
     """Require runtime/latest links to resolve to the parent-bound release."""
     errors: list[str] = []
@@ -796,6 +1149,15 @@ def runtime_pointer_errors(
             return [f"parent/global DHCP 模式未可信: {exc}"]
     if dhcp_status not in {"enabled", "disabled"}:
         return ["parent DHCP status 无效"]
+
+    selected = None
+    try:
+        selected = (selected_dhcp if selected_dhcp is not None
+                    else selected_dhcp_authority(project, parent))
+        if selected is not None:
+            selected = _recheck_selected_dhcp_authority(project, selected)
+    except (OSError, ValueError) as exc:
+        errors.append(f"selected DHCP authority 无法验证: {exc}")
 
     def check(pointer: Path, target: Path, label: str) -> None:
         if not pointer.is_symlink():
@@ -822,9 +1184,35 @@ def runtime_pointer_errors(
             root / "ztp/config/nvos/latest_yaml",
         ),
     }
+    # A validated nonempty scoped inventory determines the runtime families.
+    # Empty/legacy inventory remains conservative: it cannot waive either gate.
+    inventory = parent.get("inventory")
+    families = set(layouts)
+    if isinstance(inventory, list) and inventory:
+        scope_types = {
+            "all": {"eth", "eth_spx", "spx", "air", "ib", "nvl"},
+            "eth": {"eth", "eth_spx", "spx", "air"},
+            "ib": {"ib"}, "nvl": {"nvl"},
+        }
+        allowed = scope_types.get(parent.get("switch_scope"))
+        types = {item.get("type") for item in inventory
+                 if isinstance(item, dict) and isinstance(item.get("type"), str)}
+        if (allowed is None or len(types) == 0
+                or any(not isinstance(item, dict) or not isinstance(item.get("type"), str)
+                       or item.get("type") not in allowed
+                       for item in inventory)):
+            errors.append("parent inventory 与 switch_scope 不一致")
+        else:
+            families = set()
+            if types & {"eth", "eth_spx", "spx", "air"}:
+                families.add("cumulus")
+            if types & {"ib", "nvl"}:
+                families.add("nvos")
     for label, pointers in layouts.items():
         record = components.get(label)
         if not isinstance(record, dict):
+            if label not in families and label not in components:
+                continue
             errors.append(f"parent 缺少 {label} component")
             continue
         relative = record.get("release_dir")
@@ -851,6 +1239,11 @@ def runtime_pointer_errors(
             project / "99-output-dhcp/dhcp-release-manifest.json",
             "dhcp runtime manifest",
         )
+    if selected is not None:
+        try:
+            _recheck_selected_dhcp_authority(project, selected)
+        except (OSError, ValueError) as exc:
+            errors.append(f"selected DHCP authority 检查期间变化: {exc}")
     return errors
 
 
@@ -881,7 +1274,11 @@ def expected_apache_boundary(source: Path) -> bytes:
     result = values[0].encode("utf-8")
     if not result.endswith(b"\n"):
         raise ValueError("Apache publication boundary 结尾不完整")
-    if b"HTTP-ZTP-PUBLIC-BOUNDARY-V1" not in result:
+    markers = [line for line in result.splitlines()
+               if line.startswith(b"# HTTP-ZTP-PUBLIC-BOUNDARY-V")]
+    if len(markers) != 1 or markers[0] not in {
+        b"# HTTP-ZTP-PUBLIC-BOUNDARY-V1", b"# HTTP-ZTP-PUBLIC-BOUNDARY-V2",
+    }:
         raise ValueError("Apache publication boundary 缺少版本标记")
     return result
 
@@ -1420,10 +1817,13 @@ def mini_air_summary(project: Path) -> tuple[int, int]:
             raise ValueError("mini 清单设备必须位于两个 section 中")
     if minimum == 0:
         raise ValueError("mini 最低必需集合为空")
-    candidates = sorted((project / "99-output-p2p").glob("*-air.json"))
-    if len(candidates) != 1:
-        raise ValueError(f"AIR JSON 数量不是 1: {len(candidates)}")
-    air = load_json(candidates[0])
+    # SETUP binds this exact source stem to the runtime AIR JSON. Retained
+    # historical outputs are not current authority and must never be a fallback.
+    source = p2p_input_path(project)
+    source_hash = sha256_file(source)
+    air = load_json(project / "99-output-p2p" / (source.stem + "-air.json"))
+    if p2p_input_path(project) != source or sha256_file(source) != source_hash:
+        raise ValueError("P2P selected source changed during mini AIR summary")
     nodes = air.get("content", {}).get("nodes")
     if not isinstance(nodes, dict) or not nodes:
         raise ValueError("AIR JSON nodes 为空或格式错误")
@@ -1521,7 +1921,42 @@ def apply_validation_profile(args: argparse.Namespace) -> None:
         )
 
 
-def main(argv: list[str] | None = None) -> int:
+def management_os_identity(system: str, release_text: str) -> str:
+    """Qualify literal Ubuntu host identity without evaluating os-release.
+
+    Only the two identity fields are consumed; ordinary descriptive metadata
+    remains irrelevant. Duplicates and malformed identity cannot authorize a
+    supported version by last-write-wins or by stripping an unmatched quote.
+    This does not change the separate Ubuntu 24.04 Docker image contract.
+    """
+    if system != "Linux":
+        raise ValueError(f"unsupported management OS: system={system}")
+    if not isinstance(release_text, str):
+        raise ValueError("os-release identity must be UTF-8 text")
+    identity: dict[str, str] = {}
+    for line in release_text.splitlines():
+        key, separator, raw = line.partition("=")
+        if key.strip() in {"ID", "VERSION_ID"} and (not separator or key != key.strip()):
+            raise ValueError("malformed os-release identity assignment")
+        if not separator or key not in {"ID", "VERSION_ID"}:
+            continue
+        if key in identity:
+            raise ValueError(f"duplicate os-release identity field: {key}")
+        value = raw.strip()
+        if not re.fullmatch(r'''(?:[A-Za-z0-9_.-]+|"[A-Za-z0-9_.-]+"|'[A-Za-z0-9_.-]+')''', value):
+            raise ValueError(f"malformed literal os-release identity field: {key}")
+        identity[key] = value[1:-1] if value.startswith(('"', "'")) else value
+    if set(identity) != {"ID", "VERSION_ID"}:
+        raise ValueError("os-release requires unique ID and VERSION_ID")
+    if identity["ID"] != "ubuntu" or identity["VERSION_ID"] not in {"22.04", "24.04"}:
+        raise ValueError(
+            f"unsupported management OS: ID={identity['ID']}, "
+            f"VERSION_ID={identity['VERSION_ID']}; require Ubuntu 22.04 or 24.04 / Linux"
+        )
+    return f"Ubuntu {identity['VERSION_ID']} / Linux"
+
+
+def _main_bound_deployment(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     recorder = Recorder()
     try:
@@ -1534,6 +1969,10 @@ def main(argv: list[str] | None = None) -> int:
         f"{os.getpid()}.json"
     )
     root = args.root.resolve()
+    try:
+        configure_validation_deployment_root(root)
+    except (ValueError, OSError, RuntimeError) as exc:
+        recorder.fail("deployment-contract-root", str(exc))
     project: Path | None = None
     parent: dict[str, Any] | None = None
     subnets: tuple[DhcpSubnet, ...] | None = None
@@ -1545,25 +1984,14 @@ def main(argv: list[str] | None = None) -> int:
     dhcp_status = "enabled"
 
     system = platform.system()
-    os_release: dict[str, str] = {}
     try:
-        for line in Path("/etc/os-release").read_text(encoding="utf-8").splitlines():
-            if "=" in line:
-                key, value = line.split("=", 1)
-                os_release[key] = value.strip().strip('"')
-    except OSError as exc:
+        os_identity = management_os_identity(
+            system, Path("/etc/os-release").read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
         recorder.fail("operating-system", str(exc))
     else:
-        if system == "Linux" and os_release.get("ID") == "ubuntu" and os_release.get(
-            "VERSION_ID"
-        ) == "24.04":
-            recorder.passed("operating-system", "Ubuntu 24.04 / Linux")
-        else:
-            recorder.fail(
-                "operating-system",
-                f"system={system}, ID={os_release.get('ID')}, "
-                f"VERSION_ID={os_release.get('VERSION_ID')}",
-            )
+        recorder.passed("operating-system", os_identity)
 
     missing_modules = [
         name for name in REQUIRED_PYTHON_MODULES
@@ -1594,6 +2022,7 @@ def main(argv: list[str] | None = None) -> int:
                     f"python/cgi={counts['python']}, shell={counts['shell']}",
                 )
 
+    selected_dhcp = None
     project = recorder.guarded(
         "project-path", lambda: project_path(root, args.project),
     )
@@ -1648,8 +2077,11 @@ def main(argv: list[str] | None = None) -> int:
                 if trusted in {"enabled", "disabled"}:
                     dhcp_status = trusted
                     recorder.passed("dhcp-mode", f"global-bound {trusted}")
+            selected_dhcp = recorder.guarded(
+                "selected-dhcp-authority", lambda: selected_dhcp_authority(project, parent),
+            )
             artifact_errors, checked = component_artifact_errors(
-                project, parent, dhcp_status=dhcp_status,
+                project, parent, dhcp_status=dhcp_status, selected_dhcp=selected_dhcp,
             )
             if artifact_errors:
                 for error in artifact_errors:
@@ -1661,6 +2093,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             pointer_errors = runtime_pointer_errors(
                 root, project, parent, dhcp_status=dhcp_status,
+                selected_dhcp=selected_dhcp,
             )
             if pointer_errors:
                 for error in pointer_errors:
@@ -1890,19 +2323,15 @@ def main(argv: list[str] | None = None) -> int:
                         "三个控制 CGI hash 与 executable mode 匹配",
                     )
         if project is not None and dhcp_status == "enabled":
-            for name in DHCP_OUTPUTS:
-                generated = project / "99-output-dhcp" / name
-                installed = Path("/etc/dhcp") / name
-                try:
-                    left = sha256_file(generated)
-                    right = sha256_file(installed)
-                except (OSError, ValueError) as exc:
-                    recorder.fail("installed-dhcp", f"{name}: {exc}")
-                else:
-                    if left == right:
-                        recorder.passed("installed-dhcp", f"{name} hash 匹配")
-                    else:
-                        recorder.fail("installed-dhcp", f"{name} hash 漂移")
+            installed_errors = installed_dhcp_errors(
+                project, parent, Path("/etc/dhcp"), selected_dhcp=selected_dhcp,
+            )
+            if installed_errors:
+                for error in installed_errors:
+                    recorder.fail("installed-dhcp", error)
+            else:
+                for name in DHCP_OUTPUTS:
+                    recorder.passed("installed-dhcp", f"{name} parent-selected hash 匹配")
         if subnets is not None:
             for address in sorted({row.service_ip for row in subnets if row.service_ip}):
                 try:
@@ -2135,6 +2564,16 @@ def main(argv: list[str] | None = None) -> int:
                 for platform_name in ("cumulus", "nvos"):
                     if not isinstance(components, dict) or platform_name not in components:
                         continue
+                    if platform_name == "cumulus":
+                        try:
+                            image_required = cumulus_runtime_image_required(root, project, parent)
+                        except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
+                            recorder.fail("http-image-policy", f"Cumulus: {exc}")
+                            continue
+                        if image_required is False:
+                            recorder.passed("http-image-policy",
+                                "Cumulus actual selected bootstrap upgrade=false; image not used")
+                            continue
                     image_dir = root / "ztp/image" / platform_name
                     try:
                         publications = sorted(image_dir.iterdir())
@@ -2256,6 +2695,23 @@ def main(argv: list[str] | None = None) -> int:
         f"FAIL={levels['FAIL']}"
     )
     return 1 if levels["FAIL"] or (args.strict_warnings and levels["WARN"]) else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    global _VALIDATION_DEPLOYMENT_ROOT
+    previous = _VALIDATION_DEPLOYMENT_ROOT
+    previous_path = sys.path[:]
+    previous_modules = {name: module for name, module in sys.modules.copy().items()
+                        if name == "tools" or name.startswith("tools.")}
+    try:
+        return _main_bound_deployment(argv)
+    finally:
+        _VALIDATION_DEPLOYMENT_ROOT = previous
+        sys.path[:] = previous_path
+        for name in tuple(sys.modules):
+            if name == "tools" or name.startswith("tools."):
+                sys.modules.pop(name, None)
+        sys.modules.update(previous_modules)
 
 
 if __name__ == "__main__":
