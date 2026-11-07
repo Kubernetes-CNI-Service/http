@@ -84,7 +84,8 @@ from project_contract import (
     ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS, PUBLICKEY_DIRECTORIES, SETUP_LINK_SPECS,
-    ACTIVE_PROJECT_EXCLUDED_NAMES, ACTIVE_PROJECT_POINTER, SHARED_LINK_SPECS, active_project_dir, pointer_link_specs,
+    ACTIVE_PROJECT_EXCLUDED_NAMES, ACTIVE_PROJECT_POINTER, RETIRED_SETUP_LINKS, SHARED_LINK_SPECS,
+    active_project_dir, pointer_link_specs,
     pointer_link_target, setup_dynamic_link_patterns,
     detect_global_schema_version,
     normalize_issue_tracker_policy,
@@ -912,8 +913,9 @@ def _remove_legacy_links(proj_dir):
     """旧链接清理（R16-13，切换之后）：旧版 setup 建过、规格表里已经没有的链接，只删链接。
 
     3 条旧 NVOS 输出名和 cumulus AIR/output-p2p（O14 的旧名）、P2P 与 AIR 目录里按工作簿名建的 *.xlsx
-    链接（p2p.xlsx 除外）、旧版建在项目 99-output-monitor/<网络>/ 下的 3 条 CSV 链接（WP-6 D6 交给 setup）。
-    同名位置是真实文件或目录时只提示、不删。
+    链接（p2p.xlsx 除外）、旧版建在项目 99-output-monitor/<网络>/ 下的 3 条 CSV 链接（WP-6 D6 交给 setup），
+    以及 R-013 退出规格表的 RETIRED_SETUP_LINKS（monitor/99-output-ufm；http dev 2026-11-08：与上面 4 个旧名同样
+    处理，WP-10 P1）。同名位置是真实文件或目录时只提示、不计错、不删（WP-3 D6）。
     """
     template = os.path.join(ZTP, "config")
     candidates = [os.path.join(template, "nvos", "template", name)
@@ -926,6 +928,7 @@ def _remove_legacy_links(proj_dir):
                                  if os.path.basename(path) != "p2p.xlsx"))
     candidates.extend(os.path.join(proj_dir, "99-output-monitor", network, csv)
                       for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
+    candidates.extend(os.path.join(HTTP_BASE, name) for name in RETIRED_SETUP_LINKS)
     for path in candidates:
         if os.path.islink(path):
             if _DRY_RUN:

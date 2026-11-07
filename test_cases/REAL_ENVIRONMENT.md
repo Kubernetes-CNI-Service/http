@@ -2792,3 +2792,99 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复后通过。
 - [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-ACTIVATE-PROJECT-002 — 从旧部署迁移：v3.1.0 部署的 AIR 管理服务器第一次跑 v3.1.1 的 load，再看 `--status`
+
+### 基本信息
+
+- Case ID：`TC-REAL-ACTIVATE-PROJECT-002`。
+- 名称：已由 v3.1.0 部署的环境，第一次运行 v3.1.1 的 load（load 调 setup）就把树里的直连链接迁移到
+  `DAY0-Prepare/activate-project` 指针；再跑一次没有任何变化；`--status` 正常。
+- 类型：real-environment / scenario / migration / failure-injection。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：R-016 详细设计 v1.1 §8 第 1～5 条与 R16-09；§4.3 与 §1 第 4 条（owner 2026-11-03：同名真实文件
+  或目录报错、不中断、不删除）；v3.1.1 详细工作指导 WP-10（REAL_ENV 一行）。
+- 自动化文件与测试方法：`test_cases.test_activate_project_workflow.DirectLayoutMigrationTests`：
+  - `test_first_setup_migrates_the_direct_layout_and_a_second_run_changes_nothing`（含迁移后 `--status`、load `--dry-run`）；
+  - `test_a_v310_tree_with_a_real_log_directory_migrates_it_by_the_receipt`；
+  - `test_a_real_file_or_directory_at_a_link_position_is_reported_and_kept_while_the_rest_migrates`；
+  - `test_a_real_directory_at_a_retired_link_position_is_warned_about_kept_and_not_an_error`；
+  - `test_a_migration_cut_off_midway_is_finished_by_the_next_setup`（R16-09）；
+  - `test_after_the_migration_the_infra_writer_logs_beside_the_migrated_logs`（依赖 WP-9b）。
+- 适用平台：management-server（AIR 管理服务器，Ubuntu 22.04，单项目，R-016 的前提）/ AIR。
+
+### 风险与目标
+
+- 要防止的故障：第一次 v3.1.1 load 之后，有固定链接还停在直连写法 `../DAY0-Prepare/<项目>/…`；指针没建或指错；
+  公钥目录被换成链接、目录里的真实文件被删；`infra/logs` 仍是直连、日志丢失或迁移凭据残留；`ztp/.setup_manifest`
+  还是旧内容；第二次 load 又改动链接；页面、worker、cron.sh、infra 写者读不到项目。
+- 涉及的模块和状态边界：`DAY0-Prepare/11-load.py` → `DAY0-Prepare/01-a-setup.py`（`_reconcile_links`、
+  `_switch_active_project`、`_process_pubkeys`、`_bind_infra_logs` 及回执函数、`_write_manifest`、`--status`）；
+  `tools/project_contract.py`（`pointer_link_specs`、`active_project_dir`、`managed_infra_log_project`）。
+- 成功标准：第一次 load 返回 0；规格表里 setup 写的每一行都是 `pointer_link_specs()` 的原文；指针 → 当前项目；
+  4 个公钥目录是真实目录，每把非空 key 一条经指针的链接；`infra/logs` 经指针、日志都在；manifest 首行
+  `# setup manifest — proj: <项目真实路径>`；第二次 load 前后链接清单逐行相同；`--status` 退出码 0。
+- 自动化不能证明的：真实的 v3.1.0 树（夹具按 `f741269` 的规格表实测构造：v3.1.0 有 74 行，v3.1.1 新加的 19 行
+  在旧树里没有，`monitor/99-output-ufm` 只在旧树里有；公钥目录只有 2 个）、Linux 上 `renameat2` 的日志迁移、
+  以 root 运行的 load、sync/tar 带到服务器的代码与服务器上已有的链接、真实服务与页面、worker 的读取。
+
+### 前置条件与输入
+
+- Fixture / 项目输入：owner 授权的 AIR 管理服务器，可快照回滚；已由 v3.1.0 部署并 load 过一个项目 P（单项目），
+  服务在运行。
+- 外部依赖：v3.1.1 候选源码的正式 full proof；按手册 Runbook 3/4 的正常发布路径把 v3.1.1 带到服务器。
+- 所需权限：Runbook 5 的 load 权限（sudo）。
+- 初始状态（开始前只读保存）：`ls -l DAY0-Prepare/activate-project`（应当不存在）；
+  `find . -path ./DAY0-Prepare -prune -o -type l -printf '%p -> %l\n' | sort`；4 个公钥目录的 `ls -la`；
+  `ls -la infra infra/logs`；`ztp/.setup_manifest`；项目 `99-output-infra` 的文件清单与 SHA-256；
+  服务状态（Apache、DHCP、12-ztp-monitor、worker、crontab）。不记录任何秘密。
+
+### 步骤
+
+1. 快照，保存上面的初始状态。
+2. v3.1.1 代码到位、load 之前：`python3 -B DAY0-Prepare/01-a-setup.py --status`。只读；按手册 Runbook 5
+   「迁移前的 status」，预期退出码 1，报没有激活的项目，规格表各行「指向别处」。
+3. 按 Runbook 5 的命令对 P 跑一次 load。保存 setup 段的输出：`[LINK] <路径>: <旧原文> → <新原文>`、
+   `[SWITCH] activate-project → P`、`[DEL] 旧公钥链接 …`。
+4. `python3 -B DAY0-Prepare/01-a-setup.py --status`：退出码 0，`[OK] activate-project 与链接规格表一致`。
+5. 与第 1 步对比：规格表各行改成经指针的原文；4 个公钥目录仍是真实目录（另 2 个由 setup 新建为真实目录），
+   项目里没有的 key 的链接被删，目录里的真实文件还在；`infra/logs` → `../DAY0-Prepare/activate-project/99-output-infra`，
+   日志的清单与 SHA-256 不变；`infra/` 下没有 `.logs-migration*`；manifest 首行指向 P 的真实路径。
+   v3.1.0 留下的退役链接 `monitor/99-output-ufm` 已被删除（http dev 2026-11-08：与 4 个旧名同样处理）；
+   这个位置如果是真实文件或目录，setup 只打 `[WARN]`、不计错、不删。
+6. 对 P 再跑一次同一条 load：链接清单与第 5 步逐行相同，manifest 内容相同。
+7. 读者：状态页、worker 一个周期、cron.sh 一次采集、`infra/deploy_infra.py` 写一条日志、`check_infra.py` 采集，
+   都落在 P（infra 写者依赖 WP-9b）。
+8. 故障注入（只在快照上）：
+   - a）重做第 1～3 步，在 load 的 setup 段中途打断（Ctrl-C 或结束 load 进程），再跑 load：结果与第 5 步一致（R16-09）。
+   - b）重做第 1～2 步，在一个固定链接位置放一个真实文件（例如 `ethernet/eth.csv`），跑 load：load 报失败（setup 以 1
+     退出），这个文件不被删、其余链接照常迁移、指针已建；把文件移走后重跑 load 正常。
+   - c）如果服务器上的 `infra/logs` 还是真实目录（REQ-19 之前的部署）：第一次 load 按回执把日志迁入项目；在迁移中途
+     打断后重跑能完成；凭据残留时 setup 拒绝继续，按手册 V2 §12「infra/logs 迁移凭据残留」处理。
+
+### 预期结果
+
+- 正向结果：第 3～7 步通过；8a 重跑后与一次完整迁移一致；8c 日志的清单与 SHA-256 不变。
+- 拒绝/失败结果：第 2 步退出码 1（迁移前的预期）；8b 的 load 失败、真实文件保留；8c 凭据残留时 setup 以 1 退出并
+  给出凭据相关的报错。
+- 不允许发生的副作用：项目里的用户文件或用户链接被改写、删除；公钥目录变成链接；日志丢失或重复；第二次 load
+  改动任何链接；服务器上跨项目切换；手工改链接或删凭据来「修好」。
+- 需要保存的证据：每一步的完整命令、输出和退出码；第 1、5、6 步的链接清单与 diff；公钥目录、`infra/`、
+  `99-output-infra` 的清单与 SHA-256；manifest 前后内容；服务状态前后对比；指针和链接的属主（`stat`，R16-23 的
+  降权在 v3.1.2 的 M6）。
+
+### 故障注入与清理
+
+- 并发、超时、异常、重启或输入篡改：只做第 8 步列出的几项；不在真实客户源文件上做篡改。
+- 清理/回滚验证：恢复快照，核对服务、链接清单与快照前一致；不手工删除锁、凭据或 manifest。
+- 重复执行与幂等性：第 6 步；8a 打断后重跑。
+- 风险：load 会停、起服务（服务切换）；AIR 地址冲突。失败时服务保持停止，按 DEV 规则修正后重跑 load，
+  不自动回退到旧项目。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_activate_project_workflow.py`（`DirectLayoutMigrationTests`，6 例；infra 写者一例依赖 WP-9b）。
+- [ ] 修复前能够稳定失败（迁移没有单独的实现，这是验收测试；改用变异对照，见 agentWP10 报告。退役链接一项是先红后绿）。
+- [x] 修复后通过（集成头 `0ef1f7f` 加本包：除依赖 WP-9b 的一例外全部通过；叠加 WP-9b 的生产改动后全部通过）。
+- [x] 已纳入全量 discovery（模块已在 suite `deployment-runtime` 和 workflow `activate_project_pointer_lifecycle` 的 tests 里；
+  分片车道在集成时按 `lane_for_new_modules.py` 定，WP-3 建议 w0）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。未执行前不得写 PASS。

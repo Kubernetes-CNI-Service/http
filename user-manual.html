@@ -13212,6 +13212,7 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
           <li>Native 服务失败：检查端口、ZTP 地址、Apache/DHCP 配置和 systemd 状态。</li>
           <li>Docker：当前未准入生产；隔离验证失败应停在首个证据点并回到 canonical 工作树修复，外来同名容器不删除。</li>
           <li>ZTP 失败：核对实际 ZTP 接口、DHCP lease、MAC YAML、HTTP 资源和 bootstrap 日志。</li>
+          <li>infra/logs 迁移凭据残留：setup（含 load 调用的 setup）报「日志迁移凭据……」「日志迁移临时凭据未结清」或「待恢复日志凭据不属于所选项目」并以 1 退出、拒绝继续，说明上次把真实目录 <code>infra/logs</code> 迁入项目 <code>99-output-infra</code> 时中断，留下了 <code>infra/.logs-migration.json</code> 或 <code>infra/.logs-migration.*</code>。先用同一个项目重跑 setup 或 load：凭据与现场一致时，setup 按凭据恢复原目录后重做迁移，或完成已提交的迁移。仍被拒绝时，先离线保全这些文件和项目里的 <code>99-output-infra/.logs-migration-source</code>，核对后再处理；不要删除凭据来让 setup 继续。</li>
           <li>NVOS 降级配置：IB 只读取当前受管 release 的 <code>latest_yaml/default_ib.yaml</code>，NVLink 只读取 <code>latest_yaml/default_nvl.yaml</code>。两者由项目 global 的对应 family 渲染并受 child/parent manifest 的名称、大小和 SHA-256 约束；缺失、漂移或预取失败时不得退回带占位密码的中性 <code>config/nvos/default.yaml</code>，专属配置失败后的 fallback 必须 fail closed。</li>
         </ul>
         <p>任何错误都应 fail closed。不要删除 lock、receipt、quarantine 或 status 文件来伪造成功。</p>
