@@ -130,7 +130,7 @@ _STRICT   = False  # --strict：把空公钥/xlsx/共享镜像占位文件视为
 _NO_UPGRADE = False  # load --no-upgrade：不检查或发布升级镜像
 _CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
-_SWITCH_SCOPE = "all"  # --switch：只严格校验所选设备族的 global 分支
+_SWITCH_SCOPE = None  # --switch 给定的设备族集合；None 时按 CSV 推断（_switch_families）
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
@@ -2079,6 +2079,54 @@ def _is_matching_production_air_pair(left_hostname, left_type,
     return len(matches) == 1 and matches[0] == production_key
 
 
+# 设备 CSV type 列的取值集合
+_ETH_TYPES  = frozenset({"eth", "eth_spx", "spx"})
+_NVOS_TYPES = frozenset({"ib", "nvl"})
+# server_mgmt 是 server 的新写法；server_ufm 只用前 7 列，由 ufm-setup-upgrade 读取（owner 2026-10-19）
+_SERVER_TYPES = frozenset({"server", "server_mgmt"})
+_UFM_TYPES = frozenset({"server_ufm"})
+_AIR_TYPES = frozenset({"air"})
+_JUMP_TYPES = frozenset({"eth_jump"})
+_SUPPORTED_TYPES = (
+    _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _UFM_TYPES | _AIR_TYPES | _JUMP_TYPES
+)
+# 每个交换机族由哪些 type 构成；air 与 11-load 的 SWITCH_SCOPE_TYPES 一致算 eth 族。
+# eth_jump、server 类不属于任何族（I-023）。
+_SWITCH_FAMILY_TYPES = {
+    "eth": _ETH_TYPES | _AIR_TYPES,
+    "ib": frozenset({"ib"}),
+    "nvl": frozenset({"nvl"}),
+}
+
+
+def _switch_families(csv_path):
+    """返回本次严格校验 global 的交换机族集合（I-023）。
+
+    给了 --switch 就按参数；没给时按 CSV type 列里实际出现的类型推断，口径与
+    _validate_eth_csv 一致：跳过空行，没有 type 列或行太短时算 eth。只有 eth_jump
+    的项目因此不按 Cumulus 的要求校验 eth 段。CSV 不存在或读不了时不推断任何族，
+    读取错误由 02-devices_config.csv 的校验报告。
+    """
+    if _SWITCH_SCOPE is not None:
+        return _SWITCH_SCOPE
+    try:
+        with open(csv_path, newline="", encoding="utf-8-sig") as stream:
+            reader = csv.reader(stream)
+            header = [cell.strip().lower() for cell in next(reader, [])]
+            type_col = header.index("type") if "type" in header else None
+            present = {
+                row[type_col].strip().lower()
+                if type_col is not None and len(row) > type_col else "eth"
+                for row in reader
+                if row and not all(_vna(cell) for cell in row)
+            }
+    except (OSError, UnicodeError, csv.Error):
+        return frozenset()
+    return frozenset(
+        family for family, types in _SWITCH_FAMILY_TYPES.items() if present & types
+    )
+
+
 def _validate_eth_csv(path):
     """逐行校验统一设备 CSV；server/air 仅校验各自消费流程所需字段。"""
     errors, warnings = [], []
@@ -2116,7 +2164,7 @@ def _validate_eth_csv(path):
 
     # CSV layout is bound only to the declared schema.  ETH policy is relevant
     # to Cumulus setup, not to an IB/NVL-only setup of a mixed inventory.
-    if schema_version == 2 and _SWITCH_SCOPE in {"all", "eth"}:
+    if schema_version == 2 and "eth" in _switch_families(path):
         switches = global_document.get("switches", [])
         eth_config = next((
             item["eth"] for item in switches
@@ -2132,18 +2180,6 @@ def _validate_eth_csv(path):
                 ]
             except ValueError as exc:
                 errors.append(f"  {exc}")
-
-    # ETH 设备类型集合
-    _ETH_TYPES  = {"eth", "eth_spx", "spx"}
-    _NVOS_TYPES = {"ib", "nvl"}
-    # server_mgmt 是 server 的新写法；server_ufm 只用前 7 列，由 ufm-setup-upgrade 读取（owner 2026-10-19）
-    _SERVER_TYPES = {"server", "server_mgmt"}
-    _UFM_TYPES = {"server_ufm"}
-    _AIR_TYPES = {"air"}
-    _JUMP_TYPES = {"eth_jump"}
-    _SUPPORTED_TYPES = (
-        _ETH_TYPES | _NVOS_TYPES | _SERVER_TYPES | _UFM_TYPES | _AIR_TYPES | _JUMP_TYPES
-    )
 
     def e(row_n, hn, msg):
         errors.append(f"  行{row_n} [{hn}] {msg}")
@@ -3110,32 +3146,20 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
 
     print("── 文件合法性检查 ────────────────────────────────────────────")
 
-    # 先读取 CSV 中存在的设备类型，按需校验对应的全局配置区段
+    # YAML 全局配置（合并格式）只严格校验有效族：给了 --switch 按参数，否则按
+    # CSV 里实际出现的交换机类型推断（I-023），避免纯 IB/NVL 或只有 eth_jump 的
+    # 项目被未使用的 Cumulus 策略阻断。
     csv_path = os.path.join(_CSV_DIR or proj_dir, "02-devices_config.csv")
-    types_in_csv = set()
-    if os.path.isfile(csv_path):
-        try:
-            with open(csv_path, newline="", encoding="utf-8-sig") as _f:
-                _rdr = csv.DictReader(_f)
-                for _row in _rdr:
-                    _t = _row.get("type", "").strip().lower()
-                    if _t:
-                        types_in_csv.add(_t)
-        except Exception:
-            pass
-
-    # YAML 全局配置（合并格式）。完整 setup 校验所有出现的设备族；由
-    # 11-load --switch 委派的 scoped setup 只校验所选设备族，避免纯 IB/NVL
-    # 发布被未使用的 Cumulus 策略阻断。
-    if _SWITCH_SCOPE in {"all", "eth"}:
+    families = _switch_families(csv_path)
+    if "eth" in families:
         _run("01-global.yaml (eth)",
              os.path.join(proj_dir, "01-global.yaml"),
              _validate_global_yaml)  # section_key="eth" by default
-    if _SWITCH_SCOPE in {"all", "ib"} and "ib" in types_in_csv:
+    if "ib" in families:
         _run("01-global.yaml (ib)",
              os.path.join(proj_dir, "01-global.yaml"),
              lambda p: _validate_global_yaml(p, section_key="ib"))
-    if _SWITCH_SCOPE in {"all", "nvl"} and "nvl" in types_in_csv:
+    if "nvl" in families:
         _run("01-global.yaml (nvl)",
              os.path.join(proj_dir, "01-global.yaml"),
              lambda p: _validate_global_yaml(p, section_key="nvl"))
@@ -3147,7 +3171,7 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
     # Keep this inside preflight and before _SetupLinkTransaction is created so
     # an invalid pair can never switch any runtime link.
     global_path = os.path.join(proj_dir, "01-global.yaml")
-    if (_SWITCH_SCOPE in {"all", "eth"}
+    if ("eth" in families
             and os.path.isfile(global_path) and os.path.isfile(csv_path)):
         _run(
             "schema v2 MLAG 跨文件合同",
@@ -4712,7 +4736,7 @@ def _parse_args(argv=None):
                         help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
     parser.add_argument(
         "--switch", choices=("eth", "ib", "nvl"), dest="switch_scope",
-        help="只严格校验所选设备族的 global 配置；供 scoped load 使用",
+        help="只严格校验所选设备族的 global 配置；不给时按 CSV 里出现的设备类型推断",
     )
     args = parser.parse_args(argv)
     if args.status or args.list_projects:
@@ -4834,7 +4858,9 @@ def main(argv=None):
     _STRICT = args.strict
     _NO_UPGRADE = bool(getattr(args, "no_upgrade", False))
     _CONFIRM_PROJECT_SWITCH = args.confirm_project_switch
-    _SWITCH_SCOPE = getattr(args, "switch_scope", None) or "all"
+    _SWITCH_SCOPE = (
+        frozenset({args.switch_scope}) if getattr(args, "switch_scope", None) else None
+    )
     key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")
     if key_mode not in ("", "server-delegated"):
         print(_c(RED, "[ERROR] invalid private setup key-preparation mode"))
