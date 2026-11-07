@@ -1171,6 +1171,10 @@ class ImpactManifestTests(unittest.TestCase):
                 "infra/requirements-ibsw-upgrade-macos-cp39.txt",
                 "test_cases/f01_sdk_venv.py",
                 "infiniband/bringup/xdr-initial-setup/infra-neutral.conf",
+                # 2026-11-07 (v3.1.0 M1a): support modules of the tests the 11-load batch brought in.
+                "test_cases/linux_runtime_lock_model.py",
+                "test_cases/source_tools_fixture.py",
+                "test_cases/subprocess_timeout_evidence.py",
             ],
             manifest["tracked_support"],
         )

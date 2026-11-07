@@ -33,7 +33,8 @@
         "test_cases.test_deps_table",
         "test_cases.test_deps_table_workflow",
         "test_cases.test_issue_tracker_engine_runtime",
-        "test_cases.test_private_public_fixture_input"
+        "test_cases.test_private_public_fixture_input",
+        "test_cases.test_subprocess_timeout_evidence"
       ]
     },
     {
@@ -184,7 +185,12 @@
         "test_cases.test_initial_setup_selfcontained_neutral",
         "test_cases.test_initial_setup_target_credentials_workflow",
         "test_cases.test_initial_setup_target_outcome_summary",
-        "test_cases.test_initial_setup_target_password_policy"
+        "test_cases.test_initial_setup_target_password_policy",
+        "test_cases.test_current_exclusive_deployment_lock",
+        "test_cases.test_darwin_lock_kernel_witness",
+        "test_cases.test_infra_component_contract",
+        "test_cases.test_infra_component_entry_contract",
+        "test_cases.test_infra_component_workflow"
       ]
     },
     {
@@ -227,7 +233,9 @@
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow",
         "test_cases.test_ib_cvt_project_output",
-        "test_cases.test_load_ib_cvt"
+        "test_cases.test_load_ib_cvt",
+        "test_cases.test_dhcp_deferred_candidate_contract",
+        "test_cases.test_generation_input_binding_workflow"
       ]
     },
     {
@@ -650,7 +658,10 @@
     "infra/requirements-ibsw-upgrade.txt",
     "infra/requirements-ibsw-upgrade-macos-cp39.txt",
     "test_cases/f01_sdk_venv.py",
-    "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+    "infiniband/bringup/xdr-initial-setup/infra-neutral.conf",
+    "test_cases/linux_runtime_lock_model.py",
+    "test_cases/source_tools_fixture.py",
+    "test_cases/subprocess_timeout_evidence.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -839,7 +850,8 @@
     "tools/ibsw_upgrade_executor.py": "tools/ibsw_upgrade_executor.py",
     "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
     "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
-    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py"
+    "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py",
+    "tools/infra_components.py": "tools/infra_components.py"
   },
   "test_rules": [
     {
@@ -2151,6 +2163,44 @@
       ],
       "tests": [
         "test_cases.test_initial_setup_selfcontained_neutral"
+      ]
+    },
+    {
+      "id": "infra_load_component_data",
+      "paths": [
+        "tools/infra_components.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_component_contract"
+      ]
+    },
+    {
+      "id": "infra_load_components_entry_direct",
+      "paths": [
+        "infra/deploy_infra.py",
+        "infra/infra-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_component_entry_contract"
+      ]
+    },
+    {
+      "id": "current_exclusive_deployment_lock_direct",
+      "paths": [
+        "tools/deployment_lock.py"
+      ],
+      "tests": [
+        "test_cases.test_current_exclusive_deployment_lock",
+        "test_cases.test_darwin_lock_kernel_witness"
+      ]
+    },
+    {
+      "id": "r22_dhcp_private_candidate_direct",
+      "paths": [
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py"
+      ],
+      "tests": [
+        "test_cases.test_dhcp_deferred_candidate_contract"
       ]
     }
   ],
@@ -3670,6 +3720,43 @@
       "tests": [
         "test_cases.test_initial_setup_target_outcome_summary"
       ]
+    },
+    {
+      "id": "load_current_call_to_finite_infra_component_install",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "infra/deploy_infra.py",
+        "infra/infra-setup.py",
+        "tools/infra_components.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_component_workflow"
+      ]
+    },
+    {
+      "id": "generation_input_binding_setup_load_c2",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "ztp/optimize/sample_links.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_input_binding_workflow"
+      ]
+    },
+    {
+      "id": "r22_scoped_dhcp_activation_workflow",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "tools/ztp_service_runtime.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "infra/docker/activate.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_input_binding_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -4383,6 +4470,32 @@
       ],
       "tests": [
         "test_cases.test_initial_setup_selfcontained_neutral"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/linux_runtime_lock_model.py"
+      ],
+      "tests": [
+        "test_cases.test_load_release_transaction"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/source_tools_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_generation_input_binding_workflow",
+        "test_cases.test_load_release_transaction"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/subprocess_timeout_evidence.py"
+      ],
+      "tests": [
+        "test_cases.test_subprocess_timeout_evidence",
+        "test_cases.test_bootstrap_config_fetch_contract"
       ]
     }
   ]
