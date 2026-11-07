@@ -14,6 +14,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import shlex
 import shutil
@@ -3332,18 +3333,25 @@ print("actual-copied-validator-selected-B")
 
     # owner 2026-11-07 选定方案 A（http dev 转达，owner 原话「按照你的建议来」）。依据：
     #   1. DEV 基线 95c6c3c 的 11-load 没有「冻结旧版 release」这一步，也不保存旧输入的原文；
-    #      平铺父 release 记录的输入在上次 load 之后被改过，就再也无法冻结。
+    #      DEV 本来就不冻结，所以跳过冻结没有安全代价。
     #   2. R-016「往前恢复」（owner 11-03）：失败时修好原因重跑 load，不依赖退回旧版。
     #   3. 决定 C（owner 11-04）：跨项目 load 失败不自动退回旧项目，服务保持停止、提示重跑。
-    #   4. http dev 11-07 审定：方案 A 针对的是「旧版已无法用当前文件复原」，记录的源文件
-    #      已不存在（如 P2P 工作簿换名删旧）也属此类。
-    # 所以 DEV 时代的平铺父 release 只因「项目当前输入（或平铺 DHCP 产物）的字节与记录的
-    # 哈希不一致，或已不存在」而冻结不了时，打警告、照常 load、不保留旧版回退点，与项目
-    # 里没有父 release 相同。父 release 本身不合法、选择器或来源不安全、存在但不是单链接
-    # 普通文件、读取期间身份变化，以及已有 `current` 选择器的代次分支里的任何错误，一律
-    # 照旧拒绝（下面各测试逐项钉住）。
+    #   4. http dev 11-07 审定（第 2 版）：方案 A 针对的是「旧版已无法用当前文件复原」，记录的
+    #      源文件已不存在（如 P2P 工作簿换名删旧）也属此类。
+    #   5. http dev 11-07 Mac 主树实测（第 3 版）：父 release 记录 `p2p/<工作簿>.xlsx`，项目的
+    #      `p2p/` 是 owner R-014 第 3 条允许的、指向项目外资料目录的用户链接，第 2 版仍拒绝。
+    # 所以 DEV 时代的平铺父 release 凡是冻结不了（输入改动或已不存在、来源经链接或多链接、
+    # 来源路径不安全、旧格式或父 release 不合法、绑定的 DHCP manifest 无效），都打一条写明
+    # 原因类别的警告、照常 load、不保留旧版回退点，与项目里没有父 release 相同。仍然拒绝的
+    # 只有：读取期间身份变化（并发改动，应当重跑）、`99-output-ztp` 本身不规范，以及选择器
+    # 和已有 `current` 的代次分支里的任何错误（下面各测试逐项钉住）。
     _LEGACY_FREEZE_WARNING = "旧版 release 无法冻结"
     _LEGACY_NO_FALLBACK = "本次 load 不保留旧版回退点"
+    _LEGACY_CHANGED = "输入已改动"
+    _LEGACY_ABSENT = "来源已不存在"
+    _LEGACY_NOT_OWNED = "来源不是项目内的普通文件"
+    _LEGACY_UNSAFE = "来源路径不安全"
+    _LEGACY_FORMAT = "旧 release 格式无法迁移"
 
     def _publish_legacy_flat_parent_then_edit_global(self) -> bytes:
         LOAD.validate_and_publish_release(self.project, self.inputs)
@@ -3366,10 +3374,22 @@ print("actual-copied-validator-selected-B")
             # A refused legacy preflight has staged nothing.
             self.assertFalse(os.path.lexists(self.project / "99-output-ztp/generations"))
 
+    def _assert_flat_parent_skipped(self, category: str, label: str) -> str:
+        # One warning names the reason category and, under it, the source label.
+        output = self.project / "99-output-ztp"
+        selector_target, stdout = self._freeze_and_capture()
+        self.assertIsNone(selector_target)
+        self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+        self.assertIn(self._LEGACY_NO_FALLBACK, stdout)
+        self.assertRegex(stdout, re.escape(category) + "[^：；]*：[^；）]*" + re.escape(label))
+        self.assertFalse(os.path.lexists(output / "current"))
+        self.assertFalse(os.path.lexists(output / "generations"))
+        return stdout
+
     def _resign_flat_parent(self, mutate) -> None:
         # The release ID is the documented digest of the parent's basis keys
         # (11-load release_basis); re-signing keeps the parent itself valid so
-        # that only the injected field can be the reason for a refusal.
+        # that only the injected field can be the reason it cannot be frozen.
         parent_file = self.project / "99-output-ztp/current-release.json"
         parent = json.loads(parent_file.read_text(encoding="utf-8"))
         mutate(parent)
@@ -3451,6 +3471,42 @@ print("actual-copied-validator-selected-B")
             LOAD.ensure_previous_generation_frozen(self.project),
         )
 
+    def test_legacy_flat_parent_with_p2p_dir_linked_outside_the_project_is_not_frozen(self) -> None:
+        # 第 3 版（依据 5，http dev 11-07 Mac 主树实测）：DEV 时代的父 release 记录
+        # `p2p/<工作簿>.xlsx`，项目的 `p2p/` 链接到项目外的资料目录（owner R-014 第 3 条允许）。
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        parent_file = output / "current-release.json"
+        materials = self.root / "Work/materials"
+        materials.mkdir(parents=True)
+        workbook_name = self.p2p_source.name
+        self.p2p_source.rename(materials / workbook_name)
+        p2p_dir = self.project / "p2p"
+        p2p_dir.symlink_to(materials)
+        self.p2p_file.unlink()
+        self.p2p_file.symlink_to(f"p2p/{workbook_name}")
+
+        def record_p2p_dir_source(parent):
+            parent["input_sources"]["p2p"]["path"] = f"p2p/{workbook_name}"
+
+        self._resign_flat_parent(record_p2p_dir_source)
+        flat_parent = parent_file.read_bytes()
+        stdout = self._assert_flat_parent_skipped(self._LEGACY_NOT_OWNED, "inputs/p2p")
+        # The workbook bytes still match the record: the link is the only reason.
+        self.assertNotIn(self._LEGACY_CHANGED, stdout)
+        self.assertEqual(flat_parent, parent_file.read_bytes())
+        self.assertEqual(f"p2p/{workbook_name}", os.readlink(self.p2p_file))
+
+        # Control: the same record with `p2p/` as a real project directory is frozen.
+        p2p_dir.unlink()
+        p2p_dir.mkdir()
+        (materials / workbook_name).rename(p2p_dir / workbook_name)
+        release_id = json.loads(flat_parent)["release_id"]
+        self.assertEqual(
+            f"generations/{release_id}",
+            LOAD.ensure_previous_generation_frozen(self.project),
+        )
+
     def test_legacy_drift_tolerance_keeps_refusing_a_non_link_or_unsafe_selector(self) -> None:
         self._publish_legacy_flat_parent_then_edit_global()
         selector = self.project / "99-output-ztp/current"
@@ -3472,7 +3528,25 @@ print("actual-copied-validator-selected-B")
                     else:
                         selector.unlink()
 
-    def test_legacy_drift_tolerance_keeps_refusing_an_invalid_parent(self) -> None:
+    def test_legacy_flat_parent_skip_does_not_cover_a_non_canonical_output_directory(self) -> None:
+        # `99-output-ztp` 本身不规范（这里是指向项目外真实目录的链接）时照旧拒绝，
+        # 即使其中的平铺父 release 本来属于可跳过的情况（输入已改动）。
+        self._publish_legacy_flat_parent_then_edit_global()
+        output = self.project / "99-output-ztp"
+        elsewhere = self.root / "elsewhere-output"
+        output.rename(elsewhere)
+        output.symlink_to(elsewhere)
+        try:
+            self._assert_freeze_refused()
+            self.assertFalse(os.path.lexists(elsewhere / "current"))
+            self.assertFalse(os.path.lexists(elsewhere / "generations"))
+        finally:
+            output.unlink()
+            elsewhere.rename(output)
+
+    def test_legacy_flat_parent_in_an_unmigratable_format_is_not_frozen(self) -> None:
+        # 第 3 版（依据 1、5）：父 release 本身不合法或是旧格式（很早的 DEV 项目可能是
+        # schema 1），旧版无法迁移；与输入改动一样警告并跳过，类别写「旧 release 格式无法迁移」。
         self._publish_legacy_flat_parent_then_edit_global()
         output = self.project / "99-output-ztp"
         parent_file = output / "current-release.json"
@@ -3493,15 +3567,14 @@ print("actual-copied-validator-selected-B")
             with self.subTest(kind=kind):
                 parent_file.write_bytes(payload)
                 try:
-                    self._assert_freeze_refused()
-                    self.assertFalse(os.path.lexists(output / "current"))
+                    self._assert_flat_parent_skipped(self._LEGACY_FORMAT, "current-release.json")
                 finally:
                     parent_file.write_bytes(original)
         with self.subTest(kind="parent-hard-link"):
             alias = output / "parent-alias.json"
             os.link(parent_file, alias)
             try:
-                self._assert_freeze_refused()
+                self._assert_flat_parent_skipped(self._LEGACY_FORMAT, "current-release.json")
             finally:
                 alias.unlink()
         with self.subTest(kind="parent-symlink"):
@@ -3509,13 +3582,12 @@ print("actual-copied-validator-selected-B")
             parent_file.rename(real)
             parent_file.symlink_to(real.name)
             try:
-                self._assert_freeze_refused()
+                self._assert_flat_parent_skipped(self._LEGACY_FORMAT, "current-release.json")
             finally:
                 parent_file.unlink()
                 real.rename(parent_file)
         # A flat DHCP manifest which the (re-signed, valid) parent binds but which is
-        # itself invalid is the parent's own defect, not drift: it still refuses and
-        # nothing is staged.
+        # itself invalid cannot be migrated either.
         flat = self.ztp / "config/isc-dhcp-server"
         manifest_file = flat / "dhcp-release-manifest.json"
         original_manifest = manifest_file.read_bytes()
@@ -3544,12 +3616,11 @@ print("actual-copied-validator-selected-B")
             self._resign_flat_parent(bind)
 
         # Control for the binding: a valid re-serialized manifest bound the same way
-        # leaves the edited global as the only finding, which is tolerated.
+        # leaves the edited global as the only finding.
         bind_flat_manifest(json.dumps(manifest, indent=1).encode("utf-8"))
         try:
-            selector_target, stdout = self._freeze_and_capture()
-            self.assertIsNone(selector_target)
-            self.assertIn("inputs/global", stdout)
+            stdout = self._assert_flat_parent_skipped(self._LEGACY_CHANGED, "inputs/global")
+            self.assertNotIn(self._LEGACY_FORMAT, stdout)
             self.assertNotIn("dhcp/", stdout)
         finally:
             manifest_file.write_bytes(original_manifest)
@@ -3558,23 +3629,22 @@ print("actual-copied-validator-selected-B")
             with self.subTest(kind=kind):
                 bind_flat_manifest(payload)
                 try:
-                    self._assert_freeze_refused()
+                    self._assert_flat_parent_skipped(self._LEGACY_FORMAT, "current-release.json")
                 finally:
                     manifest_file.write_bytes(original_manifest)
                     parent_file.write_bytes(original)
-        self.assertFalse(os.path.lexists(output / "current"))
 
-    def test_legacy_drift_tolerance_keeps_refusing_an_unsafe_source_path(self) -> None:
+    def test_legacy_flat_parent_with_unsafe_source_path_is_not_frozen(self) -> None:
+        # 第 3 版（依据 1、5）：父 release 记录的来源路径不安全时旧版无法冻结，警告并跳过。
         self._publish_legacy_flat_parent_then_edit_global()
         output = self.project / "99-output-ztp"
         parent_file = output / "current-release.json"
         original = parent_file.read_bytes()
         # Control for the re-signing helper: an identity re-sign is still a valid
-        # parent, so the only remaining finding is the edited global (tolerated).
+        # parent, so the only remaining finding is the edited global.
         self._resign_flat_parent(lambda parent: None)
-        selector_target, stdout = self._freeze_and_capture()
-        self.assertIsNone(selector_target)
-        self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+        stdout = self._assert_flat_parent_skipped(self._LEGACY_CHANGED, "inputs/global")
+        self.assertNotIn(self._LEGACY_UNSAFE, stdout)
         for unsafe in ("../outside P2P.xlsx", "/nonexistent/outside P2P.xlsx",
                        "./demo P2P_v1.0.xlsx"):
             with self.subTest(path=unsafe):
@@ -3582,46 +3652,72 @@ print("actual-copied-validator-selected-B")
                     parent["input_sources"]["p2p"]["path"] = unsafe
                 self._resign_flat_parent(point_p2p_elsewhere)
                 try:
-                    self._assert_freeze_refused()
-                    self.assertFalse(os.path.lexists(output / "current"))
+                    self._assert_flat_parent_skipped(self._LEGACY_UNSAFE, "inputs/p2p")
                 finally:
                     parent_file.write_bytes(original)
 
-    def test_legacy_drift_tolerance_keeps_refusing_a_non_regular_or_unstable_input(self) -> None:
-        # The edited global is found first; a later input which is not an owned
-        # single-link regular file, or which changes while it is read, still refuses.
+    def test_legacy_flat_parent_with_linked_or_multilink_sources_is_not_frozen(self) -> None:
+        # 第 3 版（依据 1、5）：来源存在但不是项目内的单链接普通文件（硬链接、符号链接、
+        # 悬空链接，或平铺 DHCP 输出名是目录），旧版无法冻结，警告并跳过。
         self._publish_legacy_flat_parent_then_edit_global()
-        output = self.project / "99-output-ztp"
-        original_subnet = self.subnet_file.read_bytes()
-        with self.subTest(kind="hard-link"):
+        flat = self.ztp / "config/isc-dhcp-server"
+        with self.subTest(kind="input-hard-link"):
             alias = self.project / "subnet-alias.csv"
             os.link(self.subnet_file, alias)
             try:
-                self._assert_freeze_refused()
+                self._assert_flat_parent_skipped(self._LEGACY_NOT_OWNED, "inputs/subnet")
             finally:
                 alias.unlink()
-        with self.subTest(kind="symlink"):
-            real = self.project / "subnet-real.csv"
-            self.subnet_file.rename(real)
-            self.subnet_file.symlink_to(real.name)
+        for kind, target in (("input-symlink", "subnet-real.csv"),
+                             ("input-dangling-symlink", "subnet-missing.csv")):
+            with self.subTest(kind=kind):
+                real = self.project / "subnet-real.csv"
+                self.subnet_file.rename(real)
+                self.subnet_file.symlink_to(target)
+                try:
+                    self._assert_flat_parent_skipped(self._LEGACY_NOT_OWNED, "inputs/subnet")
+                finally:
+                    self.subnet_file.unlink()
+                    real.rename(self.subnet_file)
+        with self.subTest(kind="dhcp-output-directory"):
+            hosts = flat / "dhcpd_ib.hosts"
+            moved = hosts.with_name(hosts.name + ".moved")
+            hosts.rename(moved)
+            hosts.mkdir()
             try:
-                self._assert_freeze_refused()
+                self._assert_flat_parent_skipped(self._LEGACY_NOT_OWNED, "dhcp/dhcpd_ib.hosts")
             finally:
-                self.subnet_file.unlink()
-                real.rename(self.subnet_file)
+                hosts.rmdir()
+                moved.rename(hosts)
+
+    def test_legacy_flat_parent_freeze_still_refuses_a_source_changed_while_read(self) -> None:
+        # 读取期间来源身份变化说明有并发改动，应当重跑：照旧拒绝，即使同一父 release
+        # 还有可跳过的发现（已改动的 global、经硬链接的 subnet）。
+        self._publish_legacy_flat_parent_then_edit_global()
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        original_subnet = self.subnet_file.read_bytes()
         real_read_bytes = Path.read_bytes
-        # The drifted global itself, and a later input read only because drift
-        # does not stop the checks: a read whose file identity moves on refuses.
-        for kind, victim in (("edited-global-changed-while-read", self.global_file),
-                             ("later-subnet-changed-while-read", self.subnet_file)):
+        cases = (
+            # The drifted global itself, and a later input read only because
+            # findings do not stop the checks.
+            ("edited-global-changed-while-read", self.global_file, False),
+            ("later-subnet-changed-while-read", self.subnet_file, False),
+            # A flat DHCP output read after an input finding (hard-linked subnet).
+            ("dhcp-changed-while-read-after-linked-subnet", flat / "dhcpd.conf", True),
+        )
+        for kind, victim, link_subnet in cases:
             with self.subTest(kind=kind):
                 original = victim.read_bytes()
                 rewrites = []
+                alias = self.project / "subnet-alias.csv"
+                if link_subnet:
+                    os.link(self.subnet_file, alias)
 
                 def rewrite_while_reading(path, victim=victim, rewrites=rewrites):
                     content = real_read_bytes(path)
                     if path.name == victim.name and not rewrites:
-                        # The read bytes are returned; only the file identity moves on.
+                        # The read bytes are returned; only the file moves on.
                         with open(path, "ab") as stream:
                             stream.write(b"# 198.51.100.0 written during the read\n")
                         rewrites.append(path)
@@ -3633,6 +3729,8 @@ print("actual-copied-validator-selected-B")
                     self.assertEqual(1, len(rewrites), f"fault missed the {victim.name} read")
                 finally:
                     victim.write_bytes(original)
+                    if link_subnet:
+                        alias.unlink()
         self.assertEqual(original_subnet, self.subnet_file.read_bytes())
         self.assertFalse(os.path.lexists(output / "current"))
         self.assertFalse(os.path.lexists(output / "generations"))
@@ -3642,7 +3740,6 @@ print("actual-copied-validator-selected-B")
         # 存在（ENOENT），或平铺 DHCP 输出文件已不存在，旧版同样无法用当前文件复原，与字节
         # 不一致一样打警告、返回 None。只针对平铺父 release 的迁移分支。
         parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
-        output = self.project / "99-output-ztp"
         flat = self.ztp / "config/isc-dhcp-server"
         renamed_workbook = self.project / "demo P2P_v1.1.xlsx"
         cases = (
@@ -3651,6 +3748,7 @@ print("actual-copied-validator-selected-B")
             ("dhcp-hosts-deleted", flat / "dhcpd_ib.hosts", "dhcp/dhcpd_ib.hosts"),
             ("dhcp-manifest-deleted", flat / "dhcp-release-manifest.json",
              "dhcp/dhcp-release-manifest.json"),
+            ("dhcp-directory-deleted", flat, "isc-dhcp-server"),
         )
         for kind, path, label in cases:
             with self.subTest(kind=kind):
@@ -3665,13 +3763,7 @@ print("actual-copied-validator-selected-B")
                     moved = path.with_name(path.name + ".moved")
                     path.rename(moved)
                 try:
-                    selector_target, stdout = self._freeze_and_capture()
-                    self.assertIsNone(selector_target)
-                    self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
-                    self.assertIn(self._LEGACY_NO_FALLBACK, stdout)
-                    self.assertIn(label, stdout)
-                    self.assertFalse(os.path.lexists(output / "current"))
-                    self.assertFalse(os.path.lexists(output / "generations"))
+                    self._assert_flat_parent_skipped(self._LEGACY_ABSENT, label)
                 finally:
                     moved.rename(path)
                     if kind == "p2p-workbook-renamed":
@@ -3688,10 +3780,7 @@ print("actual-copied-validator-selected-B")
             target_moved = target.with_name(target.name + ".moved")
             target.rename(target_moved)
             try:
-                selector_target, stdout = self._freeze_and_capture()
-                self.assertIsNone(selector_target)
-                self.assertIn("dhcp/dhcpd_nvl.hosts", stdout)
-                self.assertFalse(os.path.lexists(output / "generations"))
+                self._assert_flat_parent_skipped(self._LEGACY_ABSENT, "dhcp/dhcpd_nvl.hosts")
             finally:
                 target_moved.rename(target)
                 hosts.unlink()
@@ -3701,32 +3790,6 @@ print("actual-copied-validator-selected-B")
             f"generations/{parent_a['release_id']}",
             LOAD.ensure_previous_generation_frozen(self.project),
         )
-
-    def test_legacy_drift_tolerance_keeps_refusing_present_non_regular_sources(self) -> None:
-        # Present but not a regular file is not absence: an input name that is a
-        # dangling symlink, or a flat DHCP output name that is a directory, refuses.
-        self._publish_legacy_flat_parent_then_edit_global()
-        flat = self.ztp / "config/isc-dhcp-server"
-        with self.subTest(kind="input-dangling-symlink"):
-            real = self.project / "subnet-real.csv"
-            self.subnet_file.rename(real)
-            self.subnet_file.symlink_to("subnet-missing.csv")
-            try:
-                self._assert_freeze_refused()
-            finally:
-                self.subnet_file.unlink()
-                real.rename(self.subnet_file)
-        with self.subTest(kind="dhcp-output-directory"):
-            hosts = flat / "dhcpd_ib.hosts"
-            moved = hosts.with_name(hosts.name + ".moved")
-            hosts.rename(moved)
-            hosts.mkdir()
-            try:
-                self._assert_freeze_refused()
-            finally:
-                hosts.rmdir()
-                moved.rename(hosts)
-        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
 
     def test_existing_generation_is_not_affected_by_project_input_drift(self) -> None:
         parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
