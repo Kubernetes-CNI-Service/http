@@ -247,12 +247,7 @@
     "test_cases.test_initial_setup_pty_cleanup",
     "test_cases.test_initial_setup_selfcontained_neutral",
     "test_cases.test_initial_setup_target_credentials_workflow",
-    "test_cases.test_initial_setup_target_outcome_summary"
-   ]
-  },
-  {
-   "lane": "w3",
-   "units": [
+    "test_cases.test_initial_setup_target_outcome_summary",
     "test_cases.test_initial_setup_target_password_policy",
     "test_cases.test_issue0007_role_link_contract",
     "test_cases.test_issue0007_role_link_workflow",
@@ -260,7 +255,12 @@
     "test_cases.test_issue_tracker_activity_source_workflow",
     "test_cases.test_issue_tracker_cycle_source",
     "test_cases.test_issue_tracker_cycle_source_workflow",
-    "test_cases.test_issue_tracker_engine_runtime",
+    "test_cases.test_issue_tracker_engine_runtime"
+   ]
+  },
+  {
+   "lane": "w3",
+   "units": [
     "test_cases.test_issue_tracker_sync",
     "test_cases.test_issue_tracker_sync_workflow",
     "test_cases.test_load_ib_cvt",
@@ -271,6 +271,8 @@
     "test_cases.test_module_loader_contract",
     "test_cases.test_monitor_authority_entrypoints",
     "test_cases.test_monitor_authority_source_guard",
+    "test_cases.test_monitor_derived_parent_release",
+    "test_cases.test_monitor_imported_configs_parent_release",
     "test_cases.test_monitor_legacy_tracker_retirement",
     "test_cases.test_monitor_legacy_tracker_retirement_workflow",
     "test_cases.test_monitor_ufm_status",
@@ -349,6 +351,7 @@
     "test_cases.test_setup_collection_link_evidence_workflow",
     "test_cases.test_setup_ufm_links_workflow",
     "test_cases.test_shared_artifact_bundle",
+    "test_cases.test_source_tools_fixture_contract",
     "test_cases.test_splitter_profile_breakout",
     "test_cases.test_splitter_profile_breakout_workflow",
     "test_cases.test_ssh_key_preparation_contract",
