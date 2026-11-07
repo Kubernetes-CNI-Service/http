@@ -24,7 +24,7 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "6bee012c8d6feed864fe4b070074972c1e45a31a891c668756bd131be0f376d3"
+    "snapshot_sha256": "99c3b98dc30214cab526ba9580cb1fc90a62c21b3d15e03ea6d11cc383797da5"
   },
   "impact_manifest_sha256": "1e4aacb994f69ab67b2293ed8fa431dd43678c222b7f3d83271fa0ffd9142953",
   "schema_version": 1,
@@ -39,7 +39,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "2a355a8343a1a70471ac24544649cf144537a519885a2b573ecad030264b4b28"
+      "sha256": "229d4106681ad7c83d683f5a193914b4b6f2db4b6c529d87d9f7c1eaf1db7dc8"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -1215,7 +1215,7 @@
     "test_cases.test_issue_tracker_sync": "c3686673baaf667eeb5ee1bd46cc315ccacdde5aa4af40ff8e4d86abaebeaa16",
     "test_cases.test_issue_tracker_sync_workflow": "6c60d04377fc158d3fb92b34934065060185ea4e0c35a0a97731a13e6c7d04c6",
     "test_cases.test_load_ib_cvt": "495c6005a9b231646e897040ad800de50a758cfad6201cb8b5476e02d0bb4f1d",
-    "test_cases.test_load_release_transaction": "d1557c37290d5db10c7fbc078555c6f922baa85d26fbaca1c827a9683462689a",
+    "test_cases.test_load_release_transaction": "a401b7fafcc66f15af24c0806ca5e9518c0a21fec4571b853bcba6d0e446db1b",
     "test_cases.test_log_rotation": "d9078c1eba2af8da430cd83194816b2c34b5d8c7d0d4fb68fa8904438ea0ba1e",
     "test_cases.test_manual_applied_config": "1dc0c5e9872fd5164f170e92b8f94c4ef1ee62b5dd9b934165769476791c4b77",
     "test_cases.test_mlag_evpn_generation": "7eb9edb511bc66c616b214903fbeef5c77df112c27990750fd6fb006a507cd7a",
@@ -1230,7 +1230,7 @@
     "test_cases.test_monitor_stack_review": "a73c150ddc62722de0a3414932d8974f0243b4e05da41186d57eac289c195522",
     "test_cases.test_monitor_ufm_status": "df330d6d60c54b2741b973e089185f0cacbb22f19f82cd7a1116112a1b190944",
     "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
-    "test_cases.test_monitor_writer_quiesce_workflow": "386e78946c519df69dc0d04bdb06747ef400526f1506f6a997655a88c1506114",
+    "test_cases.test_monitor_writer_quiesce_workflow": "46f1900f3dbb25ddd09cd12e76fd77a75b735817655896aa4a24516f87213242",
     "test_cases.test_native_bios_os22_consumer_compatibility": "74e7d2187ddc2d933024e5c3fee6af641a7a64725230c5e4c6a5c703bae923b5",
     "test_cases.test_native_bios_shared_source_inverse": "c183703252d8ba9b6e8ba32e9b07d43829c19307b6553b711b90ceb9bd8dbba3",
     "test_cases.test_native_cpld_safe_image_fail_closed": "dc7f90b25e68d50a50e1b9fee0e169c7529292b44303c4d7e41421056d7d735f",
