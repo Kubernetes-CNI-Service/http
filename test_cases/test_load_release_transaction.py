@@ -3330,16 +3330,79 @@ print("actual-copied-validator-selected-B")
         )
         self.assertEqual(old_conf, (generation / "dhcp/dhcpd.conf").read_bytes())
 
+    # owner 2026-11-07 选定方案 A（http dev 转达，owner 原话「按照你的建议来」）。依据：
+    #   1. DEV 基线 95c6c3c 的 11-load 没有「冻结旧版 release」这一步，也不保存旧输入的原文；
+    #      平铺父 release 记录的输入在上次 load 之后被改过，就再也无法冻结。
+    #   2. R-016「往前恢复」（owner 11-03）：失败时修好原因重跑 load，不依赖退回旧版。
+    #   3. 决定 C（owner 11-04）：跨项目 load 失败不自动退回旧项目，服务保持停止、提示重跑。
+    #   4. http dev 11-07 审定：方案 A 针对的是「旧版已无法用当前文件复原」，记录的源文件
+    #      已不存在（如 P2P 工作簿换名删旧）也属此类。
+    # 所以 DEV 时代的平铺父 release 只因「项目当前输入（或平铺 DHCP 产物）的字节与记录的
+    # 哈希不一致，或已不存在」而冻结不了时，打警告、照常 load、不保留旧版回退点，与项目
+    # 里没有父 release 相同。父 release 本身不合法、选择器或来源不安全、存在但不是单链接
+    # 普通文件、读取期间身份变化，以及已有 `current` 选择器的代次分支里的任何错误，一律
+    # 照旧拒绝（下面各测试逐项钉住）。
+    _LEGACY_FREEZE_WARNING = "旧版 release 无法冻结"
+    _LEGACY_NO_FALLBACK = "本次 load 不保留旧版回退点"
+
+    def _publish_legacy_flat_parent_then_edit_global(self) -> bytes:
+        LOAD.validate_and_publish_release(self.project, self.inputs)
+        a_global = self.global_file.read_bytes()
+        self.global_file.write_bytes(a_global + b"\n# independently valid B edit\n")
+        return a_global
+
+    def _freeze_and_capture(self):
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            selector_target = LOAD.ensure_previous_generation_frozen(self.project)
+        return selector_target, stdout.getvalue()
+
+    def _assert_freeze_refused(self, exceptions=None, *, generation_selected=False) -> None:
+        stdout = io.StringIO()
+        with redirect_stdout(stdout), self.assertRaises(exceptions or LOAD.LoadError):
+            LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertNotIn(self._LEGACY_FREEZE_WARNING, stdout.getvalue())
+        if not generation_selected:
+            # A refused legacy preflight has staged nothing.
+            self.assertFalse(os.path.lexists(self.project / "99-output-ztp/generations"))
+
+    def _resign_flat_parent(self, mutate) -> None:
+        # The release ID is the documented digest of the parent's basis keys
+        # (11-load release_basis); re-signing keeps the parent itself valid so
+        # that only the injected field can be the reason for a refusal.
+        parent_file = self.project / "99-output-ztp/current-release.json"
+        parent = json.loads(parent_file.read_text(encoding="utf-8"))
+        mutate(parent)
+        basis_keys = (
+            "project", "deployment_scope", "switch_scope", "inputs",
+            "input_sources", "components", "inventory", "dhcp_status",
+            "generated_inputs", "imported_configs",
+        )
+        basis = {key: parent[key] for key in basis_keys if key in parent}
+        parent["release_id"] = hashlib.sha256(json.dumps(
+            basis, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()[:20]
+        parent_file.write_text(json.dumps(parent) + "\n", encoding="utf-8")
+
     def test_existing_a_must_be_frozen_before_b_can_replace_legacy_flat_inputs(self) -> None:
+        # 第一段按方案 A 改写（依据见上方注释块）：DEV 时代的平铺父 release 在输入改动后
+        # 冻结不了，警告后返回 None，与没有父 release 相同；不建 `current`，不写代次。
         parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
         output = self.project / "99-output-ztp"
         flat = self.ztp / "config/isc-dhcp-server"
+        flat_parent = (output / "current-release.json").read_bytes()
         a_global = self.global_file.read_bytes()
         b_global = a_global + b"\n# independently valid B edit\n"
         self.global_file.write_bytes(b_global)
-        with self.assertRaises(LOAD.LoadError):
-            LOAD.ensure_previous_generation_frozen(self.project)
+        selector_target, stdout = self._freeze_and_capture()
+        self.assertIsNone(selector_target)
+        self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+        self.assertIn(self._LEGACY_NO_FALLBACK, stdout)
+        self.assertIn("inputs/global", stdout)
         self.assertFalse(os.path.lexists(output / "current"))
+        self.assertFalse(os.path.lexists(output / "generations"))
+        self.assertEqual(flat_parent, (output / "current-release.json").read_bytes())
+        self.assertEqual(b_global, self.global_file.read_bytes())
         self.global_file.write_bytes(a_global)
 
         selector_target = LOAD.ensure_previous_generation_frozen(self.project)
@@ -3356,6 +3419,386 @@ print("actual-copied-validator-selected-B")
             selector_target, LOAD.ensure_previous_generation_frozen(self.project),
         )
         self.assertEqual(a_global, (generation_a / "inputs/global").read_bytes())
+
+    def test_legacy_flat_parent_with_drifted_flat_dhcp_is_not_frozen(self) -> None:
+        # 方案 A 的同类情况：平铺 DHCP 产物在上次 load 之后被改写（例如之后 load 了别的项目）。
+        parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        later_manifest = json.loads((flat / "dhcp-release-manifest.json").read_text())
+        later_manifest["release_id"] = "independent-later-load"
+        drifted = {
+            "dhcpd.conf": (flat / "dhcpd.conf").read_bytes() + b"# later load\n",
+            "dhcp-release-manifest.json": json.dumps(later_manifest).encode("utf-8"),
+        }
+        for name, payload in drifted.items():
+            with self.subTest(name=name):
+                original = (flat / name).read_bytes()
+                (flat / name).write_bytes(payload)
+                try:
+                    selector_target, stdout = self._freeze_and_capture()
+                    self.assertIsNone(selector_target)
+                    self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+                    self.assertIn(self._LEGACY_NO_FALLBACK, stdout)
+                    self.assertIn(f"dhcp/{name}", stdout)
+                    self.assertFalse(os.path.lexists(output / "current"))
+                    self.assertFalse(os.path.lexists(output / "generations"))
+                finally:
+                    (flat / name).write_bytes(original)
+        # Control: the same parent with its recorded bytes back is still frozen.
+        self.assertEqual(
+            f"generations/{parent_a['release_id']}",
+            LOAD.ensure_previous_generation_frozen(self.project),
+        )
+
+    def test_legacy_drift_tolerance_keeps_refusing_a_non_link_or_unsafe_selector(self) -> None:
+        self._publish_legacy_flat_parent_then_edit_global()
+        selector = self.project / "99-output-ztp/current"
+        for kind in ("regular-file", "directory", "parent-escape", "absolute"):
+            with self.subTest(kind=kind):
+                if kind == "regular-file":
+                    selector.write_text("generations/aaaaaaaaaaaaaaaaaaaa\n")
+                elif kind == "directory":
+                    selector.mkdir()
+                elif kind == "parent-escape":
+                    selector.symlink_to("../generations/aaaaaaaaaaaaaaaaaaaa")
+                else:
+                    selector.symlink_to("/nonexistent/generations/aaaaaaaaaaaaaaaaaaaa")
+                try:
+                    self._assert_freeze_refused()
+                finally:
+                    if kind == "directory":
+                        selector.rmdir()
+                    else:
+                        selector.unlink()
+
+    def test_legacy_drift_tolerance_keeps_refusing_an_invalid_parent(self) -> None:
+        self._publish_legacy_flat_parent_then_edit_global()
+        output = self.project / "99-output-ztp"
+        parent_file = output / "current-release.json"
+        original = parent_file.read_bytes()
+        parent = json.loads(original)
+        edited_global = hashlib.sha256(self.global_file.read_bytes()).hexdigest()
+        rewrites = {
+            "not-json": b"{not json\n",
+            "schema-1": json.dumps({**parent, "schema_version": 1}).encode("utf-8"),
+            "invalid-release-id": json.dumps(
+                {**parent, "release_id": "not-a-release-id"}).encode("utf-8"),
+            # Re-pointing the record at the edited input without re-signing it.
+            "unsigned-basis-edit": json.dumps({
+                **parent, "inputs": {**parent["inputs"], "global": edited_global},
+            }).encode("utf-8"),
+        }
+        for kind, payload in rewrites.items():
+            with self.subTest(kind=kind):
+                parent_file.write_bytes(payload)
+                try:
+                    self._assert_freeze_refused()
+                    self.assertFalse(os.path.lexists(output / "current"))
+                finally:
+                    parent_file.write_bytes(original)
+        with self.subTest(kind="parent-hard-link"):
+            alias = output / "parent-alias.json"
+            os.link(parent_file, alias)
+            try:
+                self._assert_freeze_refused()
+            finally:
+                alias.unlink()
+        with self.subTest(kind="parent-symlink"):
+            real = output / "parent-real.json"
+            parent_file.rename(real)
+            parent_file.symlink_to(real.name)
+            try:
+                self._assert_freeze_refused()
+            finally:
+                parent_file.unlink()
+                real.rename(parent_file)
+        # A flat DHCP manifest which the (re-signed, valid) parent binds but which is
+        # itself invalid is the parent's own defect, not drift: it still refuses and
+        # nothing is staged.
+        flat = self.ztp / "config/isc-dhcp-server"
+        manifest_file = flat / "dhcp-release-manifest.json"
+        original_manifest = manifest_file.read_bytes()
+        manifest = json.loads(original_manifest)
+        bound_manifests = {
+            "bound-dhcp-manifest-not-json": b"{not json\n",
+            "bound-dhcp-manifest-outputs-incomplete": json.dumps({
+                **manifest, "outputs": {
+                    name: record for name, record in manifest["outputs"].items()
+                    if name != "dhcpd_nvl.hosts"
+                },
+            }).encode("utf-8"),
+            "bound-dhcp-output-record-without-digest": json.dumps({
+                **manifest, "outputs": {**manifest["outputs"], "dhcpd.conf": {"size": 11}},
+            }).encode("utf-8"),
+        }
+
+        def bind_flat_manifest(payload: bytes) -> None:
+            manifest_file.write_bytes(payload)
+
+            def bind(parent):
+                parent["components"]["dhcp"]["manifest_sha256"] = (
+                    hashlib.sha256(payload).hexdigest()
+                )
+
+            self._resign_flat_parent(bind)
+
+        # Control for the binding: a valid re-serialized manifest bound the same way
+        # leaves the edited global as the only finding, which is tolerated.
+        bind_flat_manifest(json.dumps(manifest, indent=1).encode("utf-8"))
+        try:
+            selector_target, stdout = self._freeze_and_capture()
+            self.assertIsNone(selector_target)
+            self.assertIn("inputs/global", stdout)
+            self.assertNotIn("dhcp/", stdout)
+        finally:
+            manifest_file.write_bytes(original_manifest)
+            parent_file.write_bytes(original)
+        for kind, payload in bound_manifests.items():
+            with self.subTest(kind=kind):
+                bind_flat_manifest(payload)
+                try:
+                    self._assert_freeze_refused()
+                finally:
+                    manifest_file.write_bytes(original_manifest)
+                    parent_file.write_bytes(original)
+        self.assertFalse(os.path.lexists(output / "current"))
+
+    def test_legacy_drift_tolerance_keeps_refusing_an_unsafe_source_path(self) -> None:
+        self._publish_legacy_flat_parent_then_edit_global()
+        output = self.project / "99-output-ztp"
+        parent_file = output / "current-release.json"
+        original = parent_file.read_bytes()
+        # Control for the re-signing helper: an identity re-sign is still a valid
+        # parent, so the only remaining finding is the edited global (tolerated).
+        self._resign_flat_parent(lambda parent: None)
+        selector_target, stdout = self._freeze_and_capture()
+        self.assertIsNone(selector_target)
+        self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+        for unsafe in ("../outside P2P.xlsx", "/nonexistent/outside P2P.xlsx",
+                       "./demo P2P_v1.0.xlsx"):
+            with self.subTest(path=unsafe):
+                def point_p2p_elsewhere(parent, unsafe=unsafe):
+                    parent["input_sources"]["p2p"]["path"] = unsafe
+                self._resign_flat_parent(point_p2p_elsewhere)
+                try:
+                    self._assert_freeze_refused()
+                    self.assertFalse(os.path.lexists(output / "current"))
+                finally:
+                    parent_file.write_bytes(original)
+
+    def test_legacy_drift_tolerance_keeps_refusing_a_non_regular_or_unstable_input(self) -> None:
+        # The edited global is found first; a later input which is not an owned
+        # single-link regular file, or which changes while it is read, still refuses.
+        self._publish_legacy_flat_parent_then_edit_global()
+        output = self.project / "99-output-ztp"
+        original_subnet = self.subnet_file.read_bytes()
+        with self.subTest(kind="hard-link"):
+            alias = self.project / "subnet-alias.csv"
+            os.link(self.subnet_file, alias)
+            try:
+                self._assert_freeze_refused()
+            finally:
+                alias.unlink()
+        with self.subTest(kind="symlink"):
+            real = self.project / "subnet-real.csv"
+            self.subnet_file.rename(real)
+            self.subnet_file.symlink_to(real.name)
+            try:
+                self._assert_freeze_refused()
+            finally:
+                self.subnet_file.unlink()
+                real.rename(self.subnet_file)
+        real_read_bytes = Path.read_bytes
+        # The drifted global itself, and a later input read only because drift
+        # does not stop the checks: a read whose file identity moves on refuses.
+        for kind, victim in (("edited-global-changed-while-read", self.global_file),
+                             ("later-subnet-changed-while-read", self.subnet_file)):
+            with self.subTest(kind=kind):
+                original = victim.read_bytes()
+                rewrites = []
+
+                def rewrite_while_reading(path, victim=victim, rewrites=rewrites):
+                    content = real_read_bytes(path)
+                    if path.name == victim.name and not rewrites:
+                        # The read bytes are returned; only the file identity moves on.
+                        with open(path, "ab") as stream:
+                            stream.write(b"# 198.51.100.0 written during the read\n")
+                        rewrites.append(path)
+                    return content
+
+                try:
+                    with mock.patch.object(Path, "read_bytes", rewrite_while_reading):
+                        self._assert_freeze_refused()
+                    self.assertEqual(1, len(rewrites), f"fault missed the {victim.name} read")
+                finally:
+                    victim.write_bytes(original)
+        self.assertEqual(original_subnet, self.subnet_file.read_bytes())
+        self.assertFalse(os.path.lexists(output / "current"))
+        self.assertFalse(os.path.lexists(output / "generations"))
+
+    def test_legacy_flat_parent_with_absent_sources_is_not_frozen(self) -> None:
+        # 方案 A（owner「按照你的建议来」）加 http dev 11-07 审定：记录的项目输入源文件已不
+        # 存在（ENOENT），或平铺 DHCP 输出文件已不存在，旧版同样无法用当前文件复原，与字节
+        # 不一致一样打警告、返回 None。只针对平铺父 release 的迁移分支。
+        parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        renamed_workbook = self.project / "demo P2P_v1.1.xlsx"
+        cases = (
+            ("subnet-input-deleted", self.subnet_file, "inputs/subnet"),
+            ("p2p-workbook-renamed", self.p2p_source, "inputs/p2p"),
+            ("dhcp-hosts-deleted", flat / "dhcpd_ib.hosts", "dhcp/dhcpd_ib.hosts"),
+            ("dhcp-manifest-deleted", flat / "dhcp-release-manifest.json",
+             "dhcp/dhcp-release-manifest.json"),
+        )
+        for kind, path, label in cases:
+            with self.subTest(kind=kind):
+                if kind == "p2p-workbook-renamed":
+                    # The operator points p2p.xlsx at a new workbook name; the old file
+                    # the parent recorded no longer exists.
+                    moved = renamed_workbook
+                    path.rename(moved)
+                    self.p2p_file.unlink()
+                    self.p2p_file.symlink_to(moved.name)
+                else:
+                    moved = path.with_name(path.name + ".moved")
+                    path.rename(moved)
+                try:
+                    selector_target, stdout = self._freeze_and_capture()
+                    self.assertIsNone(selector_target)
+                    self.assertIn(self._LEGACY_FREEZE_WARNING, stdout)
+                    self.assertIn(self._LEGACY_NO_FALLBACK, stdout)
+                    self.assertIn(label, stdout)
+                    self.assertFalse(os.path.lexists(output / "current"))
+                    self.assertFalse(os.path.lexists(output / "generations"))
+                finally:
+                    moved.rename(path)
+                    if kind == "p2p-workbook-renamed":
+                        self.p2p_file.unlink()
+                        self.p2p_file.symlink_to(path.name)
+        with self.subTest(kind="dhcp-link-target-deleted"):
+            # Flat outputs are SETUP links into a project's 99-output-dhcp; a link
+            # whose target is gone is an output that no longer exists.
+            hosts = flat / "dhcpd_nvl.hosts"
+            target = self.project / "99-output-dhcp/dhcpd_nvl.hosts"
+            target.parent.mkdir(exist_ok=True)
+            hosts.rename(target)
+            hosts.symlink_to(target)
+            target_moved = target.with_name(target.name + ".moved")
+            target.rename(target_moved)
+            try:
+                selector_target, stdout = self._freeze_and_capture()
+                self.assertIsNone(selector_target)
+                self.assertIn("dhcp/dhcpd_nvl.hosts", stdout)
+                self.assertFalse(os.path.lexists(output / "generations"))
+            finally:
+                target_moved.rename(target)
+                hosts.unlink()
+                target.rename(hosts)
+        # Control: with every recorded file back, A is frozen as usual.
+        self.assertEqual(
+            f"generations/{parent_a['release_id']}",
+            LOAD.ensure_previous_generation_frozen(self.project),
+        )
+
+    def test_legacy_drift_tolerance_keeps_refusing_present_non_regular_sources(self) -> None:
+        # Present but not a regular file is not absence: an input name that is a
+        # dangling symlink, or a flat DHCP output name that is a directory, refuses.
+        self._publish_legacy_flat_parent_then_edit_global()
+        flat = self.ztp / "config/isc-dhcp-server"
+        with self.subTest(kind="input-dangling-symlink"):
+            real = self.project / "subnet-real.csv"
+            self.subnet_file.rename(real)
+            self.subnet_file.symlink_to("subnet-missing.csv")
+            try:
+                self._assert_freeze_refused()
+            finally:
+                self.subnet_file.unlink()
+                real.rename(self.subnet_file)
+        with self.subTest(kind="dhcp-output-directory"):
+            hosts = flat / "dhcpd_ib.hosts"
+            moved = hosts.with_name(hosts.name + ".moved")
+            hosts.rename(moved)
+            hosts.mkdir()
+            try:
+                self._assert_freeze_refused()
+            finally:
+                hosts.rmdir()
+                moved.rename(hosts)
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
+
+    def test_existing_generation_is_not_affected_by_project_input_drift(self) -> None:
+        parent_a = LOAD.validate_and_publish_release(self.project, self.inputs)
+        output = self.project / "99-output-ztp"
+        flat = self.ztp / "config/isc-dhcp-server"
+        selector_target = LOAD.ensure_previous_generation_frozen(self.project)
+        self.assertEqual(f"generations/{parent_a['release_id']}", selector_target)
+        generation = output / selector_target
+        frozen = {
+            path.relative_to(generation).as_posix(): path.read_bytes()
+            for path in generation.rglob("*") if path.is_file()
+        }
+        self.global_file.write_bytes(
+            self.global_file.read_bytes() + b"\n# independently valid B edit\n")
+        (flat / "dhcpd.conf").write_bytes((flat / "dhcpd.conf").read_bytes() + b"# B\n")
+
+        reused, stdout = self._freeze_and_capture()
+        self.assertEqual(selector_target, reused)
+        self.assertNotIn(self._LEGACY_FREEZE_WARNING, stdout)
+        self.assertEqual(selector_target, os.readlink(output / "current"))
+        self.assertEqual(frozen, {
+            path.relative_to(generation).as_posix(): path.read_bytes()
+            for path in generation.rglob("*") if path.is_file()
+        })
+
+        # Any error of the generation branch still refuses, drifted inputs or not.
+        for relative in ("inputs/global", "dhcp/dhcpd.conf", "current-release.json"):
+            with self.subTest(tampered=relative):
+                target = generation / relative
+                target.write_bytes(frozen[relative] + b"\n# tampered A snapshot\n")
+                try:
+                    self._assert_freeze_refused(generation_selected=True)
+                    self.assertEqual(selector_target, os.readlink(output / "current"))
+                finally:
+                    target.write_bytes(frozen[relative])
+        with self.subTest(tampered="unexpected-artifact"):
+            extra = generation / "unexpected.txt"
+            extra.write_text("extra\n", encoding="utf-8")
+            try:
+                self._assert_freeze_refused(generation_selected=True)
+            finally:
+                extra.unlink()
+        self.assertEqual(selector_target, LOAD.ensure_previous_generation_frozen(self.project))
+
+    def test_main_loads_past_a_legacy_flat_parent_whose_inputs_were_edited(self) -> None:
+        # 方案 A 的 main 级例子：平铺父 release + 改过的输入，load 走过冻结这一步，
+        # 进入模板、生成和 DHCP 事务阶段（后续阶段由 fixture mock，在 DHCP 事务处注入失败）。
+        self._publish_legacy_flat_parent_then_edit_global()
+        lifecycle_events: list[str] = []
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(
+            LOAD, "prepare_active_runtime_rollback_receipt",
+            side_effect=AssertionError("no frozen A, so no A runtime receipt"),
+        ) as receipt, redirect_stdout(stdout), redirect_stderr(stderr):
+            result = self._exercise_main_transaction_failure(
+                ValueError("injected DHCP install failure"),
+                lifecycle_events=lifecycle_events,
+                observe_template_mutation=True,
+            )[0]
+        self.assertEqual(1, result)
+        receipt.assert_not_called()
+        self.assertIn(self._LEGACY_FREEZE_WARNING, stdout.getvalue())
+        self.assertIn(self._LEGACY_NO_FALLBACK, stdout.getvalue())
+        self.assertNotIn("冻结旧版 release 以供显式回退", stderr.getvalue())
+        self.assertIn(
+            "[FAILED] load 阶段失败：统一 release 一致性与 DHCP 事务安装", stderr.getvalue(),
+        )
+        self.assertEqual(
+            ["template-mutation", "monitor-authority-attest", "generate", "dhcp-transaction"],
+            lifecycle_events,
+        )
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/current"))
 
     def test_previous_generation_preflight_rejects_dangling_output_authority(self) -> None:
         output = self.project / "99-output-ztp"

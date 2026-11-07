@@ -4979,6 +4979,22 @@ def publish_committed_dhcp_candidate(
     ok("DHCP 候选已在父 release 提交后发布到 99-output-dhcp，候选目录已删除")
 
 
+class FlatParentInputDrift(LoadError):
+    """A valid committed flat parent whose recorded bytes are no longer on disk.
+
+    Raised only for ``99-output-ztp/current-release.json`` (the pre-generation
+    layout), and only after every other check passed: the sole findings are
+    project inputs or flat DHCP outputs whose stable bytes differ from the
+    digests the parent recorded, or which no longer exist (ENOENT).
+    ``drifted`` names them (``inputs/<key>``, ``dhcp/<name>``); the message is
+    the first finding's.
+    """
+
+    def __init__(self, message: str, drifted: tuple[str, ...]) -> None:
+        super().__init__(message)
+        self.drifted = drifted
+
+
 def _pinned_generation_payloads(
     project: Path, parent_file: Path, dhcp_source_dir: Path | None,
 ) -> tuple[str, dict[str, bytes]]:
@@ -4990,6 +5006,10 @@ def _pinned_generation_payloads(
         parent_directory.parent == output / "generations"
         and bool(re.fullmatch(r"[0-9a-f]{20}", parent_directory.name))
     )
+    # Only the committed flat parent reports byte drift after its other checks;
+    # generation snapshots and B candidates still fail at the first mismatch.
+    defer_drift = not snapshot_directory and parent_file.name == "current-release.json"
+    drift: list[tuple[str, str]] = []
     source_name_valid = (
         parent_file.name == "current-release.json"
         or (parent_directory == output and bool(re.fullmatch(
@@ -5111,6 +5131,14 @@ def _pinned_generation_payloads(
             raise LoadError(f"pinned input {key} has an unsafe source or digest")
         source = ((parent_directory / "inputs" / key) if snapshot_directory
                   else canonical_project / relative)
+        if defer_drift:
+            try:
+                source.lstat()
+            except FileNotFoundError:
+                # The recorded source is gone (e.g. a renamed P2P workbook whose old
+                # file was deleted): A can no longer be rebuilt from current files.
+                drift.append((f"inputs/{key}", f"pinned input {key} is missing"))
+                continue
         if (not stat.S_ISREG(source.lstat().st_mode)
                 or source.lstat().st_nlink != 1
                 or source.resolve(strict=True) != source):
@@ -5119,14 +5147,25 @@ def _pinned_generation_payloads(
         content = source.read_bytes()
         after = source.stat()
         identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if (any(getattr(before, field) != getattr(after, field) for field in identity)
-                or hashlib.sha256(content).hexdigest() != expected):
+        if any(getattr(before, field) != getattr(after, field) for field in identity):
             raise LoadError(f"pinned input {key} changed or differs from parent")
+        if hashlib.sha256(content).hexdigest() != expected:
+            if not defer_drift:
+                raise LoadError(f"pinned input {key} changed or differs from parent")
+            drift.append((f"inputs/{key}", f"pinned input {key} changed or differs from parent"))
         payloads[f"inputs/{key}"] = content
     if dhcp_status == "enabled":
         assert dhcp_source_dir is not None and isinstance(child, dict)
         for name in names:
             source = dhcp_source_dir / name
+            if defer_drift:
+                try:
+                    source.stat()
+                except FileNotFoundError:
+                    # Flat outputs are reached through SETUP's links; a missing file or
+                    # link target means A can no longer be rebuilt from current files.
+                    drift.append((f"dhcp/{name}", f"pinned DHCP child is missing: {name}"))
+                    continue
             if not source.is_file():
                 raise LoadError(f"pinned DHCP child is missing: {name}")
             if snapshot_directory:
@@ -5138,21 +5177,37 @@ def _pinned_generation_payloads(
             if _sha256_path(source) != hashlib.sha256(data).hexdigest():
                 raise LoadError(f"pinned DHCP child changed while freezing: {name}")
             payloads[f"dhcp/{name}"] = data
-        if hashlib.sha256(payloads["dhcp/dhcp-release-manifest.json"]).hexdigest() != expected_manifest:
-            raise LoadError("pinned DHCP manifest differs from parent component")
-        try:
-            manifest = json.loads(payloads["dhcp/dhcp-release-manifest.json"])
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise LoadError(f"pinned DHCP manifest is not JSON: {exc}") from exc
-        outputs = manifest.get("outputs") if isinstance(manifest, dict) else None
-        if (not isinstance(outputs, dict) or set(outputs) != set(names[1:])
-                or manifest.get("release_id") != child.get("release_id")):
-            raise LoadError("pinned DHCP child identity/outputs are incomplete")
-        for name in names[1:]:
-            record = outputs[name]
-            expected = record.get("sha256") if isinstance(record, dict) else None
-            if expected != hashlib.sha256(payloads[f"dhcp/{name}"]).hexdigest():
-                raise LoadError(f"pinned DHCP output differs from child manifest: {name}")
+        manifest_bytes = payloads.get("dhcp/dhcp-release-manifest.json")
+        if manifest_bytes is None:
+            pass  # A missing flat manifest is already recorded drift.
+        elif hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest:
+            if not defer_drift:
+                raise LoadError("pinned DHCP manifest differs from parent component")
+            # A later load's flat manifest says nothing about this parent's outputs.
+            drift.append(("dhcp/dhcp-release-manifest.json",
+                          "pinned DHCP manifest differs from parent component"))
+        else:
+            try:
+                manifest = json.loads(manifest_bytes)
+            except (UnicodeError, json.JSONDecodeError) as exc:
+                raise LoadError(f"pinned DHCP manifest is not JSON: {exc}") from exc
+            outputs = manifest.get("outputs") if isinstance(manifest, dict) else None
+            if (not isinstance(outputs, dict) or set(outputs) != set(names[1:])
+                    or manifest.get("release_id") != child.get("release_id")):
+                raise LoadError("pinned DHCP child identity/outputs are incomplete")
+            for name in names[1:]:
+                record = outputs[name]
+                expected = record.get("sha256") if isinstance(record, dict) else None
+                data = payloads.get(f"dhcp/{name}")
+                if data is None or expected != hashlib.sha256(data).hexdigest():
+                    if not (defer_drift and isinstance(expected, str)
+                            and re.fullmatch(r"[0-9a-f]{64}", expected)):
+                        raise LoadError(f"pinned DHCP output differs from child manifest: {name}")
+                    if data is not None:  # a missing output is already recorded
+                        drift.append((f"dhcp/{name}",
+                                      f"pinned DHCP output differs from child manifest: {name}"))
+    if drift:
+        raise FlatParentInputDrift(drift[0][1], tuple(label for label, _ in drift))
     return release_id, payloads
 
 
@@ -5313,8 +5368,13 @@ def ensure_previous_generation_frozen(project: Path) -> str | None:
     """Keep a committed A recoverable before a later load can generate B.
 
     A pre-versioned flat parent can be migrated only while its original
-    project inputs and DHCP child still validate.  If those bytes have already
-    changed, refusing before generation is safer than signing B over A.
+    project inputs and DHCP child still validate.  DEV never kept those
+    inputs, so a valid flat parent whose only finding is that the project
+    inputs or flat DHCP outputs were edited or removed after its load cannot
+    be frozen: warn and continue without a fallback point, as when no parent
+    exists (owner 2026-11-07, plan A; R-016 recovers forward by rerunning
+    load).  Every other finding still refuses, and a selected generation is
+    never excused.
     """
     output = project.resolve(strict=True) / "99-output-ztp"
     if os.path.lexists(output) and (
@@ -5362,9 +5422,16 @@ def ensure_previous_generation_frozen(project: Path) -> str | None:
         ZTP_DIR / "config/isc-dhcp-server"
         if parent_payload.get("dhcp_status") == "enabled" else None
     )
-    release_id, _payloads = _pinned_generation_payloads(
-        project, parent, flat_dhcp,
-    )
+    try:
+        release_id, _payloads = _pinned_generation_payloads(
+            project, parent, flat_dhcp,
+        )
+    except FlatParentInputDrift as exc:
+        warn(
+            "旧版 release 无法冻结（输入在上次 load 之后已改动："
+            f"{'、'.join(exc.drifted)}），本次 load 不保留旧版回退点"
+        )
+        return None
     generation = stage_pinned_generation(
         project, parent, flat_dhcp,
     )

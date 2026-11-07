@@ -961,7 +961,8 @@ def _source_bound_load_report_path(
         # 2026-10-23 owner load->collection handoff: 11-load.py changed (was e3ef9185a8f0…); its structural path still holds.
         # 2026-11-07 M1a: 11-load.py changed with the 11-load merge batch (TEST f384f73 base, L0-L11, AP-b) (was 39c48c3c879164cc08f66546ef59e86c0b3dffea0f274eac7ce20177815590ee); the structural path was checked on the current files before re-pinning.
         # 2026-11-07 M1a: 11-load.py changed again after afed871 (314b799 DEV subnet CSV wording, 58821f9 DEV template p2p/ and --p2p-file help) (was 456ba794ef10deb1b12065774749e3d26f13b79a260492e01e2d002df9e22d1e); the structural path was checked on the current files before re-pinning.
-        (load_tree, "d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e"),
+        # 2026-11-07 M1a: 11-load.py changed for the owner's option A on legacy flat parents (2026-11-07: a DEV-era parent that can no longer be frozen is warned and skipped) (was d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e); the structural path was checked on the current files before re-pinning.
+        (load_tree, "3ca01436f207b28039cd27ded192010af3bbfc70f17d739fe6154b076a1b014e"),
         # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05); the structural path was checked on the current files before re-pinning.
         (report_tree, "bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585"),
     )
