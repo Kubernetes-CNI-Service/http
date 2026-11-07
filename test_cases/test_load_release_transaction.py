@@ -26,7 +26,6 @@ import unittest
 from unittest import mock
 
 from test_cases.source_tools_fixture import copy_source_tools
-from test_cases.linux_runtime_lock_model import declared_linux_fdinfo_for_darwin_fixture
 import zipfile
 from urllib.parse import urlsplit
 

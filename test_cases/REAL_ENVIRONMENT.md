@@ -2490,3 +2490,21 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 第 1 对（串行 11-06 21:35 起，分片 23:44 起）：C1～C6 全部通过；串行 7376 s，分片 `total_wall_seconds` 2246.8 s。
   - 第 2 对（分片 11-07 10:09 起，串行 10:53 起）：C1～C6 全部通过；串行 7626 s，分片 2283.6 s。
   - 两对的胶囊回放都在 700 s 以内，没有车道触发 deadline，没有 `TimeoutExpired`、`timed out`、`deadline` 行；两臂唯一的跳过 holder 是新克隆缺私有文档层时按合同出现一次的 `PrivateDocumentationContractTests` 跳过。
+
+## TC-REAL-LINUX-FDINFO-001 — Linux 当前 FD 的 flock 归属只读查询（R22 分步，取自 TEST `6595761`）
+
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。生产代码随 v3.1.0 的 11-load 批进入（`11-load.py`：`_read_runtime_lock_fdinfo`、
+  `_require_runtime_lock_guard`，经 `_require_runtime_restore_guard` 保护同项目 A 运行时回执的恢复）。自动化
+  `test_runtime_lock_fdinfo`（取 TEST `f384f73` 整份，去掉两个依赖已删 setup 切换 WAL 测试的用例，见 v3.1.0 AP-b）
+  在 macOS 上只能用明确声明的 Linux fdinfo 模型；真实 `/proc/self/fdinfo` 的锁行只能在 Linux 上测。
+- 前置条件：Ubuntu 22.04（AIR 管理服务器）或 24.04；当前精确干净树；不在运行的 load、setup、bringup；普通私有实文件
+  作为锁文件；不需要 root。
+- 步骤与预期：
+  1. 在同一锁文件上依次构造：自己持 SH、自己持 EX、另一进程持 EX 后释放、dup 后 exec 的子进程、UN 后复用；
+     每一步读本进程 `/proc/self/fdinfo/<fd>` 的 `lock:` 行，记录 READ/WRITE/空。
+  2. 预期：只有调用方当前 FD 自己持有的 EX 被认作 WRITE；他方持有或已释放的锁不被当作授权；查询本身不取锁
+     （独立 SH witness 在查询前后都能取得）。
+  3. 运行 `python3 -B test_cases/run_related_tests.py` 选中的 `test_runtime_lock_fdinfo`，结果与 macOS 模型一致。
+- 证据：每一步的 fdinfo 原文、dev/inode、进程关系；不记录任何秘密。
+- 清理与风险：删除测试锁文件；只读查询，不改 OFD flags。Linux 内核 fdinfo 格式若与模型不同，以实测为准修模型，
+  不放宽生产判定。

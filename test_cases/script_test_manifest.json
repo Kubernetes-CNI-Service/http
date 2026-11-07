@@ -190,7 +190,8 @@
         "test_cases.test_darwin_lock_kernel_witness",
         "test_cases.test_infra_component_contract",
         "test_cases.test_infra_component_entry_contract",
-        "test_cases.test_infra_component_workflow"
+        "test_cases.test_infra_component_workflow",
+        "test_cases.test_runtime_lock_fdinfo"
       ]
     },
     {
@@ -2202,6 +2203,15 @@
       "tests": [
         "test_cases.test_dhcp_deferred_candidate_contract"
       ]
+    },
+    {
+      "id": "linux_runtime_current_fd_lock",
+      "paths": [
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_runtime_lock_fdinfo"
+      ]
     }
   ],
   "workflows": [
@@ -3757,6 +3767,16 @@
       "tests": [
         "test_cases.test_generation_input_binding_workflow"
       ]
+    },
+    {
+      "id": "linux_current_fd_runtime_lock",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "tools/deployment_lock.py"
+      ],
+      "tests": [
+        "test_cases.test_runtime_lock_fdinfo"
+      ]
     }
   ],
   "path_rules": [
@@ -4477,7 +4497,7 @@
         "test_cases/linux_runtime_lock_model.py"
       ],
       "tests": [
-        "test_cases.test_load_release_transaction"
+        "test_cases.test_runtime_lock_fdinfo"
       ]
     },
     {
