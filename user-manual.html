@@ -12743,6 +12743,7 @@ $EDITOR DAY0-Prepare/&lt;project&gt;/02-dhcp-subnet_config.csv
 # 再选择/更新项目 P2P XLSX 与可选 AIR policy</code></pre>
           <p><strong>成功判据</strong>create 返回 0，项目目录只从模板生成，三份固定输入和一个可识别的 P2P 来源存在；<code>--create</code> 不切换 live runtime，不创建生产 release。</p>
           <p><strong>用户链接输入</strong><code>02-devices_config.csv</code>、<code>*.pub</code> 可以是指向项目外文件的链接；P2P 可用 <code>p2p.xlsx -&gt; p2p/&lt;工作簿&gt;.xlsx</code>，<code>p2p/</code> 本身可以链到外部资料目录。setup、upload 打包和 sync 各在入口按真实文件校验一次，目标不存在时报错停止；upload 包把链接内容作为普通文件带走，并在 <code>03-linked-inputs.json</code> 记下链接、真实路径和 SHA-256；sync 只对这些文件使用单文件 <code>--copy-links</code>。<code>01-global.yaml</code> 与 <code>02-dhcp-subnet_config.csv</code> 仍须是普通文件。</p>
+          <p><strong>只读检查</strong><code>python3 -B DAY0-Prepare/01-a-setup.py --status</code> 不拿锁、不读 <code>ztp/.setup_manifest</code>，报告：<code>DAY0-Prepare/activate-project</code> 指针（没有 / 有效 / 无效及原因）；链接规格表逐行的状态（正确、缺失、指向别处、真实文件冲突、目标缺失）——必需项和准备步骤建的项有问题即报错，可选项（如非 AIR 项目的 <code>p2p-air.json</code>、<code>04-device-aliases.csv</code>）只列出，发布器所有的 <code>latest_yaml</code> 不检查；<code>ztp/image/*/*.bin</code>、<code>infiniband/bringup/ufm-setup-upgrade/image</code> 这类共享链接指向 <code>http/image</code> 下即为正确；项目里准备步骤负责建的内容齐不齐；4 个公钥目录里逐把 key 的链接；用户链接输入写成「来自链接 → 目标」。全部正常时退出码 0，有任何问题退出码 1。<code>python3 -B DAY0-Prepare/01-a-setup.py --check-template</code> 不动任何链接，假设指针指向 template，逐项检查 template 里有没有规格表要的固定名，必需、准备步骤建、可选三类分开列出（template 里的链接成员按它指向的文件算）；缺必需项时退出码 1，否则 0。两者都是独立的只读动作，不能与项目名或变更参数组合（组合时退出码 2）。</p>
           <p><strong>失败处理</strong>项目已存在、输入类型错误、重复设备、越界路径或模板不完整时停止；不要用 <code>cp -R</code> 覆盖已有项目，也不要用 <code>--force</code> 隐藏输入问题。保留终端中第一个错误并修正源输入。</p>
           <p><strong>下一步</strong>执行 Runbook 2 的本机正式 load；只有它完整成功后，项目才具备 upload/sync 所需的 full proof。</p>
         </div>
@@ -12868,6 +12869,7 @@ sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
 
 # AIR 示例只能处理 Ethernet：使用 --air，且不要指定 ib/nvl</code></pre>
           <p><strong>成功判据</strong>setup、infra、生成、DHCP、Apache、release commit、service converge 和 ZTP monitor 均成功；活动项目、source receipt 和 parent release 指向本次 generation；命令返回 0。</p>
+          <p><strong>迁移前的 status</strong>还没有迁移到 <code>activate-project</code> 指针的旧部署（树里的链接仍是 <code>../DAY0-Prepare/&lt;project&gt;/…</code> 直连写法），load 之前跑 <code>--status</code> 会报没有激活的项目、规格表各行全部「指向别处」，退出码 1。这是预期结果，不要手工改链接：先跑一次 load（或 setup）完成迁移，再用 <code>--status</code> 验收，期望退出码 0。</p>
           <p><strong>失败处理</strong>统一 release 未提交时使用日志中的首个错误修输入/环境并完整重跑；不要单独运行 DHCP generator、手工替换 YAML latest 或直接 <code>systemctl restart</code> 试图拼出成功状态。半发布 marker 存在时先按其 reason 恢复。</p>
           <p><strong>下一步</strong>立即执行 Runbook 6，只有服务、HTTP、状态页和设备证据都通过才算部署完成。</p>
         </div>

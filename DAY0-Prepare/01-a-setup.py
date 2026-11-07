@@ -13,7 +13,9 @@ ethernet/eth.csv → ../DAY0-Prepare/activate-project/02-devices_config.csv；�
   python3 01-a-setup.py --force <...>            # 校验错误降为警告，照样准备和切换
   python3 01-a-setup.py --p2p-file=<文件名> <...> # 多个 P2P XLSX 时明确选择 P2P 源
   python3 01-a-setup.py --create <项目名>        # 只初始化新项目，不激活
-  python3 01-a-setup.py --status | --list-projects
+  python3 01-a-setup.py --status             # 只读：activate-project 与链接规格表的状态；有问题时退出码 1
+  python3 01-a-setup.py --check-template     # 只读：template 是否带齐规格表的固定名；缺必需项时退出码 1
+  python3 01-a-setup.py --list-projects
 
 激活分 6 步，每一步都能重复执行（R-016 §4.2）；不回滚、不加切换标记，出了问题就再跑一次 setup：
   1. 校验目标项目，什么都不写；不通过以 2 退出。
@@ -38,6 +40,7 @@ import ctypes
 import csv
 from datetime import datetime
 import errno
+import fnmatch
 import glob
 import ctypes
 import errno
@@ -81,7 +84,8 @@ from project_contract import (
     ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS, PUBLICKEY_DIRECTORIES, SETUP_LINK_SPECS,
-    ACTIVE_PROJECT_EXCLUDED_NAMES, SHARED_LINK_SPECS, pointer_link_target, setup_dynamic_link_patterns,
+    ACTIVE_PROJECT_EXCLUDED_NAMES, ACTIVE_PROJECT_POINTER, SHARED_LINK_SPECS, active_project_dir, pointer_link_specs,
+    pointer_link_target, setup_dynamic_link_patterns,
     detect_global_schema_version,
     normalize_issue_tracker_policy,
     normalize_redundancy_mac,
@@ -3305,6 +3309,27 @@ def _collect_expected_links(proj_dir):
     return links
 
 
+def _shared_link_points_under_image(link_path):
+    """I-024: whether ``link_path`` is a shared link of the link table whose text leads where its row says.
+
+    project_contract.SHARED_LINK_SPECS names the tree paths and the http/image targets of the links that belong
+    to no project (the ZTP images, the UFM tool's image/ directory).  Setup makes them; --status accepts them
+    and conflict detection skips them by this one rule (owner 2026-11-02: setup 建链接与 --status 校验用同一张
+    名单).  Judged by the link text, like every link (R-016 §4.3).
+    """
+    if not os.path.islink(link_path):
+        return False
+    target = os.path.normpath(os.path.join(os.path.dirname(link_path), os.readlink(link_path)))
+    link_parts = os.path.relpath(link_path, HTTP_BASE).split(os.sep)
+    target_parts = os.path.relpath(target, HTTP_BASE).split(os.sep)
+
+    def matches(parts, pattern):
+        names = pattern.split("/")
+        return len(parts) == len(names) and all(map(fnmatch.fnmatchcase, parts, names))
+
+    return any(matches(link_parts, row.path) and matches(target_parts, row.target) for row in SHARED_LINK_SPECS)
+
+
 def _check_conflicts(proj_dir):
     """
     扫描全部预期软链接路径，找出已存在且指向其他项目文件夹的链接。
@@ -3312,7 +3337,6 @@ def _check_conflicts(proj_dir):
     返回 False 表示用户拒绝处理冲突，主流程应退出。
     """
     proj_real = os.path.realpath(proj_dir)
-    shared_images = {link: os.path.realpath(src) for link, src in _shared_image_pairs()}
     conflicts = []
 
     for link_path in _collect_expected_links(proj_dir):
@@ -3320,10 +3344,10 @@ def _check_conflicts(proj_dir):
             continue
         if not os.path.islink(link_path):
             continue
-        target_real = os.path.realpath(link_path)
-        # 共享镜像不属于任何项目；正确指向 http/image/ 时不是项目冲突。
-        if shared_images.get(link_path) == target_real:
+        # 共享链接不属于任何项目：按规格表的共享一节，指向 http/image 下就不是项目冲突（I-024）。
+        if _shared_link_points_under_image(link_path):
             continue
+        target_real = os.path.realpath(link_path)
         # 如果链接目标在 proj_dir 下（或本身就是 proj_dir），不算冲突
         if target_real == proj_real or target_real.startswith(proj_real + os.sep):
             continue
@@ -4266,101 +4290,115 @@ def _require_project_contract(project):
     return canonical
 
 
-def _require_exact_identity_link(link, target, label, target_directory=False):
-    try:
-        link_meta = link.lstat()
-        target_meta = target.lstat()
-        raw = os.readlink(link)
-        resolved = link.resolve(strict=True)
-        expected = target.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise ValueError(f"活动项目身份无效（{label}）：{exc}") from exc
-    target_ok = (
-        stat.S_ISDIR(target_meta.st_mode)
-        if target_directory else
-        stat.S_ISREG(target_meta.st_mode) and target_meta.st_nlink == 1
-    )
-    expected_raw = os.path.relpath(target, link.parent)
-    if (
-        not stat.S_ISLNK(link_meta.st_mode)
-        or link_meta.st_nlink != 1
-        or raw != expected_raw
-        or resolved != expected
-        or not target_ok
-    ):
-        raise ValueError(
-            f"活动项目身份无效（{label}）：expected={expected_raw}, actual={raw}"
-        )
-
-
 def inspect_active_project():
-    """Validate and return the exact setup-managed active project identity."""
-    text = _read_bounded_regular_text(MANIFEST_FILE, "setup manifest")
-    lines = text.splitlines()
-    prefix = "# setup manifest — proj: "
-    if not lines or not lines[0].startswith(prefix):
-        raise ValueError("活动项目身份无效：setup manifest header 缺失")
-    project = _require_project_contract(Path(lines[0][len(prefix):]))
-    root = Path(HTTP_BASE).resolve(strict=True)
-    manifest_links = []
-    seen = set()
-    for value in lines[1:]:
-        if not value or value in seen:
-            raise ValueError("活动项目身份无效：setup manifest 含空行或重复链接")
-        link = Path(value)
-        if not link.is_absolute() or os.path.normpath(value) != value:
-            raise ValueError(f"活动项目身份无效：manifest 链接不是规范绝对路径：{value}")
-        try:
-            link.parent.resolve(strict=True).relative_to(root)
-            metadata = link.lstat()
-            raw = os.readlink(link)
-            resolved = link.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise ValueError(f"活动项目身份无效（managed link {link}）：{exc}") from exc
-        if (
-            not stat.S_ISLNK(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or os.path.isabs(raw)
-            or os.path.normpath(raw) != raw
-        ):
-            raise ValueError(f"活动项目身份无效：managed link 不安全：{link}")
-        shared_targets = {
-            Path(source).resolve(strict=True)
-            for _published, source in _shared_image_pairs()
-        }
-        if not (
-            resolved == project
-            or project in resolved.parents
-            or resolved in shared_targets
-        ):
-            raise ValueError(f"活动项目身份无效：managed link 逃逸目标项目：{link}")
-        seen.add(value)
-        manifest_links.append(link)
+    """R-016 §4.5: the active project's state, read-only and lock-free, judged by the link table.
 
-    ztp = Path(ZTP)
-    anchors = {
-        ztp / "config/cumulus/template/01-global.yaml": (
-            project / "01-global.yaml", "global", False,
-        ),
-        ztp / "config/cumulus/template/02-devices_config.csv": (
-            project / "02-devices_config.csv", "inventory", False,
-        ),
-        ztp / "config/isc-dhcp-server/02-subnet_config.csv": (
-            project / "02-dhcp-subnet_config.csv", "DHCP subnet", False,
-        ),
-        ztp / "status": (project / "99-output-ztp", "status", True),
-    }
-    manifest_set = set(manifest_links)
-    if not set(anchors).issubset(manifest_set):
-        raise ValueError("活动项目身份无效：setup manifest 缺少核心身份链接")
-    for link, (target, label, is_directory) in anchors.items():
-        _require_exact_identity_link(
-            link, target, label, target_directory=is_directory,
-        )
-    return {
-        "project": project,
-        "managed_link_count": len(manifest_links),
-    }
+    ztp/.setup_manifest is never read (it is only a record, Q5).  The pointer DAY0-Prepare/activate-project names
+    the project (project_contract.active_project_dir); every row of the link table is judged by its link text
+    against the canonical text (pointer_link_specs), as the reconcile engine judges it (R-016 §4.3).  Returns:
+      project   the real project directory, or None without a valid pointer;
+      pointer   one line on the pointer: 没有 / 有效 / 无效 (with the reason);
+      links     {tree path: state} of each checked table row, shared link and public-key link; a state is
+                正确, 缺失, 指向别处, 真实文件冲突, 目标缺失, 不适用 or 多余;
+      problems  the lines that make --status exit 1: the pointer not valid, a required or prepared row not right,
+                missing derived contents (§3.3), a public-key link not right, an unreadable user link input;
+      listed    the lines only listed: optional rows and shared links (§3.4), rows of a tool this host lacks;
+      shared    「<path> → <text>」 of each shared link that leads under http/image (I-024);
+      inputs    「<name> 来自链接 → <real path>」 of each user link input (WP-11, R-014 第 3 条).
+    Publisher-owned rows (latest_yaml) are not checked.  Without a valid pointer only link texts are judged.
+    """
+    problems, listed, shared, inputs, links = [], [], [], [], {}
+    try:
+        project = active_project_dir(HTTP_BASE)
+    except ValueError as exc:  # ActiveProjectPointerError names the reason
+        project, pointer = None, f"{ACTIVE_PROJECT_POINTER}：无效（{exc}）"
+        problems.append(pointer)
+    else:
+        if project is None:
+            pointer = f"{ACTIVE_PROJECT_POINTER}：没有（没有激活的项目）"
+            problems.append(pointer)
+        else:
+            pointer = f"{ACTIVE_PROJECT_POINTER} → {project.name}：有效（{project}）"
+
+    def judge(link, text, kind):
+        if os.path.islink(link):
+            actual = os.readlink(link)
+            if actual != text:
+                return "指向别处", f"{actual}，应为 {text}"
+            if project is not None and not (os.path.isdir(link) if kind == "dir" else os.path.isfile(link)):
+                return "目标缺失", f"{text} 不是存在的{'目录' if kind == 'dir' else '文件'}"
+            return "正确", text
+        if os.path.lexists(link):
+            return "真实文件冲突", "同名的真实文件或目录，setup 不替换"
+        return "缺失", f"应为 {text}"
+
+    def record(path, state, detail, only_listed):
+        links[path] = state
+        if state != "正确":
+            (listed if only_listed else problems).append(f"{path}：{state}（{detail}）")
+
+    canonical = dict(pointer_link_specs())
+    tools_root = os.path.join(HTTP_BASE, "tools") + os.sep
+    for row in SETUP_LINK_SPECS:
+        if row.role == "publisher":
+            continue
+        link = os.path.join(HTTP_BASE, row.path)
+        if link.startswith(tools_root) and not os.path.isdir(os.path.dirname(link)):
+            # Offline analyzers are not deployed; setup leaves their links alone there (_analyzer_output_pairs).
+            record(row.path, "不适用", "本机没有这个工具目录，setup 不建", True)
+            continue
+        record(row.path, *judge(link, canonical[row.path], row.kind), row.role == "optional")
+
+    for row in SHARED_LINK_SPECS:
+        found = sorted(glob.glob(os.path.join(glob.escape(HTTP_BASE), row.path)))
+        if not found and "*" not in row.path and os.path.isdir(IMAGE_DIR):
+            record(row.path, "缺失", "http/image 存在时 setup 建这条共享链接", True)
+        for link in found:
+            path = os.path.relpath(link, HTTP_BASE)
+            if _shared_link_points_under_image(link):
+                present = os.path.isdir(link) if row.kind == "dir" else os.path.isfile(link)
+                state, detail = ("正确" if present else "目标缺失"), os.readlink(link)
+            elif os.path.islink(link):
+                state, detail = "指向别处", f"{os.readlink(link)}，应在 http/image 下"
+            else:
+                state, detail = "真实文件冲突", "同名的真实文件或目录"
+            record(path, state, detail, True)
+            if state == "正确":
+                shared.append(f"{path} → {detail}")
+
+    if project is not None:
+        # R-016 §3.3: what the preparation step makes in the project.
+        derived = dict.fromkeys(OUTPUT_DIRS, "dir")
+        derived.update((row.target, row.kind) for row in SETUP_LINK_SPECS
+                       if row.base == "project" and row.role == "prepared")
+        derived["p2p.xlsx"] = "file"
+        for name, kind in sorted(derived.items()):
+            target = project / name
+            if not (target.is_dir() if kind == "dir" else target.is_file()):
+                problems.append(f"派生内容缺失：{project.name}/{name}（准备步骤负责建）")
+        # R-016 §3.2: each real public-key directory holds one canonical link per non-empty project key.
+        keys = sorted(os.path.basename(path) for path in glob.glob(os.path.join(glob.escape(str(project)), "*.pub"))
+                      if os.path.isfile(path) and os.path.getsize(path) > 0)
+        for directory in PUBLICKEY_DIRECTORIES:
+            key_dir = os.path.join(HTTP_BASE, directory)
+            if keys and (os.path.islink(key_dir) or not os.path.isdir(key_dir)):
+                problems.append(f"{directory}：不是真实目录（4 个公钥目录都是真实目录）")
+                continue
+            for name in keys:
+                path = directory + "/" + name
+                record(path, *judge(os.path.join(key_dir, name), pointer_link_target(path, name), "file"), False)
+            for link in sorted(glob.glob(os.path.join(glob.escape(key_dir), "*.pub"))):
+                if os.path.islink(link) and os.path.basename(link) not in keys:
+                    record(directory + "/" + os.path.basename(link), "多余",
+                           "项目里没有这把 key，setup 会删掉这条链接", False)
+        try:
+            for item in read_project_input_links(project):
+                inputs.append(f"{item.name} 来自链接 → {item.real_path}（链接原文 {item.link}）")
+        except ValueError as exc:
+            problems.append(f"用户链接输入：{exc}")
+
+    return {"project": project, "pointer": pointer, "links": links, "problems": problems,
+            "listed": listed, "shared": shared, "inputs": inputs}
 
 
 def _measure_directory(descriptor, display, result):
@@ -4494,12 +4532,71 @@ def discover_projects():
 
 
 def _print_active_status():
-    identity = inspect_active_project()
-    project = identity["project"]
-    print(
-        f"[ACTIVE] {project.name}: {identity['managed_link_count']} managed links"
-    )
-    print(format_output_usage(project, measure_output_usage(project)))
+    """--status (R-016 §4.5): print inspect_active_project(); any problem raises ValueError, so main exits 1."""
+    report = inspect_active_project()
+    project = report["project"]
+    if project is not None:
+        print(_c(GREEN, f"[ACTIVE] {report['pointer']}"))
+    counts = {}
+    for state in report["links"].values():
+        counts[state] = counts.get(state, 0) + 1
+    print("[LINKS] " + "，".join(f"{state} {count}" for state, count in sorted(counts.items()))
+          + "（发布器所有的 latest_yaml 不检查）")
+    for line in report["shared"]:
+        print(f"  [SHARED] {line}（共享，http/image 下）")
+    for line in report["inputs"]:
+        print(f"  [LINK-INPUT] {line}")
+    for line in report["listed"]:
+        print(f"  [LIST] {line}")
+    for line in report["problems"]:
+        print(_c(RED, f"  [ERROR] {line}"))
+    if project is not None:
+        try:
+            print(format_output_usage(project, measure_output_usage(project)))
+        except ValueError as exc:
+            print(_c(YELLOW, f"[WARN] 无法安全统计 99-output-* 容量：{exc}"))
+    if report["problems"]:
+        raise ValueError(f"当前状态有 {len(report['problems'])} 个问题，见上方 [ERROR] 行")
+    print(_c(GREEN, "[OK] activate-project 与链接规格表一致"))
+
+
+def check_template():
+    """R-016 §4.6 (B 方案): which fixed names of the link table template carries, by class.
+
+    Read-only; no link is touched.  As if DAY0-Prepare/activate-project pointed at template, each project row's
+    fixed name must be there as its kind; a link member counts when it leads to one (v3.1.1 WP-12 adds the
+    template's first link, ib.csv).  Returns {"required": {...}, "prepared": {...}, "optional": {...}}, each
+    mapping a fixed name to whether template has it.  Repository aliases and publisher rows name no project file.
+    """
+    report = {"required": {}, "prepared": {}, "optional": {}}
+    for row in SETUP_LINK_SPECS:
+        if row.base == "project" and row.role in report:
+            path = os.path.join(TEMPLATE_DIR, row.target)
+            report[row.role][row.target] = os.path.isdir(path) if row.kind == "dir" else os.path.isfile(path)
+    return report
+
+
+def _print_template_check():
+    """--check-template: print check_template(); 0 when template has every required name, else 1."""
+    if os.path.islink(TEMPLATE_DIR) or not os.path.isdir(TEMPLATE_DIR):
+        print(_c(RED, f"[ERROR] template 不是真实目录：{TEMPLATE_DIR}"))
+        return 1
+    report = check_template()
+    titles = {"required": "必需（缺了是错误）", "prepared": "准备步骤建（setup 会建，template 可以没有）",
+              "optional": "可选（允许缺）"}
+    for role, names in report.items():
+        print(f"[{role.upper()}] {titles[role]}：template 有 {sum(names.values())}/{len(names)} 项")
+        for name, present in sorted(names.items()):
+            if role == "required":
+                print(f"  [OK] {name}" if present else _c(RED, f"  [MISSING] {name}"))
+            elif not present:
+                print(f"  [ABSENT] {name}")
+    missing = sorted(name for name, present in report["required"].items() if not present)
+    if missing:
+        print(_c(RED, f"[ERROR] template 缺必需项：{', '.join(missing)}"))
+        return 1
+    print(_c(GREEN, "[OK] template 不缺必需项"))
+    return 0
 
 
 def _print_project_list():
@@ -4529,7 +4626,11 @@ def _parse_args(argv=None):
     discovery = parser.add_mutually_exclusive_group()
     discovery.add_argument(
         "--status", action="store_true",
-        help="只读验证并显示当前 active 项目和 managed-link 身份",
+        help="只读、不拿锁：报告 activate-project 指针、链接规格表逐行状态和项目派生内容；有问题时退出码 1",
+    )
+    discovery.add_argument(
+        "--check-template", action="store_true",
+        help="只读：假设 activate-project 指向 template，检查 template 有没有规格表里的固定名；缺必需项时退出码 1",
     )
     discovery.add_argument(
         "--list-projects", action="store_true",
@@ -4568,15 +4669,15 @@ def _parse_args(argv=None):
         parser.error("--csv-dir 已退役（R-016 Q1）：在项目里建 02-devices_config.csv → 外部文件 的链接代替"
                      "（R-014 第 3 条）")
     args = parser.parse_args(argv)
-    if args.status or args.list_projects:
+    if args.status or args.list_projects or args.check_template:
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
             args.force, args.strict, args.dry_run, args.p2p_file,
             args.host_role, args.no_upgrade, getattr(args, "switch_scope", None),
         )):
-            parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
+            parser.error("--status/--list-projects/--check-template 是独立只读动作，不能组合变更参数")
     elif args.project is None:
-        parser.error("必须指定 project，或使用 --status/--list-projects")
+        parser.error("必须指定 project，或使用 --status/--list-projects/--check-template")
     return args
 
 
@@ -4663,6 +4764,8 @@ def main(argv=None):
     global _SWITCH_SCOPE, _NO_UPGRADE
 
     args = _parse_args(argv)
+    if getattr(args, "check_template", False):
+        return _print_template_check()
     if getattr(args, "status", False) or getattr(args, "list_projects", False):
         try:
             if getattr(args, "status", False):

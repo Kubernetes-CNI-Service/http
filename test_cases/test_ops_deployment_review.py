@@ -1096,27 +1096,40 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
 
     @staticmethod
     def _publish_active_identity(root: Path, project: Path) -> tuple[Path, list[Path]]:
-        ztp = root / "ztp"
-        targets = {
-            ztp / "config/cumulus/template/01-global.yaml": project / "01-global.yaml",
-            ztp / "config/cumulus/template/02-devices_config.csv": (
-                project / "02-devices_config.csv"
-            ),
-            ztp / "config/isc-dhcp-server/02-subnet_config.csv": (
-                project / "02-dhcp-subnet_config.csv"
-            ),
-            ztp / "status": project / "99-output-ztp",
-        }
-        for link, target in targets.items():
+        """R-016 §4.5 (v3.1.1 WP-4): the active identity is DAY0-Prepare/activate-project plus the link table.
+
+        Builds the pointer, every non-publisher table row at its canonical text (pointer_link_specs), and the
+        project's prepared contents; returns the pointer and the four identity links the old manifest named.
+        """
+        table = SETUP.sys.modules["project_contract"]
+        for row in table.SETUP_LINK_SPECS:
+            if row.base != "project" or row.role not in ("required", "prepared"):
+                continue
+            target = project / row.target
+            if row.kind == "dir":
+                target.mkdir(parents=True, exist_ok=True)
+            elif not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(row.target + "\n", encoding="utf-8")
+        for entry in sorted((ROOT / "DAY0-Prepare/template").iterdir()):
+            if entry.name.startswith("99-output-") and entry.is_dir():
+                (project / entry.name).mkdir(exist_ok=True)
+        texts = dict(table.pointer_link_specs())
+        for row in table.SETUP_LINK_SPECS:
+            if row.role == "publisher":
+                continue
+            link = root / row.path
             link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(os.path.relpath(target, link.parent))
-        manifest = ztp / ".setup_manifest"
-        manifest.write_text(
-            f"# setup manifest — proj: {project.resolve()}\n"
-            + "".join(f"{path}\n" for path in sorted(targets)),
-            encoding="utf-8",
-        )
-        return manifest, sorted(targets)
+            link.symlink_to(texts[row.path])
+        pointer = root / "DAY0-Prepare/activate-project"
+        pointer.symlink_to(project.name)
+        ztp = root / "ztp"
+        return pointer, [
+            ztp / "config/cumulus/template/01-global.yaml",
+            ztp / "config/cumulus/template/02-devices_config.csv",
+            ztp / "config/isc-dhcp-server/02-subnet_config.csv",
+            ztp / "status",
+        ]
 
     def test_native_status_and_project_list_are_read_only_and_identity_bound(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1128,17 +1141,17 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             incomplete.mkdir()
             (day0 / "template").mkdir()
             (day0 / "alias").symlink_to(active.name)
-            manifest, links = self._publish_active_identity(root, active)
+            _pointer, links = self._publish_active_identity(root, active)
             lock = root / ".deployment.lock"
 
             with mock.patch.multiple(
                 SETUP,
                 HERE=str(day0), HTTP_BASE=str(root), ZTP=str(root / "ztp"),
-                MANIFEST_FILE=str(manifest),
+                MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
             ):
                 identity = SETUP.inspect_active_project()
                 self.assertEqual(active, identity["project"])
-                self.assertEqual(len(links), identity["managed_link_count"])
+                self.assertEqual([], identity["problems"])
                 projects = SETUP.discover_projects()
                 self.assertEqual(
                     [("active", True), ("inactive", False)],
@@ -1154,40 +1167,81 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                         self.assertEqual(0, SETUP.main(["--list-projects"]))
                 self.assertFalse(os.path.lexists(lock))
 
+                # A managed link re-pointed at another project is detected (R-016 §4.3: by its text).
                 links[1].unlink()
                 links[1].symlink_to(os.path.relpath(
                     inactive / "02-devices_config.csv", links[1].parent,
                 ))
-                with self.assertRaisesRegex(ValueError, "活动项目身份"):
-                    SETUP.inspect_active_project()
+                identity = SETUP.inspect_active_project()
+                self.assertTrue(any(
+                    os.path.relpath(links[1], root) in line for line in identity["problems"]
+                ), identity["problems"])
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(1, SETUP.main(["--status"]))
 
     def test_native_status_rejects_linked_or_oversized_identity_manifest(self):
+        # v3.1.1 WP-4 (R-016 §4.5, Q5): the identity is the pointer; ztp/.setup_manifest is only a record and
+        # never names the active project.  A forged pointer -- a regular file, a link to a linked directory, a
+        # multi-level text, a FIFO -- is refused without blocking.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             day0 = root / "DAY0-Prepare"
             active = self._write_project_contract(day0, "active")
-            manifest, _links = self._publish_active_identity(root, active)
-            original = manifest.read_bytes()
-            forged = root / "forged-manifest"
-            forged.write_bytes(original)
+            pointer, links = self._publish_active_identity(root, active)
+            manifest = root / "ztp/.setup_manifest"
+            manifest.write_text(
+                f"# setup manifest — proj: {active}\n"
+                + "".join(f"{path}\n" for path in sorted(links)),
+                encoding="utf-8",
+            )
+            (day0 / "alias").symlink_to(active.name)
 
             with mock.patch.multiple(
                 SETUP,
                 HERE=str(day0), HTTP_BASE=str(root), ZTP=str(root / "ztp"),
                 MANIFEST_FILE=str(manifest),
             ):
-                manifest.unlink()
-                manifest.symlink_to(forged)
-                with self.assertRaisesRegex(ValueError, "安全读取"):
-                    SETUP.inspect_active_project()
+                pointer.unlink()
+                self.assertIsNone(SETUP.inspect_active_project()["project"])
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(1, SETUP.main(["--status"]))
 
-                manifest.unlink()
-                manifest.write_bytes(
-                    b"x" * (SETUP.MAX_DISCOVERY_METADATA_BYTES + 1)
+                pointer.write_text("active\n", encoding="utf-8")
+                self.assertIsNone(SETUP.inspect_active_project()["project"])
+                pointer.unlink()
+                for text in ("alias", "../DAY0-Prepare/active", str(active)):
+                    with self.subTest(pointer=text):
+                        pointer.symlink_to(text)
+                        self.assertIsNone(SETUP.inspect_active_project()["project"])
+                        with redirect_stdout(io.StringIO()):
+                            self.assertEqual(1, SETUP.main(["--status"]))
+                        pointer.unlink()
+
+            os.mkfifo(pointer)
+            probe = "\n".join((
+                "import contextlib, importlib.util, io, pathlib, sys",
+                f"sys.path.insert(0, {str(TOOLS)!r})",
+                f"path = pathlib.Path({str(ROOT / 'DAY0-Prepare/01-a-setup.py')!r})",
+                "spec = importlib.util.spec_from_file_location('fifo_setup_probe', path)",
+                "module = importlib.util.module_from_spec(spec)",
+                "sys.modules[spec.name] = module",
+                "spec.loader.exec_module(module)",
+                f"module.HERE, module.HTTP_BASE = {str(day0)!r}, {str(root)!r}",
+                f"module.ZTP = {str(root / 'ztp')!r}",
+                "with contextlib.redirect_stdout(io.StringIO()):",
+                "    code = module.main(['--status'])",
+                "raise SystemExit(0 if code == 1 else 9)",
+            ))
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-B", "-c", probe], cwd=ROOT,
+                    text=True, capture_output=True, timeout=10, check=False,
                 )
-                with self.assertRaisesRegex(ValueError, "不超过"):
-                    SETUP.inspect_active_project()
+            except subprocess.TimeoutExpired:
+                self.fail("FIFO pointer blocked instead of failing closed")
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+            # The bounded reader itself still fails closed on a FIFO (kept from the manifest era).
             fifo = root / "fifo-manifest"
             os.mkfifo(fifo)
             probe = "\n".join((

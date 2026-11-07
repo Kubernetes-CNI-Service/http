@@ -927,5 +927,425 @@ class WP6RetiredLinkPackagingTests(unittest.TestCase):
         self.assertEqual({WP6_RETIRED_MONITOR_LINK}, present - absent)
 
 
+# ── v3.1.1 WP-4: --status, --check-template, and _check_conflicts' shared links (R-016 §4.5, §4.6; I-024) ──
+# Expected values come from the design, never from the implementation under test:
+# - R-016 §4.5: --status is read-only and lock-free and no longer reads ztp/.setup_manifest; it reports the
+#   pointer (没有 / 有效 / 无效), every fixed row (正确、缺失、指向别处、真实文件冲突、目标缺失: required ones are
+#   errors, optional ones are only listed), whether the active project's derived contents (§3.3) are complete;
+#   exit 0 when all is well, 1 on any problem.  详细工作指导 WP-4: publisher-owned rows are not checked; shared
+#   links are right when they lead under http/image (I-024); a user link input is reported as 「来自链接 → 目标」
+#   (WP-11, R-014 第 3 条).
+# - R-016 §4.6: --check-template changes nothing, checks template for each fixed name as if the pointer named
+#   template, lists required and optional names apart, exit 0 when no required name is missing, else 1.
+# - I-024 (owner 2026-11-02): setup's links and --status use one list; the UFM image link
+#   infiniband/bringup/ufm-setup-upgrade/image -> ../../../image is shared, never a project escape.
+# - 详细工作指导 WP-4 「_check_conflicts」: shared targets come from the table's shared section.
+# Each row's canonical text is the table's own (pointer_link_specs / pointer_link_target, wave-3 brief), never a
+# literal written here.
+
+import contextlib
+from contextlib import redirect_stderr, redirect_stdout
+import functools
+import io
+import shutil
+from unittest import mock
+
+WP4_PROJECT = "site-p"
+WP4_UFM_IMAGE = "infiniband/bringup/ufm-setup-upgrade/image"
+
+
+@functools.lru_cache(maxsize=1)
+def wp4_setup():
+    """DAY0-Prepare/01-a-setup.py, loaded once for the WP-4 classes."""
+    return load_script("activate_project_contract_wp4_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
+
+
+def wp4_table():
+    """The link table setup itself imports (tools/project_contract.py)."""
+    return wp4_setup().sys.modules["project_contract"]
+
+
+def wp4_complete_tree(root: Path, name: str = WP4_PROJECT) -> Path:
+    """A tree as R-016 says setup leaves it: the pointer, every non-publisher row at its canonical text, the
+    project's required inputs and prepared contents (§3.3, §3.4), and one key linked in each public-key
+    directory (§3.2).  Optional targets are left absent: dangling optional rows are normal (§3.4)."""
+    table = wp4_table()
+    day0 = root / "DAY0-Prepare"
+    project = day0 / name
+    project.mkdir(parents=True)
+    # §3.3: the 99-output-* directories the template carries.
+    for entry in sorted((ROOT / "DAY0-Prepare/template").iterdir()):
+        if entry.name.startswith("99-output-") and entry.is_dir():
+            (project / entry.name).mkdir()
+    for row in table.SETUP_LINK_SPECS:
+        if row.base != "project" or row.role not in ("required", "prepared"):
+            continue
+        target = project / row.target
+        if row.kind == "dir":
+            target.mkdir(parents=True, exist_ok=True)
+        elif not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(f"fixture {row.target}\n", encoding="utf-8")
+    (project / "laptop.pub").write_text("ssh-ed25519 fixture operator@laptop\n", encoding="ascii")
+    os.symlink(name, day0 / "activate-project")
+    texts = dict(table.pointer_link_specs())
+    for row in table.SETUP_LINK_SPECS:
+        if row.role == "publisher":
+            continue
+        link = root / row.path
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(texts[row.path], link)
+    for directory in table.PUBLICKEY_DIRECTORIES:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+        os.symlink(table.pointer_link_target(directory + "/laptop.pub", "laptop.pub"),
+                   root / directory / "laptop.pub")
+    return project
+
+
+def wp4_patches(root: Path, template: Path | None = None) -> dict:
+    return dict(
+        HERE=str(root / "DAY0-Prepare"), HTTP_BASE=str(root), ZTP=str(root / "ztp"),
+        IMAGE_DIR=str(root / "image"), MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
+        TEMPLATE_DIR=str(template if template is not None else ROOT / "DAY0-Prepare/template"),
+    )
+
+
+def wp4_run_main(root: Path, argv, template: Path | None = None, *, forbid_manifest: bool = False):
+    """main(argv) under the tree; an argparse refusal is its exit code.  No lock may be taken."""
+    setup = wp4_setup()
+    printed = io.StringIO()
+    manifest_reader = (mock.patch.object(
+        setup, "_read_bounded_regular_text",
+        side_effect=AssertionError("R-016 §4.5: --status no longer reads ztp/.setup_manifest"),
+    ) if forbid_manifest else contextlib.nullcontext())
+    with mock.patch.multiple(setup, **wp4_patches(root, template)), mock.patch.object(
+        setup, "deployment_lock", side_effect=AssertionError("R-016 §4.5/§4.6: read-only actions take no lock"),
+    ), manifest_reader, redirect_stdout(printed), redirect_stderr(io.StringIO()):
+        try:
+            code = setup.main(list(argv))
+        except SystemExit as exc:
+            code = exc.code
+    return code, printed.getvalue()
+
+
+def wp4_inspect(root: Path) -> dict:
+    setup = wp4_setup()
+    with mock.patch.multiple(setup, **wp4_patches(root)):
+        return setup.inspect_active_project()
+
+
+def wp4_check_template(root: Path, template: Path) -> dict:
+    setup = wp4_setup()
+    with mock.patch.multiple(setup, **wp4_patches(root, template)):
+        return setup.check_template()
+
+
+class WP4StatusTests(unittest.TestCase):
+    """R-016 §4.5 and 详细工作指导 WP-4: --status over the pointer layout."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / "http"
+        self.project = wp4_complete_tree(self.root)
+
+    def status(self):
+        return wp4_run_main(self.root, ["--status"])
+
+    def assert_status(self, expected_code: int, *words: str) -> str:
+        code, printed = self.status()
+        self.assertEqual(expected_code, code, printed)
+        for word in words:
+            self.assertIn(word, printed)
+        return printed
+
+    def assert_problem(self, path: str, state: str) -> None:
+        printed = self.assert_status(1, path, state)
+        report = wp4_inspect(self.root)
+        self.assertEqual(state, report["links"][path])
+        self.assertTrue(any(path in line and state in line for line in report["problems"]), report["problems"])
+
+    def test_complete_tree_is_right_read_only_lock_free_and_manifest_free(self):
+        # A stale manifest naming another project is not an identity source any more (R-016 §4.5, Q5).
+        other = self.root / "DAY0-Prepare/site-q"
+        other.mkdir()
+        (self.root / "ztp/.setup_manifest").write_text(
+            f"# setup manifest — proj: {other}\n", encoding="utf-8")
+        before = tree_state(self.root.parent)
+        code, printed = wp4_run_main(self.root, ["--status"], forbid_manifest=True)
+        self.assertEqual(0, code, printed)
+        self.assertIn("activate-project", printed)
+        self.assertIn(WP4_PROJECT, printed)
+        self.assertEqual(tree_state(self.root.parent), before, "--status writes nothing")
+        self.assertNotIn("site-q", printed)
+
+        report = wp4_inspect(self.root)
+        self.assertEqual(Path(os.path.realpath(self.project)), report["project"])
+        self.assertEqual([], report["problems"])
+        for row in wp4_table().SETUP_LINK_SPECS:
+            if row.role in ("required", "prepared"):
+                with self.subTest(row=row.path):
+                    self.assertEqual("正确", report["links"][row.path])
+
+    def test_no_pointer_is_reported_and_exits_1(self):
+        (self.root / "DAY0-Prepare/activate-project").unlink()
+        self.assert_status(1, "activate-project", "没有")
+        report = wp4_inspect(self.root)
+        self.assertIsNone(report["project"])
+        self.assertTrue(report["problems"])
+
+    def test_invalid_pointer_names_the_reason_and_exits_1(self):
+        pointer = self.root / "DAY0-Prepare/activate-project"
+        (self.root / "DAY0-Prepare/template").mkdir()
+        for text in ("template", "../DAY0-Prepare/" + WP4_PROJECT, "site-gone"):
+            with self.subTest(text=text):
+                pointer.unlink()
+                os.symlink(text, pointer)
+                self.assert_status(1, "无效", text)
+                self.assertIsNone(wp4_inspect(self.root)["project"])
+
+    def test_missing_fixed_link_is_an_error(self):
+        (self.root / "ztp/status").unlink()
+        self.assert_problem("ztp/status", "缺失")
+
+    def test_link_pointing_elsewhere_is_an_error_even_when_it_reaches_the_same_file(self):
+        # R-016 §4.3: 「已正确」 is judged by the link text alone; the pre-migration direct text is elsewhere
+        # (详细工作指导 WP-4 「风险」: before migration --status reports every such row 「指向别处」).
+        path = "ztp/config/cumulus/template/02-devices_config.csv"
+        link = self.root / path
+        link.unlink()
+        os.symlink(os.path.relpath(self.project / "02-devices_config.csv", link.parent), link)
+        self.assertEqual(link.resolve(), (self.project / "02-devices_config.csv").resolve())
+        self.assert_problem(path, "指向别处")
+
+    def test_real_file_in_a_link_position_is_an_error_and_is_kept(self):
+        path = "ethernet/eth.csv"
+        link = self.root / path
+        link.unlink()
+        link.write_bytes(b"operator file\n")
+        self.assert_problem(path, "真实文件冲突")
+        self.assertEqual(b"operator file\n", link.read_bytes())
+
+    def test_required_target_missing_is_an_error(self):
+        (self.project / "01-global.yaml").unlink()
+        self.assert_problem("ztp/config/cumulus/template/01-global.yaml", "目标缺失")
+
+    def test_optional_rows_are_only_listed(self):
+        table = wp4_table()
+        optional = [row.path for row in table.SETUP_LINK_SPECS if row.role == "optional"]
+        self.assertIn(table.P2P_AIR_PATH, optional)
+        self.assertFalse((self.project / "99-output-p2p/p2p-air.json").exists(), "not an AIR project")
+        # One optional link pointing elsewhere is listed too, never an error (R-016 §4.5).
+        moved = self.root / "ethernet/monitor/04-device-aliases.csv"
+        moved.unlink()
+        os.symlink("../../somewhere-else.csv", moved)
+        printed = self.assert_status(0, table.P2P_AIR_PATH, "ethernet/monitor/04-device-aliases.csv")
+        report = wp4_inspect(self.root)
+        self.assertEqual([], report["problems"])
+        self.assertEqual("目标缺失", report["links"][table.P2P_AIR_PATH])
+        self.assertEqual("指向别处", report["links"]["ethernet/monitor/04-device-aliases.csv"])
+        self.assertTrue(any(table.P2P_AIR_PATH in line for line in report["listed"]))
+        self.assertNotIn("[ERROR]", printed)
+
+    def test_publisher_rows_are_not_checked(self):
+        table = wp4_table()
+        publisher = [row.path for row in table.SETUP_LINK_SPECS if row.role == "publisher"]
+        self.assertTrue(publisher)
+        for path in publisher:
+            link = self.root / path
+            link.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink("no-release-yet", link)
+        printed = self.assert_status(0)
+        for path in publisher:
+            self.assertNotIn(path, printed)
+            self.assertNotIn(path, wp4_inspect(self.root)["links"])
+
+    def test_ufm_image_link_under_http_image_is_right_i024(self):
+        # I-024: a project with UFM, http/image present, setup's link ../../../image: right, not an escape.
+        devices = self.project / "02-devices_config.csv"
+        devices.write_text(
+            "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac\n"
+            "ufm01,server_ufm,NA,198.51.100.31,24,198.51.100.1,02:00:00:00:02:31\n", encoding="utf-8")
+        image = self.root / "image"
+        image.mkdir()
+        (image / "ufm.lic").write_bytes(b"fixture license\n")
+        (image / "cumulus-linux-5.16.4-mlx-amd64.bin").write_bytes(b"fixture image\n")
+        link = self.root / WP4_UFM_IMAGE
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(os.path.relpath(image, link.parent), link)
+        self.assertEqual("../../../image", os.readlink(link))
+        binary = self.root / "ztp/image/cumulus/cumulus-linux-5.16.4-mlx-amd64.bin"
+        binary.parent.mkdir(parents=True)
+        os.symlink(os.path.relpath(image / binary.name, binary.parent), binary)
+
+        printed = self.assert_status(0, WP4_UFM_IMAGE)
+        self.assertNotIn("逃逸", printed)
+        report = wp4_inspect(self.root)
+        self.assertEqual([], report["problems"])
+        self.assertEqual("正确", report["links"][WP4_UFM_IMAGE])
+        self.assertEqual("正确", report["links"]["ztp/image/cumulus/" + binary.name])
+
+    def test_shared_link_leading_elsewhere_is_listed_not_right(self):
+        link = self.root / WP4_UFM_IMAGE
+        link.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink("../../../DAY0-Prepare/" + WP4_PROJECT, link)
+        self.assert_status(0, WP4_UFM_IMAGE)
+        report = wp4_inspect(self.root)
+        self.assertEqual("指向别处", report["links"][WP4_UFM_IMAGE])
+        self.assertTrue(any(WP4_UFM_IMAGE in line for line in report["listed"]))
+
+    def test_missing_derived_content_is_an_error(self):
+        # R-016 §3.3: the 99-output-* directories are the preparation step's; one missing is a problem.
+        shutil.rmtree(self.project / "99-output-dhcp")
+        printed = self.assert_status(1, "99-output-dhcp")
+        report = wp4_inspect(self.root)
+        self.assertTrue(any("派生内容" in line and "99-output-dhcp" in line for line in report["problems"]),
+                        report["problems"])
+        self.assertIn("派生内容", printed)
+
+    def test_public_key_links_follow_the_project_keys(self):
+        # R-016 §3.2: each of the four real directories holds one canonical link per non-empty project key.
+        table = wp4_table()
+        missing = sorted(table.PUBLICKEY_DIRECTORIES)[0] + "/laptop.pub"
+        (self.root / missing).unlink()
+        self.assert_problem(missing, "缺失")
+        os.symlink(table.pointer_link_target(missing, "laptop.pub"), self.root / missing)
+        self.assert_status(0)
+
+        stale = sorted(table.PUBLICKEY_DIRECTORIES)[-1] + "/retired.pub"
+        os.symlink(table.pointer_link_target(stale, "retired.pub"), self.root / stale)
+        self.assert_status(1, stale)
+        operator_file = self.root / sorted(table.PUBLICKEY_DIRECTORIES)[-1] / "operator.pub"
+        (self.root / stale).unlink()
+        operator_file.write_text("operator-managed\n", encoding="ascii")
+        self.assert_status(0)
+
+    def test_user_link_input_is_reported_with_its_target(self):
+        # WP-11 / R-014 第 3 条: a project input may be the user's link; --status names where it comes from.
+        outside = self.root.parent / "Work/devices.csv"
+        outside.parent.mkdir()
+        outside.write_bytes((self.project / "02-devices_config.csv").read_bytes())
+        devices = self.project / "02-devices_config.csv"
+        devices.unlink()
+        os.symlink(outside, devices)
+        printed = self.assert_status(0, "02-devices_config.csv", "来自链接", str(outside.resolve()))
+        self.assertTrue(any("02-devices_config.csv" in line and str(outside.resolve()) in line
+                            for line in wp4_inspect(self.root)["inputs"]), printed)
+        outside.unlink()
+        self.assert_status(1, "02-devices_config.csv")
+
+    def test_rows_of_a_tool_this_host_lacks_are_not_applicable(self):
+        # Offline analyzers are not deployed (setup leaves their links alone where the tool is absent).
+        shutil.rmtree(self.root / "tools/ibdiagnet-analyze-tool")
+        self.assert_status(0)
+        self.assertEqual("不适用", wp4_inspect(self.root)["links"]["tools/ibdiagnet-analyze-tool/99-output-p2p"])
+
+
+class WP4CheckTemplateTests(unittest.TestCase):
+    """R-016 §4.6 (B 方案) and 详细工作指导 WP-4/WP-8: --check-template against template's fixed names."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / "http"
+        (self.root / "DAY0-Prepare").mkdir(parents=True)
+
+    def copy_template(self) -> Path:
+        copy = self.root / "DAY0-Prepare/template"
+        shutil.copytree(ROOT / "DAY0-Prepare/template", copy, symlinks=True)
+        return copy
+
+    def required_names(self) -> set[str]:
+        return {row.target for row in wp4_table().SETUP_LINK_SPECS
+                if row.base == "project" and row.role == "required"}
+
+    def test_the_real_template_passes_and_nothing_changes(self):
+        # R-013 acceptance (WP-8): --check-template on the repository's template returns 0.
+        template = ROOT / "DAY0-Prepare/template"
+        before = tree_state(template)
+        code, printed = wp4_run_main(self.root, ["--check-template"], template)
+        self.assertEqual(0, code, printed)
+        self.assertEqual(tree_state(template), before)
+        for name in self.required_names():
+            self.assertIn(name, printed)
+        report = wp4_check_template(self.root, template)
+        self.assertEqual({name: True for name in self.required_names()}, report["required"])
+
+    def test_a_copy_missing_one_required_name_fails(self):
+        template = self.copy_template()
+        (template / "02-dhcp-subnet_config.csv").unlink()
+        code, printed = wp4_run_main(self.root, ["--check-template"], template)
+        self.assertEqual(1, code, printed)
+        self.assertIn("02-dhcp-subnet_config.csv", printed)
+        self.assertFalse(wp4_check_template(self.root, template)["required"]["02-dhcp-subnet_config.csv"])
+
+    def test_link_members_count_like_files(self):
+        # WP-12 adds template/ib.csv -> 02-devices_config.csv, the template's first link: never an error.
+        template = self.copy_template()
+        os.symlink("02-devices_config.csv", template / "ib.csv")
+        (template / "01-global.yaml").rename(template / "global-source.yaml")
+        os.symlink("global-source.yaml", template / "01-global.yaml")
+        code, printed = wp4_run_main(self.root, ["--check-template"], template)
+        self.assertEqual(0, code, printed)
+
+    def test_prepared_and_optional_names_may_be_missing_and_are_listed_apart(self):
+        template = self.copy_template()
+        shutil.rmtree(template / "99-output-p2p")
+        code, printed = wp4_run_main(self.root, ["--check-template"], template)
+        self.assertEqual(0, code, printed)
+        self.assertIn("必需", printed)
+        self.assertIn("可选", printed)
+        report = wp4_check_template(self.root, template)
+        self.assertFalse(report["prepared"]["99-output-p2p"])
+        self.assertFalse(report["optional"]["99-output-p2p/p2p-air.json"])
+        self.assertTrue(all(report["required"].values()))
+
+    def test_check_template_is_a_standalone_read_only_action(self):
+        for argv in (["--check-template", WP4_PROJECT], ["--check-template", "--status"],
+                     ["--check-template", "-y"]):
+            with self.subTest(argv=argv):
+                code, _printed = wp4_run_main(self.root, argv)
+                self.assertEqual(2, code)
+
+
+class WP4CheckConflictsTests(unittest.TestCase):
+    """详细工作指导 WP-4: _check_conflicts takes shared targets from the table's shared section (I-024)."""
+
+    def test_shared_links_under_http_image_are_not_project_conflicts(self):
+        setup = wp4_setup()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve() / "http"
+            project = root / "DAY0-Prepare" / WP4_PROJECT
+            other = root / "DAY0-Prepare/site-q"
+            for path in (project, other, root / "image"):
+                path.mkdir(parents=True)
+            (other / "01-global.yaml").write_text("x\n", encoding="utf-8")
+            (root / "image/cumulus-linux-5.16.4-mlx-amd64.bin").write_bytes(b"fixture\n")
+            ufm = root / WP4_UFM_IMAGE
+            binary = root / "ztp/image/cumulus/cumulus-linux-5.16.4-mlx-amd64.bin"
+            foreign = root / "infiniband/01-global.yaml"
+            for link, target in ((ufm, root / "image"), (binary, root / "image" / binary.name),
+                                 (foreign, other / "01-global.yaml")):
+                link.parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(os.path.relpath(target, link.parent), link)
+
+            authorize = mock.Mock(return_value=False)
+            with mock.patch.multiple(setup, **wp4_patches(root)), mock.patch.object(
+                setup, "_authorize_project_switch", authorize,
+            ), redirect_stdout(io.StringIO()):
+                with mock.patch.object(setup, "_collect_expected_links",
+                                            return_value=[str(ufm), str(binary), str(foreign)]):
+                    self.assertFalse(setup._check_conflicts(str(project)))
+                # Only the link into another project is a conflict; the shared ones never are.
+                authorize.assert_called_once_with(str(project), 1)
+                authorize.reset_mock()
+                with mock.patch.object(setup, "_collect_expected_links",
+                                            return_value=[str(ufm), str(binary)]):
+                    self.assertTrue(setup._check_conflicts(str(project)))
+                authorize.assert_not_called()
+            self.assertTrue(ufm.is_symlink() and binary.is_symlink(), "shared links are kept")
+
+
+
 if __name__ == "__main__":
     unittest.main()

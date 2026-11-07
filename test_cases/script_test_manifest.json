@@ -201,7 +201,8 @@
         "test_cases.test_activate_project_unsetup_workflow",
         "test_cases.test_activate_project_air_contract",
         "test_cases.test_activate_project_air_workflow",
-        "test_cases.test_activate_project_workflow"
+        "test_cases.test_activate_project_workflow",
+        "test_cases.test_activate_project_status_workflow"
       ]
     },
     {
@@ -3950,7 +3951,8 @@
       "tests": [
         "test_cases.test_activate_project_unsetup_workflow",
         "test_cases.test_activate_project_air_workflow",
-        "test_cases.test_activate_project_workflow"
+        "test_cases.test_activate_project_workflow",
+        "test_cases.test_activate_project_status_workflow"
       ]
     }
   ],
