@@ -192,7 +192,9 @@
         "test_cases.test_infra_component_contract",
         "test_cases.test_infra_component_entry_contract",
         "test_cases.test_infra_component_workflow",
-        "test_cases.test_runtime_lock_fdinfo"
+        "test_cases.test_runtime_lock_fdinfo",
+        "test_cases.test_setup_switch_scope_contract",
+        "test_cases.test_setup_link_spec_contract"
       ]
     },
     {
@@ -237,7 +239,11 @@
         "test_cases.test_ib_cvt_project_output",
         "test_cases.test_load_ib_cvt",
         "test_cases.test_dhcp_deferred_candidate_contract",
-        "test_cases.test_generation_input_binding_workflow"
+        "test_cases.test_generation_input_binding_workflow",
+        "test_cases.test_device_identity",
+        "test_cases.test_hostname_ranges",
+        "test_cases.test_inventory_subset",
+        "test_cases.test_device_identity_workflow"
       ]
     },
     {
@@ -283,7 +289,8 @@
         "test_cases.test_collection_d70_retirement",
         "test_cases.test_collection_d70_retirement_workflow",
         "test_cases.test_monitor_derived_parent_release",
-        "test_cases.test_monitor_imported_configs_parent_release"
+        "test_cases.test_monitor_imported_configs_parent_release",
+        "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
       ]
     },
     {
@@ -665,7 +672,9 @@
     "infiniband/bringup/xdr-initial-setup/infra-neutral.conf",
     "test_cases/linux_runtime_lock_model.py",
     "test_cases/source_tools_fixture.py",
-    "test_cases/subprocess_timeout_evidence.py"
+    "test_cases/subprocess_timeout_evidence.py",
+    "test_cases/fixtures/mac_spellings.tsv",
+    "tools/ibdiagnet-analyze-tool/config/port_profiles.csv"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -855,7 +864,10 @@
     "tools/ibsw_upgrade_observer.py": "tools/ibsw_upgrade_observer.py",
     "tools/ibsw_upgrade_access.py": "tools/ibsw_upgrade_access.py",
     "tools/ibsw_upgrade_pipeline.py": "tools/ibsw_upgrade_pipeline.py",
-    "tools/infra_components.py": "tools/infra_components.py"
+    "tools/infra_components.py": "tools/infra_components.py",
+    "tools/device_identity.py": "tools/device_identity.py",
+    "tools/hostname_ranges.py": "tools/hostname_ranges.py",
+    "tools/inventory_subset.py": "tools/inventory_subset.py"
   },
   "test_rules": [
     {
@@ -998,7 +1010,8 @@
         "test_cases.test_finish_native_workflow",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
         "test_cases.test_xlsx_zero_row_fail_closed",
-        "test_cases.test_xlsx_zero_row_workflow"
+        "test_cases.test_xlsx_zero_row_workflow",
+        "test_cases.test_setup_switch_scope_contract"
       ]
     },
     {
@@ -1070,7 +1083,8 @@
       ],
       "tests": [
         "test_cases.test_setup_ufm_links_workflow",
-        "test_cases.test_eth_jump_duplicate_identity"
+        "test_cases.test_eth_jump_duplicate_identity",
+        "test_cases.test_setup_link_spec_contract"
       ]
     },
     {
@@ -2224,6 +2238,33 @@
       "tests": [
         "test_cases.test_monitor_derived_parent_release",
         "test_cases.test_monitor_imported_configs_parent_release"
+      ]
+    },
+    {
+      "id": "device_identity_direct",
+      "paths": [
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_device_identity"
+      ]
+    },
+    {
+      "id": "hostname_ranges_direct",
+      "paths": [
+        "tools/hostname_ranges.py"
+      ],
+      "tests": [
+        "test_cases.test_hostname_ranges"
+      ]
+    },
+    {
+      "id": "inventory_subset_direct",
+      "paths": [
+        "tools/inventory_subset.py"
+      ],
+      "tests": [
+        "test_cases.test_inventory_subset"
       ]
     }
   ],
@@ -3801,6 +3842,40 @@
         "test_cases.test_monitor_derived_parent_release",
         "test_cases.test_monitor_imported_configs_parent_release"
       ]
+    },
+    {
+      "id": "device_selector_roundtrip",
+      "members": [
+        "tools/hostname_ranges.py",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_device_identity_workflow"
+      ]
+    },
+    {
+      "id": "inventory_subset_mac_rule",
+      "members": [
+        "tools/inventory_subset.py",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_device_identity_workflow"
+      ]
+    },
+    {
+      "id": "ib_analyzer_deploy_and_run",
+      "members": [
+        "tools/sync-code.py",
+        "tools/tar-for-upload.py",
+        "tools/_package_common.py",
+        "tools/project_contract.py",
+        "infiniband/monitor/post-collect.py",
+        "tools/ibdiagnet-analyze-tool/analyze.py"
+      ],
+      "tests": [
+        "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -4541,6 +4616,26 @@
       "tests": [
         "test_cases.test_subprocess_timeout_evidence",
         "test_cases.test_bootstrap_config_fetch_contract"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/fixtures/mac_spellings.tsv"
+      ],
+      "tests": [
+        "test_cases.test_device_identity",
+        "test_cases.test_device_identity_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "tools/ibdiagnet-analyze-tool/config/port_profiles.csv"
+      ],
+      "tests": [
+        "test_cases.test_ib_analysis_domain",
+        "test_cases.test_upload_package_contract",
+        "test_cases.test_project_contracts",
+        "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
       ]
     }
   ]
