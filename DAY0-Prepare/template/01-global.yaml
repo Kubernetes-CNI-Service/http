@@ -49,11 +49,19 @@ switches:
       priority:
       - 100
       - 200
-      shared-addresses:
-      - bond-mac: '02:00:00:ff:01:ff'
-        anycast-ip: 192.0.2.201
-      - bond-mac: '02:00:00:ff:02:ff'
-        anycast-ip: 192.0.2.202
+      # Optional VXLAN active-active shared-address overrides, commented out so
+      # setup and config generation do not refuse a project without MLAG pairs
+      # for an override that matches nothing.  Without an override each
+      # VXLAN active-active MLAG pair (the rows of 02-devices_config.csv that share
+      # one bond_mac) uses the next IPv4 after the larger of its peer loopbacks.
+      # Uncomment only when that automatic address conflicts, and list only the
+      # bond_mac of such a pair: an entry that matches no VXLAN active-active MLAG
+      # pair in the CSV stops setup and config generation.
+      # shared-addresses:
+      # - bond-mac: '02:00:00:ff:01:ff'
+      #   anycast-ip: 192.0.2.201
+      # - bond-mac: '02:00:00:ff:02:ff'
+      #   anycast-ip: 192.0.2.202
     bridge:
       domain:
         br_default:

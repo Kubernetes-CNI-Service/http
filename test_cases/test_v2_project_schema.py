@@ -11,6 +11,7 @@ from importlib.machinery import SourceFileLoader
 import io
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -315,9 +316,8 @@ class SchemaSelectionTests(unittest.TestCase):
 
     def test_canonical_project_template_starts_new_projects_as_v2(self):
         template = ROOT / "DAY0-Prepare/template"
-        document = yaml.safe_load(
-            (template / "01-global.yaml").read_text(encoding="utf-8")
-        )
+        text = (template / "01-global.yaml").read_text(encoding="utf-8")
+        document = yaml.safe_load(text)
         self.assertEqual(2, document["schema_version"])
         eth = next(item["eth"] for item in document["switches"] if "eth" in item)
         self.assertEqual(
@@ -325,6 +325,27 @@ class SchemaSelectionTests(unittest.TestCase):
             eth["vrr"],
         )
         self.assertNotIn("pairs", eth["mlag"])
+        # 断言本意变更（v3.1.1 模板 MLAG 示例修法 (a)）：2026-11-08 00:32 发给 owner，
+        # 02:32 满 2 小时无答复，按 owner 11-07 的 2 小时规则执行默认 (a)。原断言要求
+        # 模板生效这两条 override；它们只对 CSV 里真实存在的 VXLAN active-active MLAG
+        # pair 成立，没有 MLAG 对的新项目会被 setup 和生成器拒绝（agentWP8 报告第 10.1
+        # 节）。现在模板解析后不含 shared-addresses，原示例原样保留为注释，取消注释即生效。
+        self.assertNotIn("shared-addresses", eth["mlag"])
+        example = re.search(
+            r"^(?P<indent> +)# shared-addresses:\n(?:(?P=indent)# [- ] .*\n)+",
+            text, re.MULTILINE,
+        )
+        self.assertIsNotNone(example, "template keeps a commented shared-addresses example")
+        indent = example.group("indent")
+        uncommented = (
+            text[:example.start()]
+            + example.group(0).replace(indent + "# ", indent)
+            + text[example.end():]
+        )
+        enabled = next(
+            item["eth"] for item in yaml.safe_load(uncommented)["switches"]
+            if "eth" in item
+        )
         self.assertEqual(
             [
                 {
@@ -336,7 +357,7 @@ class SchemaSelectionTests(unittest.TestCase):
                     "anycast-ip": "192.0.2.202",
                 },
             ],
-            eth["mlag"]["shared-addresses"],
+            enabled["mlag"]["shared-addresses"],
         )
         with (template / "02-devices_config.csv").open(
             newline="", encoding="utf-8-sig",
@@ -349,6 +370,59 @@ class SchemaSelectionTests(unittest.TestCase):
         self.assertNotIn("vrf_default", header)
         self.assertNotIn("vrr_ip", header)
         self.assertNotIn("vrr_mac", header)
+
+    def test_template_project_with_one_eth_and_no_mlag_pair_passes_setup_validation(self):
+        # 模板 MLAG 示例修法 (a)（2026-11-08 00:32 发给 owner，02:32 满 2 小时无答复，按
+        # owner 11-07 的 2 小时规则执行默认 (a)）。预期取自 agentWP8 报告第 10.1 节的对照组：
+        # 用模板新建、CSV 只有一台 eth 且没有 MLAG 对的项目，setup 输入校验 0 个错误，
+        # 不再报 shared-addresses 未对应 MLAG pair；生成器对没有 MLAG 设备的集合同样不拒绝。
+        template = ROOT / "DAY0-Prepare/template"
+        real_mlag = SETUP._validate_v2_mlag_project
+        mlag_results = []
+
+        def mlag_spy(global_path, csv_path):
+            result = real_mlag(global_path, csv_path)
+            mlag_results.append(result)
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory) / "DAY0-Prepare" / "site-a"
+            shutil.copytree(template, project, symlinks=True)
+            devices = project / "02-devices_config.csv"
+            with devices.open(newline="", encoding="utf-8-sig") as stream:
+                header = next(csv.reader(stream))
+            row = [
+                "leaf01", "eth", "oob-leaf", "192.0.2.11", "24", "192.0.2.254",
+                "02:00:00:00:00:11",
+            ]
+            row += [""] * (len(header) - len(row))
+            with devices.open("w", newline="", encoding="utf-8") as stream:
+                csv.writer(stream).writerows([header, row])
+
+            output = io.StringIO()
+            with mock.patch.multiple(
+                SETUP, _SWITCH_SCOPE=None, _P2P_SOURCE=None, _FORCE=False,
+                _AUTO_YES=False, _DRY_RUN=True, _STRICT=False,
+                IMAGE_DIR=str(Path(directory) / "no-shared-images"),
+            ), mock.patch.object(
+                SETUP, "_validate_v2_mlag_project", mlag_spy,
+            ), redirect_stdout(output):
+                passed = SETUP._validate_project(str(project))
+            global_document = yaml.safe_load(
+                (project / "01-global.yaml").read_text(encoding="utf-8")
+            )
+
+        report = output.getvalue()
+        self.assertNotIn("未对应 VXLAN active-active MLAG pair", report)
+        self.assertEqual([([], [])], mlag_results, report)
+        self.assertTrue(passed, report)
+
+        eth = next(
+            item["eth"] for item in global_document["switches"] if "eth" in item
+        )
+        GENERATOR._apply_v2_mlag_attributes(
+            {}, eth["mlag"], GENERATOR.normalize_v2_mlag_policy(eth),
+        )
 
     def test_missing_schema_is_v1_but_explicit_values_are_strict(self):
         self.assertEqual(1, CONTRACT.detect_global_schema_version({"common": {}}))

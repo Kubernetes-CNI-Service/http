@@ -175,6 +175,8 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
     shared-addresses:
     - bond-mac: '02:00:00:ff:01:ff'
       anycast-ip: 192.0.2.201
+  模板 01-global.yaml 里这段默认是注释掉的示例：不需要覆盖时保持注释；需要时取消
+  注释，并按 CSV 中实际 MLAG pair 的 bond_mac 填写。
   bond-mac 匹配不区分大小写，anycast-ip 不带 CIDR。重复 bond-mac/IP、找不到对应
   MLAG pair、地址冲突或给非 MLAG+VNI pair 配置 override 都会停止生成。schema v1
   历史项目仍按原 mlag.pairs 合同兼容读取；不能在 schema v2 中混用旧结构。
