@@ -89,6 +89,8 @@ infiniband/monitor/ufm-info
 infiniband/monitor/ufm-info/**
 infiniband/p2p.xlsx
 infiniband/p2p.xlsx/**
+infiniband/publickey
+infiniband/publickey/**
 infra/.logs-migration.*
 infra/.logs-migration.*/**
 infra/.logs-migration.json

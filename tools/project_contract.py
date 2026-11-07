@@ -2056,7 +2056,8 @@ IMAGE_HOST_STATE_PATHS = frozenset(name for name, _target in runtime_link_specs(
     "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
 }) | frozenset(name + ".zip" for name in REFERENCE_ONLY_SUBTREES)
 IMAGE_HOST_STATE_SUBTREES = frozenset({
-    "Finished-projects", "infra/logs", "infiniband/bringup", "monitor/status",
+    "Finished-projects", "infra/logs", "infiniband/bringup",
+    "infiniband/publickey", "monitor/status",
     "ztp/backup", "ztp/config/cumulus/template/.claude", "ztp/config/publickey",
     "ztp/image", "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
 }) | REFERENCE_ONLY_SUBTREES
