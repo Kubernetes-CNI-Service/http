@@ -41,58 +41,6 @@ EXPECTED_WORKSPACE_LINKS = (
 
 
 class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
-    def test_public_key_transaction_failure_restores_both_roots_and_manifest(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            project = root / "DAY0-Prepare/site-a"
-            project.mkdir(parents=True)
-            (project / "laptop.pub").write_text(public_key(29, "site-a"), encoding="utf-8")
-            roots = (root / "ztp/config/publickey", root / "infiniband/publickey")
-            stale = []
-            active = []
-            for key_root in roots:
-                key_root.mkdir(parents=True)
-                old = key_root / "stale.pub"
-                old.symlink_to("../../DAY0-Prepare/old-site/stale.pub")
-                stale.append(old)
-                active.append(key_root / "laptop.pub")
-            manifest = root / "ztp/.setup_manifest"
-            manifest.write_bytes(b"original manifest\n")
-            with mock.patch.multiple(
-                SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
-                ZTP=str(root / "ztp"), MANIFEST_FILE=str(manifest),
-                _DRY_RUN=False, _LINK_ERRORS=0,
-            ):
-                all_paths = SETUP._setup_transaction_paths(str(project))
-                for path in (*stale, *active):
-                    self.assertIn(str(path), all_paths)
-                transaction = SETUP._SetupLinkTransaction([str(p) for p in (*stale, *active)])
-                # v3.1.1 WP-2: setup's links go through the one reconcile engine (was _make_link).
-                original_reconcile = SETUP._reconcile_links
-
-                def fail_second_root(links):
-                    links = list(links)
-                    if any(link_path == str(active[1]) for link_path, _text in links):
-                        raise RuntimeError("injected IB publication failure")
-                    return original_reconcile(links)
-
-                with mock.patch.object(SETUP, "_reconcile_links", side_effect=fail_second_root):
-                    with redirect_stdout(io.StringIO()):
-                        with self.assertRaisesRegex(RuntimeError, "injected IB publication failure"):
-                            SETUP._process_pubkeys(str(project))
-                self.assertTrue(active[0].is_symlink(), "ZTP link must exist before failure")
-                manifest.write_bytes(b"interrupted manifest\n")
-                with redirect_stdout(io.StringIO()):
-                    transaction.rollback()
-
-            self.assertEqual(b"original manifest\n", manifest.read_bytes())
-            for old, new in zip(stale, active):
-                with self.subTest(root=str(old.parent)):
-                    self.assertTrue(old.is_symlink())
-                    self.assertEqual("../../DAY0-Prepare/old-site/stale.pub", os.readlink(old))
-                    self.assertFalse(new.is_symlink())
-            self.assertTrue((project / "laptop.pub").is_file())
-
     def test_real_setup_p1_key_profile_then_unsetup_cleans_both_publication_roots(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

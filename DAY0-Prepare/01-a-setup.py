@@ -3258,64 +3258,15 @@ def _authorize_project_switch(proj_dir, affected_count):
     return True
 
 
-# ── 冲突检测 ──────────────────────────────────────────────────────────────────
-
-def _collect_expected_links(proj_dir):
-    """
-    收集所有预期会创建的软链接路径（link_path），不包含目标值。
-    用于冲突检测和清单：覆盖 ZTP、网络工具及监控路径。
-    """
-    links = []
-
-    # 固定映射
-    for ztp_rel, _proj_rel, _kind in MAPPINGS:
-        links.append(os.path.join(ZTP, ztp_rel))
-    for workspace_rel, _proj_rel, _kind in WORKSPACE_INPUT_MAPPINGS:
-        links.append(os.path.join(HTTP_BASE, workspace_rel))
-
-    # 项目无关的共享镜像
-    links.extend(link_path for link_path, _src in _shared_image_pairs())
-    links.extend(link_path for link_path, _src in _bringup_image_pairs())
-
-    # P2P 输入统一使用固定名称，两个生成器共享同一输出目录。
-    links.extend(P2P_INPUT_LINKS)
-    links.extend(P2P_OUTPUT_LINKS)
-    links.append(P2P_AIR_JSON_LINK)
-    links.extend(link_path for link_path, _target in _bringup_link_pairs(proj_dir))
-    links.extend(link_path for link_path, _target in _bringup_input_pairs(proj_dir))
-    links.extend(link_path for link_path, _target in _analyzer_input_pairs(proj_dir))
-    links.extend(link_path for link_path, _target in _analyzer_output_pairs(proj_dir))
-
-    # .pub 公钥
-    for src in glob.glob(os.path.join(proj_dir, "*.pub")):
-        if os.path.getsize(src) > 0:
-            for key_dir in _publickey_roots():
-                links.append(os.path.join(key_dir, os.path.basename(src)))
-
-    # latest_yaml
-    for sub in ("cumulus", "nvos"):
-        links.append(os.path.join(ZTP, "config", sub, "latest_yaml"))
-    sample = sample_directory(os.path.join(ZTP, "optimize"), proj_dir)
-    links.extend(str(sample / name) for name in LINK_NAMES.values())
-
-    # 网络类型 CSV 链接
-    for link_path, _ in _NET_CSV_LINKS:
-        links.append(link_path)
-    links.extend(link_path for link_path, _ in _monitor_inventory_link_pairs())
-
-    # 项目监控归档、采集目录和汇总页面链接
-    links.extend(link_path for link_path, _ in _monitor_link_paths(proj_dir))
-
-    return links
-
+# ── 共享链接（I-024）────────────────────────────────────────────────────────────
 
 def _shared_link_points_under_image(link_path):
     """I-024: whether ``link_path`` is a shared link of the link table whose text leads where its row says.
 
     project_contract.SHARED_LINK_SPECS names the tree paths and the http/image targets of the links that belong
-    to no project (the ZTP images, the UFM tool's image/ directory).  Setup makes them; --status accepts them
-    and conflict detection skips them by this one rule (owner 2026-11-02: setup 建链接与 --status 校验用同一张
-    名单).  Judged by the link text, like every link (R-016 §4.3).
+    to no project (the ZTP images, the UFM tool's image/ directory).  Setup makes them and --status accepts them
+    by this one rule (owner 2026-11-02: setup 建链接与 --status 校验用同一张名单).  Judged by the link text,
+    like every link (R-016 §4.3).
     """
     if not os.path.islink(link_path):
         return False
@@ -3328,50 +3279,6 @@ def _shared_link_points_under_image(link_path):
         return len(parts) == len(names) and all(map(fnmatch.fnmatchcase, parts, names))
 
     return any(matches(link_parts, row.path) and matches(target_parts, row.target) for row in SHARED_LINK_SPECS)
-
-
-def _check_conflicts(proj_dir):
-    """
-    扫描全部预期软链接路径，找出已存在且指向其他项目文件夹的链接。
-    若发现冲突，列出并询问用户是否先删除；-y 模式自动删除。
-    返回 False 表示用户拒绝处理冲突，主流程应退出。
-    """
-    proj_real = os.path.realpath(proj_dir)
-    conflicts = []
-
-    for link_path in _collect_expected_links(proj_dir):
-        if os.path.abspath(link_path) == os.path.join(HTTP_BASE, INFRA_LOG_REL):
-            continue
-        if not os.path.islink(link_path):
-            continue
-        # 共享链接不属于任何项目：按规格表的共享一节，指向 http/image 下就不是项目冲突（I-024）。
-        if _shared_link_points_under_image(link_path):
-            continue
-        target_real = os.path.realpath(link_path)
-        # 如果链接目标在 proj_dir 下（或本身就是 proj_dir），不算冲突
-        if target_real == proj_real or target_real.startswith(proj_real + os.sep):
-            continue
-        # 链接目标与当前项目无关 → 冲突
-        conflicts.append((link_path, os.readlink(link_path), target_real))
-
-    if not conflicts:
-        return True
-
-    print(_c(YELLOW, f"\n发现 {len(conflicts)} 个链接指向其他项目："))
-    for link_path, cur_target, _ in conflicts:
-        print(f"  {os.path.relpath(link_path, HTTP_BASE)}")
-        print(f"      → {cur_target}")
-
-    if not _authorize_project_switch(proj_dir, len(conflicts)):
-        print(_c(RED, "已取消，请确认目标项目后重新运行 setup.py"))
-        return False
-
-    for link_path, _, _ in conflicts:
-        if not _DRY_RUN:
-            os.remove(link_path)
-        print(_c(CYAN if _DRY_RUN else GREEN,
-                 f"  {'[DRY] 删除' if _DRY_RUN else '[DEL]'} {os.path.relpath(link_path, HTTP_BASE)}"))
-    return True
 
 
 # 项目下需要预先创建的输出目录（99- 前缀，用户一般不会手动建）
@@ -3893,10 +3800,10 @@ def _reconcile_table_links():
     A project row's text goes through DAY0-Prepare/activate-project, so it does not depend on the project and
     this step runs before the switch (R-016 §4.2 第 3 步).  Rows written elsewhere: the publisher's latest_yaml
     (R-016 §3.4, _process_latest_yaml); infra/logs, the same pointer text but bound by REQ-19's receipt-backed
-    _bind_infra_logs (a real log directory there is migrated, not reported).  The AIR json row has the
-    fixed name 99-output-p2p/p2p-air.json since I-031 and is reconciled here like any optional row.  A tools/ row is skipped while its
-    tool directory is absent: an offline analyzer is not recreated on a management server.  Returns the
-    engine's results.
+    _bind_infra_logs (a real log directory there is migrated, not reported).  The AIR json row has the fixed
+    name 99-output-p2p/p2p-air.json since I-031 and is reconciled here like any optional row.  A tools/ row is
+    skipped while its tool directory is absent: an offline analyzer is not recreated on a management server.
+    Returns the engine's results.
     """
     pairs = []
     for row in SETUP_LINK_SPECS:

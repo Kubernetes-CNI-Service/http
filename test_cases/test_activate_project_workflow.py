@@ -37,11 +37,9 @@ EXAMPLE = ROOT / "examples/public-project"
 CONTRACT = load_script("activate_project_workflow_project_contract", ROOT / "tools/project_contract.py")
 FIRST, SECOND = "site-p", "site-q"
 POINTER = "DAY0-Prepare/activate-project"
-# Table rows whose text WP-3 leaves direct, each handed to the package that owns its reader (详细工作指导 WP-9):
-# delete an entry when that package moves the row behind the pointer.
-HANDED_ON = {
-    CONTRACT.P2P_AIR_PATH: "WP-9c: I-031 fixed AIR json name; _process_xlsx_files derives it until then",
-}
+# Table rows whose text WP-3 left direct for the package owning their reader (详细工作指导 WP-9); empty since
+# WP-9c (I-031) gave the AIR json its fixed name.
+HANDED_ON: dict[str, str] = {}
 
 
 def public_key(seed: int, comment: str) -> str:

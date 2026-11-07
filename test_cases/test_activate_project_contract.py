@@ -57,11 +57,9 @@ EXAMPLE = ROOT / "examples/public-project"
 PROJECT = "site-p"
 OTHER = "site-q"
 POINTER = "DAY0-Prepare/activate-project"
-# Table rows whose text WP-3 leaves direct, each handed to the package that owns its reader (详细工作指导 WP-9):
-# delete an entry when that package moves the row behind the pointer.
-HANDED_ON = {
-    CONTRACT.P2P_AIR_PATH: "WP-9c: I-031 fixed AIR json name; _process_xlsx_files derives it until then",
-}
+# Table rows whose text WP-3 left direct for the package owning their reader (详细工作指导 WP-9); empty since
+# WP-9c (I-031) gave the AIR json its fixed name.
+HANDED_ON: dict[str, str] = {}
 
 
 def active_project_dir():
@@ -927,7 +925,7 @@ class WP6RetiredLinkPackagingTests(unittest.TestCase):
         self.assertEqual({WP6_RETIRED_MONITOR_LINK}, present - absent)
 
 
-# ── v3.1.1 WP-4: --status, --check-template, and _check_conflicts' shared links (R-016 §4.5, §4.6; I-024) ──
+# ── v3.1.1 WP-4: --status, --check-template and the shared links (R-016 §4.5, §4.6; I-024) ──
 # Expected values come from the design, never from the implementation under test:
 # - R-016 §4.5: --status is read-only and lock-free and no longer reads ztp/.setup_manifest; it reports the
 #   pointer (没有 / 有效 / 无效), every fixed row (正确、缺失、指向别处、真实文件冲突、目标缺失: required ones are
@@ -939,7 +937,8 @@ class WP6RetiredLinkPackagingTests(unittest.TestCase):
 #   template, lists required and optional names apart, exit 0 when no required name is missing, else 1.
 # - I-024 (owner 2026-11-02): setup's links and --status use one list; the UFM image link
 #   infiniband/bringup/ufm-setup-upgrade/image -> ../../../image is shared, never a project escape.
-# - 详细工作指导 WP-4 「_check_conflicts」: shared targets come from the table's shared section.
+# - The shared targets come from the table's shared section (_check_conflicts, which also used them, is gone:
+#   D11, http dev 2026-11-08 -- a switch changes only the pointer, R-016 §1 第 2 条).
 # Each row's canonical text is the table's own (pointer_link_specs / pointer_link_target, wave-3 brief), never a
 # literal written here.
 
@@ -1306,45 +1305,6 @@ class WP4CheckTemplateTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 code, _printed = wp4_run_main(self.root, argv)
                 self.assertEqual(2, code)
-
-
-class WP4CheckConflictsTests(unittest.TestCase):
-    """详细工作指导 WP-4: _check_conflicts takes shared targets from the table's shared section (I-024)."""
-
-    def test_shared_links_under_http_image_are_not_project_conflicts(self):
-        setup = wp4_setup()
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory).resolve() / "http"
-            project = root / "DAY0-Prepare" / WP4_PROJECT
-            other = root / "DAY0-Prepare/site-q"
-            for path in (project, other, root / "image"):
-                path.mkdir(parents=True)
-            (other / "01-global.yaml").write_text("x\n", encoding="utf-8")
-            (root / "image/cumulus-linux-5.16.4-mlx-amd64.bin").write_bytes(b"fixture\n")
-            ufm = root / WP4_UFM_IMAGE
-            binary = root / "ztp/image/cumulus/cumulus-linux-5.16.4-mlx-amd64.bin"
-            foreign = root / "infiniband/01-global.yaml"
-            for link, target in ((ufm, root / "image"), (binary, root / "image" / binary.name),
-                                 (foreign, other / "01-global.yaml")):
-                link.parent.mkdir(parents=True, exist_ok=True)
-                os.symlink(os.path.relpath(target, link.parent), link)
-
-            authorize = mock.Mock(return_value=False)
-            with mock.patch.multiple(setup, **wp4_patches(root)), mock.patch.object(
-                setup, "_authorize_project_switch", authorize,
-            ), redirect_stdout(io.StringIO()):
-                with mock.patch.object(setup, "_collect_expected_links",
-                                            return_value=[str(ufm), str(binary), str(foreign)]):
-                    self.assertFalse(setup._check_conflicts(str(project)))
-                # Only the link into another project is a conflict; the shared ones never are.
-                authorize.assert_called_once_with(str(project), 1)
-                authorize.reset_mock()
-                with mock.patch.object(setup, "_collect_expected_links",
-                                            return_value=[str(ufm), str(binary)]):
-                    self.assertTrue(setup._check_conflicts(str(project)))
-                authorize.assert_not_called()
-            self.assertTrue(ufm.is_symlink() and binary.is_symlink(), "shared links are kept")
-
 
 
 if __name__ == "__main__":

@@ -985,16 +985,12 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 _DRY_RUN=False,
                 _LINK_ERRORS=0,
             ), redirect_stdout(io.StringIO()):
-                managed = set(SETUP._collect_expected_links(str(project)))
                 # v3.1.1 WP-3: the aliases are rows of the link table, written by setup's one engine.
                 SETUP._reconcile_links([
                     (str(root / row.path), SETUP._spec_link_text(row))
                     for row in SETUP.SETUP_LINK_SPECS if row.view == "network-inventory"
                 ])
 
-            self.assertTrue(
-                {os.fspath(root / relative) for relative in expected} <= managed,
-            )
             for relative, target in expected.items():
                 with self.subTest(alias=relative):
                     alias = root / relative
@@ -1053,9 +1049,13 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                     self.assertEqual(target, os.readlink(alias))
                     self.assertEqual(inventory.resolve(), alias.resolve(strict=True))
 
-    def test_setup_refuses_dangling_monitor_aliases_without_network_inventory(
+    def test_setup_makes_monitor_aliases_that_dangle_without_network_inventory(
         self,
     ):
+        # Contract changed by R-016 §4.3 (「什么都没有 → 建链接」) and Q7 (owner 2026-11-03「好的」: a dangling
+        # fixed link means the input is absent); D3, http dev 2026-11-08: setup makes every row of the table, a
+        # project without its inventory leaves the aliases dangling, and that is no link error (--status
+        # reports the missing required input, R-016 §3.4).
         expected = (
             "ethernet/monitor/eth.csv",
             "infiniband/monitor/ib.csv",
@@ -1074,13 +1074,17 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 _DRY_RUN=False,
                 _LINK_ERRORS=0,
             ), redirect_stdout(io.StringIO()):
-                SETUP._process_monitor_links(str(project))
+                SETUP._reconcile_links([
+                    (str(root / row.path), SETUP._spec_link_text(row))
+                    for row in SETUP.SETUP_LINK_SPECS if row.view == "network-inventory"
+                ])
                 errors = SETUP._LINK_ERRORS
 
-            self.assertEqual(len(expected), errors)
+            self.assertEqual(0, errors)
             for relative in expected:
                 with self.subTest(alias=relative):
-                    self.assertFalse(os.path.lexists(root / relative))
+                    self.assertTrue((root / relative).is_symlink())
+                    self.assertFalse((root / relative).exists(), "dangles: the project has no inventory")
 
     @staticmethod
     def _write_project_contract(day0: Path, name: str) -> Path:
@@ -1480,11 +1484,12 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             root = Path(directory)
             manifest = root / ".setup_manifest"
             manifest.write_text("old\n", encoding="utf-8")
-            link = root / "managed-link"
+            link = root / "ztp/status"
+            link.parent.mkdir()
             link.symlink_to("target")
             with (
                 mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)),
-                mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]),
+                mock.patch.object(SETUP, "HTTP_BASE", str(root)),
                 mock.patch.object(SETUP.os, "replace", side_effect=OSError("disk full")),
             ):
                 with self.assertRaises(OSError):

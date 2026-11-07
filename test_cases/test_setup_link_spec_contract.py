@@ -300,6 +300,8 @@ class PublicKeyDirectoriesTest(unittest.TestCase):
         project.mkdir(parents=True)
         (project / "laptop.pub").write_bytes(b"synthetic laptop key\n")
         (project / "mgmt-server.pub").write_bytes(b"synthetic management key\n")
+        # R-016 R16-13: the per-key links are refreshed after the switch, through the pointer.
+        (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
         return project
 
     def publish(self, root: Path, project: Path) -> None:
@@ -332,15 +334,19 @@ class PublicKeyDirectoriesTest(unittest.TestCase):
                     for name in ("laptop.pub", "mgmt-server.pub"):
                         self.assertTrue((path / name).is_symlink())
                         self.assertEqual((project / name).resolve(), (path / name).resolve())
+            # D5 (http dev 2026-11-08): the per-key links are the table's dynamic section, and the derived
+            # manifest records them (Q5, review A8).
+            manifest = root / "ztp/.setup_manifest"
             with mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(root / "ztp"),
-                                     IMAGE_DIR=str(root / "image")):
-                candidates = {os.path.relpath(path, root) for path in SETUP._managed_ztp_link_candidates()}
-                # The manifest records these and --status checks every manifest link against the project.
-                expected = {os.path.relpath(path, root) for path in SETUP._collect_expected_links(str(project))}
+                                     MANIFEST_FILE=str(manifest)), redirect_stdout(io.StringIO()):
+                SETUP._write_manifest(str(project))
+            recorded = {os.path.relpath(path, root) for path in manifest.read_text(encoding="utf-8").splitlines()[1:]}
             keys = {key_dir + "/" + name for key_dir in PUBLICKEY_DIRECTORIES
                     for name in ("laptop.pub", "mgmt-server.pub")}
-            self.assertLessEqual(keys, candidates)
-            self.assertLessEqual(keys, expected)
+            for key in sorted(keys):
+                with self.subTest(dynamic=key):
+                    self.assertTrue(any(fnmatchcase(key, pattern) for pattern in CONTRACT.setup_dynamic_link_patterns()))
+            self.assertLessEqual(keys, recorded)
 
     def test_new_public_key_directories_follow_the_process_umask(self):
         # C99 (TEST 88f9cb3): os.makedirs's default mode, never a private mkdtemp directory.

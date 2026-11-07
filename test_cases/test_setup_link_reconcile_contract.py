@@ -315,8 +315,6 @@ class TableRowsTest(unittest.TestCase):
                 with self.subTest(row=row.path):
                     link = root / row.path
                     self.assertTrue(link.is_symlink(), "setup makes every setup row of the table")
-                    if row.path == CONTRACT.P2P_AIR_PATH:
-                        continue  # I-031 (WP-9c): still derived per workbook until the producer writes the fixed name
                     self.assertEqual(canonical[row.path], os.readlink(link))
             for name, text in NEW_ROW_TEXTS.items():
                 with self.subTest(new_row=name):

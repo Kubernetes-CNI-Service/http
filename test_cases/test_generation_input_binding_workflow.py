@@ -603,7 +603,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         link.parent.mkdir(parents=True)
         link.symlink_to(os.path.relpath(fixture.global_file, link.parent))
         with mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)), \
-                mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]):
+                mock.patch.object(SETUP, "HTTP_BASE", str(root)):
             SETUP._write_manifest(str(project.resolve()))
         preimage = manifest.read_bytes()
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
@@ -687,7 +687,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
                 SETUP._make_exact_link(str(leaf), str(source / name))
                 self.assertTrue(leaf.is_symlink())
                 links.append(str(leaf))
-            with mock.patch.object(SETUP, "_collect_expected_links", return_value=links):
+            with mock.patch.object(SETUP, "HTTP_BASE", str(root)):
                 SETUP._write_manifest(str(project))
             before = manifest.read_bytes()
             selector = api.ensure_previous_generation_frozen(project)
@@ -739,7 +739,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
                     payload = path.read_bytes()
                     path.unlink()
                     path.write_bytes(payload)
-            with mock.patch.object(SETUP, "_collect_expected_links", return_value=list(map(str, keys))):
+            with mock.patch.object(SETUP, "HTTP_BASE", str(root)):
                 SETUP._write_manifest(str(project))
             before = manifest.read_bytes()
             selector = f"generations/{generation.name}"

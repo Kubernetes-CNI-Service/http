@@ -143,17 +143,17 @@ class SetupCreatesUfmInputLinksWorkflowTest(unittest.TestCase):
                 self.assertEqual(text, os.readlink(root / name))
             self.assertEqual((project / "01-global.yaml").resolve(), (root / TOOL / "01-global.yaml").resolve())
 
-            with mock.patch.multiple(SETUP, **setup_patches(root)):
-                expected_links = {os.path.relpath(path, root) for path in SETUP._collect_expected_links(str(project))}
-            self.assertLessEqual(set(EXPECTED_LINKS), expected_links,
-                                 "conflict detection and the setup manifest must know every UFM link")
-            self.assertFalse(set(BRIDGES) & expected_links, "tracked bridges are not setup output")
+            # Q5 (review A8): the derived manifest records every UFM link; tracked bridges are not setup output.
+            recorded = {os.path.relpath(path, root) for path in
+                        (root / "ztp/.setup_manifest").read_text(encoding="utf-8").splitlines()[1:]}
+            self.assertLessEqual(set(EXPECTED_LINKS), recorded)
+            self.assertFalse(set(BRIDGES) & recorded, "tracked bridges are not setup output")
 
             # Contract changed by Q7 (R-016 §4.4, §13; owner 2026-11-03 「好的」; O4 left column): unsetup unlinks
             # the pointer and keeps every link; the ones reaching the project dangle, the shared image stays.
-            # The link stages above do not include setup's switch step (R-016 §4.2 step 4) that makes the pointer.
+            # The setup run above includes its switch step (R-016 §4.2 step 4): the pointer names the project.
             pointer = root / "DAY0-Prepare/activate-project"
-            pointer.symlink_to(PROJECT)
+            self.assertEqual(PROJECT, os.readlink(pointer))
             texts = {name: os.readlink(root / name) for name in EXPECTED_LINKS}
             with mock.patch.multiple(
                 UNSETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"), ZTP=str(root / "ztp"),
@@ -244,7 +244,8 @@ class SetupUfmOutputLinkTest(unittest.TestCase):
             (http / "monitor").mkdir(parents=True)
             with mock.patch.object(SETUP, "HTTP_BASE", str(http)):
                 pairs = SETUP._monitor_link_paths(str(project))
-                expected = SETUP._collect_expected_links(str(project))
+            # The link table is what setup writes and records (Q5).
+            expected = [str(http / row.path) for row in CONTRACT.SETUP_LINK_SPECS]
             for link, target in pairs:
                 with self.subTest(link=link):
                     self.assertNotEqual(str(http / "monitor" / "99-output-ufm"), link)

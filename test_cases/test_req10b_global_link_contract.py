@@ -57,11 +57,6 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
                 ZTP=str(root / "ztp"), _AUTO_YES=False,
                 _CONFIRM_PROJECT_SWITCH=False, _DRY_RUN=False,
             ):
-                self.assertIn(str(ib_key), SETUP._collect_expected_links(str(project)))
-                with mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(ib_key)]), \
-                        mock.patch.object(SETUP, "_authorize_project_switch", return_value=False):
-                    with redirect_stdout(io.StringIO()):
-                        self.assertFalse(SETUP._check_conflicts(str(project)))
                 self.assertTrue(ib_key.is_symlink())
                 self.assertEqual((foreign_project / "laptop.pub").resolve(), ib_key.resolve())
 

@@ -1127,9 +1127,16 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
     """Direct setup key gate; every HOME, project, and lock is private."""
 
     def _invoke(self, setup, root: Path, project: Path, home: Path,
-                *, delegated: bool, inherited_fd: bool) -> tuple[str, int]:
+                *, delegated: bool, inherited_fd: bool, standalone_step_2: bool = False) -> tuple[str, int]:
+        """standalone_step_2 (D4, R-016 §4.2): step 1 plans the P2P source without writing and its validation is
+        inert; the stop is step 2's real selection, after laptop.pub; only real selections are counted."""
         class BeforeP2p(Exception):
             pass
+
+        def select(_project, *, plan_only=False):
+            if plan_only:
+                return str(project / "p2p.xlsx")
+            raise BeforeP2p()
 
         lock_path = root / ".deployment.lock"
         lock_path.touch(mode=0o600)
@@ -1150,7 +1157,10 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
                  mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
-                 mock.patch.object(setup, "_select_p2p_source", side_effect=BeforeP2p) as p2p, \
+                 mock.patch.object(setup, "_select_p2p_source",
+                                   side_effect=select if standalone_step_2 else BeforeP2p) as p2p, \
+                 mock.patch.object(setup, "_validate_project", return_value=True) if standalone_step_2 \
+                 else mock.patch.object(setup, "_validate_project", wraps=setup._validate_project), \
                  mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
                  redirect_stdout(io.StringIO()):
                 if child_fd is None:
@@ -1167,7 +1177,9 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
                     outcome = f"exit:{exc.code}"
                 else:
                     outcome = f"return:{result}"
-            return outcome, p2p.call_count
+            calls = [call for call in p2p.call_args_list
+                     if not (standalone_step_2 and call.kwargs.get("plan_only"))]
+            return outcome, len(calls)
         finally:
             if child_fd is not None:
                 try:
@@ -1269,7 +1281,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             local_key = public_line("ssh-ed25519", 81, "laptop")
             (home / ".ssh/id_ed25519.pub").write_bytes(local_key)
             outcome, p2p_calls = self._invoke(
-                setup, root, project, home, delegated=False, inherited_fd=False,
+                setup, root, project, home, delegated=False, inherited_fd=False, standalone_step_2=True,
             )
             self.assertEqual("before-p2p", outcome)
             self.assertEqual(1, p2p_calls)

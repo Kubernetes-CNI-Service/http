@@ -1515,15 +1515,6 @@ class TemplateContractTests(unittest.TestCase):
             self.assertEqual(newer.resolve(), (project / "p2p.xlsx").resolve())
             self.assertEqual(newer.name, os.readlink(project / "p2p.xlsx"))
 
-    def test_project_p2p_link_is_inside_setup_transaction(self):
-        setup = load_module("day0_setup_p2p_transaction", ROOT / "DAY0-Prepare/01-a-setup.py")
-        with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
-            self.assertIn(
-                str(project / "p2p.xlsx"),
-                setup._setup_transaction_paths(str(project)),
-            )
-
     def test_load_passes_root_p2p_basename_to_setup(self):
         load = load_module("day0_load_root_p2p", ROOT / "DAY0-Prepare/11-load.py")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(load, "run") as run:

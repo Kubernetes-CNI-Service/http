@@ -38,6 +38,16 @@ def load_script(name: str, path: Path):
     return module
 
 
+def stop_at_real_p2p_selection(stop: type, planned: Path):
+    """R-016 §4.2 (D4, http dev 2026-11-08): step 1 only plans the P2P source (plan_only, nothing written); step 2
+    prepares laptop.pub and then selects for real -- the point these tests stop at."""
+    def select(_project, *, plan_only=False):
+        if plan_only:
+            return str(planned)
+        raise stop()
+    return select
+
+
 def project_with_marker(path: Path, laptop: bytes, management: bytes) -> Path:
     path.mkdir(mode=0o700)
     # REQ16 workflow reaches real setup/load, whose R22 preflight requires
@@ -740,7 +750,12 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                 stack.enter_context(mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}))
                 stack.enter_context(mock.patch.object(setup, "stop_native_ztp_monitors"))
                 stack.enter_context(mock.patch.object(setup, "_initialize_project_from_template"))
-                stack.enter_context(mock.patch.object(setup, "_select_p2p_source", side_effect=StopAfterKeyPreparation))
+                stack.enter_context(mock.patch.object(
+                    setup, "_select_p2p_source",
+                    side_effect=stop_at_real_p2p_selection(StopAfterKeyPreparation, project / "p2p.xlsx"),
+                ))
+                # Step 1's input validation is not this test's subject (R-016 §4.2 order, D4).
+                stack.enter_context(mock.patch.object(setup, "_validate_project", return_value=True))
                 stack.enter_context(redirect_stdout(io.StringIO()))
                 stack.enter_context(redirect_stderr(io.StringIO()))
                 result = loader.main([str(project), "--no-upgrade"])
@@ -792,7 +807,10 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
-                 mock.patch.object(setup, "_select_p2p_source", side_effect=StopAfterKeyPreparation), \
+                 mock.patch.object(setup, "_select_p2p_source",
+                                   side_effect=stop_at_real_p2p_selection(StopAfterKeyPreparation,
+                                                                          project / "p2p.xlsx")), \
+                 mock.patch.object(setup, "_validate_project", return_value=True), \
                  redirect_stdout(io.StringIO()):
                 selected = loader.prepare_pubkeys(
                     project, ssh_dir=ssh, dry_run=False,

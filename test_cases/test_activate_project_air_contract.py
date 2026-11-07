@@ -125,13 +125,11 @@ class SetupAirLinkTests(unittest.TestCase):
             )
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.multiple(SETUP, **patches))
-                # _process_mapping's link_root default was bound to the real ztp/ at import time.
-                defaults = SETUP._process_mapping.__defaults__
-                stack.enter_context(mock.patch.object(
-                    SETUP._process_mapping, "__defaults__", (*defaults[:-1], str(ztp)),
-                ))
                 stack.enter_context(redirect_stdout(io.StringIO()))
+                # v3.1.1 WP-3: the P2P stage only reports the selected workbook; the link table's rows, the AIR
+                # json among them, are written by setup's step 3 (_reconcile_table_links).
                 SETUP._process_xlsx_files(str(project), str(workbook))
+                SETUP._reconcile_table_links()
                 errors = SETUP._LINK_ERRORS
 
             self.assertEqual(0, errors)
