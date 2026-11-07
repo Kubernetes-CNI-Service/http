@@ -25,8 +25,12 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 ```
 
 正式同步、打包或部署前必须具备绑定当前源码、测试、manifest 以及 Python/平台身份的全量测试
-证明。本机 macOS 上的正式 `DAY0-Prepare/11-load.py` 会在生成项目文件之前执行全量测试，
-成功完成 load 后再次确认当前状态仍逐字节一致。开发者也可以显式执行以下治理命令：
+证明。本机 macOS 上的正式 `DAY0-Prepare/11-load.py` 会先执行只读的
+`--check --require-full`：当前精确证明有效时直接复用；只有返回 4（受管字节变化）或
+5（证明缺失、过期或执行环境不一致）才执行一次全量测试并复核，其他错误 fail closed。
+普通 `DAY0-Prepare/<项目>` 输入和运行输出不属于代码治理快照；同一环境的 fresh clone
+只修改这些项目文件时也复用仓库随 commit 携带的有效证明，但每次 load 仍完整执行项目输入、
+生成和发布门禁。成功完成 load 后再次确认当前状态仍逐字节一致。开发者也可以显式执行以下治理命令：
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --all -v

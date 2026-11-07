@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import uuid
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,7 +108,7 @@ class GateCommandTests(unittest.TestCase):
         self.assertEqual([], events)
         self.assertRegex(stderr.getvalue(), "--mini.*AIR|--prod")
 
-    def test_macos_real_load_runs_full_before_work_and_rechecks_after_success(self):
+    def test_macos_real_load_resolves_full_proof_before_work_and_rechecks_after_success(self):
         events = []
         args = SimpleNamespace(dry_run=False)
         with mock.patch.object(
@@ -125,6 +126,101 @@ class GateCommandTests(unittest.TestCase):
         ):
             self.assertEqual(0, LOAD.cli(["customer"]))
         self.assertEqual(["full", "load", "post-check"], events)
+
+    # M01 (TEST d27c63c, without its pre-push gate; owner 2026-11-06: a formal load first checks the
+    # existing proof read-only and runs the full suite only when no current exact proof exists).
+    def test_current_full_proof_is_reused_without_running_full_suite(self):
+        calls = []
+
+        def run(arguments, label, **kwargs):
+            calls.append((arguments, label, kwargs))
+            return 0
+
+        with mock.patch.object(
+            LOAD, "_run_local_test_runner", side_effect=run,
+        ), redirect_stdout(io.StringIO()):
+            LOAD.run_local_full_test_gate()
+
+        self.assertEqual([
+            (
+                ["--check", "--require-full"],
+                "本机正式 load 前全量测试证明检查",
+                {"accepted_returncodes": frozenset({0, 4, 5})},
+            ),
+        ], calls)
+
+    def test_only_stale_or_missing_full_proof_falls_back_to_full_suite(self):
+        conditions = (
+            ("managed source changed", 4),
+            ("managed test changed", 4),
+            ("impact manifest changed", 4),
+            ("proof missing or execution environment changed", 5),
+        )
+        for condition, status in conditions:
+            with self.subTest(condition=condition):
+                calls = []
+
+                def run(arguments, label, **kwargs):
+                    calls.append((arguments, label, kwargs))
+                    if len(calls) == 1:
+                        return status
+                    return 0
+
+                with mock.patch.object(
+                    LOAD, "_run_local_test_runner", side_effect=run,
+                ), redirect_stdout(io.StringIO()):
+                    LOAD.run_local_full_test_gate()
+
+                self.assertEqual([
+                    (
+                        ["--check", "--require-full"],
+                        "本机正式 load 前全量测试证明检查",
+                        {"accepted_returncodes": frozenset({0, 4, 5})},
+                    ),
+                    (["--all"], "本机正式 load 前全量测试", {}),
+                    (
+                        ["--check", "--require-full"],
+                        "本机 load 全量测试证明复核",
+                        {},
+                    ),
+                ], calls)
+
+    def test_governance_safety_error_never_falls_back_to_full_suite(self):
+        calls = []
+
+        def run(arguments, label, **kwargs):
+            calls.append((arguments, label, kwargs))
+            return 2
+
+        with mock.patch.object(
+            LOAD, "_run_local_test_runner", side_effect=run,
+        ), redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+            LOAD.LoadError, "exit=2",
+        ):
+            LOAD.run_local_full_test_gate()
+
+        self.assertEqual(1, len(calls))
+
+    def test_day0_project_inputs_do_not_change_governed_full_snapshot(self):
+        manifest = RUNNER.load_and_validate_manifest(ROOT, RUNNER.DEFAULT_MANIFEST)
+        before = RUNNER.make_snapshot(ROOT, RUNNER.DEFAULT_MANIFEST, manifest)
+        project = ROOT / "DAY0-Prepare" / f"proof-project-{uuid.uuid4().hex}"
+        try:
+            project.mkdir()
+            (project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nleaf01,eth\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet\noob,192.0.2.0\n", encoding="utf-8",
+            )
+            after = RUNNER.make_snapshot(ROOT, RUNNER.DEFAULT_MANIFEST, manifest)
+        finally:
+            for child in project.iterdir() if project.exists() else ():
+                child.unlink()
+            if project.exists():
+                project.rmdir()
+        self.assertEqual(before, after)
 
     def test_air_validation_load_passes_explicit_intent_to_both_full_gates(self):
         requested = ["customer", "--air", "--validation-only"]
@@ -240,13 +336,19 @@ class GateCommandTests(unittest.TestCase):
 
     def test_local_load_full_gate_reaches_a_noninteractive_unittest_child(self):
         unittest_calls = []
+        proof_checks = 0
 
         def dispatch(command, **kwargs):
+            nonlocal proof_checks
             if command == [
                 sys.executable, "-B", str(LOAD.LOCAL_TEST_RUNNER),
                 "--check", "--require-full",
             ]:
-                return subprocess.CompletedProcess(command, 0)
+                # M01: the first read-only check finds no current proof (5), so the full suite runs.
+                proof_checks += 1
+                return subprocess.CompletedProcess(
+                    command, 5 if proof_checks == 1 else 0,
+                )
             if command == [
                 sys.executable, "-B", str(LOAD.LOCAL_TEST_RUNNER), "--all",
             ]:

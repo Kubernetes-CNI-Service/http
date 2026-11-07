@@ -122,8 +122,11 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 主分类，或分类引用了不存在的模块，manifest 校验都会 fail closed。
 
 正式发布需要一份绑定当前源码、测试、manifest 和 Python/平台身份的全量回归证明。本机
-macOS 正式 `DAY0-Prepare/11-load.py` 先解析并拒绝互相冲突的纯命令行参数，再在生成项目文件前执行全量回归，并在成功后做只读逐字节
-复核。也可以单独执行以下治理命令生成及检查证明：
+macOS 正式 `DAY0-Prepare/11-load.py` 先解析并拒绝互相冲突的纯命令行参数，再在生成项目文件前只读执行
+`--check --require-full`：精确证明有效就直接复用；只有返回 4（受管字节未批准）或 5（证明缺失、过期或环境不一致）
+才执行一次全量回归，其他错误 fail closed；成功后做只读逐字节复核。`DAY0-Prepare/<项目>` 输入和运行输出不属于
+代码治理快照，只改这些不会使证明失效，但每次 load 仍完整执行项目输入、生成和发布门禁（M01，2026-11-07 落地）。
+也可以单独执行以下治理命令生成及检查证明：
 
 ```bash
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --all -v

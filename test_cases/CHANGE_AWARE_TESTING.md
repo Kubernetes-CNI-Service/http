@@ -115,7 +115,8 @@ roots。Jinja 全量合同还逐项解析 include/import/from-import/extends 的
 runner 位于 canonical `test_cases/`，不会进入 upload/sync 生产包。开发期间建议一直运行
 `--watch`。成功的 `--all` 会在批准 ledger 中额外记录 full-suite attestation，绑定当前完整
 snapshot、Python 解释器、版本、平台和架构；普通 related 通过本身不会伪造这份证明。本机
-macOS 正式 load 在实际生成前运行 `--all`，成功后运行 `--check --require-full`；Linux load 与
+macOS 正式 load 在实际生成前先只读运行 `--check --require-full`：返回 0 时复用精确证明，只有返回 4 或 5
+才运行一次 `--all` 并复核，其他错误阻断（M01）；成功后运行 `--check --require-full`；Linux load 与
 macOS dry-run 不运行开发测试。正式 `sync-code` 或 `tar-for-upload` 只执行
 `--check --require-full`：精确证明有效就直接复用，缺失或过期则在任何打包、网络或远端写入前
 停止并要求重跑本机正式 load，绝不自行回退执行全量。`--check` 返回 4 表示字节未批准，

@@ -18,7 +18,8 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py --check
 ```
 
-分类 suite 和原始 unittest discovery 只用于定位，不能替代上述批准门禁。完整规则见
+本机 macOS 正式 load 会先只读核对已有证明：当前精确证明有效就复用，没有当前精确证明时才执行一次
+全量并复核（M01）。分类 suite 和原始 unittest discovery 只用于定位，不能替代上述批准门禁。完整规则见
 [`test_cases/README.md`](../../test_cases/README.md)。
 
 ## Docker VM 验收边界
