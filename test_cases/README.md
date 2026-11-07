@@ -73,6 +73,12 @@ Cumulus QoS、MLAG、snippet 与跨平台 workflow 共用 `module_loader.py`：�
 loader 自己插入的 sys.path 项，保留模块自己声明的路径，保证真实 lazy AIR import 仍可达。
 手册参数清单无数量截断；独立测试同时固定 load 的 `--type` 兼容别名不会因增加参数而消失。
 
+`source_tools_fixture.copy_source_tools` 供 gib 与 tlrt 各一处 fixture 复制使用：普通源码文件
+继续用 `copytree`/`copy2` 保留字节、mode、mtime 和目标已存在时的失败；只排除独立字面清单
+中的三条 analyzer 运行期输出路径，并与生产声明交叉核对。其他 symlink 和 symlinked
+tools 根必须拒绝，不复制操作员运行数据，不修改原 cleanup。它不是生产安全边界复制器，
+也不替代原 held-FD/authority 校验；`test_source_tools_fixture_contract` 固定这两处调用。
+
 四类交付制品的自动化与真实环境分工见
 [《四类交付制品与 2026-12 部署流程》](../docs/deployment/BUNDLE_WORKFLOWS.md)。
 

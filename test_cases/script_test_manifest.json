@@ -34,7 +34,8 @@
         "test_cases.test_deps_table_workflow",
         "test_cases.test_issue_tracker_engine_runtime",
         "test_cases.test_private_public_fixture_input",
-        "test_cases.test_subprocess_timeout_evidence"
+        "test_cases.test_subprocess_timeout_evidence",
+        "test_cases.test_source_tools_fixture_contract"
       ]
     },
     {
@@ -4505,6 +4506,7 @@
         "test_cases/source_tools_fixture.py"
       ],
       "tests": [
+        "test_cases.test_source_tools_fixture_contract",
         "test_cases.test_generation_input_binding_workflow",
         "test_cases.test_load_release_transaction"
       ]
