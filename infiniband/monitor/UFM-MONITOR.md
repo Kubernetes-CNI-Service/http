@@ -633,12 +633,12 @@ docker exec ufm ls /var/tmp/ibdiagnet2/
 | `ufm-setup-upgrade/01-global.yaml`、`publickey` | git 跟踪的仓库桥接（`../../01-global.yaml`、`../../publickey`），与 xdr-initial-setup 相同；`test_cases/audit_public_tree.py::SETUP_RUNTIME_BRIDGES` 登记 | 不由 setup 创建，unsetup 也不删除 |
 | `ztp/config/nvos/template/P2P/02-devices_config.csv` | `SETUP_ZTP_MAPPINGS`（转换器按清单设备名选 P2P 名称列） | 固定映射循环 |
 
-- unsetup：`DAY0-Prepare/02-unsetup.py::_known_workspace_links` / `_known_ztp_project_links` 列出以上全部 setup 链接。
+- unsetup：以上都是规格表里的固定链接，unsetup 之后保留，悬空表示没有激活的项目，再 setup 一次就恢复（v3.1.1 WP-6，R-016 Q7、O14）。
 - 打包：`tools/_package_common.py::STATIC_SETUP_MANAGED_LINKS` 加 ufm-setup-upgrade 的六项。
 - 忽略文件：`.gitignore` 手工加；三份 dockerignore 的 host-state 块按 `image_host_state_docker_patterns()` 重新生成。
 - Docker：monitor 的四个链接进入 `published_runtime_link_specs()`，Docker 激活会逐个严格核对（必须存在、文本一致、落在当前项目）。**已部署的管理服务器升级到这一版后要重跑一次 setup**，否则激活会报 `published project link is missing`。
 - 新 type：setup 的 `_validate_eth_csv` 接受两类，`server_ufm` 核对 eth0_ip（不带前缀）、netmask（可写 `/23`）、eth0_gw、eth0_mac（必填且不重复）；其余 10 个读 type 列的脚本跳过服务器行，`server_mgmt` 按 `server` 处理（`test_server_device_types`、`test_server_device_types_workflow`）。
-- 测试：`test_setup_ufm_links_workflow`（setup → 每个链接的文本与解析目标 → unsetup 全部删除、桥接与项目数据不动；契约表、打包、审计）。
+- 测试：`test_setup_ufm_links_workflow`（setup → 每个链接的文本与解析目标 → unsetup 后全部保留并悬空、桥接与项目数据不动；契约表、打包、审计）。
 
 ### 14.4 仍待决定或实测的事项
 1. ~~CVT 放在哪里，load 是否生成 CVT~~：owner 2026-10-21 已定，放项目 `99-output-p2p`，load 生成并校验（已实现，第 13 节）。待定的只剩第二步：父 release 绑定和提交前复核。

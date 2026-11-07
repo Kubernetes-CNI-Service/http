@@ -42,8 +42,9 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             root = project / "99-output-ztp/configuration-methods"
             first = authority.begin_method(root, "leaf1", "first", "first-leaf1", "ztp_monitor_cycle")
             authority.finish_method(root, first, ConfigSyncAuthorityTests.method_receipt_v2(first))
-            link = workspace / "current-project"
-            link.symlink_to(project)
+            # R-016 §4.4 (R16-20): unsetup reads the project from the pointer and detaches it by unlinking it.
+            link = workspace / "DAY0-Prepare/activate-project"
+            link.symlink_to(project.name)
             manifest = workspace / "ztp/.setup_manifest"
             manifest.parent.mkdir()
             manifest.write_text("owned fixture manifest")
@@ -75,8 +76,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
                 stack.enter_context(mock.patch.object(unsetup, "stop_native_ztp_monitors"))
                 stack.enter_context(mock.patch.object(unsetup, "_cleanup_req10c_auto_watch"))
-                stack.enter_context(mock.patch.object(unsetup, "_read_manifest", return_value=([str(link)], str(project))))
-                for name in ("_known_ztp_project_links", "_known_workspace_links", "_project_monitor_csv_links"):
+                for name in ("_known_ztp_project_links", "_known_workspace_links"):
                     stack.enter_context(mock.patch.object(unsetup, name, return_value=[]))
                 stack.enter_context(mock.patch.object(SourceFileLoader, "exec_module", isolate_leaf))
                 stack.enter_context(mock.patch.object(authority, "withdraw_all", withdraw_then_writer))
@@ -107,8 +107,9 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 root = project / "99-output-ztp/configuration-methods"
                 ticket = authority.begin_method(root, "leaf1", "setup-cycle", "leaf1-cycle", "ztp_monitor_cycle")
                 authority.finish_method(root, ticket, ConfigSyncAuthorityTests.method_receipt_v2(ticket))
-                link = workspace / "current-project"
-                link.symlink_to(project)
+                # R-016 §4.4 (R16-20): unsetup reads the project from the pointer and detaches it by unlinking it.
+                link = workspace / "DAY0-Prepare/activate-project"
+                link.symlink_to(project.name)
                 manifest = workspace / "ztp/.setup_manifest"
                 manifest.parent.mkdir()
                 manifest.write_text("owned fixture manifest")
@@ -117,10 +118,8 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                         mock.patch.object(unsetup, "MANIFEST_FILE", str(manifest)), mock.patch.object(unsetup, "_AUTO_YES", True), \
                         mock.patch.object(unsetup, "_DRY_RUN", case == "dry-run"), \
                         mock.patch.object(unsetup, "_cleanup_req10c_auto_watch"), \
-                        mock.patch.object(unsetup, "_read_manifest", return_value=([str(link)], str(project))), \
                         mock.patch.object(unsetup, "_known_ztp_project_links", return_value=[]), \
-                        mock.patch.object(unsetup, "_known_workspace_links", return_value=[]), \
-                        mock.patch.object(unsetup, "_project_monitor_csv_links", return_value=[]):
+                        mock.patch.object(unsetup, "_known_workspace_links", return_value=[]):
                     result = unsetup._main_locked_impl(SimpleNamespace(project=str(project)))
                 self.assertEqual(1 if case == "unsafe" else 0, result)
                 self.assertEqual(case != "success", link.is_symlink())

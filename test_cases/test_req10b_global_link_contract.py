@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import ast
 from contextlib import redirect_stdout
-import inspect
 import io
 import os
 from pathlib import Path
@@ -130,25 +128,26 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
     def test_setup_and_unsetup_workspace_input_tables_have_exact_membership(self) -> None:
         self.assertEqual(EXPECTED_WORKSPACE_INPUTS, set(CONTRACT.SETUP_WORKSPACE_INPUT_MAPPINGS))
         self.assertEqual(EXPECTED_WORKSPACE_INPUTS, set(SETUP.WORKSPACE_INPUT_MAPPINGS))
-        function = ast.parse(inspect.getsource(UNSETUP._known_workspace_links)).body[0]
-        paths = next(
-            node.value for node in function.body
-            if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "paths" for target in node.targets)
-        )
-        self.assertIsInstance(paths, ast.List)
-        fallback_inputs = set()
-        for entry in paths.elts:
-            self.assertIsInstance(entry, ast.Call)
-            self.assertEqual(ast.unparse(entry.func), "os.path.join")
-            self.assertEqual(ast.unparse(entry.args[0]), "HTTP_BASE")
-            relative = "/".join(ast.literal_eval(part) for part in entry.args[1:])
-            if relative == "ethernet/eth.csv":
-                break  # The following entries are runtime links, not project input mappings.
-            fallback_inputs.add(relative)
-        else:
-            self.fail("unsetup workspace-input/runtime-link boundary disappeared")
-        self.assertEqual({row[0] for row in EXPECTED_WORKSPACE_INPUTS}, fallback_inputs)
+        # Contract changed by G12 and O14 (v3.1.1 WP-6; O4 right column, owner 2026-11-07 「同意你的建议。」 via
+        # http dev): unsetup's fallback is derived from the link table plus the legacy names, no longer a
+        # literal list holding the workspace inputs.  The inputs are fixed links that unsetup keeps (Q7).
+        legacy = {
+            "ztp/config/nvos/template/99-output-ib", "ztp/config/nvos/template/99-output-nvl",
+            "ztp/config/nvos/template/99-output-published", "ztp/config/cumulus/template/AIR/output-p2p",
+        }
+        dynamic = {pattern.replace("*-sample/*", "site-a-sample/01-global.yaml").replace("*", "laptop")
+                   for pattern in CONTRACT.setup_dynamic_link_patterns()}
+        inputs = {row[0] for row in EXPECTED_WORKSPACE_INPUTS}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in sorted(legacy | dynamic | inputs):
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).symlink_to("synthetic-target")
+            with mock.patch.multiple(UNSETUP, HTTP_BASE=str(root), ZTP=str(root / "ztp")):
+                found = UNSETUP._known_ztp_project_links() + UNSETUP._known_workspace_links()
+            fallback = {os.path.relpath(path, root) for path in found}
+        self.assertEqual(legacy | dynamic, fallback)
+        self.assertEqual(set(), inputs & fallback)
 
     def test_bringup_bridge_is_a_tracked_relative_symlink(self) -> None:
         bridge = ROOT / "infiniband/bringup/xdr-initial-setup/01-global.yaml"
@@ -176,7 +175,10 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
             with mock.patch.multiple(
                 UNSETUP, HTTP_BASE=str(root), ZTP=str(root / "ztp")
             ):
-                self.assertIn(str(managed), UNSETUP._known_workspace_links())
+                # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
+                # 「同意你的建议。」 via http dev): the managed global link is a fixed link unsetup keeps.
+                self.assertNotIn(str(managed), UNSETUP._known_workspace_links())
+                self.assertNotIn(str(managed), UNSETUP._known_ztp_project_links())
 
     def test_real_latest_entry_is_reported_counted_and_left_untouched(self) -> None:
         # Owner 2026-11-03 (需求文档 :925, rule :933; R-014 :834): when a link

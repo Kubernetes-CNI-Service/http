@@ -1497,7 +1497,6 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             args = SimpleNamespace(project=None)
             with (
                 mock.patch.object(UNSETUP, "HTTP_BASE", str(root)),
-                mock.patch.object(UNSETUP, "_read_manifest", return_value=(None, None)),
                 mock.patch.object(
                     UNSETUP, "_known_ztp_project_links", return_value=[str(first), str(second)],
                 ),

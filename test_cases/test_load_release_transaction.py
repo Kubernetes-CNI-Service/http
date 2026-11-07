@@ -11467,8 +11467,10 @@ print("actual-copied-validator-selected-B")
         )
         self.assertEqual([], list(flat.glob(".load-dhcp-candidate-*")))
 
+        # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
+        # 「同意你的建议。」 via http dev): the DHCP manifest link is a fixed table row unsetup keeps.
         with mock.patch.object(UNSETUP, "ZTP", str(self.ztp)):
-            self.assertIn(
+            self.assertNotIn(
                 str(runtime_manifest), UNSETUP._known_ztp_project_links()
             )
 

@@ -378,7 +378,6 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
         ), mock.patch.object(self.unsetup, "HTTP_BASE", str(base)), \
              mock.patch.object(self.unsetup, "HERE", str(base / "DAY0-Prepare")), \
              mock.patch.object(self.unsetup, "MANIFEST_FILE", str(base / "ztp/.setup_manifest")), \
-             mock.patch.object(self.unsetup, "_read_manifest", return_value=(None, None)), \
              mock.patch.object(self.unsetup, "_known_ztp_project_links", return_value=[]), \
              mock.patch.object(self.unsetup, "_known_workspace_links", return_value=[]), \
              mock.patch.object(self.unsetup, "_AUTO_YES", True), \

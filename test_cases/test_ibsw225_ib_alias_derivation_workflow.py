@@ -130,17 +130,24 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
 
     def test_unsetup_fallback_literal_inventory_keeps_both_upgrade_aliases(self):
         # Direct path inventory only: no public unsetup/cron/PID or cleanup claim.
+        # Contract changed by G12 and O14 (v3.1.1 WP-6; O4 right column, owner 2026-11-07 「同意你的建议。」 via
+        # http dev): the fallback is the table's dynamic links plus the legacy names.  Both upgrade aliases are
+        # fixed table rows, so unsetup keeps them (Q7) and they are never fallback candidates.
         unsetup = load_script("ibsw_alias_fallback_inventory", ROOT / "DAY0-Prepare/02-unsetup.py")
-        base = "/synthetic/ibsw-fallback"
-        expected = {
-            base + "/infiniband/01-global.yaml",
-            base + "/infiniband/ib.csv",
-            base + "/infiniband/bringup/xdr-upgrade/01-global.yaml",
-            base + "/infiniband/bringup/xdr-upgrade/ib.csv",
-            base + "/infiniband/bringup/xdr-upgrade/xdr-upgrade-logs",
-        }
-        with patch.object(unsetup, "HTTP_BASE", base), \
-             patch.object(unsetup, "ZTP", base + "/ztp"), \
-             patch.object(unsetup.glob, "glob", return_value=[]), \
-             patch.object(unsetup.os.path, "islink", side_effect=lambda path: path in expected):
-            self.assertEqual(set(unsetup._known_workspace_links()), expected)
+        contract = load_script("ibsw_alias_fallback_contract", ROOT / "tools/project_contract.py")
+        aliases = {GLOBAL_NAME, CSV_NAME}
+        self.assertLessEqual(aliases, {row.path for row in contract.SETUP_LINK_SPECS})
+        legacy = {"ztp/config/nvos/template/" + name for name in ("99-output-ib", "99-output-nvl", "99-output-published")}
+        legacy.add("ztp/config/cumulus/template/AIR/output-p2p")
+        dynamic = {pattern.replace("*-sample/*", "site-a-sample/01-global.yaml").replace("*", "laptop")
+                   for pattern in contract.setup_dynamic_link_patterns()}
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            for name in sorted(aliases | legacy | dynamic):
+                (base / name).parent.mkdir(parents=True, exist_ok=True)
+                (base / name).symlink_to("synthetic-target")
+            with patch.object(unsetup, "HTTP_BASE", str(base)), patch.object(unsetup, "ZTP", str(base / "ztp")):
+                found = {os.path.relpath(path, base)
+                         for path in (*unsetup._known_ztp_project_links(), *unsetup._known_workspace_links())}
+        self.assertEqual(legacy | dynamic, found)
+        self.assertEqual(set(), aliases & found)

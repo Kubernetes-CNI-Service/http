@@ -1193,6 +1193,10 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 owned = a / "99-output-infra/owned.log"
                 owned.write_bytes(b"owned by site-a\n")
                 logs.symlink_to(os.path.relpath(owned.parent, logs.parent))
+                text = os.readlink(logs)
+                # R-016 §4.4: unsetup <project> runs only while that project is the active one.
+                pointer = root / "DAY0-Prepare/activate-project"
+                pointer.symlink_to(a.name)
                 manifest = root / "ztp/.setup_manifest"
                 if with_manifest:
                     manifest.parent.mkdir(parents=True)
@@ -1204,7 +1208,10 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 ), redirect_stdout(io.StringIO()):
                     result = UNSETUP._main_locked(SimpleNamespace(project=str(a)))
                 self.assertEqual(0, result)
-                self.assertFalse(os.path.lexists(logs))
+                # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
+                # 「同意你的建议。」 via http dev): unsetup unlinks the pointer and keeps the log link.
+                self.assertFalse(os.path.lexists(pointer))
+                self.assertEqual(text, os.readlink(logs))
                 self.assertFalse(manifest.exists())
                 self.assertEqual(b"owned by site-a\n", owned.read_bytes())
 
@@ -1217,6 +1224,9 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 owned.write_bytes(b"committed project bytes\n")
                 logs.symlink_to(os.path.relpath(destination, logs.parent))
                 link_inode = logs.lstat().st_ino
+                # R-016 §4.4: unsetup <project> runs only while that project is the active one.
+                pointer = root / "DAY0-Prepare/activate-project"
+                pointer.symlink_to(a.name)
                 manifest = root / "ztp/.setup_manifest"
                 manifest.parent.mkdir(parents=True)
                 manifest_bytes = f"# setup manifest — proj: {a}\n{logs}\n".encode()
@@ -1249,6 +1259,7 @@ class Req19InfraLogContractTests(unittest.TestCase):
                     self.assertNotEqual(0, result)
                     self.assertTrue(logs.is_symlink())
                     self.assertEqual(link_inode, logs.lstat().st_ino)
+                    self.assertTrue(pointer.is_symlink())
                     self.assertEqual(manifest_bytes, manifest.read_bytes())
                     self.assertEqual(receipt_inode, receipt.lstat().st_ino)
                     self.assertEqual(receipt_bytes, receipt.read_bytes())
@@ -1256,7 +1267,10 @@ class Req19InfraLogContractTests(unittest.TestCase):
                     self.assertEqual(b"committed project bytes\n", (backup / "owned.log").read_bytes())
                 else:
                     self.assertEqual(0, result)
-                    self.assertFalse(os.path.lexists(logs))
+                    # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
+                    # 「同意你的建议。」 via http dev): unsetup unlinks the pointer and keeps the log link.
+                    self.assertFalse(os.path.lexists(pointer))
+                    self.assertEqual(link_inode, logs.lstat().st_ino)
                     self.assertFalse(manifest.exists())
                 self.assertEqual(b"committed project bytes\n", owned.read_bytes())
 

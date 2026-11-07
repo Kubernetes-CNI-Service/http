@@ -274,6 +274,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     ),
                 )
             self.assertTrue(managed.is_symlink())
+            text = os.readlink(managed)
             with mock.patch.multiple(
                 UNSETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                 ZTP=str(root / "ztp"),
@@ -281,7 +282,9 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 _AUTO_YES=True, _DRY_RUN=False,
             ), redirect_stdout(io.StringIO()):
                 result = UNSETUP._main_locked(SimpleNamespace(project=None))
-            self.assertFalse(managed.is_symlink())
+            # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
+            # 「同意你的建议。」 via http dev): the managed global link is a fixed link unsetup keeps.
+            self.assertEqual(text, os.readlink(managed))
             self.assertEqual(0, result)
             self.assertEqual(GLOBAL_BYTES, project_global.read_bytes())
             self.assertEqual(b"do not remove\n", retained.read_bytes())

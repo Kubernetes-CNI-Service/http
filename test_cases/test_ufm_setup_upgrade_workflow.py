@@ -69,10 +69,12 @@ class SetupLinksFeedUfmToolTest(unittest.TestCase):
             run_dir = ufm.prepare_run_dir(tool, "login")
             self.assertEqual(run_dir.resolve().parent, archive)
 
-            with mock.patch.object(UNSETUP, "HTTP_BASE", str(root)):
-                known = set(UNSETUP._known_workspace_links())
+            # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07 「同意你的建议。」
+            # via http dev): the tool links are fixed table rows unsetup keeps, never fallback candidates.
+            with mock.patch.multiple(UNSETUP, HTTP_BASE=str(root), ZTP=str(root / "ztp")):
+                known = set(UNSETUP._known_workspace_links()) | set(UNSETUP._known_ztp_project_links())
             for name in ("ib.csv", "p2p.xlsx", "ufm-setup-upgrade-logs"):
-                self.assertIn(os.fspath(tool / name), known, name)
+                self.assertNotIn(os.fspath(tool / name), known, name)
 
 
 if __name__ == "__main__":

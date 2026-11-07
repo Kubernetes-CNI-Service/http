@@ -1,6 +1,6 @@
 """Workflow: setup creates every UFM input link in the tool's and the monitor's own directory, unsetup
-removes them, and the contract tables know them (owner principle 1, 2026-10-22: a script's default
-inputs are links in its own directory, created ahead by setup).
+keeps them (Q7: dangling once the pointer is gone), and the contract tables know them (owner principle 1,
+2026-10-22: a script's default inputs are links in its own directory, created ahead by setup).
 
 The expected link texts are the ones the owner's environment test used (UFM-环境测试-20261022
 step0-links.sh), written out here independently of tools/project_contract.py."""
@@ -140,6 +140,12 @@ class SetupCreatesUfmInputLinksWorkflowTest(unittest.TestCase):
                                  "conflict detection and the setup manifest must know every UFM link")
             self.assertFalse(set(BRIDGES) & expected_links, "tracked bridges are not setup output")
 
+            # Contract changed by Q7 (R-016 §4.4, §13; owner 2026-11-03 「好的」; O4 left column): unsetup unlinks
+            # the pointer and keeps every link; the ones reaching the project dangle, the shared image stays.
+            # The link stages above do not include setup's switch step (R-016 §4.2 step 4) that makes the pointer.
+            pointer = root / "DAY0-Prepare/activate-project"
+            pointer.symlink_to(PROJECT)
+            texts = {name: os.readlink(root / name) for name in EXPECTED_LINKS}
             with mock.patch.multiple(
                 UNSETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"), ZTP=str(root / "ztp"),
                 MANIFEST_FILE=str(root / "ztp/.setup_manifest"), _AUTO_YES=True, _DRY_RUN=False,
@@ -147,9 +153,12 @@ class SetupCreatesUfmInputLinksWorkflowTest(unittest.TestCase):
                 result = UNSETUP._main_locked(SimpleNamespace(project=None))
 
             self.assertEqual(0, result)
-            for name in EXPECTED_LINKS:
-                with self.subTest(removed=name):
-                    self.assertFalse(os.path.lexists(root / name), name)
+            self.assertFalse(os.path.lexists(pointer), "R-016 §4.4: unsetup unlinks the pointer")
+            for name, (_text, target) in EXPECTED_LINKS.items():
+                with self.subTest(kept=name):
+                    self.assertEqual(texts[name], os.readlink(root / name), "Q7: the link stays as it was")
+                    self.assertEqual(target == "/image", (root / name).exists(),
+                                     "Q7: project links dangle; the shared image link still resolves")
             for name, text in BRIDGES.items():
                 self.assertEqual(text, os.readlink(root / name), "unsetup keeps tracked bridges")
             self.assertEqual(b"fixture license\n", (root / "image/ufm.lic").read_bytes())

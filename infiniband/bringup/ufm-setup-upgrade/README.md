@@ -13,7 +13,7 @@ ufm-setup-upgrade/
   ufm-setup-upgrade-logs -> ../../../DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs   setup 创建
 ```
 
-`ib.csv`、`p2p.xlsx` 和日志目录与 xdr-initial-setup 一样由 setup 按当前项目创建，unsetup 时移除；
+`ib.csv`、`p2p.xlsx` 和日志目录与 xdr-initial-setup 一样由 setup 按当前项目创建；unsetup 之后链接保留，悬空表示没有激活的项目，再 setup 一次就恢复；
 不运行 setup 时也可以手工建立同样的链接，或用 `--input-dir` 指向放有这些文件的目录。
 
 运行环境：Python 3.9+、PyYAML、系统 `ssh`。
@@ -21,7 +21,7 @@ ufm-setup-upgrade/
 ## 需要预先准备的链接（2026-10-22 起由 setup 建立）
 
 脚本运行前，本目录下要有以下 6 个链接。前 2 个随代码提交；后 4 个依赖当前项目或管理服务器，由 setup
-创建、unsetup 移除（`image` 只有 ha-post-config 用到；`http/image/` 不存在时 setup 跳过它）。除 `image` 外，
+创建，unsetup 之后保留（`image` 只有 ha-post-config 用到；`http/image/` 不存在时 setup 跳过它）。除 `image` 外，
 所有链接最终都指向 `DAY0-Prepare/<项目>/` 下的文件：
 
 | 本目录下的链接 | 链接内容 | 最终指向 | 谁来建 |
@@ -42,7 +42,7 @@ setup 中的实现（2026-10-22 合入 http）：
   - `BRINGUP_INPUT_SPECS` 含 `ib.csv`、`p2p.xlsx`（链接到 `infiniband/` 下的当前别名）；
   - `BRINGUP_IMAGE_LINKS` 含 `image`。
 - `DAY0-Prepare/01-a-setup.py`：`_process_bringup_links`、`_process_bringup_input_links`、`_process_bringup_image_links`。
-- `DAY0-Prepare/02-unsetup.py::_known_workspace_links` 列出这 4 个 setup 链接。
+- unsetup 保留这 4 个链接：它们是规格表里的固定链接，`DAY0-Prepare/02-unsetup.py` 只删指针、`.setup_manifest` 和动态链接（v3.1.1 WP-6，R-016 Q7、O14）。
 - 打包和同步的排除名单 `tools/_package_common.py::setup_managed_links()` 从 `project_contract` 的链接规格表派生（v3.1.1 G12，`STATIC_SETUP_MANAGED_LINKS` 已删除），含上面 4 个 setup 链接和 2 个仓库桥接（`TRACKED_SETUP_BRIDGES`）。
 - `test_cases/audit_public_tree.py::SETUP_RUNTIME_BRIDGES` 登记 `01-global.yaml`、`publickey` 两个仓库桥接。
 - `.gitignore` 与三份 dockerignore 已同步。
