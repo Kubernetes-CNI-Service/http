@@ -1347,9 +1347,6 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
             # Image names come from the selected device families and global
             # versions, never from a static project-template placeholder.
             continue
-        if relative.parts and relative.parts[0] == "p2p":
-            # p2p/ is customer-owned and may be an external directory link.
-            continue
         destination = project / relative
         if source.is_symlink():
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -12245,7 +12242,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
-    parser.add_argument("--p2p-file", help="明确选择项目根目录或 p2p/ 下的非空普通 XLSX（name.xlsx 或 p2p/name.xlsx）")
+    parser.add_argument("--p2p-file", help="明确选择项目根目录内任意非空普通 XLSX 文件名")
     parser.add_argument(
         "--import-configs", nargs="?", const="", metavar="YYYYMMDD_HHMMSS",
         help=("从项目 import-configs/ 下导入 Cumulus 配置；无值选择最新命名目录，"

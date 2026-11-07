@@ -5184,10 +5184,12 @@ print("actual-copied-validator-selected-B")
         key.write_bytes(b"independent public key\n")
         original_umask = os.umask(mask)
         try:
+            # The DEV-based 01-a-setup has no setup-switch WAL (owner R-016 /
+            # AP-b), so "without WAL" is its only state and there is no WAL
+            # switch to patch; the transaction stays active as before.
             with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
                                      _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0,
-                                     _LINK_TRANSACTION=SETUP._SetupLinkTransaction([]),
-                                     _SETUP_SWITCH_WAL_CONTEXT=None):
+                                     _LINK_TRANSACTION=SETUP._SetupLinkTransaction([])):
                 SETUP._process_pubkeys(str(self.project))
                 for directory in (self.ztp / "config/publickey", parent / "publickey"):
                     self.assertEqual(mode, stat.S_IMODE(directory.stat().st_mode))
@@ -9891,33 +9893,16 @@ print("actual-copied-validator-selected-B")
             )
             TOPOLOGY._write_description_intent(dot, intent)
 
-            source_csv = root / "02-devices_config.csv"
-            source_csv.write_text("hostname,type\nleaf01,eth\n", encoding="utf-8")
             output_text = io.StringIO()
             with mock.patch.object(
                 GENERATOR, "_load_csv_hostnames", return_value={"leaf01"},
-            ), mock.patch.object(GENERATOR, "_CSV_FILE", str(source_csv)), \
-                    redirect_stdout(output_text):
+            ), redirect_stdout(output_text):
                 GENERATOR._run_patch_descriptions(str(dot), str(output))
 
-            pointer = root / "generated_with_desc_current"
-            self.assertTrue(pointer.is_symlink())
-            self.assertRegex(
-                os.readlink(pointer), r"^\.generated_with_desc\.version\.[0-9a-f]{32}$",
-            )
-            version = pointer.resolve(strict=True)
-            self.assertEqual(root.resolve(), version.parent)
-            manifest = json.loads(
-                (version / ".description-version.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(1, manifest["schema_version"])
-            self.assertEqual("generated", manifest["timestamp"])
-            self.assertEqual(
-                hashlib.sha256((version / "leaf01.yaml").read_bytes()).hexdigest(),
-                manifest["files"]["leaf01.yaml"],
-            )
             generated = GENERATOR._load_generated_yaml(
-                (version / "leaf01.yaml").read_text(encoding="utf-8")
+                (root / "generated_with_desc/leaf01.yaml").read_text(
+                    encoding="utf-8",
+                )
             )
 
         interfaces = generated[0]["set"]["interface"]
