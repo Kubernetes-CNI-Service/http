@@ -19,7 +19,7 @@ import re
 import stat
 import sys
 from types import MappingProxyType
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 import yaml
 
@@ -1147,6 +1147,7 @@ def image_credential_docker_patterns() -> tuple[str, ...]:
 # Declarative producer authority: setup consumes these mappings to create live
 # links; activation consumes the published subset; image policy derives names
 # from the entire authority. Paths here never inspect a live project/target.
+# Both mappings are literal sections of the G12 table SETUP_LINK_SPECS below.
 SETUP_ZTP_MAPPINGS = (
     ("config/cumulus/template/01-global.yaml", "01-global.yaml", "file"),
     ("config/cumulus/template/02-devices_config.csv", "02-devices_config.csv", "file_csv"),
@@ -1254,73 +1255,232 @@ def infra_log_root_lock(http_root: str | os.PathLike[str]):
             fcntl.flock(descriptor, fcntl.LOCK_UN)
     finally:
         os.close(descriptor)
-P2P_INPUT_PATHS = (
-    "ztp/config/cumulus/template/P2P/p2p.xlsx",
-    "ztp/config/nvos/template/P2P/p2p.xlsx",
-    "ethernet/p2p.xlsx", "infiniband/p2p.xlsx", "nvlink/p2p.xlsx",
-)
-P2P_OUTPUT_PATHS = (
-    "ztp/config/cumulus/template/P2P/output-p2p",
-    "ztp/config/nvos/template/P2P/output-p2p",
-)
-P2P_AIR_PATH = "ztp/config/isc-dhcp-server/p2p-air.json"
-BRINGUP_OUTPUT_SPECS = tuple(
-    ("infiniband/bringup/" + tool + "/" + name, "99-output-ib_nvl/bringup/" + name)
-    for tool, name in (("ndr", "ndr-upgrade-logs"),
-                       ("xdr-initial-setup", "xdr-initial-setup-logs"),
-                       ("xdr-upgrade", "xdr-upgrade-logs"),
-                       ("ufm-setup-upgrade", "ufm-setup-upgrade-logs"))
-)
-# (tool input link, repository alias it points at, project file behind the alias).  The deployment
-# tool reads only its own directory; setup binds it to the active inventory and P2P aliases.
-BRINGUP_INPUT_SPECS = (
-    ("infiniband/bringup/ufm-setup-upgrade/ib.csv", "infiniband/ib.csv", "02-devices_config.csv"),
-    ("infiniband/bringup/ufm-setup-upgrade/p2p.xlsx", "infiniband/p2p.xlsx", "p2p.xlsx"),
-)
-# Tool links to the shared, project-independent http/image directory (ha-post-config finds *.lic there).
-# Not a project producer binding, so not in runtime_link_specs(); image builds deny the whole
-# infiniband/bringup subtree (IMAGE_HOST_STATE_SUBTREES).
-BRINGUP_IMAGE_LINKS = ("infiniband/bringup/ufm-setup-upgrade/image",)
-ANALYZER_INPUT_SPECS = (
-    ("ztp/config/cumulus/template/P2P/eth-info", "99-output-monitor/ethernet/eth-info"),
-    ("ztp/config/nvos/template/P2P/ib-info", "99-output-monitor/infiniband/ib-info"),
-)
+
+
+# ── G12: the link specification table (R-016 详细设计 v1.1 §3.1, §3.4; v3.1.1 WP-1) ──────────────────
+class SetupLinkSpec(NamedTuple):
+    """One row of the link specification table: a fixed tree link and what stands behind it.
+
+    path       tree path, repository-relative.
+    target     the project's fixed name (base "project"), the tree path this link aliases (base
+               "repository"), or the shared http/ path (base "shared").
+    kind       "file" | "dir": what the target is.
+    role       R-016 §3.4: "required" (project input), "prepared" (setup's preparation step makes the
+               target), "optional" (may be absent; dangling is normal) or "publisher" (publisher owned).
+    writer     "setup" | "publisher": who writes the link.
+    note       free text.
+    base       "project" | "repository" | "shared".
+    view       the existing constant this row also feeds, so readers keep their names; None for rows that
+               only the reconcile engine (v3.1.1 WP-2) creates from this table.
+    published  Docker activation binds the link (published_runtime_link_specs; Docker frozen, O5).
+    """
+
+    path: str
+    target: str
+    kind: str
+    role: str
+    writer: str = "setup"
+    note: str = ""
+    base: str = "project"
+    view: str | None = None
+    published: bool = False
+
+
+# Literal sections the table expands: SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS (above) and
+# ANALYZER_OUTPUT_SPECS are read as syntax by the monitor writer census and test_source_tools_fixture_contract,
+# so their rows are written once, there.
 ANALYZER_OUTPUT_SPECS = (
     ("monitor/99-output-p2p", "99-output-p2p"),
     ("tools/lldp-analyze-tool/99-output-p2p", "99-output-p2p"),
     ("tools/lldp-analyze-tool/99-output-monitor", "99-output-monitor"),
     ("tools/ibdiagnet-analyze-tool/99-output-p2p", "99-output-p2p"),
 )
+# The collectors' structure: (network, inventory link name, collection output directories...).  Its outputs
+# feed SETUP_COLLECTION_LINKS (the worker's evidence walk) and Docker activation; the G14-2 *-status
+# directories are therefore a separate table section, never extra outputs here.
 NETWORK_MONITOR_SPECS = (
     ("ethernet", "eth.csv", "eth-info", "spx-link"),
     # ufm-info / ufm-ibdiagnet: the UFM lane of the same cron.sh (infiniband/monitor/UFM-MONITOR.md).
     ("infiniband", "ib.csv", "ib-info", "ib-link", "ufm-info", "ufm-ibdiagnet"),
     ("nvlink", "nvsw.csv", "nvsw-info", "nvsw-link"),
 )
-NETWORK_CSV_MAPPINGS = tuple((network + "/" + csv, "02-devices_config.csv")
-                             for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
-NETWORK_INVENTORY_LINKS = tuple((network + "/monitor/" + csv, network + "/" + csv)
-                               for network, csv, *_outputs in NETWORK_MONITOR_SPECS) + (
-    ("infiniband/bringup/xdr-upgrade/ib.csv", "infiniband/ib.csv"),
+# setup's mapping kinds -> (kind, role).  "file_csv" is an inventory that --csv-dir may supply.
+_SETUP_KIND_COLUMNS = MappingProxyType({
+    "file": ("file", "required"), "file_csv": ("file", "required"),
+    "output": ("file", "prepared"), "dir": ("dir", "prepared"),
+})
+_BRINGUP_LOG_NOTE = "R-016 §3.4: only projects that use this bringup tool write here"
+
+# Row order is the publication order Docker activation binds (published rows) and each view's order.
+SETUP_LINK_SPECS = (
+    *(SetupLinkSpec("ztp/" + name, target, *_SETUP_KIND_COLUMNS[kind], view="ztp")
+      for name, target, kind in SETUP_ZTP_MAPPINGS),
+    *(SetupLinkSpec(name, target, *_SETUP_KIND_COLUMNS[kind], view="workspace",
+                    published=name.startswith("monitor/"))
+      for name, target, kind in SETUP_WORKSPACE_INPUT_MAPPINGS),
+    # Monitor runtime: the project's inventory, status and collection outputs behind the monitor page.
+    SetupLinkSpec("monitor/02-devices_config.csv", "02-devices_config.csv", "file", "required",
+                  view="monitor", published=True),
+    SetupLinkSpec("monitor/99-output-ufm", "99-output-ufm", "dir", "prepared",
+                  note="R-013: v3.1.1 WP-8 removes it", view="monitor", published=True),
+    SetupLinkSpec("ztp/status", "99-output-ztp", "dir", "prepared", view="monitor", published=True),
+    SetupLinkSpec("monitor/ztp-status", "ztp/status", "dir", "prepared", base="repository",
+                  view="monitor", published=True),
+    *(SetupLinkSpec(network + "/monitor/" + name, "99-output-monitor/" + network + "/" + name,
+                    "file" if name == "cronjob.log" else "dir", "prepared", view="monitor", published=True)
+      for network, _csv, *outputs in NETWORK_MONITOR_SPECS for name in (*outputs, "cronjob.log")),
+    *(SetupLinkSpec("monitor/" + network, "99-output-monitor/" + network, "dir", "prepared",
+                    view="monitor", published=True)
+      for network, *_rest in NETWORK_MONITOR_SPECS),
+    SetupLinkSpec("infiniband/monitor/01-global.yaml", "infiniband/01-global.yaml", "file", "required",
+                  note="the UFM lane reads servers.ufm.vip (UFM-MONITOR.md 14.3)", base="repository",
+                  view="monitor", published=True),
+    SetupLinkSpec("infiniband/monitor/99-output-p2p", "99-output-p2p", "dir", "prepared",
+                  view="monitor", published=True),
+    SetupLinkSpec("monitor/99-output-monitor", "99-output-monitor", "dir", "prepared",
+                  note="REQ7: the issue tracker's prepared data and log (owner 2026-10-23)",
+                  view="monitor", published=True),
+    # Network inventories, and the collectors' aliases of them.
+    *(SetupLinkSpec(network + "/" + csv, "02-devices_config.csv", "file", "required",
+                    view="network-csv", published=True)
+      for network, csv, *_outputs in NETWORK_MONITOR_SPECS),
+    *(SetupLinkSpec(network + "/monitor/" + csv, network + "/" + csv, "file", "required", base="repository",
+                    view="network-inventory", published=True)
+      for network, csv, *_outputs in NETWORK_MONITOR_SPECS),
+    SetupLinkSpec("infiniband/bringup/xdr-upgrade/ib.csv", "infiniband/ib.csv", "file", "required",
+                  note="IBSW 2.25: upgrade.py reads ib.csv beside itself", base="repository",
+                  view="network-inventory", published=True),
+    # Topology analyzers: report directories (the offline ibdiagnet tool is not published), collected input.
+    *(SetupLinkSpec(name, target, "dir", "prepared", view="analyzer-output",
+                    published=not name.startswith("tools/ibdiagnet-analyze-tool/"))
+      for name, target in ANALYZER_OUTPUT_SPECS),
+    SetupLinkSpec("ztp/config/cumulus/template/P2P/eth-info", "99-output-monitor/ethernet/eth-info", "dir",
+                  "prepared", view="analyzer-input"),
+    SetupLinkSpec("ztp/config/nvos/template/P2P/ib-info", "99-output-monitor/infiniband/ib-info", "dir",
+                  "prepared", view="analyzer-input"),
+    # P2P: every consumer reads the fixed name p2p.xlsx (the first is Docker's P2P input); both converters
+    # share one output directory; the AIR json exists only in AIR projects.
+    SetupLinkSpec("ztp/config/cumulus/template/P2P/p2p.xlsx", "p2p.xlsx", "file", "required", view="p2p-input"),
+    SetupLinkSpec("ztp/config/nvos/template/P2P/p2p.xlsx", "p2p.xlsx", "file", "required", view="p2p-input"),
+    SetupLinkSpec("ethernet/p2p.xlsx", "p2p.xlsx", "file", "required", view="p2p-input"),
+    SetupLinkSpec("infiniband/p2p.xlsx", "p2p.xlsx", "file", "required", view="p2p-input"),
+    SetupLinkSpec("nvlink/p2p.xlsx", "p2p.xlsx", "file", "required", view="p2p-input"),
+    SetupLinkSpec("ztp/config/cumulus/template/P2P/output-p2p", "99-output-p2p", "dir", "prepared",
+                  view="p2p-output"),
+    SetupLinkSpec("ztp/config/nvos/template/P2P/output-p2p", "99-output-p2p", "dir", "prepared",
+                  view="p2p-output"),
+    SetupLinkSpec("ztp/config/isc-dhcp-server/p2p-air.json", "99-output-p2p/p2p-air.json", "file", "optional",
+                  note="R-016 §3.4: AIR projects only", view="p2p-air"),
+    # InfiniBand bringup tools: project log directories, and the inputs ufm-setup-upgrade reads beside itself.
+    *(SetupLinkSpec("infiniband/bringup/" + tool + "/" + name, "99-output-ib_nvl/bringup/" + name, "dir",
+                    "optional", note=_BRINGUP_LOG_NOTE, view="bringup-output")
+      for tool, name in (("ndr", "ndr-upgrade-logs"),
+                         ("xdr-initial-setup", "xdr-initial-setup-logs"),
+                         ("xdr-upgrade", "xdr-upgrade-logs"),
+                         ("ufm-setup-upgrade", "ufm-setup-upgrade-logs"))),
+    SetupLinkSpec("infiniband/bringup/ufm-setup-upgrade/ib.csv", "infiniband/ib.csv", "file", "required",
+                  base="repository", view="bringup-input"),
+    SetupLinkSpec("infiniband/bringup/ufm-setup-upgrade/p2p.xlsx", "infiniband/p2p.xlsx", "file", "required",
+                  base="repository", view="bringup-input"),
+    # Publisher-owned pointers to the latest complete release (R-016 §3.4).
+    SetupLinkSpec("ztp/config/cumulus/latest_yaml", "ztp/config/cumulus/template/99-output/latest", "dir",
+                  "publisher", writer="publisher", base="repository", view="latest-yaml"),
+    SetupLinkSpec("ztp/config/nvos/latest_yaml", "ztp/config/nvos/template/99-output-ib_nvl/latest", "dir",
+                  "publisher", writer="publisher", base="repository", view="latest-yaml"),
+    # v3.1.1 WP-1 rows.  No legacy view: the reconcile engine (WP-2) creates them from this table.
+    SetupLinkSpec("ethernet/01-global.yaml", "01-global.yaml", "file", "required",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)"),
+    SetupLinkSpec("nvlink/01-global.yaml", "01-global.yaml", "file", "required",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)"),
+    SetupLinkSpec("ethernet/monitor/01-global.yaml", "ethernet/01-global.yaml", "file", "required",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)", base="repository"),
+    SetupLinkSpec("nvlink/monitor/01-global.yaml", "nvlink/01-global.yaml", "file", "required",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)", base="repository"),
+    SetupLinkSpec("ethernet/monitor/99-output-p2p", "99-output-p2p", "dir", "prepared",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)"),
+    SetupLinkSpec("nvlink/monitor/99-output-p2p", "99-output-p2p", "dir", "prepared",
+                  note="R-016 第 9 条 structure alignment (owner 2026-11-04)"),
+    SetupLinkSpec("ethernet/02-devices_config.csv", "02-devices_config.csv", "file", "required",
+                  note="R-016 2026-11-05: <network>.csv is compared with it"),
+    SetupLinkSpec("infiniband/02-devices_config.csv", "02-devices_config.csv", "file", "required",
+                  note="R-016 2026-11-05: <network>.csv is compared with it"),
+    SetupLinkSpec("nvlink/02-devices_config.csv", "02-devices_config.csv", "file", "required",
+                  note="R-016 2026-11-05: <network>.csv is compared with it"),
+    SetupLinkSpec("ethernet/monitor/04-device-aliases.csv", "04-device-aliases.csv", "file", "optional",
+                  note="G14-1 alias table; may not exist (R-018, I-033)"),
+    SetupLinkSpec("infiniband/monitor/04-device-aliases.csv", "04-device-aliases.csv", "file", "optional",
+                  note="G14-1 alias table; may not exist (R-018, I-033)"),
+    SetupLinkSpec("nvlink/monitor/04-device-aliases.csv", "04-device-aliases.csv", "file", "optional",
+                  note="G14-1 alias table; may not exist (R-018, I-033)"),
+    SetupLinkSpec("ethernet/monitor/eth-status", "99-output-monitor/ethernet/eth-status", "dir", "prepared",
+                  note="G14-2 status directory"),
+    SetupLinkSpec("infiniband/monitor/ib-status", "99-output-monitor/infiniband/ib-status", "dir", "prepared",
+                  note="G14-2 status directory"),
+    SetupLinkSpec("infiniband/monitor/ufm-status", "99-output-monitor/infiniband/ufm-status", "dir",
+                  "prepared", note="G14-2 status directory"),
+    SetupLinkSpec("nvlink/monitor/nvsw-status", "99-output-monitor/nvlink/nvsw-status", "dir", "prepared",
+                  note="G14-2 status directory"),
+    SetupLinkSpec("infiniband/bringup/99-output-bringup", "99-output-bringup", "dir", "prepared",
+                  note="BU0.5 bringup state (O3 ①, owner 2026-11-07)"),
+    SetupLinkSpec("infiniband/bringup/xdr-initial-setup/ib.csv", "infiniband/ib.csv", "file", "required",
+                  note="initial-setup.py reads it beside itself (O2, owner 2026-11-07)", base="repository"),
+    SetupLinkSpec("infiniband/bringup/xdr-initial-setup/p2p.xlsx", "infiniband/p2p.xlsx", "file", "required",
+                  note="initial-setup.py reads it beside itself (O2, owner 2026-11-07)", base="repository"),
 )
+# Project-independent shared links (I-024): setup links http/image here; never a project row.
+SHARED_LINK_SPECS = (
+    SetupLinkSpec("ztp/image/*/*.bin", "image/*.bin", "file", "optional", base="shared",
+                  note="one link per shared image, platform from its name (01-a-setup.py::_image_platform)"),
+    SetupLinkSpec("infiniband/bringup/ufm-setup-upgrade/image", "image", "dir", "optional", base="shared",
+                  note="ha-post-config finds *.lic here; setup skips it without http/image"),
+)
+# The four real public-key directories; each holds one link per project key (R-016 §3.2, owner 2026-11-04).
+PUBLICKEY_DIRECTORIES = (
+    "ztp/config/publickey", "ethernet/publickey", "infiniband/publickey", "nvlink/publickey",
+)
+# Git-tracked bridges beside bringup tools: not setup output (R-016 §3.1), yet packaging and sync keep
+# excluding them as the removed STATIC_SETUP_MANAGED_LINKS did.
+TRACKED_SETUP_BRIDGES = (
+    "infiniband/bringup/xdr-initial-setup/01-global.yaml", "infiniband/bringup/xdr-initial-setup/publickey",
+    "infiniband/bringup/ufm-setup-upgrade/01-global.yaml", "infiniband/bringup/ufm-setup-upgrade/publickey",
+)
+
+
+def setup_dynamic_link_patterns() -> tuple[str, ...]:
+    """Glob patterns of setup links whose names vary with the project: one link per public key in each
+    public-key directory, and the optimize sample links."""
+    return (*(directory + "/*.pub" for directory in PUBLICKEY_DIRECTORIES), "ztp/optimize/*-sample/*")
+
+
+_SETUP_LINK_ROWS = MappingProxyType({row.path: row for row in SETUP_LINK_SPECS})
+
+
+def _project_target(row: SetupLinkSpec) -> str:
+    """Follow repository aliases to the project's fixed name."""
+    while row.base == "repository":
+        row = _SETUP_LINK_ROWS[row.target]
+    return row.target
+
+
+# The names readers already import, derived from the table.
+P2P_INPUT_PATHS = tuple(row.path for row in SETUP_LINK_SPECS if row.view == "p2p-input")
+P2P_OUTPUT_PATHS = tuple(row.path for row in SETUP_LINK_SPECS if row.view == "p2p-output")
+P2P_AIR_PATH = next(row.path for row in SETUP_LINK_SPECS if row.view == "p2p-air")
+BRINGUP_OUTPUT_SPECS = tuple((row.path, row.target) for row in SETUP_LINK_SPECS if row.view == "bringup-output")
+# (tool input link, repository alias it points at, project file behind the alias).  The deployment
+# tool reads only its own directory; setup binds it to the active inventory and P2P aliases.
+BRINGUP_INPUT_SPECS = tuple((row.path, row.target, _project_target(row))
+                            for row in SETUP_LINK_SPECS if row.view == "bringup-input")
+# Tool links to the shared http/image directory; image builds deny the whole infiniband/bringup subtree.
+BRINGUP_IMAGE_LINKS = tuple(row.path for row in SHARED_LINK_SPECS if row.path.startswith("infiniband/bringup/"))
+ANALYZER_INPUT_SPECS = tuple((row.path, row.target) for row in SETUP_LINK_SPECS if row.view == "analyzer-input")
+NETWORK_CSV_MAPPINGS = tuple((row.path, row.target) for row in SETUP_LINK_SPECS if row.view == "network-csv")
+NETWORK_INVENTORY_LINKS = tuple((row.path, row.target)
+                                for row in SETUP_LINK_SPECS if row.view == "network-inventory")
 # (repository name, project target, optional repository-internal alias target).
-MONITOR_RUNTIME_MAPPINGS = (
-    ("monitor/02-devices_config.csv", "02-devices_config.csv", None),
-    ("monitor/99-output-ufm", "99-output-ufm", None),
-    ("ztp/status", "99-output-ztp", None),
-    ("monitor/ztp-status", "99-output-ztp", "ztp/status"),
-) + tuple(
-    (network + "/monitor/" + name, "99-output-monitor/" + network + "/" + name, None)
-    for network, _csv, *outputs in NETWORK_MONITOR_SPECS
-    for name in (*outputs, "cronjob.log")
-) + tuple(("monitor/" + network, "99-output-monitor/" + network, None)
-          for network, *_rest in NETWORK_MONITOR_SPECS) + (
-    # The UFM lane reads servers.ufm.vip and writes the IB link reports (UFM-MONITOR.md 14.3).
-    ("infiniband/monitor/01-global.yaml", "01-global.yaml", "infiniband/01-global.yaml"),
-    ("infiniband/monitor/99-output-p2p", "99-output-p2p", None),
-    # REQ7 (owner 2026-10-23): monitor/issue-tracker/ keeps its prepared data and its log in the
-    # project's monitor output through this link beside it.
-    ("monitor/99-output-monitor", "99-output-monitor", None),
+MONITOR_RUNTIME_MAPPINGS = tuple(
+    (row.path, _project_target(row), row.target if row.base == "repository" else None)
+    for row in SETUP_LINK_SPECS if row.view == "monitor"
 )
 SETUP_COLLECTION_LINKS = {
     network + "/monitor/" + output: (network, output)
@@ -1359,10 +1519,13 @@ def setup_collection_link_hop(root: str | os.PathLike[str], path: str | os.PathL
     return True
 
 
-LATEST_YAML_SPECS = (("cumulus", "99-output"), ("nvos", "99-output-ib_nvl"))
+LATEST_YAML_SPECS = tuple((row.path.split("/")[2], row.target.split("/")[4])
+                          for row in SETUP_LINK_SPECS if row.view == "latest-yaml")
 PUBLISHED_RUNTIME_FILE_PATHS = (
     "ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh", "ztp/ztp.json",
 )
+# R-016 §2: the one link that changes with the project.
+ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"
 
 
 def _runtime_relative_target(name, project_target, repository_target=None):
@@ -1370,42 +1533,46 @@ def _runtime_relative_target(name, project_target, repository_target=None):
     return posixpath.relpath(target, posixpath.dirname(name))
 
 
+def _direct_link_text(row: SetupLinkSpec) -> str:
+    if row.base == "repository":
+        return _runtime_relative_target(row.path, None, row.target)
+    return _runtime_relative_target(row.path, row.target)
+
+
 def published_runtime_link_specs():
-    """Activation's live publication contract, derived from producer mappings."""
-    mappings = tuple((name, target, None) for name, target, _kind in SETUP_WORKSPACE_INPUT_MAPPINGS
-                     if name.startswith("monitor/"))
-    mappings += MONITOR_RUNTIME_MAPPINGS
-    mappings += tuple((name, target, None) for name, target in NETWORK_CSV_MAPPINGS)
-    mappings += tuple((name, "02-devices_config.csv", target) for name, target in NETWORK_INVENTORY_LINKS)
-    mappings += tuple((name, target, None) for name, target in ANALYZER_OUTPUT_SPECS
-                      if not name.startswith("tools/ibdiagnet-analyze-tool/"))
-    return tuple((name, _runtime_relative_target(name, target, alias), target)
-                 for name, target, alias in mappings)
+    """Activation's live publication contract: the table's published rows, in table order.
+
+    The text stays the direct ../DAY0-Prepare/{project}/... form until v3.1.1 WP-3 switches setup and
+    readers to pointer_link_specs().
+    """
+    return tuple((row.path, _direct_link_text(row), _project_target(row))
+                 for row in SETUP_LINK_SPECS if row.published)
 
 
 def runtime_link_specs():
-    """All fixed live link names and target templates; no image selector input.
+    """Every table row with its direct target template; no image selector input.
 
-    Dynamic key/image names and project-internal pointers live under fully
-    denied families; the fixed outer latest_yaml pointer is included here.
-    P2P input/air targets use setup's canonical p2p.xlsx example (the chosen
-    source stem is variable in a live project, never needed to classify names).
+    Shared links, dynamic key/image names and project-internal pointers live under fully denied
+    families; the fixed outer latest_yaml pointer is a row.  The P2P input/AIR targets are the fixed
+    names p2p.xlsx and p2p-air.json.  The text stays direct until WP-3 (see pointer_link_specs()).
     """
-    specs = {name: target for name, target, _project in published_runtime_link_specs()}
-    project_mappings = [("ztp/" + name, target) for name, target, _kind in SETUP_ZTP_MAPPINGS]
-    project_mappings += [(name, target) for name, target, _kind in SETUP_WORKSPACE_INPUT_MAPPINGS]
-    project_mappings += list(BRINGUP_OUTPUT_SPECS + ANALYZER_INPUT_SPECS + ANALYZER_OUTPUT_SPECS)
-    project_mappings += [(name, "p2p.xlsx") for name in P2P_INPUT_PATHS]
-    project_mappings += [(name, "99-output-p2p") for name in P2P_OUTPUT_PATHS]
-    project_mappings += [(P2P_AIR_PATH, "99-output-p2p/p2p-air.json")]
-    specs.update((name, _runtime_relative_target(name, target)) for name, target in project_mappings)
-    specs.update(
-        (name, _runtime_relative_target(name, project_target, alias))
-        for name, alias, project_target in BRINGUP_INPUT_SPECS
-    )
-    specs.update(("ztp/config/" + platform + "/latest_yaml", "template/" + output + "/latest")
-                 for platform, output in LATEST_YAML_SPECS)
-    return tuple(sorted(specs.items()))
+    return tuple(sorted((row.path, _direct_link_text(row)) for row in SETUP_LINK_SPECS))
+
+
+def pointer_link_target(link_path: str, project_name: str) -> str:
+    """R-016 §2 canonical text of a tree link to a project file: relpath through the pointer."""
+    return posixpath.relpath(ACTIVE_PROJECT_POINTER + "/" + project_name, posixpath.dirname(link_path))
+
+
+def pointer_link_specs() -> tuple[tuple[str, str], ...]:
+    """(tree path, canonical link text) of every table row (R-016 §2, the same for native and Docker).
+
+    Project rows go through DAY0-Prepare/activate-project; repository aliases keep their text.  Setup,
+    the readers and Docker switch from runtime_link_specs()' direct text to this in v3.1.1 WP-3/WP-9.
+    """
+    return tuple((row.path, pointer_link_target(row.path, row.target) if row.base == "project"
+                  else _direct_link_text(row))
+                 for row in SETUP_LINK_SPECS)
 
 
 class MacStringSafeLoader(yaml.SafeLoader):
@@ -2060,7 +2227,7 @@ IMAGE_HOST_STATE_SUBTREES = frozenset({
     "infiniband/publickey", "monitor/status",
     "ztp/backup", "ztp/config/cumulus/template/.claude", "ztp/config/publickey",
     "ztp/image", "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
-}) | REFERENCE_ONLY_SUBTREES
+}) | frozenset(PUBLICKEY_DIRECTORIES) | REFERENCE_ONLY_SUBTREES  # v3.1.1 G12: all four key directories
 IMAGE_HOST_STATE_DYNAMIC_PATTERNS = (
     "infra/.logs-migration.*",
     "ztp/config/isc-dhcp-server/dhcpd_*.hosts", "ztp/optimize/*-sample",

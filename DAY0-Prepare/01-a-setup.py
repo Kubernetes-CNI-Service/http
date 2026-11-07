@@ -64,7 +64,7 @@ from project_contract import (
     BRINGUP_OUTPUT_SPECS, BRINGUP_INPUT_SPECS, BRINGUP_IMAGE_LINKS,
     ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
-    MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS,
+    MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS, PUBLICKEY_DIRECTORIES,
     detect_global_schema_version,
     normalize_issue_tracker_policy,
     normalize_redundancy_mac,
@@ -777,10 +777,10 @@ def _unused_empty_pubkeys(proj_dir):
 
 
 def _publickey_roots():
-    """The two first-layer public-key readers share the active project keys."""
-    return (
-        os.path.join(ZTP, "config", "publickey"),
-        os.path.join(HTTP_BASE, "infiniband", "publickey"),
+    """The four real public-key directories share the active project keys (R-016 §3.2, owner 11-04)."""
+    return tuple(
+        os.path.join(ZTP, name[len("ztp/"):]) if name.startswith("ztp/") else os.path.join(HTTP_BASE, name)
+        for name in PUBLICKEY_DIRECTORIES
     )
 
 
@@ -3317,8 +3317,7 @@ def _managed_ztp_link_candidates():
     patterns = [
         os.path.join(ZTP, "image", "cumulus", "*.bin"),
         os.path.join(ZTP, "image", "nvos", "*.bin"),
-        os.path.join(ZTP, "config", "publickey", "*.pub"),
-        os.path.join(HTTP_BASE, "infiniband", "publickey", "*.pub"),
+        *(os.path.join(key_dir, "*.pub") for key_dir in _publickey_roots()),
         os.path.join(ZTP, "config", "cumulus", "template", "P2P", "*.xlsx"),
         os.path.join(ZTP, "config", "nvos", "template", "P2P", "*.xlsx"),
         os.path.join(ZTP, "config", "cumulus", "template", "AIR", "*.xlsx"),

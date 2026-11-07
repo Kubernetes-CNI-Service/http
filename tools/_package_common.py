@@ -42,6 +42,10 @@ from project_contract import (
     require_project_eligible,
     safe_load_global_yaml,
     PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON,
+    SETUP_LINK_SPECS,
+    SHARED_LINK_SPECS,
+    TRACKED_SETUP_BRIDGES,
+    setup_dynamic_link_patterns,
     is_private_b_primary_escrow_path,
     validate_optional_ib_upgrade,
     transfer_exclude_reason,
@@ -54,31 +58,6 @@ TOOLS_DIR = Path(__file__).resolve().parent
 ROOT = TOOLS_DIR.parent
 DAY0 = ROOT / "DAY0-Prepare"
 MANIFEST = ROOT / "ztp/.setup_manifest"
-STATIC_SETUP_MANAGED_LINKS = frozenset({
-    "ethernet/monitor/eth.csv",
-    "infiniband/monitor/ib.csv",
-    "nvlink/monitor/nvsw.csv",
-    "infiniband/bringup/xdr-upgrade/ib.csv",
-    "infiniband/bringup/xdr-upgrade/01-global.yaml",
-    "infiniband/bringup/xdr-initial-setup/ib.csv",
-    "infiniband/bringup/xdr-initial-setup/01-global.yaml",
-    "infiniband/bringup/xdr-initial-setup/publickey",
-    "infiniband/bringup/ufm/01-global.yaml",
-    "infiniband/bringup/ufm/ib.csv",
-    "infiniband/bringup/ufm/p2p.xlsx",
-    "infiniband/bringup/ufm/publickey",
-    "infiniband/bringup/ufm/ufm-setup-logs",
-    "infiniband/bringup/ufm-setup-upgrade/ib.csv",
-    "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
-    "infiniband/bringup/ufm-setup-upgrade/01-global.yaml",
-    "infiniband/bringup/ufm-setup-upgrade/publickey",
-    "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs",
-    "infiniband/bringup/ufm-setup-upgrade/image",
-    # LOAD creates these after SETUP wrote its manifest. Their targets are
-    # host-owned runtime output, not deployable archive source members.
-    "ztp/config/cumulus/latest_yaml",
-    "ztp/config/nvos/latest_yaml",
-})
 RESERVED_UPGRADE_GLOBAL_ALIAS = "infiniband/bringup/xdr-upgrade/01-global.yaml"
 DEPLOYMENT_PREWRITE_GUARD = TOOLS_DIR / "deployment_prewrite_guard.py"
 DEPLOYMENT_SOURCE_MANIFEST_RELATIVE = PurePosixPath(
@@ -980,8 +959,13 @@ def project_directories() -> list[Path]:
 
 
 def setup_managed_links() -> set[str]:
-    """Return manifest-owned and detectable project-runtime links."""
-    result: set[str] = set(STATIC_SETUP_MANAGED_LINKS)
+    """Return the setup-managed link names packaging and sync exclude.
+
+    Derived from tools/project_contract.py's link table, never from the
+    manifest body (R-016 v1.1 §7, R16-14): every table row, the shared
+    section and the tracked bridges by name, and the dynamic families
+    (per-key public-key links, shared images, optimize samples) as found now.
+    """
     reserved = ROOT / RESERVED_UPGRADE_GLOBAL_ALIAS
     try:
         info = reserved.lstat()
@@ -990,42 +974,20 @@ def setup_managed_links() -> set[str]:
     else:
         if not stat.S_ISLNK(info.st_mode):
             raise ValueError("reserved upgrade global must be a setup-managed symlink")
-    root = ROOT.resolve()
-    if MANIFEST.is_file():
-        for line in MANIFEST.read_text(
-            encoding="utf-8", errors="replace"
-        ).splitlines():
-            if not line or line.startswith("#"):
-                continue
-            try:
-                candidate = Path(line)
-                if not candidate.is_absolute():
-                    candidate = root / candidate
-                result.add(candidate.relative_to(root).as_posix())
-            except (OSError, ValueError):
-                continue
+    names = [row.path for row in (*SETUP_LINK_SPECS, *SHARED_LINK_SPECS)]
+    names += [*TRACKED_SETUP_BRIDGES, *setup_dynamic_link_patterns()]
+    result = {name for name in names if "*" not in name}
+    for pattern in (name for name in names if "*" in name):
+        result.update(
+            path.relative_to(ROOT).as_posix()
+            for path in ROOT.glob(pattern) if path.is_symlink()
+        )
     # A custom common.mgmt.ztp.ztp_url_prefix is published by load as a
-    # host-owned symlink.  Validate its ownership marker even when a setup
-    # manifest was found; otherwise the early return below could package or
-    # sync this management-server runtime path.
-    prefix_link = ztp_prefix_publication_relative(root)
+    # host-owned symlink.  Validate its ownership marker on every call so
+    # this management-server runtime path is never packaged or synced.
+    prefix_link = ztp_prefix_publication_relative(ROOT.resolve())
     if prefix_link is not None:
         result.add(prefix_link.as_posix())
-    if result:
-        return result
-    day0 = DAY0.resolve()
-    for name in CODE_TREE_NAMES:
-        code_root = ROOT / name
-        if not code_root.is_dir():
-            continue
-        for candidate in code_root.rglob("*"):
-            if not candidate.is_symlink():
-                continue
-            try:
-                candidate.resolve().relative_to(day0)
-                result.add(candidate.relative_to(ROOT).as_posix())
-            except (OSError, ValueError):
-                continue
     return result
 
 

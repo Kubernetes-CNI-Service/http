@@ -30,7 +30,7 @@ if HTTP_BASE not in sys.path:
     sys.path.insert(0, HTTP_BASE)
 from ztp import config_sync_authority
 from deployment_lock import DeploymentLockError, deployment_lock
-from project_contract import infra_log_root_lock, managed_infra_log_project
+from project_contract import PUBLICKEY_DIRECTORIES, infra_log_root_lock, managed_infra_log_project
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 
 _AUTO_YES = False
@@ -172,7 +172,10 @@ def _known_workspace_links():
             os.path.join(monitor_dir, "cronjob.log"),
             os.path.join(HTTP_BASE, "monitor", net_type),
         ])
-    paths.extend(glob.glob(os.path.join(HTTP_BASE, "infiniband", "publickey", "*.pub")))
+    # Per-key links in the public-key directories outside ztp/ (ztp/config/publickey is above).
+    for key_dir in PUBLICKEY_DIRECTORIES:
+        if not key_dir.startswith("ztp/"):
+            paths.extend(glob.glob(os.path.join(HTTP_BASE, key_dir, "*.pub")))
     paths.extend(glob.glob(os.path.join(ZTP, "optimize", "*-sample", "*")))
     return [path for path in paths if os.path.islink(path)]
 

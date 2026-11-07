@@ -43,7 +43,7 @@ setup 中的实现（2026-10-22 合入 http）：
   - `BRINGUP_IMAGE_LINKS` 含 `image`。
 - `DAY0-Prepare/01-a-setup.py`：`_process_bringup_links`、`_process_bringup_input_links`、`_process_bringup_image_links`。
 - `DAY0-Prepare/02-unsetup.py::_known_workspace_links` 列出这 4 个 setup 链接。
-- `tools/_package_common.py::STATIC_SETUP_MANAGED_LINKS` 含全部 6 个。
+- 打包和同步的排除名单 `tools/_package_common.py::setup_managed_links()` 从 `project_contract` 的链接规格表派生（v3.1.1 G12，`STATIC_SETUP_MANAGED_LINKS` 已删除），含上面 4 个 setup 链接和 2 个仓库桥接（`TRACKED_SETUP_BRIDGES`）。
 - `test_cases/audit_public_tree.py::SETUP_RUNTIME_BRIDGES` 登记 `01-global.yaml`、`publickey` 两个仓库桥接。
 - `.gitignore` 与三份 dockerignore 已同步。
 - 测试：`test_setup_ufm_links_workflow`、`test_ufm_setup_upgrade_workflow`。

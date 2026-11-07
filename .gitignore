@@ -158,6 +158,10 @@ core.*
 !/DAY0-Prepare/template/
 /DAY0-Prepare/template/**
 !/DAY0-Prepare/template/README.txt
+# R-016 §7: the active-project pointer and its atomic temp are host runtime
+# links; /DAY0-Prepare/*/ above matches directories only.
+/DAY0-Prepare/activate-project
+/DAY0-Prepare/.activate-project.*.tmp
 
 # setup/load-owned publication links and rendered entrypoints
 /ztp/.setup_manifest
@@ -172,6 +176,13 @@ core.*
 /ethernet/monitor/eth.csv
 /ethernet/monitor/eth-info
 /ethernet/monitor/spx-link
+# v3.1.1 G12 rows (R-016 第 9 条, R-016 11-05, G14-1, G14-2) and the key directory.
+/ethernet/01-global.yaml
+/ethernet/02-devices_config.csv
+/ethernet/publickey/
+/ethernet/monitor/01-global.yaml
+/ethernet/monitor/04-device-aliases.csv
+/ethernet/monitor/eth-status
 
 /infiniband/ib.csv
 /infiniband/p2p.xlsx
@@ -195,12 +206,24 @@ core.*
 /infiniband/bringup/ufm-setup-upgrade/p2p.xlsx
 /infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs
 /infiniband/bringup/ufm-setup-upgrade/image
+# v3.1.1 G12 rows (R-016 11-05, G14-1, G14-2).
+/infiniband/02-devices_config.csv
+/infiniband/monitor/04-device-aliases.csv
+/infiniband/monitor/ib-status
+/infiniband/monitor/ufm-status
 
 /nvlink/nvsw.csv
 /nvlink/p2p.xlsx
 /nvlink/monitor/nvsw.csv
 /nvlink/monitor/nvsw-info
 /nvlink/monitor/nvsw-link
+# v3.1.1 G12 rows (R-016 第 9 条, R-016 11-05, G14-1, G14-2) and the key directory.
+/nvlink/01-global.yaml
+/nvlink/02-devices_config.csv
+/nvlink/publickey/
+/nvlink/monitor/01-global.yaml
+/nvlink/monitor/04-device-aliases.csv
+/nvlink/monitor/nvsw-status
 
 /infra/01-global.yaml
 /infra/02-devices_config.csv
@@ -301,6 +324,8 @@ core.*
 !/DAY0-Prepare/template/
 !/DAY0-Prepare/template/01-global.yaml
 !/DAY0-Prepare/template/02-devices_config.csv
+# R-016 §7, §10.2: the template's default ib.csv link is public (AP-c).
+!/DAY0-Prepare/template/ib.csv
 !/DAY0-Prepare/template/02-dhcp-subnet_config.csv
 !/DAY0-Prepare/template/.management-pubkeys
 !/DAY0-Prepare/template/laptop.pub

@@ -192,9 +192,12 @@ class UfmLinkContractTest(unittest.TestCase):
             self.assertNotIn(name, published, "the deployment tool runs on the host only")
 
     def test_packaging_and_the_public_audit_know_the_tool_links(self):
+        # G12 (v3.1.1 WP-1; O4 right column, owner 2026-11-07 「同意你的建议。」 via http dev): the
+        # hand-written STATIC_SETUP_MANAGED_LINKS is gone; packaging derives the names from the link table.
+        managed = PACKAGE.setup_managed_links()
         for name in (f"{TOOL}/ib.csv", f"{TOOL}/p2p.xlsx", f"{TOOL}/ufm-setup-upgrade-logs", f"{TOOL}/image",
                      *BRIDGES):
-            self.assertIn(name, PACKAGE.STATIC_SETUP_MANAGED_LINKS)
+            self.assertIn(name, managed)
         for name, text in BRIDGES.items():
             self.assertTrue((ROOT / name).is_symlink(), f"{name} is a repository bridge")
             self.assertEqual(text, os.readlink(ROOT / name))
