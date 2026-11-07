@@ -9101,6 +9101,61 @@ print("actual-copied-validator-selected-B")
             self.assertEqual("eth-release", os.readlink(eth))
             self.assertEqual("nvos-release", os.readlink(nvos))
 
+    def test_switch_scope_retirement_refuses_real_latest_and_deletes_nothing(self) -> None:
+        # Owner 2026-11-03 (需求文档 :925, rule :933; R-014 :834): a same-named
+        # real file or directory is reported and never replaced or deleted.
+        def snapshot(path: Path):
+            # Total over every outcome, so a deleted, renamed or replaced
+            # entry fails the equality assertion instead of the helper.
+            if not os.path.lexists(path):
+                return None
+            info = os.lstat(path)
+            if path.is_symlink():
+                content = os.readlink(path)
+            elif path.is_dir():
+                content = {
+                    item.relative_to(path).as_posix(): item.read_bytes()
+                    for item in sorted(path.rglob("*")) if item.is_file()
+                }
+            else:
+                content = path.read_bytes()
+            return info.st_dev, info.st_ino, path.is_symlink(), path.is_dir(), content
+
+        for scope, retired, selected in (
+            ("eth", "99-output-ib_nvl", "99-output-eth"),
+            ("ib", "99-output-eth", "99-output-ib_nvl"),
+        ):
+            for kind in ("directory", "file"):
+                with self.subTest(scope=scope, kind=kind), \
+                        tempfile.TemporaryDirectory() as directory:
+                    project = Path(directory)
+                    occupied = project / retired / "latest"
+                    occupied.parent.mkdir(parents=True)
+                    if kind == "directory":
+                        occupied.mkdir()
+                        (occupied / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+                    else:
+                        occupied.write_bytes(b"operator-owned latest\n")
+                    kept = project / selected / "latest"
+                    kept.parent.mkdir(parents=True)
+                    kept.symlink_to("selected-release")
+                    before = snapshot(occupied)
+                    members = {
+                        parent: sorted(item.name for item in parent.iterdir())
+                        for parent in (occupied.parent, kept.parent)
+                    }
+
+                    with self.assertRaises(LOAD.LoadError) as caught:
+                        LOAD.retire_unselected_release_links(project, scope, dry_run=False)
+
+                    self.assertIn(str(occupied), str(caught.exception))
+                    self.assertEqual(before, snapshot(occupied))
+                    self.assertEqual("selected-release", os.readlink(kept))
+                    self.assertEqual(members, {
+                        parent: sorted(item.name for item in parent.iterdir())
+                        for parent in (occupied.parent, kept.parent)
+                    })
+
     def test_parent_release_rejects_child_from_another_switch_scope(self) -> None:
         inputs = LOAD.replace(self.inputs, switch_scope="eth")
         inventory = [{

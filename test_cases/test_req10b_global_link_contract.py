@@ -160,6 +160,88 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
             ):
                 self.assertIn(str(managed), UNSETUP._known_workspace_links())
 
+    def test_real_latest_entry_is_reported_counted_and_left_untouched(self) -> None:
+        # Owner 2026-11-03 (需求文档 :925, rule :933; R-014 :834): when a link
+        # setup must create meets a same-named real file or directory, setup
+        # reports an error, does not stop, and neither replaces nor deletes it.
+        def snapshot(path: Path):
+            # Total over every outcome, so a deleted, renamed or replaced
+            # entry fails the equality assertion instead of the helper.
+            if not os.path.lexists(path):
+                return None
+            info = os.lstat(path)
+            if path.is_symlink():
+                content = os.readlink(path)
+            elif path.is_dir():
+                content = {
+                    item.relative_to(path).as_posix(): item.read_bytes()
+                    for item in sorted(path.rglob("*")) if item.is_file()
+                }
+            else:
+                content = path.read_bytes()
+            return info.st_dev, info.st_ino, path.is_symlink(), path.is_dir(), content
+
+        cases = (
+            ("directory", True), ("file", True),
+            # Nothing to publish: the entry still is never deleted.
+            ("directory", False),
+        )
+        for kind, published in cases:
+            with self.subTest(kind=kind, published=published), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                project = root / "DAY0-Prepare/site-a"
+                ztp = root / "ztp"
+                eth_output = project / "99-output-eth"
+                eth_output.mkdir(parents=True)
+                if published:
+                    release = eth_output / "20260101_000000_combine"
+                    release.mkdir()
+                    (release / ".published-complete").write_bytes(b"complete\n")
+                    (release / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+                occupied = eth_output / "latest"
+                if kind == "directory":
+                    # An operator copy identical to the release: exactly the
+                    # case a rename-and-adopt implementation would take over.
+                    occupied.mkdir()
+                    (occupied / ".published-complete").write_bytes(b"complete\n")
+                    (occupied / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+                else:
+                    occupied.write_bytes(b"operator-owned latest\n")
+                nvos_output = project / "99-output-ib_nvl"
+                nvos_release = nvos_output / "20260101_000000-combine"
+                nvos_release.mkdir(parents=True)
+                (nvos_release / ".published-complete").write_bytes(b"complete\n")
+                for platform, name, target in (
+                    ("cumulus", "99-output", eth_output),
+                    ("nvos", "99-output-ib_nvl", nvos_output),
+                ):
+                    alias = ztp / "config" / platform / "template" / name
+                    alias.parent.mkdir(parents=True)
+                    alias.symlink_to(target)
+                before = snapshot(occupied)
+                members = sorted(item.name for item in eth_output.iterdir())
+                output = io.StringIO()
+                with mock.patch.multiple(
+                    SETUP, HTTP_BASE=str(root), ZTP=str(ztp),
+                    LATEST_YAML_SPECS=(("cumulus", "99-output"), ("nvos", "99-output-ib_nvl")),
+                    _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0,
+                ):
+                    with redirect_stdout(output):
+                        SETUP._process_latest_yaml(str(project))
+                    errors = SETUP._LINK_ERRORS
+
+                self.assertEqual(before, snapshot(occupied))
+                self.assertEqual(members, sorted(item.name for item in eth_output.iterdir()))
+                if published:
+                    self.assertEqual(1, errors)
+                    self.assertIn("ERROR", output.getvalue())
+                    self.assertIn("99-output/latest", output.getvalue())
+                # Not interrupted: the platform after the refusal is still published.
+                self.assertEqual(
+                    nvos_release.resolve(), (ztp / "config/nvos/latest_yaml").resolve(),
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
