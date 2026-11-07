@@ -51,6 +51,7 @@ from ztp_service_runtime import (  # noqa: E402
     ServiceRuntimeBackend,
     runtime_backend_from_environment,
 )
+from project_contract import ActiveProjectPointerError, active_project_dir  # noqa: E402
 DEFAULT_OUTPUT_ROOT = Path("/var/tmp/ztp-diagnostics")
 SCHEMA_VERSION = 1
 MAX_COMMAND_BYTES = 8 * 1024 * 1024
@@ -937,22 +938,12 @@ def load_latest_report(project: Path) -> tuple[Optional[Path], dict[str, Any]]:
 
 
 def runtime_active_project() -> Optional[Path]:
-    """Return the project currently wired into the DHCP/ZTP runtime."""
-    runtime_inventory = ROOT / "ztp/config/isc-dhcp-server/02-devices_config.csv"
-    try:
-        target = runtime_inventory.resolve(strict=True)
-        day0 = DAY0_ROOT.resolve(strict=True)
-    except OSError:
-        return None
-    project = target.parent
-    if (
-        target.name != "02-devices_config.csv"
-        or project.parent != day0
-        or not SAFE_PROJECT.fullmatch(project.name)
-        or project.name == "template"
-    ):
-        return None
-    return project
+    """Return the project currently wired into the DHCP/ZTP runtime: DAY0-Prepare/activate-project's.
+
+    R-016 §5.1 (R16-06): never the parent of a resolved runtime link -- a project input may link outside the
+    project (R-014 第 3 条).  None without a pointer; an invalid pointer raises ActiveProjectPointerError.
+    """
+    return active_project_dir(ROOT)
 
 
 def device_in_scope(device: dict[str, Any], scope: str) -> bool:
@@ -2170,7 +2161,12 @@ def _main(argv: Optional[list[str]] = None) -> int:
             with _private_bound_child(output_root) as temporary:
                 with _private_bound_child(temporary, artifact_id) as staging:
                     builder = BundleBuilder(staging, artifact_id)
-                    active_project = runtime_active_project()
+                    try:
+                        active_project = runtime_active_project()
+                    except ActiveProjectPointerError as exc:
+                        # Like I-044's missing pointer: recorded as a warning, never a stop; no live SSH.
+                        active_project = None
+                        builder.warn(str(exc))
                     snapshot, report = load_latest_report(project)
                     selected = select_devices(report, args.host, args.scope) if args.host else []
                     collect_project_inputs(builder, project)

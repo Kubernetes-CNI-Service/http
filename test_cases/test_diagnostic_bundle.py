@@ -1091,7 +1091,13 @@ set:
                 self.assertTrue(all(member.isdir() or member.isfile() for member in archive.getmembers()))
                 self.assertFalse(any(".." in Path(name).parts for name in names))
 
-    def test_runtime_project_resolution_uses_fixed_inventory_link(self):
+    def test_runtime_project_is_the_activate_project_pointer(self):
+        """R-016 详细设计 v1.1 §5.1, §5.2 (R16-06): the active project is DAY0-Prepare/activate-project's.
+
+        Contract change (v3.1.1 WP-9c P3, http dev 2026-11-08; owner-confirmed R-016 v1.1): this test used to pin
+        the parent of the resolved runtime 02-devices_config.csv link.  That reading names the wrong directory once
+        the project's inventory is a user link to a file outside it (需求文档 R-014 第 3 条, owner 2026-11-02).
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             day0 = root / "DAY0-Prepare"
@@ -1099,16 +1105,22 @@ set:
             runtime = root / "ztp/config/isc-dhcp-server"
             active.mkdir(parents=True)
             runtime.mkdir(parents=True)
-            inventory = active / "02-devices_config.csv"
-            inventory.write_text("hostname,type\nleaf01,eth\n")
-            (runtime / "02-devices_config.csv").symlink_to(inventory)
+            outside = root / "Work/devices.csv"
+            outside.parent.mkdir()
+            outside.write_text("hostname,type\nleaf01,eth\n")
+            (active / "02-devices_config.csv").symlink_to(outside)
+            pointer = day0 / "activate-project"
+            pointer.symlink_to("active-project")
+            (runtime / "02-devices_config.csv").symlink_to(
+                "../../../DAY0-Prepare/activate-project/02-devices_config.csv",
+            )
             with mock.patch.multiple(COLLECTOR, ROOT=root, DAY0_ROOT=day0):
                 self.assertEqual(active, COLLECTOR.runtime_active_project())
-                (runtime / "02-devices_config.csv").unlink()
-                outside = root / "outside.csv"
-                outside.write_text("x")
-                (runtime / "02-devices_config.csv").symlink_to(outside)
+                pointer.unlink()
                 self.assertIsNone(COLLECTOR.runtime_active_project())
+                pointer.symlink_to("template")
+                with self.assertRaises(ValueError):
+                    COLLECTOR.runtime_active_project()
 
     def test_remote_identity_mismatch_never_collects_device_config(self):
         output = """__IDENTITY_BEGIN__
@@ -1204,6 +1216,58 @@ __NV_CONFIG_END__
                 manifest = json.load(archive.extractfile(name))
             self.assertTrue(manifest["partial"])
             self.assertTrue(any("active runtime project" in item for item in manifest["warnings"]))
+
+    def test_invalid_pointer_is_a_collection_warning_not_a_stop(self):
+        """R-016 §5.1: an invalid DAY0-Prepare/activate-project raises a named error; the collector records it as a
+        warning and keeps collecting, like the missing pointer of I-044 (v3.1.1 WP-9c P3, http dev 2026-11-08).
+        Without an active project, live SSH stays off."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            day0 = root / "DAY0-Prepare"
+            (day0 / "requested").mkdir(parents=True)
+            (day0 / "activate-project").symlink_to("template")
+            output = root / "output"
+            output.mkdir(mode=0o700)
+            document_root = root / "www"
+            document_root.mkdir(mode=0o700)
+            report = {"devices": [{
+                "hostname": "leaf01", "type": "air", "ip": "192.0.2.10",
+                "identity_macs": {"eth0": "02:00:00:00:00:55"},
+            }]}
+            no_op = mock.Mock()
+            with ExitStack() as patches:
+                patches.enter_context(mock.patch.multiple(
+                    COLLECTOR, ROOT=root, DAY0_ROOT=day0, HTTP_ROOT=document_root,
+                    DEFAULT_OUTPUT_ROOT=output,
+                ))
+                patches.enter_context(mock.patch.object(
+                    COLLECTOR, "load_latest_report", return_value=(None, report),
+                ))
+                patches.enter_context(mock.patch.object(
+                    COLLECTOR, "select_devices", return_value=report["devices"],
+                ))
+                for name in (
+                    "collect_project_inputs", "collect_runtime_files", "collect_selected_published_configs",
+                    "collect_selected_operation_metadata", "collect_server_commands",
+                    "collect_public_key_fingerprints", "collect_monitor_state", "collect_switch_archives",
+                ):
+                    patches.enter_context(mock.patch.object(COLLECTOR, name, no_op))
+                validate_ssh = patches.enter_context(mock.patch.object(COLLECTOR, "validate_ssh_inputs"))
+                patches.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
+                patches.enter_context(mock.patch("sys.stderr", new_callable=io.StringIO))
+                rc = COLLECTOR.main([
+                    "-p", "requested", "--air", "--host", "leaf01", "--output-dir", str(output),
+                ])
+            self.assertEqual(2, rc)
+            validate_ssh.assert_not_called()
+            archives = list(output.glob("*.tar.gz"))
+            self.assertEqual(1, len(archives))
+            with tarfile.open(archives[0], "r:gz") as archive:
+                name = next(name for name in archive.getnames() if name.endswith("/manifest.json"))
+                manifest = json.load(archive.extractfile(name))
+            self.assertTrue(any("activate-project" in item and "template" in item
+                                for item in manifest["warnings"]), manifest["warnings"])
+            self.assertIsNone(manifest["runtime_active_project"])
 
     def test_collector_is_part_of_tools_deployment_contract(self):
         self.assertTrue(CONTRACT.is_tools_deployable_file(
