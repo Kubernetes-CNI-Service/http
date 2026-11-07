@@ -27,9 +27,13 @@ COPY_FILES = BASE_FILES + EXTRA_FILES
 # 2026-10-23: tools/_package_common.py and tools/project_contract.py re-pinned to the reviewed UFM/F01
 # integration (owner-approved setup links, reference-only subtree, server_ufm/server_mgmt types; was the
 # 7c44779 bytes). Both are compared whole only; no inverse layer covers them.
+# 2026-11-07 (v3.1.0 M1a): both re-pinned to the 11-load batch merge -- 865e411/0d33ffc (DEV ad4bc3c plus
+# TEST f384f73's P2P receipt, private escrow exclusion, latest_yaml links, DHCP/inventory readers) and d0fea37
+# (TEST F06 746680e: infiniband/publickey is host state); was the 95c6c3c (= DEV ad4bc3c) bytes. An independent
+# review found no changed hunk on the native OS/BIOS image path. Both are compared whole only; no inverse layer.
 PRODUCTION_PINS = {
-    'tools/_package_common.py': 'a3c55bfe13a831d75e01516cbb238c44eb756166005a49c78adf76705b73e2ef',
-    'tools/project_contract.py': 'cff03898c923d83989ebb3677b079392f68e1e7559b00afdbf79ea3f700febb6',
+    'tools/_package_common.py': '0e37977856ae432fdb16472d4d1003281c84367fbdab9cc67c3016eb74cf6d87',
+    'tools/project_contract.py': 'dbf501dd7997f0450a069e73dca4738cb0a4f43021b1035f9ed5ea9b9311bf78',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
     'tools/ibsw_upgrade_contract.py': 'e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',
