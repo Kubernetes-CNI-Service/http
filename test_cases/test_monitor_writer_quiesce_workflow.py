@@ -309,7 +309,135 @@ def _function_static_integers(function: ast.AST) -> dict[str, int]:
 
 _CLOSURE_REFLECTION_NAMES = frozenset({
     "__closure__", "__code__", "cell_contents", "f_locals", "PyFrame_LocalsToFast",
+    "PyCell_Set", "__setattr__", "__delattr__", "__getattribute__", "__dict__",
+    "__builtins__", "__import__", "builtins", "get_referents", "get_referrers",
 })
+_CLOSURE_DYNAMIC_SCOPE_NAMES = frozenset({"globals", "vars", "exec", "eval", "compile"})
+_CLOSURE_ATTRIBUTE_FUNCTIONS = frozenset({"setattr", "delattr", "getattr"})
+_CLOSURE_MODULES_MUTATORS = frozenset({
+    "update", "setdefault", "pop", "popitem", "clear", "__setitem__", "__delitem__",
+})
+
+
+def _os_flag_loop_name(scope: ast.AST, name: ast.AST) -> bool:
+    """Whether ``name`` provably ranges over literal ``"O_*"`` strings in ``scope``.
+
+    Only one shape qualifies: the name's single binding in the whole scope
+    subtree is the target of a ``for`` in this scope over a tuple or list of
+    string constants that all start with ``O_``.
+    """
+    if not isinstance(name, ast.Name) or _subtree_binding_counts(scope).get(name.id) != 1:
+        return False
+    return any(
+        isinstance(node, ast.For) and isinstance(node.target, ast.Name)
+        and node.target.id == name.id
+        and isinstance(node.iter, (ast.Tuple, ast.List)) and node.iter.elts
+        and all(
+            isinstance(item, ast.Constant) and isinstance(item.value, str)
+            and item.value.startswith("O_")
+            for item in node.iter.elts
+        )
+        for node in _walk_local_scope(scope)
+    )
+
+
+def _closure_resolution_withdrawn(tree: ast.AST) -> bool:
+    """Whether the module contains a spelled form that could change ``os``,
+    ``getattr`` or a closure cell at runtime.
+
+    This is a syntactic withdrawal list, not a complete effect analysis. It
+    withdraws closure resolution for the whole module on any of:
+
+    * a reflection name (closure cell, code object, frame locals, attribute
+      dunders, ``__builtins__``/``__import__``/``builtins``, ``gc`` referents)
+      as an attribute, a name or a string constant;
+    * ``globals``/``vars``/``exec``/``eval``/``compile`` named anywhere;
+    * ``import builtins`` or ``from builtins import ...``;
+    * ``global``/``nonlocal`` of ``os`` or ``getattr``;
+    * an attribute store or delete on ``os`` (any depth), of an ``O_*``
+      attribute on any receiver, or of ``getattr``/``setattr``/``delattr``;
+    * a subscript store or delete on ``<anything>.modules`` or a mutating
+      method call on it (``sys.modules`` and its aliases);
+    * ``setattr``/``delattr``/``getattr`` named other than as a call, or
+      called with a non-constant attribute name (a starred argument in
+      that position is non-constant);
+      ``setattr``/``delattr`` on ``os``, of an ``O_*`` name or of one of the
+      three functions. The one non-constant name allowed is
+      ``getattr(os, NAME, ...)`` where ``NAME`` provably ranges over literal
+      ``"O_*"`` strings (``_os_flag_loop_name``): a read of a flag constant.
+    """
+    called = {
+        id(node.func) for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and (
+            node.id in _CLOSURE_REFLECTION_NAMES or node.id in _CLOSURE_DYNAMIC_SCOPE_NAMES
+            or (node.id in _CLOSURE_ATTRIBUTE_FUNCTIONS and id(node) not in called)
+        ):
+            return True
+        if isinstance(node, ast.Attribute) and node.attr in _CLOSURE_REFLECTION_NAMES:
+            return True
+        if isinstance(node, ast.Constant) and isinstance(node.value, str) and (
+            node.value in _CLOSURE_REFLECTION_NAMES
+        ):
+            return True
+        if isinstance(node, ast.Import) and any(
+            alias.name.split(".")[0] == "builtins" for alias in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "builtins":
+            return True
+        if isinstance(node, (ast.Global, ast.Nonlocal)) and {"os", "getattr"} & set(node.names):
+            return True
+        if isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(
+            node.ctx, (ast.Store, ast.Del),
+        ):
+            receiver = node.value
+            while isinstance(receiver, (ast.Attribute, ast.Subscript)):
+                receiver = receiver.value
+            if isinstance(node, ast.Attribute) and (
+                (isinstance(receiver, ast.Name) and receiver.id == "os")
+                or node.attr.startswith("O_") or node.attr in _CLOSURE_ATTRIBUTE_FUNCTIONS
+            ):
+                return True
+            if (
+                isinstance(node, ast.Subscript) and isinstance(node.value, ast.Attribute)
+                and node.value.attr == "modules"
+            ):
+                return True
+        if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _CLOSURE_MODULES_MUTATORS
+            and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "modules"
+        ):
+            return True
+    scopes = [tree] + [
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef))
+    ]
+    for scope in scopes:
+        for node in _walk_local_scope(scope):
+            if not (
+                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                and node.func.id in _CLOSURE_ATTRIBUTE_FUNCTIONS
+            ):
+                continue
+            target = node.args[0] if node.args else None
+            name = node.args[1] if len(node.args) > 1 else None
+            constant = isinstance(name, ast.Constant) and isinstance(name.value, str)
+            if node.func.id == "getattr":
+                if not constant and not (
+                    isinstance(target, ast.Name) and target.id == "os"
+                    and _os_flag_loop_name(scope, name)
+                ):
+                    return True
+                continue
+            if not constant or (
+                isinstance(target, ast.Name) and target.id == "os"
+            ) or name.value.startswith("O_") or name.value in _CLOSURE_ATTRIBUTE_FUNCTIONS:
+                return True
+    return False
 
 
 def _subtree_binding_counts(root: ast.AST) -> dict[str, int]:
@@ -400,10 +528,14 @@ def _closure_static_integers(
     function (nested definitions, defaults, decorators, annotations and
     comprehensions included), it is bound exactly once, by one plain
     assignment in an enclosing function on an unbroken function-only chain,
-    to named ``os.O_*`` flags. ``os`` and ``getattr`` must be the module's
-    plain import and builtin, and no closure/frame reflection may appear in
-    the module. Class scopes, module globals and every other shape stay
-    unresolved, so the caller keeps failing closed.
+    to named ``os.O_*`` flags (see ``_portable_open_flags``). The values are
+    computed with this host's ``os`` module and builtin ``getattr``; that
+    trust is bounded syntactically, not proved: the module must bind ``os``
+    by one plain ``import os`` and never bind ``getattr`` or ``*``, the
+    outermost function must bind neither, and the module must contain none of
+    the forms ``_closure_resolution_withdrawn`` lists. Class scopes, module
+    globals and every other shape stay unresolved, so the caller keeps
+    failing closed.
     """
     chain = []
     for owner in owners:
@@ -413,13 +545,8 @@ def _closure_static_integers(
         not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) for owner in chain
     ):
         return {}
-    for node in ast.walk(tree):
-        if (
-            (isinstance(node, ast.Attribute) and node.attr in _CLOSURE_REFLECTION_NAMES)
-            or (isinstance(node, ast.Name) and node.id in _CLOSURE_REFLECTION_NAMES)
-            or (isinstance(node, ast.Constant) and node.value in _CLOSURE_REFLECTION_NAMES)
-        ):
-            return {}
+    if _closure_resolution_withdrawn(tree):
+        return {}
     module_bindings = _source_scope_bindings(tree)
     os_bindings = module_bindings.get("os", ())
     if (
@@ -6164,29 +6291,42 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "        return os.open(name, flags, dir_fd=parent_fd)\n"
             "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
         )
-        read_only = ast.parse(head + (
-            "def open_authority():\n"
-            "    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)\n"
-        ) + nested)
-        self.assertEqual(set(), literal_governed_mutation_sinks(read_only))
-        with mock.patch.dict(globals(), {"_closure_static_integers": lambda *_a: {}}):
-            with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
-                literal_governed_mutation_sinks(read_only)
+        refused = ("WDISC_UNRESOLVED: unrepresented owned mutation call", "directory")
 
         def verdict(source):
             try:
                 return literal_governed_mutation_sinks(ast.parse(head + source))
             except AssertionError as exc:
-                if not str(exc.args[0]).startswith("WDISC_UNRESOLVED"):
-                    raise
-                return exc.args[0]
+                return exc.args
+
+        resolved = {
+            "named-flags": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)\n"
+                + nested
+            ),
+            "flag-probe-loop": (
+                "def open_authority():\n"
+                "    for flag in ('O_DIRECTORY', 'O_NOFOLLOW'):\n"
+                "        if not getattr(os, flag, 0):\n"
+                "            raise ValueError(flag)\n"
+                "    flags = os.O_RDONLY | os.O_DIRECTORY\n" + nested
+            ),
+        }
+        for label, source in resolved.items():
+            with self.subTest(resolved=label):
+                self.assertEqual(set(), verdict(source))
+                with mock.patch.dict(globals(), {"_closure_static_integers": lambda *_a: {}}):
+                    self.assertEqual(refused, verdict(source))
 
         # Every shape below opens AUTHORITY for writing at runtime, or cannot
-        # be proved not to; the oracle must refuse or report it, never clean.
+        # be proved not to; the oracle must give exactly the unresolved
+        # verdict it gives without closure resolution.
+        write = "os.O_WRONLY | os.O_CREAT"
         not_provable = {
             "captured-write": (
                 "def open_authority():\n"
-                "    flags = os.O_WRONLY | os.O_CREAT\n" + nested
+                f"    flags = {write}\n" + nested
             ),
             "reassigned": (
                 "def open_authority():\n"
@@ -6214,14 +6354,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "sibling-default-walrus": (
                 "def open_authority():\n"
                 "    flags = os.O_RDONLY\n"
-                "    def widen(_unused=(flags := os.O_WRONLY | os.O_CREAT)):\n"
+                f"    def widen(_unused=(flags := {write})):\n"
                 "        return _unused\n" + nested
             ),
             "inner-helper-default-walrus": (
                 "def open_authority():\n"
                 "    flags = os.O_RDONLY\n"
                 "    def directory(parent_fd, name, path):\n"
-                "        def helper(_unused=(flags := os.O_WRONLY | os.O_CREAT)):\n"
+                f"        def helper(_unused=(flags := {write})):\n"
                 "            return _unused\n"
                 "        return os.open(name, flags, dir_fd=parent_fd)\n"
                 "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
@@ -6229,7 +6369,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "own-parameter": (
                 "def open_authority():\n"
                 "    flags = os.O_RDONLY\n"
-                "    def directory(parent_fd, name, path, flags=os.O_WRONLY | os.O_CREAT):\n"
+                f"    def directory(parent_fd, name, path, flags={write}):\n"
                 "        return os.open(name, flags, dir_fd=parent_fd)\n"
                 "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
             ),
@@ -6240,11 +6380,28 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "        def directory(parent_fd, name, path):\n"
                 "            return os.open(name, flags, dir_fd=parent_fd)\n"
                 "        return directory(-100, AUTHORITY.name, AUTHORITY)\n"
-                "    return middle(os.O_WRONLY | os.O_CREAT)\n"
+                f"    return middle({write})\n"
+            ),
+            "nested-global-flags": (
+                f"flags = {write}\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        global flags\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "nested-import-flags": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        from os import O_WRONLY as flags\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
             ),
             "class-skipped-to-writing-owner": (
                 "def open_authority():\n"
-                "    flags = os.O_WRONLY | os.O_CREAT\n"
+                f"    flags = {write}\n"
                 "    class Holder:\n"
                 "        flags = os.O_RDONLY\n"
                 "        def method(self):\n"
@@ -6254,7 +6411,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "    return Holder().method()\n"
             ),
             "class-body-binding-is-not-a-closure": (
-                "FLAGS = os.O_WRONLY | os.O_CREAT\n"
+                f"FLAGS = {write}\n"
                 "def open_authority():\n"
                 "    class Holder:\n"
                 "        FLAGS = os.O_RDONLY\n"
@@ -6264,39 +6421,25 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "            return directory(-100, AUTHORITY.name, AUTHORITY)\n"
                 "    return Holder().method()\n"
             ),
-            "method-default-in-class-scope": (
-                "def open_authority():\n"
-                "    flags = os.O_RDONLY\n"
-                "    class Holder:\n"
-                "        flags = os.O_WRONLY | os.O_CREAT\n"
-                "        def directory(self, held=os.open(AUTHORITY, flags)):\n"
-                "            return held\n"
-                "    return Holder\n"
-            ),
-            "closure-cell-rewrite": (
-                "def open_authority():\n"
-                "    flags = os.O_RDONLY\n"
-                "    def directory(parent_fd, name, path):\n"
-                "        return os.open(name, flags, dir_fd=parent_fd)\n"
-                "    directory.__closure__[0].cell_contents = os.O_WRONLY | os.O_CREAT\n"
-                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
-            ),
             "owner-parameter-shadows-os": (
                 "def open_authority(os=None):\n"
                 "    flags = os.O_RDONLY\n" + nested
+            ),
+            "owner-parameter-shadows-getattr": (
+                f"def open_authority(getattr=lambda *_args: {write}):\n"
+                "    flags = getattr(os, 'O_CLOEXEC', 0)\n" + nested
             ),
             "host-dependent-getattr-fallback": (
                 "def open_authority():\n"
                 "    flags = getattr(os, 'O_EXLOCK', os.O_WRONLY)\n" + nested
             ),
+            "host-dependent-literal-fallback": (
+                "def open_authority():\n"
+                "    flags = getattr(os, 'O_EXLOCK', 1)\n" + nested
+            ),
             "host-dependent-literal": (
                 "def open_authority():\n"
                 "    flags = 64\n" + nested
-            ),
-            "module-rebinds-getattr": (
-                "getattr = lambda *_args: os.O_WRONLY | os.O_CREAT\n"
-                "def open_authority():\n"
-                "    flags = getattr(os, 'O_CLOEXEC', 0)\n" + nested
             ),
             "module-global": (
                 "FLAGS = os.O_RDONLY\n"
@@ -6305,10 +6448,210 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "        return os.open(name, FLAGS, dir_fd=parent_fd)\n"
                 "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
             ),
+            # Module forms that could change os, getattr or a cell at runtime
+            # withdraw closure resolution for the whole module.
+            "os-attribute-store": (
+                f"os.O_RDONLY = {write}\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "flag-attribute-store-through-alias": (
+                "import os as system\n"
+                f"system.O_RDONLY = {write}\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "setattr-on-os": (
+                f"setattr(os, 'O_RDONLY', {write})\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "setattr-flag-through-alias": (
+                "import os as system\n"
+                f"setattr(system, 'O_RDONLY', {write})\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "setattr-replaces-getattr": (
+                "import importlib\n"
+                "setattr(importlib.import_module('built' + 'ins'), 'getattr',\n"
+                f"        lambda *_args: {write})\n"
+                "def open_authority():\n"
+                "    flags = getattr(os, 'O_CLOEXEC', 0)\n" + nested
+            ),
+            "os-open-replaced": (
+                "_real_open = os.open\n"
+                "os.open = lambda path, flags, **kw: _real_open(\n"
+                f"    path, flags | {write}, **kw)\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "computed-setattr-on-os": (
+                f"setattr(os, 'O_RD' + 'ONLY', {write})\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "module-rebinds-os": (
+                "from types import SimpleNamespace\n"
+                f"os = SimpleNamespace(O_RDONLY={write}, open=os.open)\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            # A star import may bind os or getattr; unprovable by policy.
+            "module-star-import": (
+                "from types import *\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "builtins-module-alias": (
+                "import builtins as runtime\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    runtime.setattr(runtime.getattr(directory, '__clo' + 'sure__')[0],\n"
+                f"                    'cell_' + 'contents', {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "builtins-function-alias": (
+                "from builtins import getattr as fetch, setattr as put\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                f"    put(fetch(directory, '__clo' + 'sure__')[0], 'cell_' + 'contents', {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "global-os": (
+                "from types import SimpleNamespace\n"
+                "def poison():\n"
+                "    global os\n"
+                f"    os = SimpleNamespace(O_RDONLY={write}, open=os.open)\n"
+                "poison()\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "globals-subscript": (
+                "from types import SimpleNamespace\n"
+                f"globals()['os'] = SimpleNamespace(O_RDONLY={write}, open=os.open)\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "exec-rebinds-os": (
+                "exec('import types\\nos = types.SimpleNamespace(O_RDONLY=1)')\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "sys-modules-store": (
+                "import sys, types\n"
+                "sys.modules['os'] = types.SimpleNamespace(O_RDONLY=1)\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "sys-modules-update": (
+                "import sys, types\n"
+                "sys.modules.update(os=types.SimpleNamespace(O_RDONLY=1))\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "builtins-getattr-replaced": (
+                "import builtins\n"
+                f"builtins.getattr = lambda *_args: {write}\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0)\n" + nested
+            ),
+            "module-rebinds-getattr": (
+                f"getattr = lambda *_args: {write}\n"
+                "def open_authority():\n"
+                "    flags = getattr(os, 'O_CLOEXEC', 0)\n" + nested
+            ),
+            "getattr-alias": (
+                "fetch = getattr\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    fetch(directory, '__clo' + 'sure__')\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "closure-cell-rewrite": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                f"    directory.__closure__[0].cell_contents = {write}\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "constant-name-cell-rewrite": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                f"    setattr(getattr(directory, '__closure__')[0], 'cell_contents', {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "computed-name-cell-rewrite": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    setattr(getattr(directory, '__clo' + 'sure__')[0], 'cell_' + 'contents',\n"
+                f"            {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "decoded-name-cell-rewrite": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    setattr(getattr(directory, b'__closure__'.decode())[0],\n"
+                f"            b'cell_contents'.decode(), {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "gc-referents-cell-rewrite": (
+                "import gc\n"
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    cells = next(item for item in gc.get_referents(directory) if type(item) is tuple)\n"
+                f"    setattr(cells[0], 'cell' + '_contents', {write})\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "flag-probe-loop-over-other-name": (
+                "def open_authority():\n"
+                "    for flag in ('O_DIRECTORY', 'path'):\n"
+                "        getattr(os, flag, 0)\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "flag-probe-loop-name-rebound": (
+                "def open_authority():\n"
+                "    for flag in ('O_DIRECTORY', 'O_NOFOLLOW'):\n"
+                "        getattr(os, flag, 0)\n"
+                "    flag = os.environ['NAME']\n"
+                "    getattr(os, flag)\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+        }
+        reported = {
+            # The default is evaluated in the class body, where flags is the
+            # class-local write value; the open is reported as a sink.
+            "method-default-in-class-scope": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    class Holder:\n"
+                f"        flags = {write}\n"
+                "        def directory(self, held=os.open(AUTHORITY, flags)):\n"
+                "            return held\n"
+                "    return Holder\n"
+            ),
         }
         for label, source in not_provable.items():
             with self.subTest(shape=label):
-                self.assertNotEqual(set(), verdict(source))
+                self.assertEqual(refused, verdict(source))
+        for label, source in reported.items():
+            with self.subTest(shape=label):
+                self.assertEqual({"directory"}, verdict(source))
 
     def test_mutation_function_aliases_preserve_governed_destination_taint(self) -> None:
         """Imported and assigned aliases cannot disguise a mutation primitive."""
