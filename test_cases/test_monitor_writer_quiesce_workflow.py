@@ -307,6 +307,156 @@ def _function_static_integers(function: ast.AST) -> dict[str, int]:
     return constants
 
 
+_CLOSURE_REFLECTION_NAMES = frozenset({
+    "__closure__", "__code__", "cell_contents", "f_locals", "PyFrame_LocalsToFast",
+})
+
+
+def _subtree_binding_counts(root: ast.AST) -> dict[str, int]:
+    """Count every syntactic binding of each name anywhere below ``root``.
+
+    Unlike ``_source_scope_bindings`` this deliberately crosses nested
+    definitions, defaults, decorators, annotations and comprehensions, so a
+    walrus or parameter in any of those positions is never invisible.
+    """
+    counts: dict[str, int] = {}
+
+    def add(name) -> None:
+        if isinstance(name, str):
+            counts[name] = counts.get(name, 0) + 1
+
+    for node in ast.walk(root):
+        if isinstance(node, ast.arg):
+            add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            add(node.name)
+        elif isinstance(node, ast.ExceptHandler):
+            add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                add(name)
+        elif type(node).__name__ in {"MatchAs", "MatchStar", "MatchMapping"}:
+            add(getattr(node, "name", None))
+            add(getattr(node, "rest", None))
+    return counts
+
+
+def _portable_open_flags(expression: ast.AST) -> int | None:
+    """Evaluate only named ``os.O_*`` flags, zero-fallback getattr and ``|``.
+
+    A bare integer or a non-zero getattr fallback is host-ABI dependent (the
+    proof runs on macOS, production on Linux), so it never resolves here.
+    """
+    if isinstance(expression, ast.BinOp) and isinstance(expression.op, ast.BitOr):
+        left = _portable_open_flags(expression.left)
+        right = _portable_open_flags(expression.right)
+        return None if left is None or right is None else left | right
+    if (
+        isinstance(expression, ast.Attribute)
+        and isinstance(expression.value, ast.Name) and expression.value.id == "os"
+        and expression.attr.startswith("O_")
+    ):
+        return _static_integer(expression)
+    if (
+        isinstance(expression, ast.Call)
+        and isinstance(expression.func, ast.Name) and expression.func.id == "getattr"
+        and len(expression.args) == 3 and not expression.keywords
+        and isinstance(expression.args[0], ast.Name) and expression.args[0].id == "os"
+        and isinstance(expression.args[1], ast.Constant)
+        and isinstance(expression.args[1].value, str)
+        and expression.args[1].value.startswith("O_")
+        and isinstance(expression.args[2], ast.Constant)
+        and type(expression.args[2].value) is int and expression.args[2].value == 0
+    ):
+        return _static_integer(expression)
+    return None
+
+
+def _open_flag_names(function: ast.AST) -> set[str]:
+    """Names read by the flags argument of any ``open`` call in this scope."""
+    names = set()
+    for call in _walk_local_scope(function):
+        if not isinstance(call, ast.Call) or called_name(call) != "open":
+            continue
+        flags = _argument(call, 1, "flags")
+        if flags is not None:
+            names.update(
+                node.id for node in ast.walk(flags) if isinstance(node, ast.Name)
+            )
+    return names
+
+
+def _closure_static_integers(
+    function: ast.AST, owners: tuple[ast.AST, ...], tree: ast.AST, wanted: set[str],
+) -> dict[str, int]:
+    """Resolve open flags a nested definition reads from its enclosing functions.
+
+    A wanted name resolves only when, in the whole outermost enclosing
+    function (nested definitions, defaults, decorators, annotations and
+    comprehensions included), it is bound exactly once, by one plain
+    assignment in an enclosing function on an unbroken function-only chain,
+    to named ``os.O_*`` flags. ``os`` and ``getattr`` must be the module's
+    plain import and builtin, and no closure/frame reflection may appear in
+    the module. Class scopes, module globals and every other shape stay
+    unresolved, so the caller keeps failing closed.
+    """
+    chain = []
+    for owner in owners:
+        if chain or isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            chain.append(owner)
+    if not chain or not wanted or any(
+        not isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef)) for owner in chain
+    ):
+        return {}
+    for node in ast.walk(tree):
+        if (
+            (isinstance(node, ast.Attribute) and node.attr in _CLOSURE_REFLECTION_NAMES)
+            or (isinstance(node, ast.Name) and node.id in _CLOSURE_REFLECTION_NAMES)
+            or (isinstance(node, ast.Constant) and node.value in _CLOSURE_REFLECTION_NAMES)
+        ):
+            return {}
+    module_bindings = _source_scope_bindings(tree)
+    os_bindings = module_bindings.get("os", ())
+    if (
+        len(os_bindings) != 1 or os_bindings[0][0] != "import"
+        or os_bindings[0][1].name != "os" or os_bindings[0][1].asname is not None
+        or module_bindings.get("getattr") or module_bindings.get("*")
+    ):
+        return {}
+    counts = _subtree_binding_counts(chain[0])
+    if counts.get("os") or counts.get("getattr"):
+        return {}
+    captured: dict[str, int] = {}
+    for name in sorted(wanted):
+        if counts.get(name) != 1:
+            continue
+        owner = next(
+            (scope for scope in reversed(chain) if _source_scope_bindings(scope).get(name)),
+            None,
+        )
+        if owner is None:
+            continue
+        entries = _source_scope_bindings(owner)[name]
+        if len(entries) != 1 or entries[0][0] != "store":
+            continue
+        values = [
+            node.value for node in _walk_local_scope(owner)
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and node.targets[0] is entries[0][1])
+            or (isinstance(node, ast.AnnAssign) and node.target is entries[0][1]
+                and node.value is not None)
+        ]
+        value = _portable_open_flags(values[0]) if len(values) == 1 else None
+        if value is not None:
+            captured[name] = value
+    return captured
+
+
 def _mutation_aliases(tree: ast.AST) -> dict[str, str]:
     aliases: dict[str, str] = {}
     for node in getattr(tree, "body", ()):
@@ -682,8 +832,11 @@ def _source_bound_load_report_path(
     # 2026-10-23 fixlist #9: 11-load.py changed with the UFM integration (was d9c67b110d7a…); _load_report_structural_path holds on the current file.
     reviewed = (
         # 2026-10-23 owner load->collection handoff: 11-load.py changed (was e3ef9185a8f0…); its structural path still holds.
-        (load_tree, "39c48c3c879164cc08f66546ef59e86c0b3dffea0f274eac7ce20177815590ee"),
-        (report_tree, "d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05"),
+        # 2026-11-07 M1a: 11-load.py changed with the 11-load merge batch (TEST f384f73 base, L0-L11, AP-b) (was 39c48c3c8791…); the structural path was checked on the current files before re-pinning.
+        # 2026-11-07 M1a: 11-load.py changed again after afed871 (314b799 DEV subnet CSV wording, 58821f9 DEV template p2p/ and --p2p-file help) (was 456ba794ef10…); the structural path was checked on the current files before re-pinning.
+        (load_tree, "d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e"),
+        # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ac…); the structural path was checked on the current files before re-pinning.
+        (report_tree, "bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
@@ -913,7 +1066,8 @@ def _source_bound_feedback_recovery_path(
     reviewed = (
         (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
         # 2026-10-23 owner load->collection handoff: ztp_service_runtime.py changed (was 0d11ab1cf740…); its structural path still holds.
-        (runtime_tree, "f40fa82b425085c5859e9dc8d3b47230d958a3781744d048f79fabda6db8a3eb"),
+        # 2026-11-07 M1a: tools/ztp_service_runtime.py became TEST f384f73 base + DEV replay (batch P1 9968948) (was f40fa82b4250…); the structural path was checked on the current files before re-pinning.
+        (runtime_tree, "6daae46cd55ac6fb6f85705be2d4b1bf455ef068ef7631365514af1d1959cde5"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
@@ -2138,6 +2292,11 @@ def literal_governed_mutation_sinks(
             function, module_governed, governed_returns,
         )
         static_integers = _function_static_integers(function)
+        captured_flags = _open_flag_names(function) - set(static_integers)
+        if captured_flags:
+            static_integers.update(_closure_static_integers(
+                function, owned_functions[function][1], tree, captured_flags,
+            ))
         delegated_governed = _governed_locals(
             function, delegated_script_constants, set(),
         ) if delegated_script_constants else set()
@@ -3589,6 +3748,53 @@ def project_live_management_setup(tree: ast.AST) -> ast.AST:
 
 
 class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
+    def _http_management_load_fixture(self, load, project):
+        """Opt-in source admission for the two real management LOAD cases.
+
+        Keep original monitor/password fault oracles; do not mock the new
+        gate, disable HTTP, or change unrelated private/negative fixtures.
+        The explicit HTTP address is DEV's independent-HTTP-authority input
+        (re-landed as 11-load batch L3); TEST f384f73's helper predates it.
+        The project sits at <root>/DAY0-Prepare/<name>, so the patched
+        HTTP_ROOT differs from project.parent.
+        """
+        from test_cases.test_load_release_transaction import ReleaseTransactionTests
+        root = project.parent.parent
+        ztp = root / "ztp"
+        ztp.mkdir(mode=0o755)
+        (project / "01-global.yaml").write_text(
+            "schema_version: 1\n"
+            "common:\n"
+            "  mgmt:\n"
+            "    dhcp-server:\n"
+            "      status: enabled\n"
+            "      package: isc-dhcp-server\n"
+            "    http:\n"
+            "      status: enabled\n"
+            "      address: 192.0.2.2\n"
+            "      package: apache2\n"
+            f"      http_root: {root}\n"
+            "    ztp:\n"
+            "      status: enabled\n"
+            "      ztp_url_prefix: /ztp\n"
+            "  switch:\n"
+            "    system:\n"
+            "      dns: {}\n"
+            "      ntp: {}\n"
+            "      date-time: {}\n"
+            "switches:\n"
+            "- eth:\n"
+            "    system:\n"
+            "      aaa:\n"
+            "        user:\n"
+            "          cumulus:\n"
+            "            hashed-password: '$6$fixture$safe-value'\n",
+            encoding="utf-8",
+        )
+        fixture = SimpleNamespace(root=root, project=project, ztp=ztp)
+        ReleaseTransactionTests._http_main_public_source_fixture(fixture)
+        return ReleaseTransactionTests._http_linux_public_ancestor_model(fixture, module=load)
+
     @staticmethod
     def seed_disabled_r22_inputs(project):
         (project / "01-global.yaml").write_text(
@@ -3796,31 +4002,56 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         load = load_module("mwq_load", "DAY0-Prepare/11-load.py")
         events = []
         backend = SimpleNamespace(name="systemd")
+        active = {"apache2"}
+        active_services = mock.Mock(
+            side_effect=lambda *_a, **_k: tuple(sorted(active)),
+        )
+
+        def stop(command, *, dry_run):
+            self.assertEqual(["systemctl", "stop", "apache2"], command)
+            self.assertIs(False, dry_run)
+            events.append("service-stop")
+            active.remove("apache2")
+
         with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load.shutil, "which", return_value="/bin/systemctl"), \
-             mock.patch.object(load, "active_managed_services", return_value=("apache2",)), \
-             mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]), \
+             mock.patch.object(load, "active_managed_services", active_services), \
+             mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]) as sudo, \
              mock.patch.object(
                  load, "stop_native_ztp_monitors",
                  side_effect=lambda *_a, **_k: events.append("monitor-stop"),
                  create=True,
              ), \
-             mock.patch.object(
-                 load, "run", side_effect=lambda *_a, **_k: events.append("service-stop"),
-             ):
+             mock.patch.object(load, "run", side_effect=stop):
             load.quiesce_services(runtime_backend=backend, host_role="management-server")
 
         self.assertEqual(["monitor-stop", "service-stop"], events)
+        sudo.assert_called_once_with("systemctl", "stop", "apache2")
+        self.assertEqual([
+            mock.call(backend, host_role="management-server"),
+            mock.call(backend, host_role="management-server"),
+        ], active_services.call_args_list)
+        self.assertEqual(set(), active)
 
     def test_native_load_service_quiesce_reuses_earlier_monitor_stop(self) -> None:
         load = load_module("mwq_load_reuse", "DAY0-Prepare/11-load.py")
         backend = SimpleNamespace(name="systemd")
         native_stop = mock.Mock()
-        service_stop = mock.Mock()
+        active = {"apache2"}
+        active_services = mock.Mock(
+            side_effect=lambda *_a, **_k: tuple(sorted(active)),
+        )
+
+        def stop(command, *, dry_run):
+            self.assertEqual(["systemctl", "stop", "apache2"], command)
+            self.assertIs(False, dry_run)
+            active.remove("apache2")
+
+        service_stop = mock.Mock(side_effect=stop)
         with mock.patch.object(load, "runtime_os", return_value="Linux"), \
              mock.patch.object(load.shutil, "which", return_value="/bin/systemctl"), \
-             mock.patch.object(load, "active_managed_services", return_value=("apache2",)), \
-             mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]), \
+             mock.patch.object(load, "active_managed_services", active_services), \
+             mock.patch.object(load, "sudo_command", return_value=["systemctl", "stop", "apache2"]) as sudo, \
              mock.patch.object(load, "stop_native_ztp_monitors", native_stop), \
              mock.patch.object(load, "run", service_stop):
             load.quiesce_services(
@@ -3830,6 +4061,12 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             )
         native_stop.assert_not_called()
         service_stop.assert_called_once()
+        sudo.assert_called_once_with("systemctl", "stop", "apache2")
+        self.assertEqual([
+            mock.call(backend, host_role="management-server"),
+            mock.call(backend, host_role="management-server"),
+        ], active_services.call_args_list)
+        self.assertEqual(set(), active)
 
     def test_supervisor_load_does_not_double_stop_native_monitor(self) -> None:
         load = load_module("mwq_load_supervisor", "DAY0-Prepare/11-load.py")
@@ -4069,20 +4306,25 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         events = []
         backend = SimpleNamespace(name="systemd")
         with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary) / "customer"
-            project.mkdir()
+            # HTTP_ROOT must stay distinct from project.parent (as the
+            # repository root was in DEV) so stop(HTTP_ROOT) is discriminating.
+            project = Path(temporary) / "DAY0-Prepare" / "customer"
+            project.mkdir(parents=True)
             (project / "01-global.yaml").write_text("fixture\n", encoding="utf-8")
 
             def event(name, result=None):
                 return lambda *_a, **_k: events.append(name) or result
 
-            with mock.patch.object(load, "preflight_password_update_backend"), \
+            with self._http_management_load_fixture(load, project), \
+                 mock.patch.multiple(load, HTTP_ROOT=project.parent.parent, ZTP_DIR=project.parent.parent / "ztp"), \
+                 mock.patch.object(load, "preflight_password_update_backend"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=93), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
                  mock.patch.object(load, "service_runtime_backend", return_value=backend), \
                  mock.patch.object(load, "validate_runtime_options"), \
                  mock.patch.object(load, "resolve_project", return_value=project), \
+                 mock.patch.object(load, "active_project", return_value=project.resolve()), \
                  mock.patch.object(load, "sync_marker_present", return_value=False), \
                  mock.patch.object(
                      load, "stop_native_ztp_monitors", side_effect=event("monitor-stop"),
@@ -4102,12 +4344,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, load.main([
                     str(project), "--update-passwords", "--host-role=management-server",
                 ]))
+                # Assert against the actual runtime root before the fixture
+                # patch exits and restores the repository default.
+                stop.assert_called_once_with(load.HTTP_ROOT)
 
         self.assertEqual(
             ["monitor-stop", "template-write", "password-write", "validate"],
             events,
         )
-        stop.assert_called_once_with(load.HTTP_ROOT)
         main = function_node("DAY0-Prepare/11-load.py", "main")
         self.assertLess(
             first_call_line(main, "stop_native_ztp_monitors"),
@@ -4125,10 +4369,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         password_write = mock.Mock()
         validate = mock.Mock()
         with tempfile.TemporaryDirectory() as temporary:
-            project = Path(temporary) / "customer"
-            project.mkdir()
+            # HTTP_ROOT must stay distinct from project.parent (as the
+            # repository root was in DEV) so stop(HTTP_ROOT) is discriminating.
+            project = Path(temporary) / "DAY0-Prepare" / "customer"
+            project.mkdir(parents=True)
             (project / "01-global.yaml").write_text("fixture\n", encoding="utf-8")
-            with mock.patch.object(load, "preflight_password_update_backend"), \
+            with self._http_management_load_fixture(load, project), \
+                 mock.patch.multiple(load, HTTP_ROOT=project.parent.parent, ZTP_DIR=project.parent.parent / "ztp"), \
+                 mock.patch.object(load, "preflight_password_update_backend"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=94), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
@@ -4147,7 +4395,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 self.assertEqual(1, load.main([
                     str(project), "--update-passwords", "--host-role=management-server",
                 ]))
-        stop.assert_called_once_with(load.HTTP_ROOT)
+                stop.assert_called_once_with(load.HTTP_ROOT)
         template_write.assert_not_called()
         password_write.assert_not_called()
         validate.assert_not_called()
@@ -5904,6 +6152,163 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     ),
                     "the reviewed-source pin must also reject every changed AST",
                 )
+
+    def test_closure_captured_open_flags_resolve_only_when_provably_static(self) -> None:
+        """A nested read-only open may borrow its flags; every rebind fails closed."""
+        head = (
+            "import os\nfrom pathlib import Path\n"
+            "AUTHORITY = Path('/srv/http/DAY0-Prepare/customer/01-global.yaml')\n"
+        )
+        nested = (
+            "    def directory(parent_fd, name, path):\n"
+            "        return os.open(name, flags, dir_fd=parent_fd)\n"
+            "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+        )
+        read_only = ast.parse(head + (
+            "def open_authority():\n"
+            "    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)\n"
+        ) + nested)
+        self.assertEqual(set(), literal_governed_mutation_sinks(read_only))
+        with mock.patch.dict(globals(), {"_closure_static_integers": lambda *_a: {}}):
+            with self.assertRaisesRegex(AssertionError, "WDISC_UNRESOLVED"):
+                literal_governed_mutation_sinks(read_only)
+
+        def verdict(source):
+            try:
+                return literal_governed_mutation_sinks(ast.parse(head + source))
+            except AssertionError as exc:
+                if not str(exc.args[0]).startswith("WDISC_UNRESOLVED"):
+                    raise
+                return exc.args[0]
+
+        # Every shape below opens AUTHORITY for writing at runtime, or cannot
+        # be proved not to; the oracle must refuse or report it, never clean.
+        not_provable = {
+            "captured-write": (
+                "def open_authority():\n"
+                "    flags = os.O_WRONLY | os.O_CREAT\n" + nested
+            ),
+            "reassigned": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    flags = os.O_RDWR\n" + nested
+            ),
+            "augmented": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    flags |= os.O_WRONLY\n" + nested
+            ),
+            "derived-from-another-name": (
+                "def open_authority():\n"
+                "    base = int(os.environ['MODE'])\n"
+                "    flags = base\n" + nested
+            ),
+            "sibling-nonlocal": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def widen():\n"
+                "        nonlocal flags\n"
+                "        flags = os.O_WRONLY | os.O_TRUNC\n"
+                "    widen()\n" + nested
+            ),
+            "sibling-default-walrus": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def widen(_unused=(flags := os.O_WRONLY | os.O_CREAT)):\n"
+                "        return _unused\n" + nested
+            ),
+            "inner-helper-default-walrus": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        def helper(_unused=(flags := os.O_WRONLY | os.O_CREAT)):\n"
+                "            return _unused\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "own-parameter": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path, flags=os.O_WRONLY | os.O_CREAT):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "intermediate-parameter": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def middle(flags):\n"
+                "        def directory(parent_fd, name, path):\n"
+                "            return os.open(name, flags, dir_fd=parent_fd)\n"
+                "        return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+                "    return middle(os.O_WRONLY | os.O_CREAT)\n"
+            ),
+            "class-skipped-to-writing-owner": (
+                "def open_authority():\n"
+                "    flags = os.O_WRONLY | os.O_CREAT\n"
+                "    class Holder:\n"
+                "        flags = os.O_RDONLY\n"
+                "        def method(self):\n"
+                "            def directory(parent_fd, name, path):\n"
+                "                return os.open(name, flags, dir_fd=parent_fd)\n"
+                "            return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+                "    return Holder().method()\n"
+            ),
+            "class-body-binding-is-not-a-closure": (
+                "FLAGS = os.O_WRONLY | os.O_CREAT\n"
+                "def open_authority():\n"
+                "    class Holder:\n"
+                "        FLAGS = os.O_RDONLY\n"
+                "        def method(self):\n"
+                "            def directory(parent_fd, name, path):\n"
+                "                return os.open(name, FLAGS, dir_fd=parent_fd)\n"
+                "            return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+                "    return Holder().method()\n"
+            ),
+            "method-default-in-class-scope": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    class Holder:\n"
+                "        flags = os.O_WRONLY | os.O_CREAT\n"
+                "        def directory(self, held=os.open(AUTHORITY, flags)):\n"
+                "            return held\n"
+                "    return Holder\n"
+            ),
+            "closure-cell-rewrite": (
+                "def open_authority():\n"
+                "    flags = os.O_RDONLY\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, flags, dir_fd=parent_fd)\n"
+                "    directory.__closure__[0].cell_contents = os.O_WRONLY | os.O_CREAT\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+            "owner-parameter-shadows-os": (
+                "def open_authority(os=None):\n"
+                "    flags = os.O_RDONLY\n" + nested
+            ),
+            "host-dependent-getattr-fallback": (
+                "def open_authority():\n"
+                "    flags = getattr(os, 'O_EXLOCK', os.O_WRONLY)\n" + nested
+            ),
+            "host-dependent-literal": (
+                "def open_authority():\n"
+                "    flags = 64\n" + nested
+            ),
+            "module-rebinds-getattr": (
+                "getattr = lambda *_args: os.O_WRONLY | os.O_CREAT\n"
+                "def open_authority():\n"
+                "    flags = getattr(os, 'O_CLOEXEC', 0)\n" + nested
+            ),
+            "module-global": (
+                "FLAGS = os.O_RDONLY\n"
+                "def open_authority():\n"
+                "    def directory(parent_fd, name, path):\n"
+                "        return os.open(name, FLAGS, dir_fd=parent_fd)\n"
+                "    return directory(-100, AUTHORITY.name, AUTHORITY)\n"
+            ),
+        }
+        for label, source in not_provable.items():
+            with self.subTest(shape=label):
+                self.assertNotEqual(set(), verdict(source))
 
     def test_mutation_function_aliases_preserve_governed_destination_taint(self) -> None:
         """Imported and assigned aliases cannot disguise a mutation primitive."""
