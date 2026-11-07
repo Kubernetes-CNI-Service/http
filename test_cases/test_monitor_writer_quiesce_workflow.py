@@ -7525,6 +7525,21 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         )
         self.assertIn("update_global_file", call_names(inherited))
 
+    def test_private_inventory_only_never_quiesces_or_writes_managed_outputs(self):
+        from test_cases.test_dhcp_switch_scope_preservation import ScopedDhcpFixture, DHCP
+        with tempfile.TemporaryDirectory() as name:
+            fixture = ScopedDhcpFixture(Path(name))
+            private = fixture.devices_file.resolve().parent / ".load-inventory-quiesce"
+            private.mkdir(mode=0o700)
+            destination = private / "02-devices_config.csv"
+            outputs, source = fixture.snapshot(), fixture.devices_file.read_bytes()
+            with mock.patch.object(DHCP, "stop_native_ztp_monitors", side_effect=AssertionError("private preparation stopped services")), mock.patch.object(DHCP, "append_air_records_to_csv", side_effect=AssertionError("live CSV writer used")):
+                fixture.execute(["c1-generate_dhcp.py", "-y", "--inventory-output", str(destination), "--inventory-only"])
+            self.assertEqual(source, destination.read_bytes())
+            self.assertEqual(source, fixture.devices_file.read_bytes())
+            self.assertEqual(outputs, fixture.snapshot())
+            self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+
 
 if __name__ == "__main__":
     unittest.main()
