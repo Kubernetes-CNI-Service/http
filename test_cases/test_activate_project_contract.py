@@ -170,12 +170,16 @@ from types import SimpleNamespace  # noqa: E402
 from unittest import mock  # noqa: E402
 
 WP6_UNSETUP = load_script("activate_project_contract_unsetup", ROOT / "DAY0-Prepare/02-unsetup.py")
-# O14 (owner 2026-11-07 「同意你的建议。」 via http dev): the four names older setups left behind.
+# O14 (owner 2026-11-07 「同意你的建议。」 via http dev): the four names older setups left behind; the fifth is
+# monitor/99-output-ufm, which R-013 took out of the table (WP-8 待决 1, settled by http dev 2026-11-08: a legacy
+# name handled like the four).
+WP6_RETIRED_MONITOR_LINK = "monitor/99-output-ufm"
 WP6_LEGACY_LINKS = (
     "ztp/config/nvos/template/99-output-ib",
     "ztp/config/nvos/template/99-output-nvl",
     "ztp/config/nvos/template/99-output-published",
     "ztp/config/cumulus/template/AIR/output-p2p",
+    WP6_RETIRED_MONITOR_LINK,
 )
 # R-016 §3.2 (owner 2026-11-04): one link per project key in each of the four real key directories.
 WP6_KEY_NAMES = ("laptop.pub", "mgmt-server.pub")
@@ -403,6 +407,29 @@ class WP6UnsetupTests(unittest.TestCase):
         self.assertEqual(before, wp6_link_state(self.root))
         self.assertTrue((self.root / "ztp/.setup_manifest").is_file())
 
+    def test_retired_monitor_link_in_a_real_directory_is_reported_and_kept(self):
+        # Owner rule 2026-11-03 (需求文档 R-016 设计输入, :920-925): a same-named real file is reported, not
+        # replaced or deleted, and the run does not stop.  WP-8 待决 1 (http dev 2026-11-08) applies it here.
+        self.build()
+        retired = self.root / WP6_RETIRED_MONITOR_LINK
+        os.unlink(retired)
+        retired.mkdir()
+        (retired / "operator.txt").write_text("operator-owned\n", encoding="utf-8")
+        before = wp6_link_state(self.root)
+        result, output = self.unsetup()
+        self.assertEqual(1, result, output)
+        self.assertIn("[ERROR]", output)
+        self.assertIn(WP6_RETIRED_MONITOR_LINK, output)
+        self.assertEqual("operator-owned\n", (retired / "operator.txt").read_text(encoding="utf-8"))
+        # Not interrupted: the rest of unsetup still ran.
+        self.assertFalse(os.path.lexists(self.day0 / "activate-project"))
+        for path in WP6_LEGACY_LINKS[:-1]:
+            with self.subTest(legacy=path):
+                self.assertFalse(os.path.lexists(self.root / path))
+        for path in self.fixed_paths():
+            with self.subTest(fixed=path):
+                self.assertEqual(before[path], os.readlink(self.root / path))
+
     def test_pointer_form_infra_logs_is_kept_and_a_second_unsetup_succeeds(self):
         # Depends on WP-9b: managed_infra_log_project must accept the canonical pointer-form text, and keep
         # accepting it when the pointer is gone and the link dangles (Q7).  RED until WP-9b lands.
@@ -415,6 +442,35 @@ class WP6UnsetupTests(unittest.TestCase):
         result, output = self.unsetup()
         self.assertEqual(0, result, output)
         self.assertEqual(state, wp6_link_state(self.root))
+
+
+WP6_PACKAGE = load_script("activate_project_contract_package_common", ROOT / "tools/_package_common.py")
+
+
+class WP6RetiredLinkPackagingTests(unittest.TestCase):
+    """WP-8 待决 1 (http dev 2026-11-08): tar and sync leave the retired monitor/99-output-ufm link behind.
+
+    WP-8 measured that neither packaging path excluded the dangling link any more once R-013 removed it from the
+    table.  Tar filters every member through project_contract.transfer_exclude_reason and setup_managed_links;
+    sync's monitor/ rsync job takes its link excludes from setup_managed_links only.
+    """
+
+    def test_transfer_exclude_reason_names_the_retired_link(self):
+        self.assertIsNotNone(CONTRACT.transfer_exclude_reason(WP6_RETIRED_MONITOR_LINK))
+        self.assertIsNone(CONTRACT.transfer_exclude_reason("monitor/generate-monitor-html.py"), "control")
+
+    def test_setup_managed_links_name_a_retired_link_that_is_present(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            (root / "DAY0-Prepare").mkdir()
+            manifest = root / "ztp/.setup_manifest"
+            with mock.patch.multiple(WP6_PACKAGE, ROOT=root, DAY0=root / "DAY0-Prepare", MANIFEST=manifest):
+                absent = WP6_PACKAGE.setup_managed_links()
+                (root / "monitor").mkdir()
+                os.symlink("../DAY0-Prepare/site-p/99-output-ufm", root / WP6_RETIRED_MONITOR_LINK)
+                present = WP6_PACKAGE.setup_managed_links()
+        self.assertNotIn(WP6_RETIRED_MONITOR_LINK, absent)
+        self.assertEqual({WP6_RETIRED_MONITOR_LINK}, present - absent)
 
 
 if __name__ == "__main__":

@@ -5,7 +5,8 @@
   - ztp/.setup_manifest；
   - 4 个公钥目录里逐把公钥的链接（只删链接，目录里的普通文件不动）；
   - ztp/optimize/*-sample/* 的链接；
-  - 旧版 setup 留下的 4 条旧名：99-output-ib、99-output-nvl、99-output-published、AIR/output-p2p。
+  - 旧版 setup 留下的 5 条旧名：99-output-ib、99-output-nvl、99-output-published、AIR/output-p2p，
+    以及 monitor/99-output-ufm（它的位置上是真实文件或目录时报错、保留，其余照常进行，以 1 退出）。
 撤销配置权威按指针所指的项目做；REQ10C 的 crontab 清理照旧。
 
 用法：
@@ -37,8 +38,8 @@ if HTTP_BASE not in sys.path:
 from ztp import config_sync_authority
 from deployment_lock import DeploymentLockError, deployment_lock
 from project_contract import (
-    ACTIVE_PROJECT_POINTER, ActiveProjectPointerError, active_project_dir, infra_log_root_lock,
-    managed_infra_log_project, setup_dynamic_link_patterns,
+    ACTIVE_PROJECT_POINTER, RETIRED_SETUP_LINKS, ActiveProjectPointerError, active_project_dir,
+    infra_log_root_lock, managed_infra_log_project, setup_dynamic_link_patterns,
 )
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
 
@@ -85,8 +86,8 @@ def _known_ztp_project_links():
 
 
 def _known_workspace_links():
-    """ztp/ 之外要删除的链接（O14）：规格表动态一节的逐把公钥链接。"""
-    paths = []
+    """ztp/ 之外要删除的链接（O14）：规格表动态一节的逐把公钥链接，以及已退役的 monitor/99-output-ufm。"""
+    paths = [os.path.join(HTTP_BASE, name) for name in RETIRED_SETUP_LINKS]
     for pattern in setup_dynamic_link_patterns():
         if not pattern.startswith("ztp/"):
             paths.extend(glob.glob(os.path.join(HTTP_BASE, pattern)))
@@ -357,6 +358,12 @@ def _main_locked_impl(args):
     links = sorted({os.path.abspath(path)
                     for path in (*_known_ztp_project_links(), *_known_workspace_links())
                     if _inside(path, HTTP_BASE) and os.path.islink(path)})
+    # Owner rule 2026-11-03: a same-named real file is reported, never replaced or deleted; the run goes on.
+    occupied = [path for path in (os.path.join(HTTP_BASE, name) for name in RETIRED_SETUP_LINKS)
+                if os.path.lexists(path) and not os.path.islink(path)]
+    for path in occupied:
+        print(_c(RED, f"[ERROR] 旧链接位置上是真实文件或目录，保留不删：{os.path.relpath(path, HTTP_BASE)}"))
+    status = 1 if occupied else 0
     if active_project is None:
         print(_c(YELLOW, f"[INFO] 没有激活的项目（{ACTIVE_PROJECT_POINTER} 不存在）"))
     else:
@@ -367,7 +374,7 @@ def _main_locked_impl(args):
     manifest = active_project is not None and os.path.isfile(MANIFEST_FILE)
     if not links and not manifest:
         print(_c(YELLOW, "\n未找到指针或 setup 的派生链接，无需操作。"))
-        return 0
+        return status
 
     print(f"\n工作目录：{HTTP_BASE}")
     print(f"共找到 {len(links)} 个要删除的链接：\n")
@@ -403,13 +410,13 @@ def _main_locked_impl(args):
 
         if _DRY_RUN:
             print(_c(CYAN, f"\n[DRY] 共 {len(links)} 个链接（未实际删除）"))
-            return 0
+            return status
 
         if manifest:
             os.remove(MANIFEST_FILE)
             print(_c(CYAN, f"[INFO] 已删除清单文件：{MANIFEST_FILE}"))
         print(f"\n完成：已删除 {len(deleted)} 个链接")
-        return 0
+        return status
     except OSError as exc:
         failures = _restore_deleted_links(deleted)
         detail = f"；回滚不完整：{' | '.join(failures)}" if failures else "；已回滚"

@@ -139,6 +139,7 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
         self.assertLessEqual(aliases, {row.path for row in contract.SETUP_LINK_SPECS})
         legacy = {"ztp/config/nvos/template/" + name for name in ("99-output-ib", "99-output-nvl", "99-output-published")}
         legacy.add("ztp/config/cumulus/template/AIR/output-p2p")
+        legacy.add("monitor/99-output-ufm")  # the fifth legacy name: WP-8 待决 1, settled by http dev 2026-11-08
         dynamic = {pattern.replace("*-sample/*", "site-a-sample/01-global.yaml").replace("*", "laptop")
                    for pattern in contract.setup_dynamic_link_patterns()}
         with tempfile.TemporaryDirectory() as directory:

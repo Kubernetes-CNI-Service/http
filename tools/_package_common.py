@@ -43,6 +43,7 @@ from project_contract import (
     require_project_eligible,
     safe_load_global_yaml,
     PRIVATE_B_PRIMARY_ESCROW_EXCLUDE_REASON,
+    RETIRED_SETUP_LINKS,
     SETUP_LINK_SPECS,
     SHARED_LINK_SPECS,
     TRACKED_SETUP_BRIDGES,
@@ -999,7 +1000,8 @@ def setup_managed_links() -> set[str]:
     Derived from tools/project_contract.py's link table, never from the
     manifest body (R-016 v1.1 §7, R16-14): every table row, the shared
     section and the tracked bridges by name, and the dynamic families
-    (per-key public-key links, shared images, optimize samples) as found now.
+    (per-key public-key links, shared images, optimize samples) and the
+    retired links older setups left behind as found now.
     """
     reserved = ROOT / RESERVED_UPGRADE_GLOBAL_ALIAS
     try:
@@ -1017,6 +1019,7 @@ def setup_managed_links() -> set[str]:
             path.relative_to(ROOT).as_posix()
             for path in ROOT.glob(pattern) if path.is_symlink()
         )
+    result.update(name for name in RETIRED_SETUP_LINKS if (ROOT / name).is_symlink())
     # A custom common.mgmt.ztp.ztp_url_prefix is published by load as a
     # host-owned symlink.  Validate its ownership marker on every call so
     # this management-server runtime path is never packaged or synced.

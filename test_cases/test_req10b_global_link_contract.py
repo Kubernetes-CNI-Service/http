@@ -134,6 +134,8 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
         legacy = {
             "ztp/config/nvos/template/99-output-ib", "ztp/config/nvos/template/99-output-nvl",
             "ztp/config/nvos/template/99-output-published", "ztp/config/cumulus/template/AIR/output-p2p",
+            # The fifth legacy name: WP-8 待决 1, settled by http dev 2026-11-08.
+            "monitor/99-output-ufm",
         }
         dynamic = {pattern.replace("*-sample/*", "site-a-sample/01-global.yaml").replace("*", "laptop")
                    for pattern in CONTRACT.setup_dynamic_link_patterns()}

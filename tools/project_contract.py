@@ -1442,6 +1442,9 @@ TRACKED_SETUP_BRIDGES = (
     "infiniband/bringup/xdr-initial-setup/01-global.yaml", "infiniband/bringup/xdr-initial-setup/publickey",
     "infiniband/bringup/ufm-setup-upgrade/01-global.yaml", "infiniband/bringup/ufm-setup-upgrade/publickey",
 )
+# Links setups before v3.1.1 made that the table no longer has: R-013 removed monitor/99-output-ufm (WP-8 待决 1,
+# settled by http dev 2026-11-08).  unsetup removes the leftover link; tar and sync never carry it.
+RETIRED_SETUP_LINKS = ("monitor/99-output-ufm",)
 
 
 def setup_dynamic_link_patterns() -> tuple[str, ...]:
@@ -2569,6 +2572,8 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         )
     ):
         return "active project pointer (host runtime)"
+    if value.as_posix() in RETIRED_SETUP_LINKS:
+        return "retired setup link"
     if (len(parts) >= 2 and parts[0] == "infra"
             and (parts[1] == ".logs.lock"
                  or parts[1].startswith(".logs-migration."))):
