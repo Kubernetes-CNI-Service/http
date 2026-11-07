@@ -1005,6 +1005,13 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 calls.append(("active", service))
                 return active[service]
 
+            # The merged quiesce asks every backend for explicit stopped-state
+            # authority (TEST 4d64ad5, as in this test's TEST version).
+            @staticmethod
+            def is_quiesced(service):
+                calls.append(("quiesced", service))
+                return not active[service]
+
             @staticmethod
             def is_enabled(_service):
                 return None
@@ -1115,8 +1122,13 @@ class ContainerRuntimeWorkflowContractTests(unittest.TestCase):
                 events.append(("restart", service))
                 active[service] = True
 
+        # start_services re-qualifies the plan through
+        # supervisor_service_availability (TEST 5e041db), which checks a
+        # non-empty listener plan against global DHCP status: model the
+        # DHCP-enabled project this plan was built for (as TEST's version).
         inputs = SimpleNamespace(settings=SimpleNamespace(
             service_ips=(), http_enabled=False, http_address=None,
+            dhcp_enabled=True,
         ))
         with mock.patch.object(
             load, "ensure_ztp_url_network_ready",

@@ -3283,6 +3283,50 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 release_lock.assert_called_once_with(91)
 
             (project / "meaningful").write_text("sentinel", encoding="ascii")
+            # The merged main reads the project global and runs the HTTP public
+            # source access gate before the A freeze and the project key
+            # attestation (TEST fccd024).  This branch asserts the project key
+            # attestation failure, not an invalid HTTP publication source, so
+            # it gets the same literal enabled global and public directories as
+            # TEST's version of this test (prepare_http_enabled_delegated_fixture),
+            # plus the explicit common.mgmt.http.address DEV c395bb6 requires.
+            # All fixture writes precede the inode snapshot below.
+            from test_cases.test_load_release_transaction import ReleaseTransactionTests
+            root.chmod(0o755)
+            project.chmod(0o755)
+            public_keys = root / "ztp/config/publickey"
+            public_keys.mkdir(parents=True, mode=0o755)
+            for directory in (root / "ztp", root / "ztp/config", public_keys):
+                directory.chmod(0o755)
+            (project / "01-global.yaml").write_text(
+                "schema_version: 1\n"
+                "common:\n"
+                "  mgmt:\n"
+                "    dhcp-server:\n"
+                "      status: enabled\n"
+                "      package: isc-dhcp-server\n"
+                "    http:\n"
+                "      status: enabled\n"
+                "      address: 192.0.2.10\n"
+                "      package: apache2\n"
+                f"      http_root: {root}\n"
+                "    ztp:\n"
+                "      status: enabled\n"
+                "      ztp_url_prefix: /ztp\n"
+                "  switch:\n"
+                "    system:\n"
+                "      dns: {}\n"
+                "      ntp: {}\n"
+                "      date-time: {}\n"
+                "switches:\n"
+                "- eth:\n"
+                "    system:\n"
+                "      aaa:\n"
+                "        user:\n"
+                "          cumulus:\n"
+                "            hashed-password: '$6$fixture$safe-value'\n",
+                encoding="utf-8",
+            )
             common = (
                 mock.patch.object(loader, "parse_args", return_value=arguments()),
                 mock.patch.object(loader, "runtime_os", return_value="Linux"),
@@ -3306,7 +3350,12 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
             )
             with common[0], common[1], common[2], common[3], common[4], common[5], \
                  common[6], common[7], common[8], common[9], common[10], \
-                 common[11] as project_attest, common[12] as initialize:
+                 common[11] as project_attest, common[12] as initialize, \
+                 mock.patch.object(loader, "HTTP_ROOT", root), \
+                 mock.patch.object(loader, "ZTP_DIR", root / "ztp"), \
+                 ReleaseTransactionTests._http_linux_public_ancestor_model(
+                     SimpleNamespace(root=root), module=loader,
+                 ):
                 before = DockerManagementSshKeyDirectTests.snapshot(project)
                 self.assertEqual(1, loader.main([]))
                 self.assertEqual(before, DockerManagementSshKeyDirectTests.snapshot(project))

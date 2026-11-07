@@ -7747,6 +7747,15 @@ print("actual-copied-validator-selected-B")
                 events.append(("restart", service))
 
         plan = SimpleNamespace(listener_names=(), endpoint_ips=())
+        # DEV ad4bc3c premise: no independent HTTP authority (DEV's setUp
+        # settings carry http_address=None; 1a421ef gave the shared TEST-based
+        # setUp one).  With an explicit address both DEV's
+        # supervisor_http_required and the merged availability gate would
+        # legitimately require Apache, which is not what this unit is about.
+        inputs = LOAD.replace(
+            self.inputs,
+            settings=LOAD.replace(self.inputs.settings, http_address=None),
+        )
         with mock.patch.object(
             LOAD, "ensure_ztp_url_network_ready",
         ), mock.patch.object(
@@ -7756,7 +7765,7 @@ print("actual-copied-validator-selected-B")
             side_effect=AssertionError("supervisor path must not invoke systemctl"),
         ):
             LOAD.start_services(
-                self.inputs, {}, dhcp_runtime_plan=plan,
+                inputs, {}, dhcp_runtime_plan=plan,
                 runtime_backend=Backend(),
             )
 
@@ -7796,6 +7805,15 @@ print("actual-copied-validator-selected-B")
             listener_names=("eno7",), listener_ifindexes=(17,),
             endpoint_ips=(),
         )
+        # DEV ad4bc3c premise: no independent HTTP authority (DEV's setUp
+        # settings carry http_address=None; 1a421ef gave the shared TEST-based
+        # setUp one).  With an explicit address both DEV's
+        # supervisor_http_required and the merged availability gate would
+        # legitimately require Apache, which is not what this unit is about.
+        inputs = LOAD.replace(
+            self.inputs,
+            settings=LOAD.replace(self.inputs.settings, http_address=None),
+        )
         with mock.patch.object(
             LOAD, "ensure_ztp_url_network_ready",
             side_effect=AssertionError(
@@ -7811,7 +7829,7 @@ print("actual-copied-validator-selected-B")
             side_effect=AssertionError("supervisor path must not invoke systemctl"),
         ):
             LOAD.start_services(
-                self.inputs, {}, dhcp_runtime_plan=plan,
+                inputs, {}, dhcp_runtime_plan=plan,
                 runtime_backend=Backend(),
             )
 

@@ -5335,10 +5335,14 @@ class ActivationContractTests(QuietContractTest):
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
             )
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "shared_network,subnet,netmask,ztp_service_ip,"
+                # Canonical subnet header (11-load SUBNET_BASE_COLUMNS; the merged
+                # tools/ztp_service_runtime.py REQUIRED_SUBNET_COLUMNS, P1 Q3).
+                "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,"
                 "cumulus_profile,nvos_ztp\n"
-                "fabric-b,198.51.100.0,255.255.255.192,198.51.100.50,oob,no\n"
-                "fabric-a,192.0.2.0,255.255.255.192,192.0.2.50,oob,no\n",
+                "fabric-b,198.51.100.0,255.255.255.192,198.51.100.10,"
+                "198.51.100.30,198.51.100.1,198.51.100.50,oob,no\n"
+                "fabric-a,192.0.2.0,255.255.255.192,192.0.2.10,"
+                "192.0.2.30,192.0.2.1,192.0.2.50,oob,no\n",
                 encoding="utf-8",
             )
             tools = http_root / "tools"
@@ -8397,9 +8401,12 @@ class ContainerTransactionContractTests(QuietContractTest):
                 "hostname,mac\nfixture,02:00:00:00:00:01\n", encoding="utf-8",
             )
             (project / "02-dhcp-subnet_config.csv").write_text(
-                "shared_network,subnet,netmask,ztp_service_ip,"
+                # Canonical subnet header (11-load SUBNET_BASE_COLUMNS; the merged
+                # tools/ztp_service_runtime.py REQUIRED_SUBNET_COLUMNS, P1 Q3).
+                "shared_network,subnet,netmask,range_start,range_end,routers,ztp_service_ip,"
                 "cumulus_profile,nvos_ztp\n"
-                "fabric,192.0.2.0,255.255.255.192,192.0.2.50,oob,no\n",
+                "fabric,192.0.2.0,255.255.255.192,192.0.2.10,"
+                "192.0.2.30,192.0.2.1,192.0.2.50,oob,no\n",
                 encoding="utf-8",
             )
             tools = http_root / "tools"

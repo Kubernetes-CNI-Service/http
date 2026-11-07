@@ -592,7 +592,12 @@ class DhcpOptionalDirectTests(unittest.TestCase):
             backend = SimpleNamespace(name="supervisor")
             actions = []
             commands = []
-            with mock.patch.object(LOAD, "ensure_ztp_url_network_ready"), \
+            # preflight/start re-qualify the Supervisor plan through
+            # supervisor_service_availability (TEST 5e041db, kept by the 11-load
+            # batch); model the host on which main's identical gate passed.
+            with mock.patch.object(
+                    LOAD, "local_ipv4_addresses", return_value={"192.0.2.10"},
+            ), mock.patch.object(LOAD, "ensure_ztp_url_network_ready"), \
                     mock.patch.object(LOAD, "verify_control_auth") as control, \
                     mock.patch.object(LOAD, "verify_published_files") as published, \
                     mock.patch.object(LOAD, "verify_apache_publication_boundary"), \
@@ -838,9 +843,12 @@ class R22LoadInputMatrixTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             source = Path(name) / "dhcpd.conf"
             source.write_text("default-lease-time 600;\n", encoding="utf-8")
+            # The merged preflight looks for the project's selected DHCP
+            # generation (TEST 1b2289f) next to the global file; this temporary
+            # project has none, so the flat DHCP outputs remain the sources.
             inputs = SimpleNamespace(settings=LOAD.replace(
                 self._settings("enabled", "disabled"), http_enabled=False,
-            ))
+            ), global_file=Path(name) / "01-global.yaml")
             commands = []
             with mock.patch.object(LOAD, "dhcp_file_mappings", return_value=[source]), \
                     mock.patch.object(LOAD, "run", side_effect=lambda command, **_kw: commands.append(command)):
