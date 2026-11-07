@@ -281,7 +281,9 @@
         "test_cases.test_monitor_legacy_tracker_retirement",
         "test_cases.test_monitor_legacy_tracker_retirement_workflow",
         "test_cases.test_collection_d70_retirement",
-        "test_cases.test_collection_d70_retirement_workflow"
+        "test_cases.test_collection_d70_retirement_workflow",
+        "test_cases.test_monitor_derived_parent_release",
+        "test_cases.test_monitor_imported_configs_parent_release"
       ]
     },
     {
@@ -2213,6 +2215,16 @@
       "tests": [
         "test_cases.test_runtime_lock_fdinfo"
       ]
+    },
+    {
+      "id": "ztp_monitor_parent_generated_inputs_direct",
+      "paths": [
+        "DAY0-Prepare/12-ztp-monitor.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_derived_parent_release",
+        "test_cases.test_monitor_imported_configs_parent_release"
+      ]
     }
   ],
   "workflows": [
@@ -3777,6 +3789,17 @@
       ],
       "tests": [
         "test_cases.test_runtime_lock_fdinfo"
+      ]
+    },
+    {
+      "id": "load_parent_generated_inputs_to_ztp_monitor",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_derived_parent_release",
+        "test_cases.test_monitor_imported_configs_parent_release"
       ]
     }
   ],

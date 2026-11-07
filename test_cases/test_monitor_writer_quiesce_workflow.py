@@ -5370,6 +5370,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         ))
         self.assertEqual(
             [
+                "_validate_release_generated_inputs",
                 "collection_attribution_input_digests",
                 "load_collection_attribution",
                 "load_release_identity",

@@ -2528,3 +2528,91 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 证据：每一步的 fdinfo 原文、dev/inode、进程关系；不记录任何秘密。
 - 清理与风险：删除测试锁文件；只读查询，不改 OFD flags。Linux 内核 fdinfo 格式若与模型不同，以实测为准修模型，
   不放宽生产判定。
+
+## TC-REAL-AIR-DERIVED-INVENTORY-001 — load 派生 AIR 清单与 manual-ztp、12-ztp-monitor 的消费（取自 TEST `3403f30`，不含 Docker）
+
+### 基本信息
+
+- Case ID：`TC-REAL-AIR-DERIVED-INVENTORY-001`。
+- 名称：load 把客户输入与派生 AIR 清单分开绑定；manual-ztp 与 12-ztp-monitor 按 parent 的
+  `generated_inputs` 消费。
+- 类型：real-environment / scenario / failure-injection。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：TEST F22 子包 1、2（`3403f30`）及 REQ23 的 `imported_configs` 摘要（`3e7f8c9`）。v3.1.0 M1a：
+  生产者随 11-load 批进入（L0 的 `11-load.py`、P4 的 `c1-generate_dhcp.py --inventory-output`），两个消费者在 FP1
+  诊断后补入（manual-ztp、12-ztp-monitor）。TEST 原卡的 Docker 部分不在本卡：`infra/docker/activate.py` 还不认
+  `generated_inputs`，是 v3.1.0 的已知限制，放到阶段 6。
+- 自动化文件与测试方法：
+  - 生产者：`test_load_release_transaction` 的 `test_parent_binds_source_and_effective_inventory_independently`；
+  - manual-ztp：`test_load_release_transaction` 的 `test_manual_consumes_real_derived_parent_and_rejects_derived_drift`、
+    `test_manual_real_parent_rejects_derived_permissions_and_empty_content`、
+    `test_manual_derived_authority_rejects_unsafe_paths_before_release_id`、
+    `test_manual_derived_authority_direct_rejects_alias_hardlink_and_writable_file`、
+    `test_manual_derived_inventory_exact_producer_contract_direct`；
+  - 12-ztp-monitor：`test_monitor_derived_parent_release`（direct，以及 load→monitor workflow）、
+    `test_monitor_imported_configs_parent_release`。
+- 适用平台：management-server（Native，AIR 管理服务器 Ubuntu 22.04）/ AIR。
+
+### 风险与目标
+
+- 要防止的故障：AIR load 后 parent 的 `release_id` 含 `generated_inputs`（用了 `--import-configs` 时还含
+  `imported_configs`），消费者却按旧的摘要基础重算，结果 manual-ztp 拒绝每一台设备、ZTP monitor 每轮失败；
+  或者反过来，消费者接受了被改动、被替换或权限被放宽的派生清单。
+- 涉及的模块和状态边界：`DAY0-Prepare/11-load.py`（生成私有派生清单，写 parent）、
+  `ztp/config/isc-dhcp-server/c1-generate_dhcp.py --inventory-output`、
+  `ztp/manual-ztp.py::validate_parent_release_binding` 与 `verify_prepared_release_binding`、
+  `DAY0-Prepare/12-ztp-monitor.py::load_release_identity`。
+- 成功标准：客户设备 CSV 的字节、inode、mtime 不变；parent 同时绑定 `inputs.devices`（源）和
+  `generated_inputs.effective_devices`（派生）；manual-ztp 预检和 monitor 都接受这个 parent；派生清单被改动后，
+  两者都在动设备或发布页面之前拒绝。
+
+### 前置条件与输入
+
+- owner 授权的隔离 AIR 管理服务器和项目副本；当前源码的正式 full proof。
+- 项目有 AIR 拓扑（`p2p-air.json`），`--switch` 为 all 或 eth，部署范围不是 prod。只有这时 load 才生成派生清单。
+- 先保存客户设备 CSV、P2P、global、拓扑策略和健康 parent release 的 SHA-256，并记录服务状态。
+- 不在真实客户源文件上做篡改负例，负例只在隔离副本上做。
+- 权限：运行 load 和 manual-ztp 的正常操作员权限。
+
+### 步骤
+
+1. 执行 AIR load，DHCP enabled、disabled 各一次。确认项目下生成 `.load-inventory-*/02-devices_config.csv`：目录
+   0700，文件 0600、单链接；parent 含 `generated_inputs.effective_devices` 的 path 和 sha256。
+2. 对一台 eth 设备、一台 AIR 设备运行 `ztp/manual-ztp.py`，不加 `-y`。预检会先做 release 绑定检查，然后在
+   执行前确认提示处回答否，不改设备。
+3. 等 12-ztp-monitor 完成至少一轮，确认报告引用的 release_id 等于 parent 的 release_id。
+4. 在隔离副本上逐项篡改，每项做完后重做第 2、3 步，再恢复：
+   - 派生清单改一个字节；
+   - 派生目录改成 0755；
+   - 派生文件改成 0644；
+   - 用软链接替换派生文件；
+   - parent 的 path 改成 `../02-devices_config.csv`，并按同一摘要基础重算 release_id。
+5. 两次 load 之间合法修改客户输入后重新 load，确认建立新的派生快照，第 2、3 步重新通过。
+6. 如果现场使用 `--import-configs`：确认 parent 含 `imported_configs`，第 2、3 步通过。
+
+### 预期结果
+
+- 正向结果：第 1～3、5、6 步通过；源 CSV 不变；DHCP disabled 时五个 DHCP 输出不变。
+- 拒绝/失败结果：第 4 步的每一项，manual-ztp 预检报 derived inventory 相关错误，monitor 报「派生 inventory」
+  相关错误，都发生在连接或改动设备、发布页面之前。
+- 不允许发生的副作用：消费者不写、不修复派生清单；不回退去读客户源 CSV；不改设备配置。
+- 需要保存的证据：完整终端；源与派生清单的摘要；parent 的 `inputs.devices` 和
+  `generated_inputs.effective_devices`；manual-ztp 预检输出；monitor 日志中的拒绝行；子 release 的设备集合。
+  不记录任何秘密。
+
+### 故障注入与清理
+
+- 输入篡改：只做第 4 步列出的几项。同一轮生成期间修改客户源或派生文件，load 应在提交前拒绝（生产者行为，
+  自动化见 `test_parent_binds_source_and_effective_inventory_independently`）。
+- 清理/回滚验证：保留已提交 parent 引用的派生目录和审计证据；只清理本轮失败的私有暂存目录；恢复隔离副本和
+  服务前像。不得删除其他运行或现有 parent 使用的目录。
+- 重复执行与幂等性：同一输入重复 load，派生清单摘要相同；消费者重复预检的结果一致。
+- 风险：AIR 地址冲突、服务切换。失败时服务保持停止，不自动重试，不放宽输入漂移门禁。
+
+### 自动化状态
+
+- [x] 已加入上述测试模块（manual-ztp 与 `test_monitor_derived_parent_release` 是 TEST 原文；
+  `test_monitor_imported_configs_parent_release` 是 v3.1.0 补的 DEV 侧 direct）。
+- [x] 修复前能够稳定失败。
+- [x] 修复后通过。
+- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
