@@ -7,7 +7,6 @@ import csv
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
-import http.server
 import importlib.util
 import inspect
 import ipaddress
@@ -690,102 +689,6 @@ def write_shared_artifact_receipt(
     )
     path.chmod(0o600)
     return path
-
-
-@contextmanager
-def private_a_health_ports(api, root, *, http_status=None, publication_prefix='r22-prefix'):
-    """Private command/network ports, not Linux/root auth or daemon witnesses.
-
-    Genuine preflight helpers still inspect helper bytes, boundary SHA, wire
-    keys and publication files. Only OS command/host addresses are adapted.
-    HTTP probes reach a real local server, never the declared external IP.
-    """
-    root = root.resolve()
-    ports = Path(tempfile.mkdtemp(prefix="private-a-health-ports-", dir=root))
-    helper = ports / "control-auth.py"
-    helper.write_bytes((ROOT / "tools/control-auth.py").read_bytes())
-    boundary = ports / "apache-ztp.conf"
-    boundary.write_bytes((ROOT / "infra/docker/apache-ztp.conf").read_bytes())
-    class Handler(http.server.SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kwargs): super().__init__(*args, directory=str(root), **kwargs)
-        def log_message(self, *args): pass
-        def do_HEAD(self):
-            if http_status is None:
-                return super().do_HEAD()
-            self.send_response(http_status); self.end_headers()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    # Bound idle teardown latency without replacing real HEAD requests or any
-    # production health, curl, cleanup or child deadline.
-    thread = threading.Thread(target=server.serve_forever,
-                              kwargs={"poll_interval": 0.05}, daemon=True)
-    thread.start()
-    calls = []
-    def command(argv, *, dry_run=False, **kwargs):
-        assert not dry_run, "A qualification cannot be dry-run"
-        argv = list(argv); calls.append(argv)
-        if (argv == [str(helper), "validate"] or argv == ["apache2ctl", "configtest"]
-                or argv == ["dhcpd", "-t", "-cf", "/etc/dhcp/dhcpd.conf"]):
-            return None  # Explicit OS command port; no real auth/daemon claim.
-        if argv[:4] == ["curl", "-fsSI", "--max-time", "5"] and len(argv) == 5:
-            url = urlsplit(argv[4])
-            assert url.scheme == "http" and url.hostname == "192.0.2.2" and url.path.startswith('/' + publication_prefix + '/'), argv
-            result = subprocess.run(argv[:4] + [f"http://127.0.0.1:{server.server_port}" + url.path],
-                capture_output=True, text=True, timeout=8, check=False)
-            if result.returncode: raise api.LoadError("private original A HTTP probe failed: " + result.stderr)
-            return None
-        raise AssertionError("unexpected host command: " + repr(argv))
-    links = [{"ifindex": 2, "ifname": "eth-test", "flags": ["UP", "BROADCAST", "MULTICAST", "LOWER_UP"],
-              "operstate": "UP", "link_type": "ether"}]
-    addresses = [{"ifindex": 2, "ifname": "eth-test", "addr_info": [{"family": "inet",
-        "local": "192.0.2.2", "prefixlen": 24, "scope": "global"}]}]
-    try:
-        with ExitStack() as stack:
-            stack.enter_context(declared_linux_fdinfo_for_darwin_fixture(api))
-            for name, value in (("CONTROL_AUTH_SOURCE", ROOT / "tools/control-auth.py"),
-                                ("CONTROL_AUTH_CONTAINER_HELPER", helper),
-                                ("APACHE_PUBLIC_BOUNDARY_CONF", boundary)):
-                stack.enter_context(mock.patch.object(api, name, value))
-            stack.enter_context(mock.patch.object(api, "run", side_effect=command))
-            stack.enter_context(mock.patch.object(api, "sudo_command", side_effect=lambda *args: list(args)))
-            stack.enter_context(mock.patch.object(api, "local_ipv4_addresses", return_value={"192.0.2.2"}))
-            stack.enter_context(mock.patch.object(api, "_local_ipv4_assignments", return_value={"192.0.2.2": {("eth-test", 24)}}))
-            stack.enter_context(mock.patch.object(api, "_local_ip_json_snapshots", return_value=(links, addresses)))
-            yield calls
-    finally:
-        server.shutdown(); server.server_close(); thread.join(timeout=5)
-        assert not thread.is_alive(), "private HTTP thread did not stop"
-
-
-class PrivateHttpFixtureContractTests(unittest.TestCase):
-    def test_bounded_poll_keeps_real_head_success_failure_and_closed_socket(self):
-        original = http.server.ThreadingHTTPServer.serve_forever
-        observed, servers, finished = [], [], []
-
-        def serve(server, poll_interval=0.5):
-            observed.append(poll_interval)
-            servers.append(server)
-            try:
-                return original(server, poll_interval=poll_interval)
-            finally:
-                finished.append(server)
-
-        with tempfile.TemporaryDirectory(prefix="private-http-contract-") as directory:
-            root = Path(directory)
-            (root / "r22-prefix").mkdir()
-            (root / "r22-prefix/health.txt").write_bytes(b"literal health evidence\n")
-            command = ["curl", "-fsSI", "--max-time", "5",
-                       "http://192.0.2.2/r22-prefix/health.txt"]
-            with mock.patch.object(http.server.ThreadingHTTPServer, "serve_forever", serve):
-                with private_a_health_ports(LOAD, root) as positive:
-                    LOAD.run(command)
-                self.assertEqual([command], positive)
-                with private_a_health_ports(LOAD, root, http_status=503) as negative:
-                    with self.assertRaisesRegex(LOAD.LoadError, "private original A HTTP probe failed"):
-                        LOAD.run(command)
-                self.assertEqual([command], negative)
-        self.assertEqual([0.05, 0.05], observed)
-        self.assertEqual(servers, finished)
-        self.assertEqual([-1, -1], [server.fileno() for server in servers])
 
 
 # CTMP candidate: retain the macOS system alias and a private effective-gid root.
