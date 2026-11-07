@@ -190,6 +190,7 @@ core.*
 /infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs
 /infiniband/bringup/xdr-upgrade/ib.csv
 /infiniband/bringup/xdr-upgrade/xdr-upgrade-logs
+/infiniband/bringup/xdr-upgrade/01-global.yaml
 /infiniband/bringup/ufm-setup-upgrade/ib.csv
 /infiniband/bringup/ufm-setup-upgrade/p2p.xlsx
 /infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs
@@ -206,6 +207,8 @@ core.*
 /infra/logs
 /infra/.logs.lock
 /infra/.logs-migration.*
+/infra/infra-runtime.conf
+/infra/infra-status
 
 /monitor/01-global.yaml
 /monitor/02-devices_config.csv

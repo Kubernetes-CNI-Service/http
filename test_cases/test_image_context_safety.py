@@ -240,6 +240,30 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
         self.assertIn("/infiniband/01-global.yaml", lines)
         self.assertIn("/infiniband/publickey/", lines)
 
+    def test_runtime_files_written_into_the_code_tree_are_git_ignored(self):
+        # I-025 (2026-11-02, measured after setup): setup links the project's global into
+        # infiniband/ and the xdr-upgrade tool dir; I-026: the UFM project's laptop.pub; and
+        # infra-setup run from the tree writes infra-status next to itself, deploy_infra writes
+        # infra-runtime.conf there.  None may show as untracked (runner E-3 refuses --all).
+        def ignored(relative):
+            return subprocess.run(
+                ["git", "check-ignore", "--no-index", "--quiet", "--", relative],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            ).returncode
+        for relative in (
+            "infiniband/01-global.yaml",
+            "infiniband/bringup/xdr-upgrade/01-global.yaml",
+            "infiniband/publickey/laptop.pub",
+            "infra/infra-runtime.conf",
+            "infra/infra-status",
+        ):
+            with self.subTest(runtime=relative):
+                self.assertEqual(0, ignored(relative))
+        for relative in ("infra/infra-setup.py", "infra/check_infra.py",
+                         "infiniband/bringup/xdr-upgrade/upgrade.py"):
+            with self.subTest(code=relative):
+                self.assertEqual(1, ignored(relative))
+
     def test_shared_producer_contract_retains_independent_target_examples(self):
         expected = {
             "monitor/ethernet": "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
