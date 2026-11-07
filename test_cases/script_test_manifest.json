@@ -196,7 +196,9 @@
         "test_cases.test_setup_switch_scope_contract",
         "test_cases.test_setup_link_spec_contract",
         "test_cases.test_project_link_inputs_workflow",
-        "test_cases.test_setup_link_reconcile_contract"
+        "test_cases.test_setup_link_reconcile_contract",
+        "test_cases.test_activate_project_contract",
+        "test_cases.test_activate_project_unsetup_workflow"
       ]
     },
     {
@@ -1021,7 +1023,8 @@
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow",
         "test_cases.test_setup_switch_scope_contract",
-        "test_cases.test_setup_link_reconcile_contract"
+        "test_cases.test_setup_link_reconcile_contract",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -1094,7 +1097,8 @@
       "tests": [
         "test_cases.test_setup_ufm_links_workflow",
         "test_cases.test_eth_jump_duplicate_identity",
-        "test_cases.test_setup_link_spec_contract"
+        "test_cases.test_setup_link_spec_contract",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -3886,6 +3890,47 @@
       ],
       "tests": [
         "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
+      ]
+    },
+    {
+      "id": "activate_project_pointer_lifecycle",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "DAY0-Prepare/13-unload.py",
+        "tools/project_contract.py",
+        "tools/_package_common.py",
+        "tools/generation_report.py",
+        "tools/ibsw_upgrade_inputs.py",
+        "tools/sync-code.py",
+        "tools/tar-for-upload.py",
+        "tools/tar-for-download.py",
+        "tools/collect-ztp-diagnostics.py",
+        "monitor/switch-collection-worker.py",
+        "monitor/switch_collection_gate.py",
+        "monitor/collection_v2_emitter.py",
+        "monitor/manual-ztp-worker.py",
+        "monitor/issue-tracker/issue-tracker-sync.py",
+        "monitor/issue-tracker/switch-status.py",
+        "ethernet/monitor/cron.sh",
+        "infra/infra-setup.py",
+        "infra/infra-setup.sh",
+        "infra/infra-teardown.sh",
+        "infra/check_infra.py",
+        "infra/deploy_infra.py",
+        "infra/docker/activate.py",
+        "ztp/manual-ztp.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/dynamic_air_inventory.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/optimize/feedback.py"
+      ],
+      "tests": [
+        "test_cases.test_activate_project_unsetup_workflow"
       ]
     }
   ],
