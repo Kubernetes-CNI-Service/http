@@ -986,7 +986,11 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 _LINK_ERRORS=0,
             ), redirect_stdout(io.StringIO()):
                 managed = set(SETUP._collect_expected_links(str(project)))
-                SETUP._process_monitor_links(str(project))
+                # v3.1.1 WP-3: the aliases are rows of the link table, written by setup's one engine.
+                SETUP._reconcile_links([
+                    (str(root / row.path), SETUP._spec_link_text(row))
+                    for row in SETUP.SETUP_LINK_SPECS if row.view == "network-inventory"
+                ])
 
             self.assertTrue(
                 {os.fspath(root / relative) for relative in expected} <= managed,
@@ -1036,7 +1040,11 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 _DRY_RUN=False,
                 _LINK_ERRORS=0,
             ), redirect_stdout(io.StringIO()):
-                SETUP._process_monitor_links(str(project))
+                # v3.1.1 WP-3: the aliases are rows of the link table, written by setup's one engine.
+                SETUP._reconcile_links([
+                    (str(root / row.path), SETUP._spec_link_text(row))
+                    for row in SETUP.SETUP_LINK_SPECS if row.view == "network-inventory"
+                ])
 
             for relative, target in expected.items():
                 with self.subTest(restored_alias=relative):
@@ -1309,6 +1317,13 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             self.assertIn("不会激活", output.getvalue())
 
     def test_project_switch_needs_exact_yes_or_dedicated_automation_ack(self):
+        # R-016 Q4 (owner 2026-11-03「好的」): switching from another project asks once; -y/--yes skips the
+        # question and --confirm-project-switch stays its synonym for load; an operator at a terminal must
+        # still type the whole word yes, and without a terminal or either flag the switch is refused.
+        self.assertTrue(
+            hasattr(SETUP, "_switch_active_project"),
+            "R-016 §4.2 第 4 步: setup switches DAY0-Prepare/activate-project",
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             day0 = root / "DAY0-Prepare"
@@ -1316,82 +1331,42 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
             new_project = day0 / "new"
             old_project.mkdir(parents=True)
             new_project.mkdir()
-            target = old_project / "01-global.yaml"
-            target.write_text("old\n", encoding="utf-8")
-            managed = root / "ztp/config/01-global.yaml"
-            managed.parent.mkdir(parents=True)
+            pointer = day0 / "activate-project"
 
-            def restore_link():
-                managed.unlink(missing_ok=True)
-                managed.symlink_to(target)
+            def restore_pointer():
+                pointer.unlink(missing_ok=True)
+                pointer.symlink_to(old_project.name)
 
-            patches = (
-                mock.patch.multiple(
-                    SETUP,
-                    HERE=str(day0),
-                    HTTP_BASE=str(root),
-                    ZTP=str(root / "ztp"),
-                    _NET_CSV_LINKS=[],
-                    _DRY_RUN=False,
-                ),
-                mock.patch.object(
-                    SETUP, "_managed_ztp_link_candidates",
-                    return_value=[str(managed)],
-                ),
-                mock.patch.object(SETUP, "_monitor_link_paths", return_value=[]),
-                mock.patch.object(SETUP, "_bringup_link_pairs", return_value=[]),
-                mock.patch.object(SETUP, "_analyzer_input_pairs", return_value=[]),
-                mock.patch.object(SETUP, "_analyzer_output_pairs", return_value=[]),
-                mock.patch.object(
-                    SETUP, "_legacy_project_monitor_csv_links", return_value=[],
-                ),
+            cases = (
+                # (-y/--yes, --confirm-project-switch, terminal, answer, switched)
+                (True, False, False, None, True),
+                (False, False, True, "y", False),
+                (False, False, True, "yes", True),
+                (True, True, False, None, True),
+                (False, True, False, None, True),
+                (False, False, False, None, False),
             )
-
-            with ExitStack() as stack:
-                for patcher in patches:
-                    stack.enter_context(patcher)
-
-                restore_link()
-                with mock.patch.object(SETUP, "_AUTO_YES", True), \
-                        mock.patch.object(
-                            SETUP, "_CONFIRM_PROJECT_SWITCH", False,
-                            create=True,
-                        ), redirect_stdout(io.StringIO()):
-                    self.assertFalse(SETUP._unsetup_previous(str(new_project)))
-                self.assertTrue(managed.is_symlink())
-
-                restore_link()
-                with mock.patch.object(SETUP, "_AUTO_YES", False), \
-                        mock.patch.object(
-                            SETUP, "_CONFIRM_PROJECT_SWITCH", False,
-                            create=True,
-                        ), mock.patch.object(
-                            SETUP.sys.stdin, "isatty", return_value=True,
-                        ), mock.patch("builtins.input", return_value="y"), \
-                        redirect_stdout(io.StringIO()):
-                    self.assertFalse(SETUP._unsetup_previous(str(new_project)))
-                self.assertTrue(managed.is_symlink())
-
-                restore_link()
-                with mock.patch.object(SETUP, "_AUTO_YES", False), \
-                        mock.patch.object(
-                            SETUP, "_CONFIRM_PROJECT_SWITCH", False,
-                            create=True,
-                        ), mock.patch.object(
-                            SETUP.sys.stdin, "isatty", return_value=True,
-                        ), mock.patch("builtins.input", return_value="yes"), \
-                        redirect_stdout(io.StringIO()):
-                    self.assertTrue(SETUP._unsetup_previous(str(new_project)))
-                self.assertFalse(managed.exists())
-
-                restore_link()
-                with mock.patch.object(SETUP, "_AUTO_YES", True), \
-                        mock.patch.object(
-                            SETUP, "_CONFIRM_PROJECT_SWITCH", True,
-                            create=True,
-                        ), redirect_stdout(io.StringIO()):
-                    self.assertTrue(SETUP._unsetup_previous(str(new_project)))
-                self.assertFalse(managed.exists())
+            with mock.patch.multiple(
+                SETUP, HERE=str(day0), HTTP_BASE=str(root), _DRY_RUN=False,
+            ):
+                for auto_yes, confirm, terminal, answer, switched in cases:
+                    restore_pointer()
+                    with self.subTest(auto_yes=auto_yes, confirm=confirm, answer=answer), \
+                            mock.patch.object(SETUP, "_AUTO_YES", auto_yes), \
+                            mock.patch.object(
+                                SETUP, "_CONFIRM_PROJECT_SWITCH", confirm,
+                                create=True,
+                            ), mock.patch.object(
+                                SETUP.sys.stdin, "isatty", return_value=terminal,
+                            ), mock.patch("builtins.input", return_value=answer), \
+                            redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            switched, SETUP._switch_active_project(str(new_project)),
+                        )
+                        self.assertEqual(
+                            new_project.name if switched else old_project.name,
+                            os.readlink(pointer),
+                        )
 
     def test_unload_supervisor_backend_stops_all_programs_without_systemctl(self):
         calls = []
@@ -1467,11 +1442,13 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             manifest = root / ".setup_manifest"
-            link = root / "managed-link"
+            # v3.1.1 WP-3 (Q5, review A8): the manifest is derived from the link table; one row stands in.
+            link = root / "ztp/status"
+            link.parent.mkdir()
             link.symlink_to("target")
             with (
                 mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)),
-                mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]),
+                mock.patch.object(SETUP, "HTTP_BASE", str(root)),
                 redirect_stdout(io.StringIO()),
             ):
                 SETUP._write_manifest(str(root))

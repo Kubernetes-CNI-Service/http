@@ -58,11 +58,9 @@ class Req19InfraLogContractTests(unittest.TestCase):
     def bind(self, root, project, *, manifest_failure=False):
         unrelated = (
             "_initialize_project_from_template", "_prepare_laptop_public_key",
-            "_remove_legacy_nvos_output_links", "_process_bin_files",
-            "_process_xlsx_files", "_process_bringup_links",
-            "_process_analyzer_links", "_process_pubkeys",
+            "_remove_legacy_links", "_process_bin_files",
+            "_process_xlsx_files", "_reconcile_table_links", "_process_pubkeys",
             "_process_latest_yaml", "_process_optimize_sample",
-            "_process_net_csv_links", "_process_monitor_links",
             "_print_next_steps",
         )
         with ExitStack() as patches:
@@ -74,8 +72,8 @@ class Req19InfraLogContractTests(unittest.TestCase):
                 P2P_INPUT_LINKS=[], P2P_OUTPUT_LINKS=[],
                 P2P_AIR_JSON_LINK=str(root / "ztp/p2p-air.json"),
                 BRINGUP_OUTPUT_MAPPINGS=[], ANALYZER_INPUT_MAPPINGS=[],
-                ANALYZER_OUTPUT_MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
-                _AUTO_YES=True, _CONFIRM_PROJECT_SWITCH=True, _LINK_TRANSACTION=None,
+                ANALYZER_OUTPUT_MAPPINGS=[], _DRY_RUN=False,
+                _AUTO_YES=True, _CONFIRM_PROJECT_SWITCH=True,
             ))
             for name in unrelated:
                 patches.enter_context(mock.patch.object(SETUP, name))
@@ -167,7 +165,7 @@ class Req19InfraLogContractTests(unittest.TestCase):
             # pending state must survive the rejected rollback, then patch
             # restoration prevents it contaminating a later unittest.
             with mock.patch.multiple(SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
-                    _INFRA_LOG_MIGRATION=state, _LINK_TRANSACTION=None), \
+                    _INFRA_LOG_MIGRATION=state), \
                  mock.patch.object(SETUP.os, "lstat", side_effect=different_device), \
                  mock.patch.object(SETUP.os, "remove", wraps=original_remove) as remove, \
                  mock.patch.object(SETUP, "_rename_infra_log_dir_noreplace",

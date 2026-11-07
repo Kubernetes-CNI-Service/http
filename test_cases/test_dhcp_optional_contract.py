@@ -1654,7 +1654,7 @@ class R22CsvConsumerMatrixTests(unittest.TestCase):
                 SETUP, "_validate_global_yaml", return_value=([], []),
             ), mock.patch.object(SETUP, "_FORCE", True), mock.patch.object(
                 SETUP, "_P2P_SOURCE", None,
-            ), mock.patch.object(SETUP, "_CSV_DIR", None), mock.patch.object(
+            ), mock.patch.object(
                 SETUP, "IMAGE_DIR", str(project / "no-shared-images"),
             ), mock.patch.object(sys, "stdout", io.StringIO()):
                 self.assertFalse(SETUP._validate_project(project))
@@ -1796,7 +1796,7 @@ class R22CsvConsumerMatrixTests(unittest.TestCase):
                     )
                 with mock.patch.object(SETUP, "_FORCE", True), mock.patch.object(
                     SETUP, "_P2P_SOURCE", None
-                ), mock.patch.object(SETUP, "_CSV_DIR", None), mock.patch.object(
+                ), mock.patch.object(
                     SETUP, "IMAGE_DIR", str(project / "no-shared-images")
                 ), mock.patch.object(sys, "stdout", io.StringIO()):
                     self.assertFalse(SETUP._validate_project(project))

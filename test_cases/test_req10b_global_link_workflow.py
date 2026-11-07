@@ -17,6 +17,7 @@ from test_cases.test_req10b_services_keys_workflow import public_key
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = load_script("req10b_global_link_setup_flow", ROOT / "DAY0-Prepare/01-a-setup.py")
+CONTRACT = load_script("req10b_global_link_project_contract", ROOT / "tools/project_contract.py")
 UNSETUP = load_script("req10b_global_link_unsetup_flow", ROOT / "DAY0-Prepare/02-unsetup.py")
 INITIAL = load_script("req10b_global_link_initial_setup_flow", ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py")
 
@@ -109,23 +110,23 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             tool.mkdir(parents=True)
             (tool / "publickey").symlink_to("../../publickey")
 
-            # Keep unrelated stages inert. The real setup mapping loop and
-            # _process_pubkeys must run before the real P1 profile reader.
+            # Keep unrelated stages inert (v3.1.1 WP-3 folded the link stages kept inert here into
+            # _reconcile_table_links). The real switch and _process_pubkeys must run before the
+            # real P1 profile reader.
             unrelated_stages = (
                 "_initialize_project_from_template", "_prepare_laptop_public_key",
-                "_remove_legacy_nvos_output_links", "_process_bin_files",
-                "_process_xlsx_files", "_process_bringup_links",
-                "_process_analyzer_links", "_process_latest_yaml",
-                "_process_optimize_sample", "_process_net_csv_links",
-                "_process_monitor_links", "_write_manifest", "_print_next_steps",
+                "_remove_legacy_links", "_process_bin_files",
+                "_process_xlsx_files", "_reconcile_table_links", "_process_latest_yaml",
+                "_process_optimize_sample", "_bind_infra_logs",
+                "_write_manifest", "_print_next_steps",
             )
             with ExitStack() as patches:
                 patches.enter_context(mock.patch.multiple(
                     SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                     ZTP=str(root / "ztp"),
                     MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
-                    MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
-                    _P2P_SOURCE=None, _LINK_TRANSACTION=None,
+                    MAPPINGS=[], _DRY_RUN=False,
+                    _P2P_SOURCE=None,
                 ))
                 for name in unrelated_stages:
                     patches.enter_context(mock.patch.object(SETUP, name))
@@ -133,9 +134,6 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     ("_select_p2p_source", str(p2p)),
                     ("_validate_project", True),
                     ("_ensure_project_p2p_link", str(p2p)),
-                    ("_unsetup_previous", True),
-                    ("_check_conflicts", True),
-                    ("_setup_transaction_paths", [str(root / row[0]) for row in EXPECTED_WORKSPACE_LINKS]),
                 ):
                     patches.enter_context(mock.patch.object(SETUP, name, return_value=result))
                 with redirect_stdout(io.StringIO()):
@@ -171,14 +169,12 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             bridge.symlink_to("../../01-global.yaml")
 
             # Keep unrelated setup stages inert while the actual _setup_impl
-            # mapping loop, _process_mapping, and _make_link run together.
+            # table reconcile (v3.1.1 WP-3), the engine and the switch run together.
             unrelated_stages = (
                 "_initialize_project_from_template", "_prepare_laptop_public_key",
-                "_remove_legacy_nvos_output_links", "_process_bin_files",
-                "_process_xlsx_files", "_process_bringup_links",
-                "_process_analyzer_links", "_process_pubkeys",
+                "_remove_legacy_links", "_process_bin_files",
+                "_process_xlsx_files", "_process_pubkeys",
                 "_process_latest_yaml", "_process_optimize_sample",
-                "_process_net_csv_links", "_process_monitor_links",
                 "_write_manifest", "_print_next_steps",
             )
             with ExitStack() as patches:
@@ -186,8 +182,8 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                     SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                     ZTP=str(root / "ztp"),
                     MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
-                    MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
-                    _P2P_SOURCE=None, _LINK_TRANSACTION=None,
+                    MAPPINGS=[], _DRY_RUN=False,
+                    _P2P_SOURCE=None,
                 ))
                 for name in unrelated_stages:
                     patches.enter_context(mock.patch.object(SETUP, name))
@@ -200,16 +196,6 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 patches.enter_context(mock.patch.object(
                     SETUP, "_ensure_project_p2p_link", return_value=str(p2p)
                 ))
-                patches.enter_context(mock.patch.object(
-                    SETUP, "_unsetup_previous", return_value=True
-                ))
-                patches.enter_context(mock.patch.object(
-                    SETUP, "_check_conflicts", return_value=True
-                ))
-                patches.enter_context(mock.patch.object(
-                    SETUP, "_setup_transaction_paths",
-                    return_value=[str(root / row[0]) for row in EXPECTED_WORKSPACE_LINKS],
-                ))
                 with redirect_stdout(io.StringIO()):
                     SETUP._setup_impl(str(project))
 
@@ -218,8 +204,9 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 source = project / project_rel
                 with self.subTest(workspace_rel=workspace_rel):
                     self.assertTrue(managed.is_symlink(), workspace_rel)
+                    # R-016 §2 (O4 left column): a project row goes through the pointer.
                     self.assertEqual(
-                        os.path.relpath(source, managed.parent), os.readlink(managed)
+                        CONTRACT.pointer_link_target(workspace_rel, project_rel), os.readlink(managed)
                     )
                     self.assertEqual(expected_bytes, managed.read_bytes())
             self.assertTrue(bridge.is_symlink())
@@ -236,17 +223,21 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             managed = root / "infiniband/01-global.yaml"
             matches = [entry for entry in SETUP.WORKSPACE_INPUT_MAPPINGS
                        if entry[0] == GLOBAL_MAPPING[0]]
+            self.assertEqual([GLOBAL_MAPPING], matches)
+            # v3.1.1 WP-3: the registered mapping is a row of the link table; setup's one engine links it
+            # through the pointer, which names the active project (R-016 §2).
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
+            rows = [row for row in SETUP.SETUP_LINK_SPECS if row.path == GLOBAL_MAPPING[0]]
             with mock.patch.multiple(
                 SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                 ZTP=str(root / "ztp"), _DRY_RUN=False,
             ), redirect_stdout(io.StringIO()):
-                results = [
-                    SETUP._process_mapping(str(project), *entry, link_root=str(root))
-                    for entry in matches
-                ]
+                results = SETUP._reconcile_links(
+                    [(str(root / row.path), SETUP._spec_link_text(row)) for row in rows]
+                )
             self.assertEqual(["linked"], results)
             self.assertTrue(managed.is_symlink())
-            self.assertEqual("../DAY0-Prepare/site-a/01-global.yaml", os.readlink(managed))
+            self.assertEqual("../DAY0-Prepare/activate-project/01-global.yaml", os.readlink(managed))
             self.assertEqual(GLOBAL_BYTES, managed.read_bytes())
 
     def test_real_setup_mapping_then_unsetup_fallback_preserves_project_data(self) -> None:
@@ -263,14 +254,16 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             # A real checkout has an infra/ directory for the independent
             # log-root lock; keep that safety gate active in this fixture.
             (root / "infra").mkdir()
+            rows = [row for row in SETUP.SETUP_LINK_SPECS if row.path == GLOBAL_MAPPING[0]]
             with mock.patch.multiple(
                 SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                 ZTP=str(root / "ztp"), _DRY_RUN=False,
             ), redirect_stdout(io.StringIO()):
+                # v3.1.1 WP-3: the registered mapping is a table row the one engine links.
                 self.assertEqual(
-                    "linked",
-                    SETUP._process_mapping(
-                        str(project), *GLOBAL_MAPPING, link_root=str(root)
+                    ["linked"],
+                    SETUP._reconcile_links(
+                        [(str(root / row.path), SETUP._spec_link_text(row)) for row in rows]
                     ),
                 )
             self.assertTrue(managed.is_symlink())

@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
 """
-在 http/ 工作目录下创建指向部署项目文件夹的软链接，让 ZTP、设备工具和监控脚本
-能正常读写当前项目的输入/输出文件。
+激活一个 DAY0 项目：让 DAY0-Prepare/activate-project 指向它，并核对树里经这个指针的固定链接。
+
+树里所有用到项目文件的链接都经过同一个指针（R-016 §2），例如
+ethernet/eth.csv → ../DAY0-Prepare/activate-project/02-devices_config.csv；切换项目只换指针这一个链接。
 
 用法：
-  python3 01-a-setup.py <项目文件夹名>        # 在 DAY0-Prepare/ 下查找
-  python3 01-a-setup.py <项目文件夹绝对路径>
-  python3 01-a-setup.py -y <项目文件夹名>    # 发布指针（latest/latest_yaml）替换也不询问
-  python3 01-a-setup.py --dry-run <...>      # 只显示操作，不实际创建
-  python3 01-a-setup.py --strict --dry-run <...>  # 部署前严格校验占位文件
+  python3 01-a-setup.py <项目名>                 # 只接受 DAY0-Prepare 的直接子目录（真实目录，不是 template）
+  python3 01-a-setup.py -y|--yes <项目名>        # 从另一个项目切换过来时不再询问（--confirm-project-switch 同义）
+  python3 01-a-setup.py --dry-run <...>          # 只显示操作，不实际创建
+  python3 01-a-setup.py --strict --dry-run <...> # 部署前严格校验占位文件
+  python3 01-a-setup.py --force <...>            # 校验错误降为警告，照样准备和切换
   python3 01-a-setup.py --p2p-file=<文件名> <...> # 多个 P2P XLSX 时明确选择 P2P 源
-  python3 01-a-setup.py --create <项目文件夹名>   # 只初始化新项目，不激活
+  python3 01-a-setup.py --create <项目名>        # 只初始化新项目，不激活
+  python3 01-a-setup.py --status | --list-projects
 
-映射规则（输入文件用文件链接，输出目录用目录链接，输出文件先在项目中创建空文件再链接）。
+激活分 6 步，每一步都能重复执行（R-016 §4.2）；不回滚、不加切换标记，出了问题就再跑一次 setup：
+  1. 校验目标项目，什么都不写；不通过以 2 退出。
+  2. 准备目标项目（模板补齐、公钥、P2P 选择、输出目录），只写这个项目；出错以 1 退出，不切换。
+  3. 核对链接规格表（project_contract.SETUP_LINK_SPECS），错误只计数。
+  4. 切换 activate-project：已指向目标就跳过；原来指向另一个项目时询问一次（-y/--yes 跳过）。
+     随后按目标项目刷新 4 个公钥目录里逐把公钥的链接、latest_yaml、共享镜像、optimize sample、
+     清理旧链接、绑定 infra/logs。
+  5. 写派生记录 ztp/.setup_manifest（首行是项目真实路径；判断当前项目一律看指针）。
+  6. 汇总：有错误以 1 退出，否则 0；第 3 步以后的错误不撤销切换。
+切换那一刻正在运行的工具（采集、升级、手工脚本），结果不保证；ZTP/DHCP 服务在运行时请用 load 切换。
+--csv-dir 已退役（R-016 Q1）：在项目里建 02-devices_config.csv → 外部文件 的链接代替（R-014 第 3 条）。
 
 链接规则（R-014 第 1、2 条，R-016 §4.3）：已有的链接直接替换，不询问，并打印旧目标 → 新目标；
 同名位置是真实文件或目录时只报错、计数，不删；补齐模板和准备输出时，不往项目里指向项目外的链接里写。
@@ -33,7 +46,7 @@ import ipaddress
 import json
 import os
 import platform
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import stat
@@ -62,13 +75,13 @@ if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from project_contract import (
     SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS,
-    managed_infra_log_project,
     infra_log_root_lock, infra_log_pending_state_names,
     P2P_INPUT_PATHS, P2P_OUTPUT_PATHS, P2P_AIR_PATH,
     BRINGUP_OUTPUT_SPECS, BRINGUP_INPUT_SPECS, BRINGUP_IMAGE_LINKS,
     ANALYZER_INPUT_SPECS, ANALYZER_OUTPUT_SPECS,
     NETWORK_MONITOR_SPECS, NETWORK_CSV_MAPPINGS, NETWORK_INVENTORY_LINKS,
     MONITOR_RUNTIME_MAPPINGS, LATEST_YAML_SPECS, PUBLICKEY_DIRECTORIES, SETUP_LINK_SPECS,
+    ACTIVE_PROJECT_EXCLUDED_NAMES, SHARED_LINK_SPECS, pointer_link_target, setup_dynamic_link_patterns,
     detect_global_schema_version,
     normalize_issue_tracker_policy,
     normalize_redundancy_mac,
@@ -128,19 +141,17 @@ ANALYZER_OUTPUT_MAPPINGS = [(os.path.join(HTTP_BASE, name), target)
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────
 
-_AUTO_YES = False
+_AUTO_YES = False  # -y/--yes：跨项目切换和发布指针替换都不询问（R-016 Q4）
 _DRY_RUN  = False
-_FORCE    = False  # --force：忽略校验错误强行继续（独立于 -y）
+_FORCE    = False  # --force：校验错误降为警告，照样准备和切换（O13，独立于 -y）
 _STRICT   = False  # --strict：把空公钥/xlsx/共享镜像占位文件视为错误
 _NO_UPGRADE = False  # load --no-upgrade：不检查或发布升级镜像
-_CSV_DIR  = None   # --csv-dir 指定的 devices_config.csv 所在目录
 _P2P_FILE = None   # --p2p-file 指定的项目根目录 XLSX
 _SWITCH_SCOPE = None  # --switch 给定的设备族集合；None 时按 CSV 推断（_switch_families）
 _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
-_LINK_TRANSACTION = None  # 当前 setup 的整批链接回滚快照
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
-_CONFIRM_PROJECT_SWITCH = False  # 自动化对跨项目切换的独立显式确认
+_CONFIRM_PROJECT_SWITCH = False  # --confirm-project-switch：-y/--yes 的跨项目切换确认，load 使用
 
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
 MAX_DISCOVERY_METADATA_BYTES = 4 * 1024 * 1024
@@ -168,44 +179,6 @@ def _confirm_overwrite(link_path):
     except EOFError:
         return False
     return ans in ("y", "yes")
-
-
-def _init_from_template(src_path, proj_rel, root):
-    """从 TEMPLATE_DIR 复制对应文件到 src_path（只当 src_path 不存在时调用）。
-    返回 True 表示成功（含 dry-run），False 表示模板中也没有，或不能写（悬空链接、指向 root 外）。"""
-    tmpl_path = os.path.join(TEMPLATE_DIR, proj_rel)
-    if (not os.path.isfile(tmpl_path) or os.path.lexists(src_path)
-            or _safe_target_path(root, src_path) is None):
-        return False
-    if _DRY_RUN:
-        print(_c(CYAN, f"  [DRY] 从模板创建 {proj_rel}"))
-        return True
-    parent = os.path.dirname(src_path)
-    if parent:
-        os.makedirs(parent, exist_ok=True)
-    shutil.copy2(tmpl_path, src_path)
-    print(_c(GREEN, f"  [INIT] {os.path.relpath(src_path, HERE)} ← 从模板复制"))
-    return True
-
-
-def _populate_dir_from_template(proj_dir, proj_rel):
-    """若模板目录中对应子目录含有文件，将缺失文件复制到项目的同名目录（不递归，不覆盖，不经任何已有链接写）。"""
-    tmpl_sub = os.path.join(TEMPLATE_DIR, proj_rel)
-    dest_dir = os.path.join(proj_dir, proj_rel)
-    if not os.path.isdir(tmpl_sub) or _safe_target_path(proj_dir, dest_dir) is None:
-        return
-    for fname in sorted(os.listdir(tmpl_sub)):
-        tmpl_file = os.path.join(tmpl_sub, fname)
-        dest_file = os.path.join(dest_dir, fname)
-        if not os.path.isfile(tmpl_file):
-            continue
-        if os.path.lexists(dest_file):
-            continue
-        if _DRY_RUN:
-            print(_c(CYAN, f"  [DRY] 从模板创建 {proj_rel}/{fname}"))
-        else:
-            shutil.copy2(tmpl_file, dest_file)
-            print(_c(GREEN, f"  [INIT] {os.path.relpath(dest_file, HERE)} ← 从模板复制"))
 
 
 def _safe_target_path(root, path):
@@ -238,19 +211,15 @@ def _link_text(link_path, target_path):
     return os.path.relpath(target_path, os.path.dirname(link_path))
 
 
-def _spec_link_text(row, proj_dir):
-    """Expected text of a G12 table row (project_contract.SETUP_LINK_SPECS) for ``proj_dir``.
+def _spec_link_text(row):
+    """Expected text of a G12 table row (project_contract.SETUP_LINK_SPECS); the one place that names it.
 
-    The one place that names a table row's text: the direct ``../DAY0-Prepare/<project>/<name>`` form of
-    project_contract.runtime_link_specs() until v3.1.1 WP-3 switches the project rows to the
-    DAY0-Prepare/activate-project form (pointer_link_target).  Repository aliases keep their text.
+    A project row goes through the pointer, relpath("DAY0-Prepare/activate-project/<name>", link dir), so its
+    text never depends on the project (R-016 §2); a repository alias keeps its text.
     """
-    link_path = os.path.join(HTTP_BASE, row.path)
     if row.base == "repository":
-        return _link_text(link_path, os.path.join(HTTP_BASE, row.target))
-    # --csv-dir supplies every 02-devices_config.csv link until it retires (WP-3).
-    base = _CSV_DIR if _CSV_DIR and row.target == "02-devices_config.csv" else proj_dir
-    return _link_text(link_path, os.path.join(base, row.target))
+        return _link_text(os.path.join(HTTP_BASE, row.path), os.path.join(HTTP_BASE, row.target))
+    return pointer_link_target(row.path, row.target)
 
 
 def _reconcile_links(links):
@@ -340,53 +309,6 @@ def _make_exact_link(link_path, target_path):
             os.remove(temp_link)
     print(_c(GREEN, f"  [LINK] {os.path.relpath(link_path, HTTP_BASE)}  →  {rel_target}"))
     return "linked"
-
-
-def _process_mapping(proj_dir, link_rel, proj_rel, kind, src_base=None, link_root=ZTP):
-    link_path = os.path.join(link_root, link_rel)
-    # file_csv：优先使用 --csv-dir 目录；未指定时回退到 proj_dir
-    base = (src_base or proj_dir) if kind == "file_csv" else proj_dir
-    kind = "file" if kind == "file_csv" else kind
-    src_path = os.path.join(base, proj_rel)
-    link = [(link_path, _link_text(link_path, src_path))]
-
-    if kind == "dir":
-        if not os.path.exists(src_path) and _safe_target_path(base, src_path):
-            if _DRY_RUN:
-                print(_c(CYAN, f"  [DRY] mkdir {src_path}"))
-            else:
-                os.makedirs(src_path, exist_ok=True)
-                print(f"  [MKDIR] {os.path.relpath(src_path, HERE)}")
-        _populate_dir_from_template(base, proj_rel)
-        return _reconcile_links(link)[0]
-
-    if kind == "output":
-        if not os.path.exists(src_path) and _safe_target_path(base, src_path):
-            out_dir = os.path.dirname(src_path)
-            if not os.path.exists(out_dir):
-                if _DRY_RUN:
-                    print(_c(CYAN, f"  [DRY] mkdir {out_dir}"))
-                else:
-                    os.makedirs(out_dir, exist_ok=True)
-                    print(f"  [MKDIR] {os.path.relpath(out_dir, HERE)}")
-            if _DRY_RUN:
-                print(_c(CYAN, f"  [DRY] touch {src_path}"))
-            else:
-                open(src_path, "a").close()
-                print(f"  [TOUCH] {os.path.relpath(src_path, HERE)}")
-        return _reconcile_links(link)[0]
-
-    # file / file_opt
-    if not os.path.exists(src_path):
-        if _init_from_template(src_path, proj_rel, base):
-            pass  # 模板初始化成功，继续创建链接
-        elif kind == "file_opt":
-            print(_c(YELLOW, f"  [MISS] {proj_rel} 不存在，跳过（可选文件）"))
-            return "missing"
-        else:
-            print(_c(RED,    f"  [ERROR] {proj_rel} 不存在，跳过"))
-            return "missing"
-    return _reconcile_links(link)[0]
 
 
 def _copy_glob_from_template(proj_dir, pattern):
@@ -542,8 +464,12 @@ def _process_bin_files():
         _reconcile_links([(link_path, _link_text(link_path, src))])
 
 
-def _select_p2p_source(proj_dir):
-    """Resolve the frozen project-root candidate set before changing runtime links."""
+def _select_p2p_source(proj_dir, *, plan_only=False):
+    """Resolve the frozen project-root candidate set before changing runtime links.
+
+    plan_only (setup step 1, R-016 §4.2) writes nothing: a non-empty real p2p.xlsx is the workbook the rescue
+    would move aside and select again, unless --p2p-file pins another.
+    """
     canonical = Path(proj_dir) / "p2p.xlsx"
     try:
         if canonical.exists() and not canonical.is_symlink() and canonical.stat().st_size:
@@ -552,10 +478,13 @@ def _select_p2p_source(proj_dir):
             if _DRY_RUN:
                 print(_c(CYAN, "  [DRY] 将非空 p2p.xlsx 无覆盖归档后重新选择"))
                 return os.fspath(canonical)
-            rescued = _rescue_canonical_p2p(canonical)
-            print(_c(GREEN, f"  [RESCUE] p2p.xlsx -> {rescued.name}"))
+            if not plan_only:
+                rescued = _rescue_canonical_p2p(canonical)
+                print(_c(GREEN, f"  [RESCUE] p2p.xlsx -> {rescued.name}"))
+            elif _P2P_FILE is None:
+                return os.fspath(canonical)
         selected = select_project_p2p_source(Path(proj_dir), _P2P_FILE)
-        if _P2P_FILE:
+        if _P2P_FILE and not plan_only:
             try:
                 newest = newest_project_p2p(Path(proj_dir))
             except P2PSelectionError:
@@ -617,7 +546,9 @@ def _ensure_project_p2p_link(proj_dir, source):
         return source
     relative = os.path.relpath(source, proj_dir)
     if os.path.dirname(relative) or relative in {".", ".."}:
-        if os.path.islink(canonical) and os.readlink(canonical) == relative:
+        # The selector reads the user's link by its path parts, so ./p2p/<workbook> is the same link (review A9).
+        if (os.path.islink(canonical)
+                and PurePosixPath(os.readlink(canonical)).parts == PurePosixPath(relative).parts):
             # R-014 第 3 条：用户自己建的 p2p.xlsx → p2p/<工作簿> 原样保留。
             print(f"  [SKIP] p2p.xlsx 是用户链接：{relative}")
             return canonical
@@ -655,34 +586,14 @@ def _ensure_project_p2p_link(proj_dir, source):
     return canonical
 
 
-def _remove_legacy_p2p_links():
-    """清理由旧版 setup 创建的非 p2p.xlsx 输入链接，不触碰实际文件。"""
-    for directory in (
-        os.path.join(ZTP, "config", "cumulus", "template", "P2P"),
-        os.path.join(ZTP, "config", "nvos", "template", "P2P"),
-    ):
-        for path in glob.glob(os.path.join(directory, "*.xlsx")):
-            if os.path.basename(path) == "p2p.xlsx" or not os.path.islink(path):
-                continue
-            if _DRY_RUN:
-                print(_c(CYAN, f"  [DRY] 删除旧 P2P 链接 {os.path.relpath(path, HTTP_BASE)}"))
-            else:
-                os.remove(path)
-                print(_c(GREEN, f"  [DEL] 旧 P2P 链接 {os.path.relpath(path, HTTP_BASE)}"))
-
-
 def _process_xlsx_files(proj_dir, source):
-    """挂载 P2P 输入、输出目录和 DHCP 使用的 AIR JSON 固定入口。"""
-    _remove_legacy_p2p_links()
+    """报告本次的 P2P 源。
+
+    P2P 的固定输入 p2p.xlsx、输出目录和 AIR JSON 固定入口（I-031：b-xlsx_to_dot.py 直接写
+    99-output-p2p/p2p-air.json，R-016 §3.4 可选行）都是规格表行，由第 3 步的核对引擎经指针建立；
+    旧版按工作簿名建的 *.xlsx 链接由 _remove_legacy_links 清理。
+    """
     print(f"  P2P 源：{os.path.relpath(source, proj_dir)}")
-    _reconcile_links((link_path, _link_text(link_path, source)) for link_path in P2P_INPUT_LINKS)
-    for link_path in P2P_OUTPUT_LINKS:
-        rel = os.path.relpath(link_path, ZTP)
-        _process_mapping(proj_dir, rel, "99-output-p2p", "dir")
-    # I-031 / R-016 R16-04: b-xlsx_to_dot.py writes the fixed 99-output-p2p/p2p-air.json itself; the tree link is
-    # the table's optional row (R-016 §3.4: dangling until the producer runs, or for good without AIR).
-    air_row = next(row for row in SETUP_LINK_SPECS if row.path == P2P_AIR_PATH)
-    _reconcile_links([(P2P_AIR_JSON_LINK, _spec_link_text(air_row, proj_dir))])
 
 
 def _bringup_link_pairs(proj_dir):
@@ -691,24 +602,10 @@ def _bringup_link_pairs(proj_dir):
             for link_path, project_rel in BRINGUP_OUTPUT_MAPPINGS]
 
 
-def _process_bringup_links(proj_dir):
-    """创建 bringup 项目归档目录，并将三个工具输出入口切换到当前项目。"""
-    pairs = _bringup_link_pairs(proj_dir)
-    for _link_path, target_path in pairs:
-        _prepare_project_dir(proj_dir, target_path)
-    _reconcile_links((link_path, _link_text(link_path, target_path)) for link_path, target_path in pairs)
-
-
 def _bringup_input_pairs(_proj_dir):
     """返回 bringup 工具的 (自己目录下的固定输入, 当前清单/P2P 的仓库别名)。"""
     return [(os.path.join(HTTP_BASE, name), os.path.join(HTTP_BASE, alias))
             for name, alias, _project_target in BRINGUP_INPUT_SPECS]
-
-
-def _process_bringup_input_links(proj_dir):
-    """ufm-setup-upgrade 只读自己目录的 ib.csv、p2p.xlsx；指向 infiniband/ 下的当前别名。"""
-    _reconcile_links((link_path, _link_text(link_path, target_path))
-                     for link_path, target_path in _bringup_input_pairs(proj_dir))
 
 
 def _bringup_image_pairs():
@@ -744,14 +641,6 @@ def _analyzer_output_pairs(proj_dir):
             continue
         pairs.append((link_path, os.path.join(proj_dir, project_rel)))
     return pairs
-
-
-def _process_analyzer_links(proj_dir):
-    """切换拓扑分析采集输入和监控页面的项目报告入口。"""
-    pairs = _analyzer_input_pairs(proj_dir) + _analyzer_output_pairs(proj_dir)
-    for _link_path, target_path in pairs:
-        _prepare_project_dir(proj_dir, target_path)
-    _reconcile_links((link_path, _link_text(link_path, target_path)) for link_path, target_path in pairs)
 
 
 MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
@@ -860,7 +749,11 @@ def _publickey_roots():
 
 
 def _process_pubkeys(proj_dir):
-    """Publish non-empty project keys to both managed public-key roots."""
+    """Link each non-empty project key in the four public-key directories, through the pointer.
+
+    R-016 §2, §3.2 and R16-13: after the switch, by the target project's real path, one link per key
+    relpath("DAY0-Prepare/activate-project/<key>", key directory); only obsolete links are removed.
+    """
     pubs = glob.glob(os.path.join(proj_dir, "*.pub"))
     if not pubs:
         inited = _copy_glob_from_template(proj_dir, "*.pub")
@@ -875,7 +768,7 @@ def _process_pubkeys(proj_dir):
     # non-empty by the time they are published.
     pubs = [path for path in pubs if os.path.getsize(path) > 0]
     expected_names = {os.path.basename(src) for src in pubs}
-    for key_dir in _publickey_roots():
+    for directory, key_dir in zip(PUBLICKEY_DIRECTORIES, _publickey_roots()):
         if not _DRY_RUN:
             os.makedirs(key_dir, exist_ok=True)
         # Public-key links project only active keys. Remove obsolete links,
@@ -888,8 +781,8 @@ def _process_pubkeys(proj_dir):
             else:
                 os.remove(old)
                 print(_c(GREEN, f"  [DEL] 旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
-        links = [(os.path.join(key_dir, os.path.basename(src)), src) for src in sorted(pubs)]
-        _reconcile_links((link_path, _link_text(link_path, src)) for link_path, src in links)
+        _reconcile_links((os.path.join(key_dir, name), pointer_link_target(directory + "/" + name, name))
+                         for name in sorted(expected_names))
 
 
 def _latest_cumulus_publish_dir(parent):
@@ -930,9 +823,6 @@ def _latest_nvos_publish_dir(parent):
 _NET_CSV_LINKS = [(os.path.join(HTTP_BASE, name), target)
                   for name, target in NETWORK_CSV_MAPPINGS]
 
-# 监控类型：(类型目录, CSV 文件名, 采集输出目录...)
-_MONITOR_SPECS = list(NETWORK_MONITOR_SPECS)
-
 
 def _monitor_inventory_link_pairs():
     """Return fixed collector aliases pointing at the active network CSV links."""
@@ -940,77 +830,11 @@ def _monitor_inventory_link_pairs():
             for name, target in NETWORK_INVENTORY_LINKS]
 
 
-def _process_net_csv_links(proj_dir):
-    """在 ethernet/、infiniband/、nvlink/ 目录下创建 CSV 符号链接，指向项目 CSV 文件。"""
-    csv_base = _CSV_DIR or proj_dir
-    src_csv  = os.path.join(csv_base, "02-devices_config.csv")
-    if not os.path.exists(src_csv) and not _DRY_RUN:
-        print(_c(YELLOW, f"  [WARN] {src_csv} 不存在，跳过网络 CSV 链接"))
-        return
-    _reconcile_links((link_path, _link_text(link_path, src_csv)) for link_path, _fname in _NET_CSV_LINKS)
-
-
 def _monitor_link_paths(proj_dir):
-    """Return the shared live monitor mappings, retaining external CSV authority."""
-    pairs = []
-    for name, target, alias in MONITOR_RUNTIME_MAPPINGS:
-        base = (_CSV_DIR or proj_dir) if target == "02-devices_config.csv" else proj_dir
-        target_path = os.path.join(HTTP_BASE, alias) if alias else os.path.join(base, target)
-        pairs.append((os.path.join(HTTP_BASE, name), target_path))
-    return pairs
-
-
-def _legacy_project_monitor_csv_links(proj_dir):
-    """返回旧版 setup 在项目监控子目录内创建的三个冗余 CSV 链接。"""
-    monitor_root = os.path.join(proj_dir, "99-output-monitor")
-    return [os.path.join(monitor_root, net_type, csv_name)
-            for net_type, csv_name, *_outputs in _MONITOR_SPECS]
-
-
-def _process_monitor_links(proj_dir):
-    """创建当前项目的监控目录、日志和所有项目相关监控链接。"""
-    global _LINK_ERRORS
-    for link_path, target_path in _monitor_inventory_link_pairs():
-        if not os.path.isfile(target_path):
-            print(_c(
-                RED,
-                f"  [ERROR] 监控清单入口不存在："
-                f"{os.path.relpath(target_path, HTTP_BASE)}",
-            ))
-            _LINK_ERRORS += 1
-            continue
-        _reconcile_links([(link_path, _link_text(link_path, target_path))])
-
-    monitor_root = os.path.join(proj_dir, "99-output-monitor")
-    _prepare_project_dir(proj_dir, os.path.join(proj_dir, "99-output-ztp"))
-    for net_type, _csv_name, *output_names in _MONITOR_SPECS:
-        project_net_dir = os.path.join(monitor_root, net_type)
-        paths = [project_net_dir] + [os.path.join(project_net_dir, n) for n in output_names]
-        for path in paths:
-            _prepare_project_dir(proj_dir, path)
-        log_path = os.path.join(project_net_dir, "cronjob.log")
-        if not os.path.exists(log_path) and _safe_target_path(proj_dir, log_path):
-            if _DRY_RUN:
-                print(_c(CYAN, f"  [DRY] touch {os.path.relpath(log_path, HERE)}"))
-            else:
-                open(log_path, "a").close()
-
-    _reconcile_links((link_path, _link_text(link_path, target_path))
-                     for link_path, target_path in _monitor_link_paths(proj_dir))
-
-
-def _process_table_links(proj_dir):
-    """The G12 rows no older stage makes (view None in SETUP_LINK_SPECS, v3.1.1 WP-1).
-
-    The preparation step makes the project directories behind their "prepared" rows; the engine then
-    reconciles every row.  An "optional" row may dangle (R-016 §3.4: an absent 04-device-aliases.csv is
-    normal), so its target is never created.
-    """
-    rows = [row for row in SETUP_LINK_SPECS if row.view is None]
-    for row in rows:
-        if row.role == "prepared" and row.base == "project":
-            _prepare_project_dir(proj_dir, os.path.join(proj_dir, row.target))
-    _reconcile_links((os.path.join(HTTP_BASE, row.path), _spec_link_text(row, proj_dir)) for row in rows)
+    """Return the shared live monitor mappings: (tree link, project file or repository alias)."""
+    return [(os.path.join(HTTP_BASE, name),
+             os.path.join(HTTP_BASE, alias) if alias else os.path.join(proj_dir, target))
+            for name, target, alias in MONITOR_RUNTIME_MAPPINGS]
 
 
 def _process_latest_yaml(_proj_dir):
@@ -1080,18 +904,32 @@ def _process_optimize_sample(proj_dir):
         _reconcile_links([(str(link), os.path.relpath(os.path.realpath(target), os.path.realpath(sample)))])
 
 
-def _remove_legacy_nvos_output_links():
-    """移除旧版 setup 创建的 NVOS 输出链接；不删除项目中的真实旧数据。"""
-    template_dir = os.path.join(ZTP, "config", "nvos", "template")
-    for name in ("99-output-ib", "99-output-nvl", "99-output-published"):
-        path = os.path.join(template_dir, name)
+def _remove_legacy_links(proj_dir):
+    """旧链接清理（R16-13，切换之后）：旧版 setup 建过、规格表里已经没有的链接，只删链接。
+
+    3 条旧 NVOS 输出名和 cumulus AIR/output-p2p（O14 的旧名）、P2P 与 AIR 目录里按工作簿名建的 *.xlsx
+    链接（p2p.xlsx 除外）、旧版建在项目 99-output-monitor/<网络>/ 下的 3 条 CSV 链接（WP-6 D6 交给 setup）。
+    同名位置是真实文件或目录时只提示、不删。
+    """
+    template = os.path.join(ZTP, "config")
+    candidates = [os.path.join(template, "nvos", "template", name)
+                  for name in ("99-output-ib", "99-output-nvl", "99-output-published")]
+    candidates.append(os.path.join(template, "cumulus", "template", "AIR", "output-p2p"))
+    for directory in (os.path.join(template, "cumulus", "template", "P2P"),
+                      os.path.join(template, "nvos", "template", "P2P"),
+                      os.path.join(template, "cumulus", "template", "AIR")):
+        candidates.extend(sorted(path for path in glob.glob(os.path.join(directory, "*.xlsx"))
+                                 if os.path.basename(path) != "p2p.xlsx"))
+    candidates.extend(os.path.join(proj_dir, "99-output-monitor", network, csv)
+                      for network, csv, *_outputs in NETWORK_MONITOR_SPECS)
+    for path in candidates:
         if os.path.islink(path):
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除旧链接 {os.path.relpath(path, HTTP_BASE)}"))
             else:
                 os.remove(path)
                 print(_c(GREEN, f"  [DEL] 旧链接 {os.path.relpath(path, HTTP_BASE)}"))
-        elif os.path.exists(path):
+        elif os.path.lexists(path):
             print(_c(YELLOW, f"  [WARN] 旧路径是实际文件或目录，未删除：{path}"))
 
 
@@ -3213,7 +3051,7 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
 
     def _run(label, path, fn):
         if not os.path.exists(path):
-            return  # 文件不存在由 _process_mapping 报告
+            return  # 不存在的文件不校验：第 2 步从模板补齐
         errs, warns = fn(path)
         if errs or warns:
             print(_c(YELLOW if not errs else RED, f"  {label}"))
@@ -3231,7 +3069,7 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
     # YAML 全局配置（合并格式）只严格校验有效族：给了 --switch 按参数，否则按
     # CSV 里实际出现的交换机类型推断（I-023），避免纯 IB/NVL 或只有 eth_jump 的
     # 项目被未使用的 Cumulus 策略阻断。
-    csv_path = os.path.join(_CSV_DIR or proj_dir, "02-devices_config.csv")
+    csv_path = os.path.join(proj_dir, "02-devices_config.csv")
     families = _switch_families(csv_path)
     if "eth" in families:
         _run("01-global.yaml (eth)",
@@ -3250,8 +3088,8 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
     _run("02-devices_config.csv", csv_path, _validate_eth_csv)
 
     # v2 MLAG membership and shared-address ownership span both project inputs.
-    # Keep this inside preflight and before _SetupLinkTransaction is created so
-    # an invalid pair can never switch any runtime link.
+    # Keep this inside step 1 (R-016 §4.2), before anything is written, so an
+    # invalid pair can never switch the project.
     global_path = os.path.join(proj_dir, "01-global.yaml")
     if ("eth" in families
             and os.path.isfile(global_path) and os.path.isfile(csv_path)):
@@ -3374,139 +3212,33 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
     return ans in ("y", "yes")
 
 
-# ── 清理上一个项目 ────────────────────────────────────────────────────────────
-
-def _managed_ztp_link_candidates():
-    """返回 setup 明确管理的 ZTP 链接，避免扫描并误删用户自建链接。"""
-    paths = [os.path.join(ZTP, ztp_rel) for ztp_rel, _proj_rel, _kind in MAPPINGS]
-    paths.extend(os.path.join(HTTP_BASE, rel) for rel, _proj_rel, _kind in WORKSPACE_INPUT_MAPPINGS)
-    paths.extend([
-        os.path.join(ZTP, "config", "cumulus", "latest_yaml"),
-        os.path.join(ZTP, "config", "nvos", "latest_yaml"),
-        os.path.join(ZTP, "config", "cumulus", "template", "P2P", "output-p2p"),
-        os.path.join(ZTP, "config", "nvos", "template", "P2P", "output-p2p"),
-        # 兼容清理由目录更名前的 setup 创建的旧链接。
-        os.path.join(ZTP, "config", "cumulus", "template", "AIR", "output-p2p"),
-        os.path.join(ZTP, "config", "nvos", "template", "99-output-ib"),
-        os.path.join(ZTP, "config", "nvos", "template", "99-output-nvl"),
-        os.path.join(ZTP, "config", "nvos", "template", "99-output-published"),
-    ])
-    paths.extend(P2P_INPUT_LINKS)
-    paths.extend(link_path for link_path, _project_rel in BRINGUP_OUTPUT_MAPPINGS)
-    paths.extend(link_path for link_path, _target in _bringup_input_pairs(None))
-    paths.extend(link_path for link_path, _project_rel in ANALYZER_INPUT_MAPPINGS)
-    paths.extend(link_path for link_path, _project_rel in ANALYZER_OUTPUT_MAPPINGS)
-    patterns = [
-        os.path.join(ZTP, "image", "cumulus", "*.bin"),
-        os.path.join(ZTP, "image", "nvos", "*.bin"),
-        *(os.path.join(key_dir, "*.pub") for key_dir in _publickey_roots()),
-        os.path.join(ZTP, "config", "cumulus", "template", "P2P", "*.xlsx"),
-        os.path.join(ZTP, "config", "nvos", "template", "P2P", "*.xlsx"),
-        os.path.join(ZTP, "config", "cumulus", "template", "AIR", "*.xlsx"),
-    ]
-    for pattern in patterns:
-        paths.extend(glob.glob(pattern))
-    paths.extend(glob.glob(os.path.join(ZTP, "optimize", "*-sample", "*")))
-    return sorted({path for path in paths if os.path.islink(path)})
-
-
-def _unsetup_previous(proj_dir):
-    """
-    在 setup 之前清理遗留链接：
-      1. setup 管理范围内所有指向其他 DAY0-Prepare 项目（非 proj_dir）的软链接
-    """
-    proj_real = os.path.realpath(proj_dir)
-    here_real = os.path.realpath(HERE)   # DAY0-Prepare/
-    to_del = []
-
-    # 1. ZTP 动态链接 + 工作目录中的固定管理位置。
-    candidates = _managed_ztp_link_candidates()
-    candidates.extend(lp for lp, _ in _monitor_link_paths(proj_dir))
-    candidates.extend(lp for lp, _ in _bringup_link_pairs(proj_dir))
-    candidates.extend(lp for lp, _ in _analyzer_input_pairs(proj_dir))
-    candidates.extend(lp for lp, _ in _analyzer_output_pairs(proj_dir))
-    candidates.extend(lp for lp, _ in _monitor_inventory_link_pairs())
-    legacy_monitor_csv = set(_legacy_project_monitor_csv_links(proj_dir))
-    candidates.extend(legacy_monitor_csv)
-    candidates.extend(lp for lp, _ in _NET_CSV_LINKS)
-    for lp in sorted(set(candidates)):
-        # REQ-19 has a separate ownership and atomic re-point contract.  The
-        # generic cleanup must never unlink this path, even for a foreign link.
-        if os.path.abspath(lp) == os.path.join(HTTP_BASE, INFRA_LOG_REL):
-            continue
-        if not os.path.islink(lp):
-            continue
-        target_real = os.path.realpath(lp)
-        # 只关心指向 DAY0-Prepare/ 下的链接
-        if not (target_real == here_real or target_real.startswith(here_real + os.sep)):
-            continue
-        # 旧版镜像链接即使指向当前项目也必须移除；镜像现由 http/image/ 统一提供。
-        image_root = os.path.join(ZTP, "image") + os.sep
-        if os.path.abspath(lp).startswith(image_root):
-            if _NO_UPGRADE:
-                continue
-            to_del.append(lp)
-            continue
-        # 旧版项目监控 CSV 已由 monitor/02-devices_config.csv 取代。
-        if lp in legacy_monitor_csv:
-            to_del.append(lp)
-            continue
-        # 当前项目的链接保留
-        if target_real == proj_real or target_real.startswith(proj_real + os.sep):
-            continue
-        to_del.append(lp)
-
-    # 去重（同一路径可能来自多个固定管理集合）
-    seen = set(); to_del = [lp for lp in to_del if not (lp in seen or seen.add(lp))]
-
-    if not to_del:
-        return True
-
-    print(_c(YELLOW, f"\n── 清理上一个项目遗留链接（共 {len(to_del)} 个）────────────────────"))
-    for lp in to_del:
-        rel = os.path.relpath(lp, HTTP_BASE)
-        print(f"  {rel}  →  {os.readlink(lp)}")
-
-    if not _authorize_project_switch(proj_dir, len(to_del)):
-        return False
-
-    for lp in to_del:
-        rel = os.path.relpath(lp, HTTP_BASE)
-        if _DRY_RUN:
-            print(_c(CYAN,  f"  [DRY] 删除 {rel}"))
-        else:
-            os.remove(lp)
-            print(_c(GREEN, f"  [DEL] {rel}"))
-    return True
-
+# ── 跨项目切换的确认 ──────────────────────────────────────────────────────────
 
 def _authorize_project_switch(proj_dir, affected_count):
-    """Require a distinct acknowledgement before deleting another project.
+    """One confirmation before ``proj_dir`` takes over from another project (R-016 Q4).
 
-    ``-y`` remains appropriate for repairing links which already belong to the
-    selected project, but it is deliberately not authority to retire links for
-    a different project.  The load orchestrator supplies the dedicated flag
-    after naming and validating its target; an interactive operator must type
-    the complete word ``yes``.
+    -y/--yes skips the question (owner 2026-11-03「好的」); --confirm-project-switch stays its synonym, which
+    load passes after naming and validating its target.  An interactive operator must type the complete word
+    ``yes``; without a terminal and without either flag the switch is refused.
     """
     if _DRY_RUN:
         print(_c(
             CYAN,
-            "  [DRY] 跨项目切换需要完整输入 yes；当前仅预览，不删除链接",
+            "  [DRY] 跨项目切换需要确认（yes、-y/--yes 或 --confirm-project-switch）；当前仅预览",
         ))
         return True
-    if _CONFIRM_PROJECT_SWITCH:
+    if _AUTO_YES or _CONFIRM_PROJECT_SWITCH:
         print(_c(
             YELLOW,
-            "已收到独立的跨项目切换确认；"
+            "已确认跨项目切换（-y/--yes 或 --confirm-project-switch）；"
             f"将为 {os.path.basename(proj_dir)} 更新 {affected_count} 个链接",
         ))
         return True
     if not sys.stdin.isatty():
         print(_c(
             RED,
-            "非交互终端拒绝跨项目切换；完整 load 必须显式传递 "
-            "--confirm-project-switch",
+            "非交互终端拒绝跨项目切换；请加 -y/--yes"
+            "（load 传 --confirm-project-switch）",
         ))
         return False
     try:
@@ -3901,7 +3633,7 @@ def _restore_pending_infra_log_backup(source, destination):
     if parent_info.st_dev != info.st_dev:
         raise OSError(errno.EXDEV, "日志恢复仅支持同文件系统，拒绝跨设备", restore_parent)
     if os.path.islink(source):
-        if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+        if not _infra_log_link_reaches(source, destination):
             raise ValueError("待恢复日志链接不是所选项目的规范链接")
         os.remove(source)
     elif os.path.lexists(source):
@@ -3991,7 +3723,7 @@ def _rollback_infra_log_migration():
     if parent_info.st_dev != backup_info.st_dev:
         raise OSError(errno.EXDEV, "日志恢复仅支持同文件系统，拒绝跨设备", restore_parent)
     if os.path.islink(source):
-        if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+        if not _infra_log_link_reaches(source, destination):
             raise ValueError("日志迁移回滚拒绝删除非所选项目链接")
         os.remove(source)
     elif os.path.lexists(source):
@@ -4006,7 +3738,7 @@ def _rollback_infra_log_migration():
 def _complete_infra_log_finalization(source, destination, receipt):
     """Idempotently discard only receipt-bound backup entries after commit."""
     backup = _infra_log_backup_path(destination)
-    if managed_infra_log_project(source, HERE) != Path(os.path.dirname(destination)):
+    if not _infra_log_link_reaches(source, destination):
         raise ValueError("日志迁移提交恢复时规范链接缺失")
     has_backup = os.path.lexists(backup)
     if has_backup:
@@ -4050,11 +3782,28 @@ def _finalize_infra_log_migration():
     _INFRA_LOG_MIGRATION = None
 
 
+def _infra_log_link_reaches(source, destination):
+    """Whether infra/logs is setup's link to ``destination``: the pointer form (R-016 §2) or, written before
+    v3.1.1, the direct ../DAY0-Prepare/<project>/99-output-infra; either way it must reach ``destination``."""
+    try:
+        return (os.path.islink(source)
+                and os.readlink(source) in {pointer_link_target(INFRA_LOG_REL, "99-output-infra"),
+                                            os.path.relpath(destination, os.path.dirname(source))}
+                and Path(source).resolve(strict=True) == Path(destination).resolve(strict=True))
+    except (OSError, RuntimeError):
+        return False
+
+
 def _bind_infra_logs(proj_dir):
-    """Bind an absent root, migrate a real root, or re-point an owned link."""
+    """Bind infra/logs through the pointer: bind an absent root, migrate a real root, or re-point a link.
+
+    The link text is the table's pointer form (R-016 §2), so once bound it never changes with the project.
+    A pre-v3.1.1 direct link to a DAY0 project's real 99-output-infra is replaced (R-016 §8); any other link
+    fails closed (REQ-19).  Runs after the switch (R16-13), so the pointer already names ``proj_dir``.
+    """
     path = os.path.join(HTTP_BASE, INFRA_LOG_REL)
     target = os.path.join(proj_dir, "99-output-infra")
-    relative = os.path.relpath(target, os.path.dirname(path))
+    relative = pointer_link_target(INFRA_LOG_REL, "99-output-infra")
     if (not stat.S_ISDIR(os.lstat(proj_dir).st_mode)
             or not stat.S_ISDIR(os.lstat(target).st_mode)):
         raise ValueError("项目及其 99-output-infra 必须是真实目录")
@@ -4072,11 +3821,22 @@ def _bind_infra_logs(proj_dir):
         raise ValueError(f"{INFRA_LOG_REL} 不是实际目录或规范链接")
     if _read_infra_log_receipt() is not None:
         raise ValueError("日志迁移凭据尚未结清，拒绝重新绑定")
-    previous_project = managed_infra_log_project(path, HERE)
-    if previous_project is None:
-        raise ValueError(f"{INFRA_LOG_REL} 不是规范 DAY0 项目日志链接")
-    if os.readlink(path) == relative:
+    text = os.readlink(path)
+    if text == relative:
         return "skipped"
+    legacy = os.path.normpath(os.path.join(os.path.dirname(path), text))
+    previous_project = Path(os.path.dirname(legacy))
+    try:
+        legacy_ok = (not os.path.isabs(text) and os.path.basename(legacy) == "99-output-infra"
+                     and previous_project.parent == Path(os.path.abspath(HERE))
+                     and text == os.path.relpath(legacy, os.path.dirname(path))
+                     and stat.S_ISDIR(previous_project.lstat().st_mode)
+                     and stat.S_ISDIR(os.lstat(legacy).st_mode)
+                     and Path(path).resolve(strict=True) == Path(legacy).resolve(strict=True))
+    except (OSError, RuntimeError):
+        legacy_ok = False
+    if not legacy_ok:
+        raise ValueError(f"{INFRA_LOG_REL} 不是规范 DAY0 项目日志链接")
     if previous_project != Path(proj_dir):
         if not _authorize_project_switch(proj_dir, 1):
             raise ValueError(f"未授权切换 {INFRA_LOG_REL} 的归属")
@@ -4088,7 +3848,7 @@ def _bind_infra_logs(proj_dir):
         current = os.lstat(path)
         if ((current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino)
                 or not stat.S_ISLNK(current.st_mode)
-                or managed_infra_log_project(path, HERE) != previous_project):
+                or os.readlink(path) != text):
             raise ValueError(f"{INFRA_LOG_REL} 在切换前发生变化")
         os.replace(temporary, path)
     finally:
@@ -4097,92 +3857,90 @@ def _bind_infra_logs(proj_dir):
     return "linked"
 
 
-class _SetupLinkTransaction:
-    """Snapshot every managed link and restore the whole set on failure."""
+# ── 主流程（R-016 §4.2：6 步，每一步都能重复执行）──────────────────────────────
 
-    def __init__(self, paths):
-        self.states = {}
-        for path in sorted(set(map(os.path.abspath, paths))):
-            if os.path.islink(path):
-                self.states[path] = ("link", os.readlink(path))
-            elif os.path.lexists(path):
-                self.states[path] = ("other", None)
-            else:
-                self.states[path] = ("missing", None)
-        if os.path.isfile(MANIFEST_FILE):
-            with open(MANIFEST_FILE, "rb") as stream:
-                self.manifest = stream.read()
-        else:
-            self.manifest = None
-        self.active = True
-
-    @staticmethod
-    def _restore_link(path, target):
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        temporary = os.path.join(
-            os.path.dirname(path), f".{os.path.basename(path)}.rollback.{os.getpid()}"
-        )
-        try:
-            if os.path.lexists(temporary):
-                os.remove(temporary)
-            os.symlink(target, temporary)
-            os.replace(temporary, path)
-        finally:
-            if os.path.lexists(temporary):
-                os.remove(temporary)
-
-    def rollback(self):
-        if not self.active or _DRY_RUN:
-            return
-        print(_c(YELLOW, "\n── setup 失败，回滚全部链接切换 ────────────────────────────────"))
-        failures = []
-        for path, (kind, target) in self.states.items():
-            try:
-                if kind == "link":
-                    if os.path.lexists(path) and not os.path.islink(path):
-                        failures.append(f"{path} 已变成实际文件/目录")
-                        continue
-                    if not (os.path.islink(path) and os.readlink(path) == target):
-                        self._restore_link(path, target)
-                elif kind == "missing" and os.path.islink(path):
-                    os.remove(path)
-                # Existing real files/directories are never setup mutations.
-            except OSError as exc:
-                failures.append(f"{path}: {exc}")
-        try:
-            if self.manifest is None:
-                if os.path.isfile(MANIFEST_FILE):
-                    os.remove(MANIFEST_FILE)
-            else:
-                os.makedirs(os.path.dirname(MANIFEST_FILE), exist_ok=True)
-                temporary = MANIFEST_FILE + f".rollback.{os.getpid()}"
-                with open(temporary, "wb") as stream:
-                    stream.write(self.manifest)
-                os.replace(temporary, MANIFEST_FILE)
-        except OSError as exc:
-            failures.append(f"{MANIFEST_FILE}: {exc}")
-        self.active = False
-        if failures:
-            print(_c(RED, "  [ERROR] 回滚不完整：" + "；".join(failures)))
-        else:
-            print(_c(GREEN, "  [ROLLBACK] 已恢复 setup 前的全部链接和 manifest"))
-
-    def commit(self):
-        self.active = False
+class _TargetInvalid(ValueError):
+    """R-016 §4.2 第 1 步: the target failed validation before anything was written; main exits 2."""
 
 
-def _setup_transaction_paths(proj_dir):
-    paths = set(_managed_ztp_link_candidates())
-    paths.update(_collect_expected_links(proj_dir))
-    paths.update(os.path.join(HTTP_BASE, row.path) for row in SETUP_LINK_SPECS if row.view is None)
-    paths.add(os.path.join(proj_dir, "p2p.xlsx"))
-    return paths
+def _reconcile_table_links():
+    """Step 3: the reconcile engine, once, over every row of the link table setup writes.
+
+    A project row's text goes through DAY0-Prepare/activate-project, so it does not depend on the project and
+    this step runs before the switch (R-016 §4.2 第 3 步).  Rows written elsewhere: the publisher's latest_yaml
+    (R-016 §3.4, _process_latest_yaml); infra/logs, the same pointer text but bound by REQ-19's receipt-backed
+    _bind_infra_logs (a real log directory there is migrated, not reported).  The AIR json row has the
+    fixed name 99-output-p2p/p2p-air.json since I-031 and is reconciled here like any optional row.  A tools/ row is skipped while its
+    tool directory is absent: an offline analyzer is not recreated on a management server.  Returns the
+    engine's results.
+    """
+    pairs = []
+    for row in SETUP_LINK_SPECS:
+        link_path = os.path.join(HTTP_BASE, row.path)
+        if (row.writer != "setup" or row.path == INFRA_LOG_REL
+                or row.path.startswith("tools/") and not os.path.isdir(os.path.dirname(link_path))):
+            continue
+        pairs.append((link_path, _spec_link_text(row)))
+    return _reconcile_links(pairs)
 
 
-# ── 主流程 ────────────────────────────────────────────────────────────────────
+def _switch_active_project(proj_dir, *, server_delegated=False):
+    """Step 4: point DAY0-Prepare/activate-project at ``proj_dir``; False when the switch is refused.
+
+    Already naming it: skip.  Naming another project: one confirmation (Q4, _authorize_project_switch).  Then
+    leftover .activate-project.*.tmp links go, .activate-project.<pid>.tmp is made and os.replace'd over the
+    pointer, and DAY0-Prepare is fsynced.  No lock and no marker (R-016 §1 第 3 条): a crash leaves the old or
+    the new pointer, and running setup again finishes the work.
+    """
+    day0 = os.path.join(HTTP_BASE, "DAY0-Prepare")
+    name = os.path.basename(proj_dir)
+    if os.path.realpath(os.path.dirname(proj_dir)) != os.path.realpath(day0):
+        print(_c(RED, f"[ERROR] {proj_dir} 不是 DAY0-Prepare 的直接子目录，不能切换"))
+        return False
+    pointer = os.path.join(day0, "activate-project")
+    current = os.readlink(pointer) if os.path.islink(pointer) else None
+    if current == name:
+        print(f"  [SKIP] activate-project 已指向 {name}")
+        return True
+    if current is None and os.path.lexists(pointer):
+        print(_c(RED, f"[ERROR] {pointer} 是实际文件/目录，不能切换（请手动处理）"))
+        return False
+    if current is not None:
+        print(_c(YELLOW, f"  当前激活项目：{current}；目标：{name}"))
+        if not server_delegated:
+            # R16-16: a warning, never a refusal.
+            print(_c(YELLOW, "  [WARN] 若 ZTP/DHCP 服务正在运行，只用 setup 切换会让发布内容混用两个项目；"
+                             "请用 load 切换"))
+        if not _authorize_project_switch(proj_dir, 1):
+            return False
+    if _DRY_RUN:
+        print(_c(CYAN, f"  [DRY] activate-project → {name}"))
+        return True
+    for leftover in glob.glob(os.path.join(day0, ".activate-project.*.tmp")):
+        if os.path.islink(leftover):
+            os.remove(leftover)
+    temporary = os.path.join(day0, f".activate-project.{os.getpid()}.tmp")
+    os.symlink(name, temporary)
+    os.replace(temporary, pointer)
+    descriptor = os.open(day0, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    print(_c(GREEN, f"  [SWITCH] activate-project → {name}" + (f"（原来是 {current}）" if current else "")))
+    return True
+
 
 def _setup_impl(proj_dir, *, server_delegated=False):
-    global _LINK_ERRORS, _P2P_SOURCE, _LINK_TRANSACTION
+    """Activate ``proj_dir`` in the six steps of R-016 §4.2; each one is safe to repeat.
+
+    1 validate, writing nothing: failure exits 2 (with --force validation errors are only warnings, O13);
+    2 prepare the target, writing only the project: an error exits 1 before the switch; 3 reconcile the link
+    table, errors counted; 4 switch the pointer, then what follows it (R16-13); 5 write the derived
+    ztp/.setup_manifest (Q5); 6 exit 1 when errors were counted, the switch kept.  No rollback (O6, owner
+    2026-11-07): running setup again repairs a failed run.
+    """
+    global _LINK_ERRORS, _P2P_SOURCE
     _dhcp_enabled, _ztp_enabled, r22_source = _require_r22_subnet_input(proj_dir)
     if _r22_subnet_source_fingerprint(
         Path(proj_dir) / "02-dhcp-subnet_config.csv"
@@ -4192,44 +3950,33 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     print(f"\n项目目录：{proj_dir}")
     print(f"ZTP 目录：{ZTP}\n")
 
-    # R-014 第 3 条：setup 读项目输入的入口。用户建的输入链接在任何写入之前解析一次、
-    # 按真实文件校验；目标不存在或不是非空普通文件时停止，绝不顺着链接写（R-014 第 2 条）。
+    print("── 1/6 校验目标项目（不写任何东西）──────────────────────────────")
+    if server_delegated:
+        # Load's server child checks the two project keys first, as before any P2P work (exit 1, REQ-16).
+        _require_delegated_laptop_public_key(proj_dir)
+    # R-014 第 3 条：用户建的输入链接在入口解析一次、按真实文件校验；目标不存在或不是非空普通文件时
+    # 停止，绝不顺着链接写（R-014 第 2 条）。
     try:
         linked_inputs = read_project_input_links(Path(proj_dir))
     except (OSError, ValueError) as exc:
         print(_c(RED, f"[ERROR] {exc}"))
-        sys.exit(1)
+        sys.exit(2)
     for item in linked_inputs:
         print(f"  [LINK-INPUT] {item.name} 来自链接 → {item.real_path}（sha256 {item.sha256}）")
+    _P2P_SOURCE = _select_p2p_source(proj_dir, plan_only=True)
+    if not _P2P_SOURCE:
+        sys.exit(2)
+    if not _validate_project(proj_dir, expected_r22_source=r22_source):
+        sys.exit(2)
 
-    if server_delegated:
-        _require_delegated_laptop_public_key(proj_dir)
+    print("\n── 2/6 准备目标项目（只写这个项目）──────────────────────────────")
     _initialize_project_from_template(proj_dir)
     if not server_delegated:
         _prepare_laptop_public_key(proj_dir)
     _P2P_SOURCE = _select_p2p_source(proj_dir)
-    if not _P2P_SOURCE:
-        sys.exit(1)
-    if not _validate_project(proj_dir, expected_r22_source=r22_source):
-        sys.exit(1)
-    print()
-
-    if not _DRY_RUN:
-        _restore_pending_infra_log_backup(
-            os.path.join(HTTP_BASE, INFRA_LOG_REL),
-            os.path.join(proj_dir, "99-output-infra"),
-        )
-    _LINK_TRANSACTION = _SetupLinkTransaction(_setup_transaction_paths(proj_dir))
-    canonical_p2p = _ensure_project_p2p_link(proj_dir, _P2P_SOURCE)
+    canonical_p2p = _P2P_SOURCE and _ensure_project_p2p_link(proj_dir, _P2P_SOURCE)
     if not canonical_p2p:
         sys.exit(1)
-    if not _unsetup_previous(proj_dir):
-        sys.exit(1)
-
-    if not _check_conflicts(proj_dir):
-        sys.exit(1)
-
-    print("── 创建输出目录 ──────────────────────────────────────────────────")
     for d in OUTPUT_DIRS:
         path = os.path.join(proj_dir, d)
         if os.path.exists(path):
@@ -4241,98 +3988,72 @@ def _setup_impl(proj_dir, *, server_delegated=False):
         else:
             os.makedirs(path, exist_ok=True)
             print(_c(GREEN, f"  [MKDIR] {d}/"))
+    # What the table says preparation makes (R-016 §3.4 "prepared"): directories and empty output files.
+    for row in SETUP_LINK_SPECS:
+        if row.base != "project" or row.role != "prepared":
+            continue
+        target = os.path.join(proj_dir, row.target)
+        if row.kind == "dir":
+            _prepare_project_dir(proj_dir, target)
+        elif not os.path.exists(target) and _safe_target_path(proj_dir, target):
+            _prepare_project_dir(proj_dir, os.path.dirname(target))
+            if _DRY_RUN:
+                print(_c(CYAN, f"  [DRY] touch {row.target}"))
+            else:
+                open(target, "a").close()
+                print(f"  [TOUCH] {row.target}")
+    if _LINK_ERRORS:
+        print(_c(RED, f"准备目标项目有 {_LINK_ERRORS} 个错误：没有切换，处理后重跑 setup"))
+        sys.exit(1)
 
-    linked = skipped = missing = errors = 0
+    print("\n── 3/6 核对链接规格表（错误只计数）──────────────────────────────")
+    results = _reconcile_table_links()
 
-    print("\n── 固定映射 ──────────────────────────────────────────────────────")
-    _remove_legacy_nvos_output_links()
-    if _CSV_DIR:
-        print(_c(CYAN, f"  CSV 目录：{_CSV_DIR}"))
-    for ztp_rel, proj_rel, kind in MAPPINGS:
-        result = _process_mapping(proj_dir, ztp_rel, proj_rel, kind, src_base=_CSV_DIR)
-        if result == "linked":   linked  += 1
-        elif result == "skipped":skipped += 1
-        elif result == "missing":missing += 1
-        elif result == "error":  pass  # 由 _reconcile_links 统一计数，避免动态链接漏报
-
-    print("\n── Infra 部署输入 ─────────────────────────────────────────────────")
-    for workspace_rel, proj_rel, kind in WORKSPACE_INPUT_MAPPINGS:
-        if workspace_rel == INFRA_LOG_REL:
-            result = _bind_infra_logs(proj_dir)
-        else:
-            result = _process_mapping(
-                proj_dir, workspace_rel, proj_rel, kind,
-                src_base=_CSV_DIR, link_root=HTTP_BASE,
-            )
-        if result == "linked":   linked += 1
-        elif result == "skipped": skipped += 1
-        elif result == "missing": missing += 1
-
-    print("\n── 共享镜像文件（http/image）────────────────────────────────────")
-    _process_bin_files()
-
-    print("\n── P2P 文件（AIR / LLDPq / CVT 共用）────────────────────────────")
-    # Every consumer sees the stable project-level name.  If the project keeps
-    # versioned workbooks under p2p/, this link resolves to the selected latest
-    # source while downstream scripts remain independent of customer filenames.
-    _process_xlsx_files(proj_dir, canonical_p2p)
-
-    print("\n── InfiniBand bringup 输出链接 ──────────────────────────────────")
-    _process_bringup_links(proj_dir)
-    _process_bringup_input_links(proj_dir)
-    _process_bringup_image_links()
-
-    print("\n── P2P 拓扑分析输入和报告链接 ──────────────────────────────────")
-    _process_analyzer_links(proj_dir)
-
-    print("\n── 公钥文件 ─────────────────────────────────────────────────────")
+    print("\n── 4/6 切换 activate-project ─────────────────────────────────────")
+    if not _switch_active_project(proj_dir, server_delegated=server_delegated):
+        sys.exit(1)
+    # R16-13: what follows the switch, by the target project's real path.
+    print("\n── 切换之后：公钥链接、发布指针、共享镜像、optimize、旧链接、infra/logs ──")
     _process_pubkeys(proj_dir)
-
-    print("\n── 最新发布链接（latest_yaml / optimize）────────────────────────")
     _process_latest_yaml(proj_dir)
-
-    print("\n── Optimize 配置比较样例链接 ───────────────────────────────────")
+    _process_bin_files()
+    _process_bringup_image_links()
     _process_optimize_sample(proj_dir)
+    _remove_legacy_links(proj_dir)
+    _process_xlsx_files(proj_dir, canonical_p2p)
+    if not _DRY_RUN:
+        _restore_pending_infra_log_backup(
+            os.path.join(HTTP_BASE, INFRA_LOG_REL),
+            os.path.join(proj_dir, "99-output-infra"),
+        )
+    _bind_infra_logs(proj_dir)
 
-    print("\n── 网络类型 CSV 链接（ethernet / infiniband / nvlink）────────────")
-    _process_net_csv_links(proj_dir)
-
-    print("\n── 监控输出链接（采集目录 / 日志 / 汇总页面）────────────────────")
-    _process_monitor_links(proj_dir)
-
-    print("\n── 链接规格表其余各行（结构对齐 / 网络 02 / 状态目录 / bringup）──────")
-    _process_table_links(proj_dir)
+    print("\n── 5/6 派生记录 ztp/.setup_manifest ───────────────────────────────")
+    if not _DRY_RUN:
+        _write_manifest(proj_dir)
+        _finalize_infra_log_migration()
 
     errors = _LINK_ERRORS
-    print(f"\n完成：固定映射创建 {linked} 个、跳过 {skipped} 个、"
-          f"缺失 {missing} 个、错误 {errors} 个；动态文件和监控链接已逐项处理")
+    print(f"\n── 6/6 完成：链接规格表 {len(results)} 行，新建或改写 {results.count('linked')} 个、"
+          f"已正确 {results.count('skipped')} 个；全部错误 {errors} 个")
     try:
         usage = measure_output_usage(Path(proj_dir))
         print(format_output_usage(proj_dir, usage))
     except ValueError as exc:
         print(_c(YELLOW, f"[WARN] 无法安全统计 99-output-* 容量：{exc}"))
-    if missing:
-        print(_c(YELLOW, "提示：缺失的可选文件可后续补充后重新运行 setup.py"))
     if errors:
-        print(_c(RED, "提示：有错误项需手动处理"))
-
-    if not _DRY_RUN and not errors:
-        _write_manifest(proj_dir)
-        _print_next_steps(proj_dir)
-        _LINK_TRANSACTION.commit()
-        _LINK_TRANSACTION = None
-        _finalize_infra_log_migration()
-    elif errors:
-        print(_c(RED, "setup 未完成：未写入成功清单，请处理错误后重试"))
+        print(_c(RED, f"已切换到 {os.path.basename(proj_dir)}，但有 {errors} 个错误：处理后重跑 setup"))
         sys.exit(1)
-    else:
-        # dry-run never mutates links, so no rollback/commit work is required.
-        _LINK_TRANSACTION = None
+    if not _DRY_RUN:
+        _print_next_steps(proj_dir)
 
 
 def setup(proj_dir, *, server_delegated=False):
-    """Run setup as one link transaction; any failure restores prior state."""
-    global _LINK_TRANSACTION, _INFRA_LOG_MIGRATION
+    """Run the six activation steps (R-016 §4.2) under the infra-log root lock.
+
+    Links are never rolled back (O6): running setup again repairs a failed run.  Only REQ-19's
+    receipt-backed infra/logs migration is undone when this run fails before finalizing it.
+    """
     require_project_eligible(Path(proj_dir))
     _require_r22_subnet_input(proj_dir)
     if _INFRA_LOG_MIGRATION is not None:
@@ -4356,16 +4077,21 @@ def setup(proj_dir, *, server_delegated=False):
             return _setup_impl(proj_dir, server_delegated=server_delegated)
         except BaseException:
             _rollback_infra_log_migration()
-            if _LINK_TRANSACTION is not None:
-                _LINK_TRANSACTION.rollback()
-                _LINK_TRANSACTION = None
             raise
 
 
 def _write_manifest(proj_dir):
-    """只记录本项目实际创建成功的链接，避免清单与文件系统状态不一致。"""
-    expected = sorted(set(_collect_expected_links(proj_dir)))
-    links = [lp for lp in expected if os.path.islink(lp)]
+    """Step 5 (R-016 §4.2, Q5): the derived record ztp/.setup_manifest, derived from the link table (review A8).
+
+    First line names the real project directory; then every link of the table in place: each SETUP_LINK_SPECS
+    row, the shared section (SHARED_LINK_SPECS) and the dynamic section (setup_dynamic_link_patterns(): per-key
+    links, optimize samples), the last two by their globs.  A record only: the active project is the pointer
+    (project_contract.active_project_dir).
+    """
+    candidates = [os.path.join(HTTP_BASE, row.path) for row in SETUP_LINK_SPECS]
+    for pattern in (*(row.path for row in SHARED_LINK_SPECS), *setup_dynamic_link_patterns()):
+        candidates.extend(glob.glob(os.path.join(glob.escape(HTTP_BASE), pattern)))
+    links = sorted({path for path in candidates if os.path.islink(path)})
     manifest_dir = os.path.dirname(MANIFEST_FILE)
     os.makedirs(manifest_dir, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(
@@ -4789,12 +4515,16 @@ def _print_project_list():
 
 def _parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description=("校验并激活一个 DAY0 项目，创建全套运行时软链接。已有链接直接替换（打印旧目标 → 新目标）；"
-                     "同名真实文件或目录只报错、不删；不往项目里指向项目外的链接里写。"),
+        description=("校验并激活一个 DAY0 项目：让 DAY0-Prepare/activate-project 指向它，并核对树里经这个指针的"
+                     "固定链接（R-016）。分 6 步，每一步都能重复执行，出了问题就重跑：校验不通过以 2 退出、"
+                     "什么都不改；准备目标项目出错以 1 退出、不切换；之后的错误以 1 退出、已经切换。"
+                     "已有链接直接替换（打印旧目标 → 新目标）；同名真实文件或目录只报错、不删；"
+                     "不往项目里指向项目外的链接里写。切换那一刻正在运行的工具，结果不保证。"),
         epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
     )
     parser.add_argument(
-        "project", nargs="?", help="DAY0-Prepare 下的项目名或项目绝对路径",
+        "project", nargs="?",
+        help="DAY0-Prepare 的直接子目录：项目名或它的绝对路径；必须是真实目录，不能是 template",
     )
     discovery = parser.add_mutually_exclusive_group()
     discovery.add_argument(
@@ -4813,33 +4543,35 @@ def _parse_args(argv=None):
         "--host-role", choices=("workstation", "management-server"),
         help="Linux 必须显式声明本机角色；Darwin 默认为 workstation",
     )
-    parser.add_argument("-y", action="store_true", dest="auto_yes",
-                        help="自动确认发布指针（latest、latest_yaml）的替换；固定链接本来就直接替换；不授权跨项目切换")
+    parser.add_argument("-y", "--yes", action="store_true", dest="auto_yes",
+                        help="从另一个项目切换过来时不再询问；发布指针（latest、latest_yaml）替换也不询问")
     parser.add_argument(
         "--confirm-project-switch", action="store_true",
-        help="显式确认跨项目切换；供已验证目标的完整 load 自动化使用",
+        help="同 -y/--yes 的跨项目切换确认；load 使用",
     )
     parser.add_argument("--force", action="store_true",
-                        help="忽略输入校验错误继续（独立于 -y）")
+                        help="校验错误降为警告，照样准备目标项目并切换（独立于 -y）")
     parser.add_argument("--strict", action="store_true",
                         help="把空公钥、XLSX 和共享镜像占位视为错误")
     parser.add_argument("--no-upgrade", action="store_true",
                         help="不检查或发布升级镜像；load --no-upgrade 委派时使用")
     parser.add_argument("--dry-run", action="store_true",
                         help="只显示操作，不创建项目、文件、目录或链接")
-    parser.add_argument("--csv-dir",
-                        help="从指定目录读取 devices_config.csv")
     parser.add_argument("--p2p-file",
-                        help="明确选择项目根目录或 p2p/ 下的 P2P XLSX")
+                        help="项目根目录内的 P2P XLSX 文件名，多个工作簿时明确选择 P2P 源")
     parser.add_argument(
         "--switch", choices=("eth", "ib", "nvl"), dest="switch_scope",
         help="只严格校验所选设备族的 global 配置；不给时按 CSV 里出现的设备类型推断",
     )
+    arguments = sys.argv[1:] if argv is None else argv
+    if any(item == "--csv-dir" or item.startswith("--csv-dir=") for item in arguments):
+        parser.error("--csv-dir 已退役（R-016 Q1）：在项目里建 02-devices_config.csv → 外部文件 的链接代替"
+                     "（R-014 第 3 条）")
     args = parser.parse_args(argv)
     if args.status or args.list_projects:
         if args.project is not None or any((
             args.create, args.auto_yes, args.confirm_project_switch,
-            args.force, args.strict, args.dry_run, args.csv_dir, args.p2p_file,
+            args.force, args.strict, args.dry_run, args.p2p_file,
             args.host_role, args.no_upgrade, getattr(args, "switch_scope", None),
         )):
             parser.error("--status/--list-projects 是独立只读动作，不能组合变更参数")
@@ -4849,25 +4581,29 @@ def _parse_args(argv=None):
 
 
 def _main_locked(args):
-    global _CSV_DIR, _P2P_FILE
-    if args.csv_dir:
-        _CSV_DIR = os.path.realpath(args.csv_dir)
-        if not os.path.isdir(_CSV_DIR):
-            print(f"[ERROR] --csv-dir 目录不存在：{_CSV_DIR}")
-            return 1
+    global _P2P_FILE
     _P2P_FILE = args.p2p_file
 
     proj = args.project
-    if os.path.isabs(proj):
-        proj_dir = proj
-    else:
+    if not os.path.isabs(proj):
         # 去掉用户误带的 "DAY0-Prepare/" 前缀，避免二次拼接
         here_name = os.path.basename(HERE)
         if proj.startswith(here_name + os.sep) or proj.startswith(here_name + "/"):
             proj = proj[len(here_name) + 1:]
-        proj_dir = os.path.join(HERE, proj)
-
-    proj_dir = os.path.realpath(proj_dir)
+        proj = os.path.join(HERE, proj)
+    # N4 (R-016 §4.2 细节): only a direct subdirectory of DAY0-Prepare, under the one-level name the pointer
+    # will hold (project_contract.active_project_dir), and never template.
+    proj = os.path.normpath(proj)
+    name = os.path.basename(proj)
+    if (os.path.realpath(os.path.dirname(proj)) != os.path.realpath(HERE)
+            or name.startswith(".") or name in ACTIVE_PROJECT_EXCLUDED_NAMES):
+        print(_c(RED, "[ERROR] 项目只接受 DAY0-Prepare 的直接子目录（不能是 "
+                      f"{'、'.join(sorted(ACTIVE_PROJECT_EXCLUDED_NAMES))} 或以 . 开头的名字）：{args.project}"))
+        return 2
+    proj_dir = os.path.join(os.path.realpath(HERE), name)
+    if os.path.lexists(proj_dir) and not stat.S_ISDIR(os.lstat(proj_dir).st_mode):
+        print(_c(RED, f"[ERROR] 项目必须是 DAY0-Prepare 下的真实目录，不能是链接或文件：{proj_dir}"))
+        return 2
     if not os.path.isdir(proj_dir):
         if not getattr(args, "create", False):
             print(_c(
@@ -4906,10 +4642,13 @@ def _main_locked(args):
         return 1
 
     # A restored project's local commit must be durable before stopping a
-    # monitor or entering setup's link transaction. Recheck in setup() for
-    # callers that bypass this CLI entry point.
-    require_project_eligible(Path(proj_dir))
-    _require_r22_subnet_input(proj_dir)
+    # monitor or entering setup's steps. Recheck in setup() for callers that
+    # bypass this CLI entry point.  Both are step 1 validation: exit 2.
+    try:
+        require_project_eligible(Path(proj_dir))
+        _require_r22_subnet_input(proj_dir)
+    except ValueError as exc:
+        raise _TargetInvalid(str(exc)) from exc
     if not _DRY_RUN and args.host_role == "management-server":
         stop_native_ztp_monitors(HTTP_BASE)
     if getattr(args, "_server_delegated", False):
@@ -4975,6 +4714,9 @@ def main(argv=None):
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
             return _main_locked(args)
+    except _TargetInvalid as exc:
+        print(_c(RED, f"[ERROR] 目标项目校验失败：{exc}"))
+        return 2
     except (DeploymentLockError, RuntimeContractError, ValueError) as exc:
         print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))
         return 1

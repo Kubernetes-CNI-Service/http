@@ -5513,12 +5513,13 @@ print("actual-copied-validator-selected-B")
         try:
             # The DEV-based 01-a-setup has no setup-switch WAL (owner R-016 /
             # AP-b), so "without WAL" is its only state and there is no WAL
-            # switch to patch; the transaction stays active as before.
+            # switch to patch; nor a link transaction (O6, owner 2026-11-07).
             with mock.patch.multiple(SETUP, HTTP_BASE=str(self.root), ZTP=str(self.ztp),
-                                     _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0,
-                                     _LINK_TRANSACTION=SETUP._SetupLinkTransaction([])):
+                                     _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0):
                 SETUP._process_pubkeys(str(self.project))
-                for directory in (self.ztp / "config/publickey", parent / "publickey"):
+                # C99 (TEST 88f9cb3), 指导 WP-16 第 3 条: all four public-key directories (R-016 §3.2).
+                for directory in (self.ztp / "config/publickey", self.root / "ethernet/publickey",
+                                  parent / "publickey", self.root / "nvlink/publickey"):
                     self.assertEqual(mode, stat.S_IMODE(directory.stat().st_mode))
         finally:
             os.umask(original_umask)
@@ -11312,13 +11313,16 @@ print("actual-copied-validator-selected-B")
             if name == "dhcp-release-manifest.json":
                 runtime_path.unlink(missing_ok=True)
                 project_path.unlink(missing_ok=True)
+                # v3.1.1 WP-3: setup's preparation step touches the "output" target (R-016 §3.4) and its one
+                # reconcile engine links the row (was _process_mapping).
+                project_path.parent.mkdir(parents=True, exist_ok=True)
+                project_path.touch()
                 with mock.patch.object(SETUP, "_DRY_RUN", False), mock.patch.object(
                     SETUP, "_LINK_ERRORS", 0,
                 ):
-                    result = SETUP._process_mapping(
-                        str(self.project), ztp_rel, project_rel, kind,
-                        link_root=str(self.ztp),
-                    )
+                    result = SETUP._reconcile_links([(
+                        str(runtime_path), os.path.relpath(project_path, runtime_path.parent),
+                    )])[0]
                 self.assertEqual("linked", result)
             else:
                 content = runtime_path.read_bytes() if runtime_path.is_file() else b""

@@ -933,9 +933,12 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                     create=False, dry_run=False, host_role="management-server",
                     _server_delegated=False,
                 )
+                # N4: setup resolves projects against its DAY0-Prepare (HERE); this one is the fixture's.
                 with mock.patch.object(SETUP, "require_project_eligible"), mock.patch.object(
                     SETUP, "stop_native_ztp_monitors"
-                ) as stop, mock.patch.object(SETUP, "setup") as setup:
+                ) as stop, mock.patch.object(SETUP, "setup") as setup, mock.patch.object(
+                    SETUP, "HERE", str(global_yaml.parent.parent),
+                ):
                     with self.assertRaises(ValueError):
                         SETUP._main_locked(args)
                 stop.assert_not_called()
@@ -986,9 +989,12 @@ class DhcpOptionalWorkflowTests(unittest.TestCase):
                 create=False, dry_run=False, host_role="management-server",
                 _server_delegated=False,
             )
+            # N4: setup resolves projects against its DAY0-Prepare (HERE); this one is the fixture's.
             with mock.patch.object(SETUP, "require_project_eligible"), mock.patch.object(
                 SETUP, "stop_native_ztp_monitors"
-            ) as stop, mock.patch.object(SETUP, "setup") as setup:
+            ) as stop, mock.patch.object(SETUP, "setup") as setup, mock.patch.object(
+                SETUP, "HERE", str(global_yaml.parent.parent),
+            ):
                 with self.assertRaises(ValueError):
                     SETUP._main_locked(args)
             stop.assert_not_called()

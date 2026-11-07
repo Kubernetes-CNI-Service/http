@@ -1304,7 +1304,7 @@ NETWORK_MONITOR_SPECS = (
     ("infiniband", "ib.csv", "ib-info", "ib-link", "ufm-info", "ufm-ibdiagnet"),
     ("nvlink", "nvsw.csv", "nvsw-info", "nvsw-link"),
 )
-# setup's mapping kinds -> (kind, role).  "file_csv" is an inventory that --csv-dir may supply.
+# setup's mapping kinds -> (kind, role).  "file_csv" is the inventory (once --csv-dir's; retired, R-016 Q1).
 _SETUP_KIND_COLUMNS = MappingProxyType({
     "file": ("file", "required"), "file_csv": ("file", "required"),
     "output": ("file", "prepared"), "dir": ("dir", "prepared"),
@@ -1587,8 +1587,8 @@ def _direct_link_text(row: SetupLinkSpec) -> str:
 def published_runtime_link_specs():
     """Activation's live publication contract: the table's published rows, in table order.
 
-    The text stays the direct ../DAY0-Prepare/{project}/... form until v3.1.1 WP-3 switches setup and
-    readers to pointer_link_specs().
+    The text stays the direct ../DAY0-Prepare/{project}/... form until Docker activation reads
+    pointer_link_specs() (v3.1.1 WP-9c, O5); setup writes the pointer form since WP-3.
     """
     return tuple((row.path, _direct_link_text(row), _project_target(row))
                  for row in SETUP_LINK_SPECS if row.published)
@@ -1599,7 +1599,8 @@ def runtime_link_specs():
 
     Shared links, dynamic key/image names and project-internal pointers live under fully denied
     families; the fixed outer latest_yaml pointer is a row.  The P2P input/AIR targets are the fixed
-    names p2p.xlsx and p2p-air.json.  The text stays direct until WP-3 (see pointer_link_specs()).
+    names p2p.xlsx and p2p-air.json.  The text stays direct for the readers that still compare it (v3.1.1
+    WP-9); setup writes pointer_link_specs() since WP-3.
     """
     return tuple(sorted((row.path, _direct_link_text(row)) for row in SETUP_LINK_SPECS))
 
@@ -1612,8 +1613,8 @@ def pointer_link_target(link_path: str, project_name: str) -> str:
 def pointer_link_specs() -> tuple[tuple[str, str], ...]:
     """(tree path, canonical link text) of every table row (R-016 §2, the same for native and Docker).
 
-    Project rows go through DAY0-Prepare/activate-project; repository aliases keep their text.  Setup,
-    the readers and Docker switch from runtime_link_specs()' direct text to this in v3.1.1 WP-3/WP-9.
+    Project rows go through DAY0-Prepare/activate-project; repository aliases keep their text.  Setup
+    writes these since v3.1.1 WP-3 (01-a-setup.py::_spec_link_text); the readers and Docker follow in WP-9.
     """
     return tuple((row.path, pointer_link_target(row.path, row.target) if row.base == "project"
                   else _direct_link_text(row))

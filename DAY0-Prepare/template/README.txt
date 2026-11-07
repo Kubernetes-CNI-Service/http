@@ -10,8 +10,9 @@ DAY0 项目完整目录模板说明
 各公共代码目录的 README 说明生成器和采集器内部逻辑。
 
 项目目录只保存项目输入和项目结果：公共代码位于 ztp/、monitor/、infra/、tools/ 等目录，
-共享镜像/离线包位于 image/ 和 apps/。setup 在 staging 中验证本文件描述的运行链接后原子
-激活项目；load 再负责生成、发布、服务和 worker。不要手工修改 setup 管理的公共链接。
+共享镜像/离线包位于 image/ 和 apps/。setup 校验项目、补齐本文件描述的目录和文件后，
+让 DAY0-Prepare/activate-project 指向它来激活项目（见下文「激活项目」）；load 再负责生成、
+发布、服务和 worker。不要手工修改 setup 管理的公共链接。
 
 本目录是所有 DAY0 真实项目的完整模板。
 
@@ -35,6 +36,34 @@ setup 不从模板复制 laptop.pub。所有密码值
   2. 除 laptop.pub 外，把这里的缺失文件复制到真实项目。
   3. 真实项目中已经存在的同名文件或目录不会被覆盖。
   4. template 后续增加的文件或目录，会在项目下次 setup 时自动补齐。
+
+激活项目（R-016）
+----------------
+
+DAY0-Prepare/activate-project 是唯一随项目变化的链接，原文是项目的一级名字（例如
+activate-project -> 2026-09-example）。树里所有用到项目文件的链接都经过它，原文固定为
+relpath("DAY0-Prepare/activate-project/<固定名>", 链接所在目录)，例如
+ethernet/eth.csv 的原文是 ../DAY0-Prepare/activate-project/02-devices_config.csv；
+4 个公钥目录里逐把公钥的链接也一样。切换项目只换这一个指针，别的链接都不动。
+下文「可能创建的连接」箭头右边写的是链接最终到达的项目文件。
+
+setup 激活项目分 6 步，每一步都能重复执行；不回滚、不加切换标记，出了问题就再跑一次 setup：
+  1. 校验目标项目，什么都不写。项目参数只接受 DAY0-Prepare 的直接子目录（真实目录，不能是
+     template、链接或以 . 开头的名字）；global、CSV、P2P、公钥按现有规则校验。不通过以 2 退出。
+     加 --force 时，输入校验的错误降为警告，照样准备和切换。
+  2. 准备目标项目，只写这个项目：按本模板补齐、准备 laptop.pub、选 P2P 并建 p2p.xlsx 指针、
+     建 99-output-* 目录和预先存在的输出文件。出错以 1 退出，不切换，原来的项目照常可用。
+  3. 核对链接规格表（tools/project_contract.py 的 SETUP_LINK_SPECS）：不存在就建，原文不对就
+     原子替换并打印旧目标 → 新目标，同名真实文件或目录只报错、不删。错误只计数。
+  4. 切换 activate-project：已指向目标就跳过；原来指向另一个项目时询问一次，要完整输入 yes；
+     -y/--yes（--confirm-project-switch 同义，load 使用）不再询问。之后按目标项目刷新逐把公钥链接、
+     latest_yaml、共享镜像、optimize sample，清理旧版 setup 留下的链接，绑定 infra/logs。
+  5. 写派生记录 ztp/.setup_manifest。它只是记录，判断当前项目一律看指针。
+  6. 第 3 步以后有错误以 1 退出，但已经切换；处理后重跑 setup。
+切换那一刻正在运行的工具（采集、升级、手工脚本），结果不保证；ZTP/DHCP 服务正在运行时，
+请用 load 切换项目，只跑 setup 会让发布内容混用两个项目（setup 只提示，不阻止）。
+--csv-dir 已经退役：清单放在项目外时，在项目里建 02-devices_config.csv -> 外部文件 的链接
+（见下文「用户链接输入」）。
 
 本目录中的空 `.bin` 文件是镜像名称占位符，setup/load 会像其他模板文件一样把它们
 复制到真实项目，用来提醒用户应准备哪些版本。真实 Cumulus/NVOS 镜像是所有项目
@@ -325,6 +354,7 @@ README.txt
   --copy-links 推送这些内容，不推送指向项目外的 p2p.xlsx、p2p/ 链接（P2P 用
   tar-for-upload 带走）。
   01-global.yaml 和 02-dhcp-subnet_config.csv 仍必须是普通文件，不接受链接。
+  02-devices_config.csv 的链接代替已退役的 setup --csv-dir。
 
 
 二、项目输出目录

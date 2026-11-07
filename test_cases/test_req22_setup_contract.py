@@ -98,7 +98,9 @@ class Req22SetupInputTests(unittest.TestCase):
                 project=str(project), csv_dir=None, p2p_file=None,
                 create=False, host_role="management-server", _server_delegated=False,
             )
+            # N4: setup resolves projects against its DAY0-Prepare (HERE); this one is the fixture's.
             with mock.patch.object(SETUP, "require_project_eligible"), \
+                    mock.patch.object(SETUP, "HERE", str(project.parent)), \
                     mock.patch.object(
                         SETUP, "stop_native_ztp_monitors",
                         side_effect=AssertionError("monitor touched before R22 gate"),

@@ -3,7 +3,9 @@ keeps them (Q7: dangling once the pointer is gone), and the contract tables know
 2026-10-22: a script's default inputs are links in its own directory, created ahead by setup).
 
 The expected link texts are the ones the owner's environment test used (UFM-环境测试-20261022
-step0-links.sh), written out here independently of tools/project_contract.py."""
+step0-links.sh), written out here independently of tools/project_contract.py.  Those are the runtime
+specification's direct texts; since v3.1.1 WP-3 setup writes a project row through the pointer instead,
+relpath("DAY0-Prepare/activate-project/<name>", link dir) (R-016 §2; O4 left column)."""
 
 from __future__ import annotations
 
@@ -62,9 +64,9 @@ def build_tree(root: Path) -> Path:
     (root / "image/ufm.lic").write_bytes(b"fixture license\n")
     infiniband = root / "infiniband"
     (infiniband / "publickey").mkdir(parents=True)
-    # The P2P input alias and the workspace global are made by other setup stages tested elsewhere.
-    (infiniband / "p2p.xlsx").symlink_to(f"../DAY0-Prepare/{PROJECT}/p2p.xlsx")
-    (infiniband / "01-global.yaml").symlink_to(f"../DAY0-Prepare/{PROJECT}/01-global.yaml")
+    # The P2P input alias and the workspace global as setup leaves them (R-016 §2: through the pointer).
+    (infiniband / "p2p.xlsx").symlink_to("../DAY0-Prepare/activate-project/p2p.xlsx")
+    (infiniband / "01-global.yaml").symlink_to("../DAY0-Prepare/activate-project/01-global.yaml")
     tool = root / TOOL
     tool.mkdir(parents=True)
     for name, text in BRIDGES.items():
@@ -81,7 +83,7 @@ def setup_patches(root: Path) -> dict:
     return dict(
         HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"), ZTP=str(root / "ztp"),
         IMAGE_DIR=str(root / "image"), MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
-        _CSV_DIR=None, _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
+        _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0, TEMPLATE_DIR=str(ROOT / "DAY0-Prepare/template"),
         P2P_INPUT_LINKS=[str(root / name) for name in CONTRACT.P2P_INPUT_PATHS],
         P2P_OUTPUT_LINKS=[str(root / name) for name in CONTRACT.P2P_OUTPUT_PATHS],
         P2P_AIR_JSON_LINK=str(root / CONTRACT.P2P_AIR_PATH),
@@ -92,24 +94,31 @@ def setup_patches(root: Path) -> dict:
     )
 
 
+def setup_text(name: str, text: str, target: str) -> str:
+    """What setup writes for an EXPECTED_LINKS entry: a project row through the pointer, else unchanged."""
+    return CONTRACT.pointer_link_target(name, target) if f"DAY0-Prepare/{PROJECT}/" in text else text
+
+
 def run_setup_link_stages(root: Path, project: Path) -> None:
+    """The real _setup_impl (v3.1.1 WP-3: one engine call over the whole table, then the switch); input
+    validation, the operator key, REQ-19's infra/logs binding (test_req19_*) and the closing hints are inert.
+    The project is completed from the real template, which carries the bringup log directories."""
     with ExitStack() as stack:
         stack.enter_context(mock.patch.multiple(SETUP, **setup_patches(root)))
-        # _process_mapping's link_root default was bound to the real ztp/ at import time.
-        stack.enter_context(mock.patch.object(SETUP._process_mapping, "__defaults__", (None, str(root / "ztp"))))
-        stack.enter_context(redirect_stdout(io.StringIO()))
         converter_inputs = [row for row in SETUP.MAPPINGS
                             if row[0] == "config/nvos/template/P2P/02-devices_config.csv"]
         if converter_inputs != [("config/nvos/template/P2P/02-devices_config.csv", "02-devices_config.csv",
                                  "file_csv")]:
             raise AssertionError(f"setup does not map the converter's devices input: {converter_inputs}")
-        for ztp_rel, proj_rel, kind in converter_inputs:
-            SETUP._process_mapping(str(project), ztp_rel, proj_rel, kind, link_root=str(root / "ztp"))
-        SETUP._process_bringup_links(str(project))
-        SETUP._process_bringup_input_links(str(project))
-        SETUP._process_bringup_image_links()
-        SETUP._process_net_csv_links(str(project))
-        SETUP._process_monitor_links(str(project))
+        for name, value in (("_require_r22_subnet_input", (False, False, "fixture")),
+                            ("_r22_subnet_source_fingerprint", "fixture"),
+                            ("_validate_project", True),
+                            ("_select_p2p_source", str(project / "p2p.xlsx"))):
+            stack.enter_context(mock.patch.object(SETUP, name, return_value=value))
+        for name in ("_prepare_laptop_public_key", "_bind_infra_logs", "_print_next_steps"):
+            stack.enter_context(mock.patch.object(SETUP, name))
+        stack.enter_context(redirect_stdout(io.StringIO()))
+        SETUP._setup_impl(str(project))
         if SETUP._LINK_ERRORS:
             raise AssertionError(f"setup reported {SETUP._LINK_ERRORS} link error(s)")
 
@@ -125,7 +134,7 @@ class SetupCreatesUfmInputLinksWorkflowTest(unittest.TestCase):
                 link = root / name
                 with self.subTest(link=name):
                     self.assertTrue(link.is_symlink(), name)
-                    self.assertEqual(text, os.readlink(link))
+                    self.assertEqual(setup_text(name, text, target), os.readlink(link))
                     expected = root / "image" if target == "/image" else project / target
                     self.assertEqual(expected.resolve(), link.resolve())
                     self.assertTrue(link.exists(), "the target exists after setup")

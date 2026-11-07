@@ -50,6 +50,8 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
             ib_key = root / "infiniband/publickey/laptop.pub"
             ib_key.parent.mkdir(parents=True)
             ib_key.symlink_to(foreign_project / "laptop.pub")
+            # R-016 R16-13 (v3.1.1 WP-3): key links are refreshed after the switch, through the pointer.
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
             with mock.patch.multiple(
                 SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                 ZTP=str(root / "ztp"), _AUTO_YES=False,
@@ -92,6 +94,8 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
             project.mkdir(parents=True)
             (project / "laptop.pub").write_bytes(b"ssh-ed25519 project-key laptop\n")
             (project / "empty.pub").write_bytes(b"")
+            # R-016 R16-13 (v3.1.1 WP-3): key links are refreshed after the switch, through the pointer.
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
             roots = (root / "ztp/config/publickey", root / "infiniband/publickey")
             for key_root in roots:
                 key_root.mkdir(parents=True)

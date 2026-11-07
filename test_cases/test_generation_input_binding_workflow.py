@@ -601,7 +601,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         manifest = ztp / ".setup_manifest"
         link = ztp / "config/cumulus/template/01-global.yaml"
         link.parent.mkdir(parents=True)
-        SETUP._SetupLinkTransaction._restore_link(str(link), os.path.relpath(fixture.global_file, link.parent))
+        link.symlink_to(os.path.relpath(fixture.global_file, link.parent))
         with mock.patch.object(SETUP, "MANIFEST_FILE", str(manifest)), \
                 mock.patch.object(SETUP, "_collect_expected_links", return_value=[str(link)]):
             SETUP._write_manifest(str(project.resolve()))
@@ -673,7 +673,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
                                  ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
                 mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
-                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None), \
+                                    _DRY_RUN=False, _LINK_ERRORS=0), \
                 self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             published = ztp / "config/isc-dhcp-server"
@@ -722,7 +722,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
                                  DEPLOYMENT_LOCK=root / ".deployment.lock", ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
                 mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
-                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None), \
+                                    _DRY_RUN=False, _LINK_ERRORS=0), \
                 self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):

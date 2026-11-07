@@ -1147,6 +1147,7 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             with mock.patch.dict(os.environ, environment), \
                  mock.patch("platform.system", return_value="Linux"), \
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
                  mock.patch.object(setup, "_select_p2p_source", side_effect=BeforeP2p) as p2p, \

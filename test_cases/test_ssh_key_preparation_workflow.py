@@ -581,6 +581,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                 with mock.patch.object(loader, "_run_subprocess", side_effect=run_real_setup), \
                      mock.patch("platform.system", return_value="Linux"), \
                      mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                     mock.patch.object(setup, "HERE", str(root)), \
                      mock.patch.dict(
                          setup.deployment_lock.__globals__,
                          {"assert_writer_allowed": lambda **_kw: None},
@@ -735,6 +736,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                 stack.enter_context(mock.patch.object(loader, "active_project", return_value=None))
                 stack.enter_context(mock.patch.object(loader, "_run_subprocess", side_effect=run_real_setup))
                 stack.enter_context(mock.patch.object(setup, "HTTP_BASE", str(root)))
+                stack.enter_context(mock.patch.object(setup, "HERE", str(root)))
                 stack.enter_context(mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}))
                 stack.enter_context(mock.patch.object(setup, "stop_native_ztp_monitors"))
                 stack.enter_context(mock.patch.object(setup, "_initialize_project_from_template"))
@@ -786,6 +788,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                  mock.patch.object(loader, "supports_local_ztp_services", return_value=False), \
                  mock.patch.object(loader, "_run_subprocess", side_effect=run_real_setup), \
                  mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
                  mock.patch.object(setup, "stop_native_ztp_monitors"), \
                  mock.patch.object(setup, "_initialize_project_from_template"), \
@@ -976,6 +979,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                      mock.patch.object(loader, "supports_local_ztp_services", return_value=True), \
                      mock.patch.object(loader, "_run_subprocess", side_effect=run_real_setup), \
                      mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                     mock.patch.object(setup, "HERE", str(root)), \
                      mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
                      mock.patch.object(setup, "stop_native_ztp_monitors"), \
                      mock.patch.object(setup, "_initialize_project_from_template"), \
@@ -1022,6 +1026,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                                       csv_dir=None, p2p_file=None)
             with mock.patch.dict(os.environ, {"HOME": str(home)}), \
                  mock.patch.object(setup, "TEMPLATE_DIR", str(template)), \
+                 mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "_DRY_RUN", False), \
                  redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit):
@@ -1077,6 +1082,7 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
                                       csv_dir=None, p2p_file=None)
             with mock.patch.dict(os.environ, {"HOME": str(home)}), \
                  mock.patch.object(setup, "TEMPLATE_DIR", str(template)), \
+                 mock.patch.object(setup, "HERE", str(root)), \
                  mock.patch.object(setup, "_DRY_RUN", False), \
                  mock.patch("ssh_key_preparation.ensure_public_key", wraps=__import__("ssh_key_preparation").ensure_public_key) as selection, \
                  mock.patch("ssh_key_preparation.prepare_project_public_key", wraps=__import__("ssh_key_preparation").prepare_project_public_key) as publication, \

@@ -86,7 +86,7 @@ class IbAliasProducerDerivationTests(unittest.TestCase):
             net_paths = [(str(workspace / name), target)
                          for name, target in setup.NETWORK_CSV_MAPPINGS]
             with patch.multiple(setup, HTTP_BASE=str(workspace), HERE=str(workspace),
-                                ZTP=str(workspace / "ztp"), _CSV_DIR=None, _DRY_RUN=False,
+                                ZTP=str(workspace / "ztp"), _DRY_RUN=False,
                                 _LINK_ERRORS=0, _NET_CSV_LINKS=net_paths), redirect_stdout(io.StringIO()):
                 for name, target, kind in setup.WORKSPACE_INPUT_MAPPINGS:
                     if name == GLOBAL_NAME:

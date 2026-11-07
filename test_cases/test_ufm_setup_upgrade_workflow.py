@@ -43,11 +43,15 @@ class SetupLinksFeedUfmToolTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project, tool = self.build_repository(root)
-            outputs = [(str(root / name), target) for name, target in SETUP.BRINGUP_OUTPUT_SPECS]
-            with mock.patch.multiple(SETUP, HTTP_BASE=str(root), _DRY_RUN=False, _AUTO_YES=True,
-                                     _LINK_ERRORS=0, BRINGUP_OUTPUT_MAPPINGS=outputs):
-                SETUP._process_bringup_input_links(str(project))
-                SETUP._process_bringup_links(str(project))
+            # v3.1.1 WP-3: setup's one reconcile engine writes the bringup rows of the link table, a project row
+            # through DAY0-Prepare/activate-project (R-016 §2); the project's log directory comes with the
+            # template and the pointer names the activated project.
+            (project / "99-output-ib_nvl/bringup/ufm-setup-upgrade-logs").mkdir(parents=True, exist_ok=True)
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
+            rows = [row for row in SETUP.SETUP_LINK_SPECS if row.view in ("bringup-input", "bringup-output")]
+            with mock.patch.multiple(SETUP, HTTP_BASE=str(root), _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0):
+                SETUP._reconcile_links([(str(root / row.path), SETUP._spec_link_text(row)) for row in rows])
+                self.assertEqual(0, SETUP._LINK_ERRORS)
 
             self.assertEqual(os.readlink(tool / "ib.csv"), "../../ib.csv")
             self.assertEqual(os.readlink(tool / "p2p.xlsx"), "../../p2p.xlsx")

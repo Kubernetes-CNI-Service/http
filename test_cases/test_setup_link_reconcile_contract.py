@@ -40,26 +40,26 @@ CONTRACT = load_script("setup_link_reconcile_project_contract", ROOT / "tools/pr
 PROJECT = "site-a"
 OUTSIDE_MESSAGE = "指向项目外的链接"  # I-027: 「跳过：<路径> 是指向项目外的链接」
 PUBLICKEY_DIRECTORIES = ("ztp/config/publickey", "ethernet/publickey", "infiniband/publickey", "nvlink/publickey")
-# 详细工作指导 WP-1 rows written out (tree link -> exact direct text for project site-a; WP-3 moves the project
-# rows behind DAY0-Prepare/activate-project, the repository aliases keep their text).
+# 详细工作指导 WP-1 rows written out (tree link -> exact text: since WP-3 the project rows go through
+# DAY0-Prepare/activate-project, R-016 §2 / O4 left column; the repository aliases keep their text).
 NEW_ROW_TEXTS = {
-    "ethernet/01-global.yaml": "../DAY0-Prepare/site-a/01-global.yaml",
-    "nvlink/01-global.yaml": "../DAY0-Prepare/site-a/01-global.yaml",
+    "ethernet/01-global.yaml": "../DAY0-Prepare/activate-project/01-global.yaml",
+    "nvlink/01-global.yaml": "../DAY0-Prepare/activate-project/01-global.yaml",
     "ethernet/monitor/01-global.yaml": "../01-global.yaml",
     "nvlink/monitor/01-global.yaml": "../01-global.yaml",
-    "ethernet/monitor/99-output-p2p": "../../DAY0-Prepare/site-a/99-output-p2p",
-    "nvlink/monitor/99-output-p2p": "../../DAY0-Prepare/site-a/99-output-p2p",
-    "ethernet/02-devices_config.csv": "../DAY0-Prepare/site-a/02-devices_config.csv",
-    "infiniband/02-devices_config.csv": "../DAY0-Prepare/site-a/02-devices_config.csv",
-    "nvlink/02-devices_config.csv": "../DAY0-Prepare/site-a/02-devices_config.csv",
-    "ethernet/monitor/04-device-aliases.csv": "../../DAY0-Prepare/site-a/04-device-aliases.csv",
-    "infiniband/monitor/04-device-aliases.csv": "../../DAY0-Prepare/site-a/04-device-aliases.csv",
-    "nvlink/monitor/04-device-aliases.csv": "../../DAY0-Prepare/site-a/04-device-aliases.csv",
-    "ethernet/monitor/eth-status": "../../DAY0-Prepare/site-a/99-output-monitor/ethernet/eth-status",
-    "infiniband/monitor/ib-status": "../../DAY0-Prepare/site-a/99-output-monitor/infiniband/ib-status",
-    "infiniband/monitor/ufm-status": "../../DAY0-Prepare/site-a/99-output-monitor/infiniband/ufm-status",
-    "nvlink/monitor/nvsw-status": "../../DAY0-Prepare/site-a/99-output-monitor/nvlink/nvsw-status",
-    "infiniband/bringup/99-output-bringup": "../../DAY0-Prepare/site-a/99-output-bringup",
+    "ethernet/monitor/99-output-p2p": "../../DAY0-Prepare/activate-project/99-output-p2p",
+    "nvlink/monitor/99-output-p2p": "../../DAY0-Prepare/activate-project/99-output-p2p",
+    "ethernet/02-devices_config.csv": "../DAY0-Prepare/activate-project/02-devices_config.csv",
+    "infiniband/02-devices_config.csv": "../DAY0-Prepare/activate-project/02-devices_config.csv",
+    "nvlink/02-devices_config.csv": "../DAY0-Prepare/activate-project/02-devices_config.csv",
+    "ethernet/monitor/04-device-aliases.csv": "../../DAY0-Prepare/activate-project/04-device-aliases.csv",
+    "infiniband/monitor/04-device-aliases.csv": "../../DAY0-Prepare/activate-project/04-device-aliases.csv",
+    "nvlink/monitor/04-device-aliases.csv": "../../DAY0-Prepare/activate-project/04-device-aliases.csv",
+    "ethernet/monitor/eth-status": "../../DAY0-Prepare/activate-project/99-output-monitor/ethernet/eth-status",
+    "infiniband/monitor/ib-status": "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ib-status",
+    "infiniband/monitor/ufm-status": "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ufm-status",
+    "nvlink/monitor/nvsw-status": "../../DAY0-Prepare/activate-project/99-output-monitor/nvlink/nvsw-status",
+    "infiniband/bringup/99-output-bringup": "../../DAY0-Prepare/activate-project/99-output-bringup",
     "infiniband/bringup/xdr-initial-setup/ib.csv": "../../ib.csv",
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx": "../../p2p.xlsx",
 }
@@ -109,8 +109,8 @@ def setup_globals(root: Path) -> dict:
         HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"), ZTP=str(root / "ztp"),
         IMAGE_DIR=str(root / "image"), TEMPLATE_DIR=str(root / "DAY0-Prepare/template"),
         MANIFEST_FILE=str(root / "ztp/.setup_manifest"),
-        _CSV_DIR=None, _DRY_RUN=False, _AUTO_YES=False, _CONFIRM_PROJECT_SWITCH=False, _NO_UPGRADE=False,
-        _LINK_ERRORS=0, _LINK_TRANSACTION=None, _P2P_SOURCE=None, _INFRA_LOG_MIGRATION=None,
+        _DRY_RUN=False, _AUTO_YES=False, _CONFIRM_PROJECT_SWITCH=False, _NO_UPGRADE=False,
+        _LINK_ERRORS=0, _P2P_SOURCE=None, _INFRA_LOG_MIGRATION=None,
         P2P_INPUT_LINKS=[str(root / name) for name in SETUP.P2P_INPUT_PATHS],
         P2P_OUTPUT_LINKS=[str(root / name) for name in SETUP.P2P_OUTPUT_PATHS],
         P2P_AIR_JSON_LINK=str(root / SETUP.P2P_AIR_PATH),
@@ -134,8 +134,6 @@ def run_setup(root: Path, project: Path) -> tuple[str, int, object]:
     exited = None
     with ExitStack() as stack:
         stack.enter_context(mock.patch.multiple(SETUP, **setup_globals(root)))
-        # _process_mapping's link_root default was bound to the real ztp/ at import time.
-        stack.enter_context(mock.patch.object(SETUP._process_mapping, "__defaults__", (None, str(root / "ztp"))))
         for name, value in (("_require_r22_subnet_input", (False, False, "fixture")),
                             ("_r22_subnet_source_fingerprint", "fixture"),
                             ("_validate_project", True),
@@ -311,13 +309,15 @@ class TableRowsTest(unittest.TestCase):
             _output, errors, exited = run_setup(root, project)
             self.assertEqual((0, None), (errors, exited), "setup ran to its end")
             self.assertTrue((root / "ztp/.setup_manifest").is_file(), "setup completed")
-            runtime = dict(CONTRACT.runtime_link_specs())
+            canonical = dict(CONTRACT.pointer_link_specs())
             rows = [row for row in CONTRACT.SETUP_LINK_SPECS if row.writer == "setup"]
             for row in rows:
                 with self.subTest(row=row.path):
                     link = root / row.path
                     self.assertTrue(link.is_symlink(), "setup makes every setup row of the table")
-                    self.assertEqual(runtime[row.path].format(project=PROJECT), os.readlink(link))
+                    if row.path == CONTRACT.P2P_AIR_PATH:
+                        continue  # I-031 (WP-9c): still derived per workbook until the producer writes the fixed name
+                    self.assertEqual(canonical[row.path], os.readlink(link))
             for name, text in NEW_ROW_TEXTS.items():
                 with self.subTest(new_row=name):
                     self.assertEqual(text, os.readlink(root / name))
@@ -401,12 +401,10 @@ class OutsideWritesTest(unittest.TestCase):
             outside.mkdir()
             (project / "99-output-dhcp").mkdir()
             (project / "99-output-dhcp/dhcpd.conf").symlink_to(outside / "dhcpd.conf")
-            output = io.StringIO()
-            with mock.patch.multiple(SETUP, **setup_globals(root)), redirect_stdout(output):
-                SETUP._process_mapping(str(project), "config/isc-dhcp-server/dhcpd.conf", "99-output-dhcp/dhcpd.conf",
-                                       "output", link_root=str(root / "ztp"))
+            # v3.1.1 WP-3: setup's preparation step (R-016 §4.2 第 2 步) touches the table's prepared outputs.
+            output, _errors, _exited = run_setup(root, project)
             self.assertEqual([], os.listdir(outside))
-            self.assertIn(OUTSIDE_MESSAGE, output.getvalue())
+            self.assertIn(OUTSIDE_MESSAGE, output)
 
     def test_a_project_internal_link_is_followed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -424,6 +422,10 @@ class PublicKeyLinksTest(unittest.TestCase):
     """WP-1's hint: one link per project key in each of the four real public-key directories."""
 
     def publish(self, root: Path, project: Path) -> int:
+        # R16-13: the per-key links are refreshed after the switch, so the pointer names this project.
+        pointer = root / "DAY0-Prepare/activate-project"
+        if not pointer.is_symlink():
+            pointer.symlink_to(project.name)
         with mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(root / "ztp"), _DRY_RUN=False,
                                  _AUTO_YES=False, _LINK_ERRORS=0), \
                 mock.patch("builtins.input", side_effect=no_prompt), redirect_stdout(io.StringIO()):
@@ -448,8 +450,8 @@ class PublicKeyLinksTest(unittest.TestCase):
                               for name in ("laptop.pub", "mgmt-server.pub")}, set(first))
             for name, (text, _inode) in first.items():
                 with self.subTest(link=name):
-                    key_dir = os.path.dirname(name)
-                    self.assertEqual(os.path.relpath(project / os.path.basename(name), root / key_dir), text)
+                    # R-016 §3.2: relpath(DAY0-Prepare/activate-project/<key>, the key directory).
+                    self.assertEqual(CONTRACT.pointer_link_target(name, os.path.basename(name)), text)
 
             (project / "extra.pub").write_bytes(b"synthetic extra key\n")
             self.assertEqual(0, self.publish(root, project))

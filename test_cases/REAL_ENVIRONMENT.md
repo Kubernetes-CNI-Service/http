@@ -2639,3 +2639,33 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复后通过。
 - [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-ACTIVATE-PROJECT-001 — setup 经 activate-project 指针切换项目（本机两个项目；服务器单项目重复 load）
+
+- 类型：real-environment / scenario / failure-injection。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应：R-016 详细设计 v1.1 §1、§2、§4.2、§11；v3.1.1 详细工作指导 WP-3（Q1、Q4、N4、O6、O13、Q5）。
+  自动化部分：`test_cases.test_activate_project_contract`（direct：6 步、退出码、切换、参数、崩溃后重跑）与
+  `test_cases.test_activate_project_workflow`（复制的工作区里 setup P → load `--dry-run` → setup Q → 读者看到 Q）。
+- 平台：local（macOS 工作站）；management-server（AIR 管理服务器，Ubuntu 22.04，单项目，R-016 的前提）。
+- 风险与目标：自动化只在临时工作区里跑合成项目，无法证明：真实工作区第一次运行时把直连原文改成经指针的原文、
+  用户自建链接（`02-devices_config.csv`、`p2p.xlsx -> p2p/<工作簿>`、`p2p/` 指向外部目录）在切换前后不被改写、
+  交互终端里的一次询问、切换中途被打断后重跑能补齐，以及服务器上 load 调 setup 后各读者经指针取到同一个项目。
+- 前置：本机两个完整项目 P、Q（脱敏副本或 owner 授权的项目），工作区为当前精确源码；服务器为可快照回滚的
+  AIR 管理服务器，已部署当前源码。开始前保存：`ls -l DAY0-Prepare/activate-project`、
+  `find . -path ./DAY0-Prepare -prune -o -type l -print0 | xargs -0 ls -l` 的输出、两个项目目录的文件清单与 SHA-256。
+- 步骤：
+  1）本机交互终端 `python3 DAY0-Prepare/01-a-setup.py P`：指针 -> P，不询问；`--status`（WP-4）正常。
+  2）`python3 DAY0-Prepare/01-a-setup.py Q`：只问一次；输入 `y` 拒绝并以 1 退出，指针仍 -> P；再运行并输入 `yes` 切换。
+  3）对比第 1、2 步后的链接清单：除 `activate-project` 外，规格表各行与逐把公钥链接的原文不变。
+  4）给 Q 制造一个输入错误（例如 02 里一行 type 写错），`-y` 运行：以 2 退出，工作区与两个项目的清单、SHA-256 不变；
+     加 `--force` 再运行：只警告并完成切换。改回 Q 的输入。
+  5）在第 3 步（核对）和第 4 步（切换）处各用 Ctrl-C 打断一次，再运行 `-y`：结果与一次完整运行的链接清单一致，
+     `DAY0-Prepare` 下没有残留的 `.activate-project.*.tmp`。
+  6）`--csv-dir` 被拒绝（退出码 2），提示改用项目里 `02-devices_config.csv -> 外部文件` 的链接；
+     项目参数写成 `template`、`P/子目录` 或工作区外的路径时以 2 退出。
+  7）服务器：对同一个项目连续两次 `11-load.py`；第二次 setup 打印 activate-project 已指向该项目，服务、worker、
+     页面读到的项目不变。
+- 预期：本机切换只改指针；校验失败什么都不改；切换后的错误以 1 退出但指针已切换，重跑补齐；服务器上不跨项目切换。
+- 不允许：项目目录里的用户文件或用户链接被改写、删除；工作区出现指向项目外的写入；服务器上只跑 setup 切换（R16-16）。
+- 证据：每一步的命令输出、退出码、上述清单与 SHA-256 前后对比。
+- 清理与风险：本机用 `-y` 切回原项目并核对清单；服务器恢复快照。未执行前为 NOT RUN，不得写 PASS。

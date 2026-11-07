@@ -11,22 +11,57 @@ Every expected value is written from the design, never read back from the implem
   name, a missing directory, a leading ".".
 - http dev 2026-11-07: the error type is frozen for WP-4/6/9 -- ActiveProjectPointerError, a ValueError (the
   type require_project_eligible already raises).
+
+setup's activation (01-a-setup.py), R-016 §4.2 and 详细工作指导 WP-3:
+- six steps, each safe to repeat: 1 validate the target and write nothing (failure exits 2); 2 prepare the target
+  project, writing only the project (failure exits 1 and does not switch); 3 reconcile the link table, errors
+  only counted; 4 switch -- skip when the pointer already names the target, otherwise one confirmation when it
+  names another project (-y/--yes skips it), then leftover .activate-project.*.tmp removed, a temporary link
+  .activate-project.<pid>.tmp os.replace'd over the pointer and DAY0-Prepare fsynced; 5 write ztp/.setup_manifest
+  (Q5: a derived record whose first line is the real project path); 6 exit 1 when errors were counted, else 0.
+  Crash anywhere between steps 2 and 5, run setup again: the result is that of one clean run (往前恢复).
+  No lock and no marker for the reconcile and the switch (R-016 §1 第 3 条); O6 (owner 2026-11-07): no rollback.
+- Tree links of project rows go through the pointer: relpath("DAY0-Prepare/activate-project/<name>", link dir)
+  (R-016 §2); so do the per-key links of the four public-key directories, refreshed after the switch (R16-13).
+- Parameters: --csv-dir retired -- a parameter error, exit 2, pointing at a project link 02-devices_config.csv ->
+  outside file (Q1, R-014 第 3 条); --yes is the long -y and --confirm-project-switch stays a synonym (Q4, owner
+  2026-11-03 「好的」); the project parameter must be a direct real subdirectory of DAY0-Prepare and not template,
+  else exit 2 (N4); --force turns validation errors into warnings and goes on preparing and switching (O13).
 """
 
 from __future__ import annotations
 
+import base64
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
+import hashlib
+import io
 import os
 from pathlib import Path
+import shutil
+import struct
+import sys
 import tempfile
 import unittest
+from unittest import mock
+
+import yaml
 
 from test_cases.module_loader import load_script
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = load_script("activate_project_contract_project_contract", ROOT / "tools/project_contract.py")
+SETUP = load_script("activate_project_contract_setup", ROOT / "DAY0-Prepare/01-a-setup.py")
+EXAMPLE = ROOT / "examples/public-project"
 
 PROJECT = "site-p"
+OTHER = "site-q"
+POINTER = "DAY0-Prepare/activate-project"
+# Table rows whose text WP-3 leaves direct, each handed to the package that owns its reader (详细工作指导 WP-9):
+# delete an entry when that package moves the row behind the pointer.
+HANDED_ON = {
+    CONTRACT.P2P_AIR_PATH: "WP-9c: I-031 fixed AIR json name; _process_xlsx_files derives it until then",
+}
 
 
 def active_project_dir():
@@ -54,6 +89,422 @@ def tree_state(root: Path) -> dict[str, tuple[int, int, str | None]]:
     return state
 
 
+def public_key(seed: int, comment: str) -> str:
+    """A valid synthetic OpenSSH Ed25519 public line; no private key exists."""
+    def field(value: bytes) -> bytes:
+        return struct.pack(">I", len(value)) + value
+
+    blob = field(b"ssh-ed25519") + field(bytes([seed]) * 32)
+    return "ssh-ed25519 " + base64.b64encode(blob).decode("ascii") + " " + comment + "\n"
+
+
+_WORKBOOK: list[bytes] = []
+
+
+def workbook_bytes() -> bytes:
+    """One synthetic P2P workbook, made once: openpyxl stamps creation times, and runs compared byte for byte
+    must hold the same bytes."""
+    if not _WORKBOOK:
+        import openpyxl
+
+        stream = io.BytesIO()
+        book = openpyxl.Workbook()
+        book.active["A1"] = "synthetic P2P"
+        book.save(stream)
+        _WORKBOOK.append(stream.getvalue())
+    return _WORKBOOK[0]
+
+
+def snapshot(root: Path) -> dict[str, tuple[str, ...]]:
+    """Every entry under root by kind: link text, or content digest with root-relative absolute paths."""
+    state = {}
+    for current, directories, files in os.walk(root):
+        for name in (*directories, *files):
+            path = Path(current) / name
+            relative = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                state[relative] = ("link", os.readlink(path))
+            elif path.is_dir():
+                state[relative] = ("dir",)
+            else:
+                payload = path.read_bytes().replace(os.fsencode(root), b"<root>")
+                state[relative] = ("file", hashlib.sha256(payload).hexdigest())
+    return state
+
+
+class Sandbox:
+    """A temporary http/ tree with the repository's DAY0-Prepare/template and two valid synthetic projects."""
+
+    def __init__(self, base: Path):
+        self.root = base / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        shutil.copytree(ROOT / "DAY0-Prepare/template", self.day0 / "template", symlinks=True)
+        (self.root / "image").mkdir()
+        (self.root / "infra").mkdir()  # a tracked repository directory: setup's infra-log root lock lives in it
+        for seed, name in ((11, PROJECT), (21, OTHER)):
+            self.make_project(name, seed)
+
+    def make_project(self, name: str, seed: int) -> Path:
+        project = self.day0 / name
+        project.mkdir()
+        document = yaml.safe_load((EXAMPLE / "01-global.yaml.example").read_text(encoding="utf-8"))
+        document["common"]["mgmt"]["http"]["address"] = "192.0.2.10"
+        document["switches"] = [item for item in document["switches"] if set(item) == {"eth"}]
+        document["switches"][0]["eth"]["system"]["aaa"]["user"]["cumulus"]["hashed-password"] = (
+            "$6$fixture$safe-value"
+        )
+        (project / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        shutil.copy2(EXAMPLE / "02-dhcp-subnet_config.csv.example", project / "02-dhcp-subnet_config.csv")
+        header, eth_row = (EXAMPLE / "02-devices_config.csv.example").read_text(encoding="utf-8").splitlines()[:2]
+        (project / "02-devices_config.csv").write_text(f"{header}\n{eth_row}\n", encoding="utf-8")
+        (project / "laptop.pub").write_text(public_key(seed, "operator@laptop"), encoding="ascii")
+        (project / "mgmt-server.pub").write_text(public_key(seed + 1, "mgmt@server"), encoding="ascii")
+        (project / "Site P2P_v1.0.xlsx").write_bytes(workbook_bytes())
+        return project
+
+    def patches(self, **overrides) -> ExitStack:
+        """setup's globals bound to this tree.  The module-level absolute link lists setup computed at import
+        are rebased here too, so no run of any setup version can write into the repository."""
+        root = self.root
+        values = {
+            "HERE": str(self.day0), "HTTP_BASE": str(root), "ZTP": str(root / "ztp"),
+            "TEMPLATE_DIR": str(self.day0 / "template"), "IMAGE_DIR": str(root / "image"),
+            "MANIFEST_FILE": str(root / "ztp/.setup_manifest"),
+            "P2P_AIR_JSON_LINK": str(root / CONTRACT.P2P_AIR_PATH),
+            "P2P_INPUT_LINKS": [str(root / name) for name in CONTRACT.P2P_INPUT_PATHS],
+            "P2P_OUTPUT_LINKS": [str(root / name) for name in CONTRACT.P2P_OUTPUT_PATHS],
+            "BRINGUP_OUTPUT_MAPPINGS": [(str(root / name), target) for name, target in CONTRACT.BRINGUP_OUTPUT_SPECS],
+            "ANALYZER_INPUT_MAPPINGS": [(str(root / name), target) for name, target in CONTRACT.ANALYZER_INPUT_SPECS],
+            "ANALYZER_OUTPUT_MAPPINGS": [(str(root / name), target)
+                                         for name, target in CONTRACT.ANALYZER_OUTPUT_SPECS],
+            "_NET_CSV_LINKS": [(str(root / name), target) for name, target in CONTRACT.NETWORK_CSV_MAPPINGS],
+            "_DRY_RUN": False, "_AUTO_YES": True, "_CONFIRM_PROJECT_SWITCH": False, "_FORCE": False,
+            "_STRICT": False, "_NO_UPGRADE": True, "_P2P_FILE": None, "_SWITCH_SCOPE": None,
+            "_P2P_SOURCE": None, "_LINK_ERRORS": 0, "_INFRA_LOG_MIGRATION": None,
+        }
+        values.update(overrides)
+        stack = ExitStack()
+        stack.enter_context(mock.patch.multiple(
+            SETUP, **{name: value for name, value in values.items() if hasattr(SETUP, name)},
+        ))
+        # The operator's ~/.ssh is not the subject here: every project already carries its laptop.pub.
+        stack.enter_context(mock.patch.object(SETUP, "_prepare_laptop_public_key"))
+        return stack
+
+    def pointer(self) -> str | None:
+        path = self.root / POINTER
+        return os.readlink(path) if path.is_symlink() else None
+
+
+def exit_code(stop: SystemExit) -> int:
+    return 0 if stop.code is None else stop.code
+
+
+class ActivationStepsTests(unittest.TestCase):
+    """R-016 §4.2 through setup(): what each step may write, the exit codes, the switch and its confirmation."""
+
+    def sandbox(self) -> Sandbox:
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-")
+        self.addCleanup(temporary.cleanup)
+        return Sandbox(Path(temporary.name).resolve())
+
+    def activate(self, box: Sandbox, name: str, **overrides) -> tuple[int, str]:
+        """setup() for DAY0-Prepare/<name>: (exit code, printed output)."""
+        output = io.StringIO()
+        code = 0
+        with box.patches(**overrides), redirect_stdout(output):
+            try:
+                SETUP.setup(str(box.day0 / name))
+            except SystemExit as stop:
+                code = exit_code(stop)
+        return code, output.getvalue()
+
+    def activated(self, box: Sandbox, name: str, **overrides) -> str:
+        code, output = self.activate(box, name, **overrides)
+        self.assertEqual(0, code, output)
+        return output
+
+    @staticmethod
+    def table_texts(box: Sandbox) -> dict[str, str | None]:
+        return {row.path: (os.readlink(box.root / row.path) if (box.root / row.path).is_symlink() else None)
+                for row in CONTRACT.SETUP_LINK_SPECS if row.path not in HANDED_ON}
+
+    def test_project_rows_and_key_links_go_through_the_pointer(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        self.assertEqual(PROJECT, box.pointer())
+        self.assertEqual(box.day0 / PROJECT, active_project_dir()(box.root))
+        checked = 0
+        for row in CONTRACT.SETUP_LINK_SPECS:
+            link = box.root / row.path
+            # The publisher's latest_yaml is not setup's (R-016 §3.4); HANDED_ON rows are other packages'; an
+            # offline tools/ analyzer absent from the tree is not recreated.
+            if row.writer != "setup" or row.path in HANDED_ON or row.path.startswith("tools/"):
+                continue
+            with self.subTest(link=row.path):
+                expected = (CONTRACT.pointer_link_target(row.path, row.target) if row.base == "project"
+                            else os.path.relpath(row.target, os.path.dirname(row.path)))
+                self.assertEqual(expected, os.readlink(link))
+                checked += 1
+        self.assertGreater(checked, 50)
+        for directory in CONTRACT.PUBLICKEY_DIRECTORIES:
+            for key in ("laptop.pub", "mgmt-server.pub"):
+                name = directory + "/" + key
+                with self.subTest(key_link=name):
+                    self.assertEqual(CONTRACT.pointer_link_target(name, key), os.readlink(box.root / name))
+        manifest = (box.root / "ztp/.setup_manifest").read_text(encoding="utf-8").splitlines()
+        self.assertEqual("# setup manifest — proj: " + os.path.realpath(box.day0 / PROJECT), manifest[0])
+
+    def test_the_manifest_records_every_link_of_the_table(self):
+        # Q5 / review A8: the derived record comes from the link table -- every row setup made, the shared
+        # section and the dynamic section (per-key links, optimize samples).
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        recorded = set((box.root / "ztp/.setup_manifest").read_text(encoding="utf-8").splitlines()[1:])
+        made = [row.path for row in CONTRACT.SETUP_LINK_SPECS if (box.root / row.path).is_symlink()]
+        absent = [row.path for row in CONTRACT.SETUP_LINK_SPECS
+                  if row.writer == "setup" and not row.path.startswith("tools/") and row.path not in made]
+        self.assertEqual([], absent, "setup makes every setup row (offline tools/ rows aside)")
+        for name in made:
+            with self.subTest(row=name):
+                self.assertIn(str(box.root / name), recorded)
+        dynamic = [path for pattern in CONTRACT.setup_dynamic_link_patterns()
+                   for path in box.root.glob(pattern) if path.is_symlink()]
+        self.assertTrue(any(path.parent.name == "publickey" for path in dynamic))
+        self.assertTrue(any(path.parent.name.endswith("-sample") for path in dynamic))
+        for path in dynamic:
+            with self.subTest(dynamic=str(path.relative_to(box.root))):
+                self.assertIn(str(path), recorded)
+
+    def test_a_user_p2p_link_spelled_with_a_dot_prefix_is_kept(self):
+        # R-014 第 3 条 (WP-11): p2p.xlsx -> p2p/<workbook> is the user's own link; ./p2p/<workbook> is the same
+        # path, and the selector already reads it so (review A9) -- setup keeps it and does not fail.
+        box = self.sandbox()
+        project = box.day0 / OTHER
+        (project / "p2p").mkdir()
+        (project / "Site P2P_v1.0.xlsx").rename(project / "p2p/Site P2P_v1.0.xlsx")
+        (project / "p2p.xlsx").symlink_to("./p2p/Site P2P_v1.0.xlsx")
+        code, output = self.activate(box, OTHER)
+        self.assertEqual(0, code, output)
+        self.assertEqual("./p2p/Site P2P_v1.0.xlsx", os.readlink(project / "p2p.xlsx"))
+        self.assertEqual(OTHER, box.pointer())
+
+    def test_switching_projects_changes_only_the_pointer_among_the_fixed_links(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        before = self.table_texts(box)
+        self.activated(box, OTHER)
+        self.assertEqual(OTHER, box.pointer())
+        self.assertEqual(before, self.table_texts(box))
+        self.assertEqual(box.day0 / OTHER, active_project_dir()(box.root))
+        manifest = (box.root / "ztp/.setup_manifest").read_text(encoding="utf-8").splitlines()
+        self.assertEqual("# setup manifest — proj: " + os.path.realpath(box.day0 / OTHER), manifest[0])
+
+    def test_validation_failure_exits_2_and_writes_nothing(self):
+        cases = {
+            # --strict makes an empty key an input error (_validate_project).
+            "empty key under --strict": ({"_STRICT": True},
+                                         lambda project: (project / "mgmt-server.pub").write_bytes(b"")),
+            "no P2P workbook": ({}, lambda project: (project / "Site P2P_v1.0.xlsx").unlink()),
+        }
+        for label, (overrides, spoil) in cases.items():
+            with self.subTest(case=label):
+                box = self.sandbox()
+                self.activated(box, PROJECT)
+                spoil(box.day0 / OTHER)
+                before = snapshot(box.root)
+                code, output = self.activate(box, OTHER, **overrides)
+                self.assertEqual(2, code, output)
+                self.assertEqual(before, snapshot(box.root))
+                self.assertEqual(PROJECT, box.pointer())
+
+    def test_force_turns_validation_errors_into_warnings_and_goes_on_to_switch(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        (box.day0 / OTHER / "mgmt-server.pub").write_bytes(b"")
+        code, output = self.activate(box, OTHER, _STRICT=True, _FORCE=True)
+        self.assertEqual(0, code, output)
+        self.assertIn("--force", output)
+        self.assertEqual(OTHER, box.pointer())
+
+    def test_preparation_error_exits_1_without_switching_or_writing_outside_the_target(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        # A project directory where the template has a file: template completion reports and counts it.
+        (box.day0 / OTHER / "README.txt").mkdir()
+        before = {name: value for name, value in snapshot(box.root).items()
+                  if not name.startswith(f"DAY0-Prepare/{OTHER}/")}
+        code, output = self.activate(box, OTHER)
+        self.assertEqual(1, code, output)
+        self.assertEqual(PROJECT, box.pointer())
+        after = {name: value for name, value in snapshot(box.root).items()
+                 if not name.startswith(f"DAY0-Prepare/{OTHER}/")}
+        self.assertEqual(before, after)
+
+    def test_reconcile_error_exits_1_after_switching(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        blocked = box.root / "ethernet/eth.csv"
+        blocked.unlink()
+        blocked.write_text("operator file\n", encoding="utf-8")
+        code, output = self.activate(box, OTHER)
+        self.assertEqual(1, code, output)
+        self.assertEqual(OTHER, box.pointer())
+        self.assertFalse(blocked.is_symlink())
+        self.assertEqual("operator file\n", blocked.read_text(encoding="utf-8"))
+        self.assertIn("ethernet/eth.csv", output)
+
+    def test_switch_replaces_a_temporary_link_over_the_pointer_and_fsyncs_day0(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        stale = box.day0 / ".activate-project.4242.tmp"
+        stale.symlink_to(PROJECT)
+        events = []
+        real_replace, real_fsync = os.replace, os.fsync
+        day0_identity = (box.day0.stat().st_dev, box.day0.stat().st_ino)
+
+        def replace(source, destination, *args, **kwargs):
+            events.append(("replace", os.fspath(source), os.fspath(destination)))
+            return real_replace(source, destination, *args, **kwargs)
+
+        def fsync(descriptor):
+            info = os.fstat(descriptor)
+            events.append(("fsync", (info.st_dev, info.st_ino) == day0_identity))
+            return real_fsync(descriptor)
+
+        with mock.patch.object(SETUP.os, "replace", side_effect=replace), \
+                mock.patch.object(SETUP.os, "fsync", side_effect=fsync):
+            self.activated(box, OTHER)
+        self.assertEqual(OTHER, box.pointer())
+        switch = ("replace", str(box.day0 / f".activate-project.{os.getpid()}.tmp"), str(box.root / POINTER))
+        self.assertIn(switch, events)
+        self.assertIn(("fsync", True), events[events.index(switch):])
+        self.assertFalse(os.path.lexists(stale))
+        self.assertEqual([], sorted(box.day0.glob(".activate-project.*.tmp")))
+
+    def test_switch_is_skipped_when_the_pointer_already_names_the_target(self):
+        box = self.sandbox()
+        self.activated(box, PROJECT)
+        self.assertEqual(PROJECT, box.pointer())
+        identity = (box.root / POINTER).lstat().st_ino
+        destinations = []
+        real_replace = os.replace
+
+        def replace(source, destination, *args, **kwargs):
+            destinations.append(os.fspath(destination))
+            return real_replace(source, destination, *args, **kwargs)
+
+        with mock.patch.object(SETUP.os, "replace", side_effect=replace):
+            self.activated(box, PROJECT, _AUTO_YES=False)
+        self.assertNotIn(str(box.root / POINTER), destinations)
+        self.assertEqual(identity, (box.root / POINTER).lstat().st_ino)
+
+    def test_cross_project_switch_asks_once_and_yes_or_the_synonym_skip_the_question(self):
+        cases = (
+            # (label, overrides, tty, answer, switched, questions)
+            ("interactive yes", {"_AUTO_YES": False}, True, "yes", True, 1),
+            ("interactive y is not yes", {"_AUTO_YES": False}, True, "y", False, 1),
+            ("no terminal, no flag", {"_AUTO_YES": False}, False, None, False, 0),
+            ("-y/--yes", {"_AUTO_YES": True}, False, None, True, 0),
+            ("--confirm-project-switch", {"_AUTO_YES": False, "_CONFIRM_PROJECT_SWITCH": True}, False, None,
+             True, 0),
+        )
+        for label, overrides, tty, answer, switched, questions in cases:
+            with self.subTest(case=label):
+                box = self.sandbox()
+                self.activated(box, PROJECT)
+                with mock.patch.object(SETUP.sys.stdin, "isatty", return_value=tty), \
+                        mock.patch("builtins.input", return_value=answer) as asked:
+                    code, output = self.activate(box, OTHER, **overrides)
+                self.assertEqual(questions, asked.call_count, output)
+                self.assertEqual(OTHER if switched else PROJECT, box.pointer(), output)
+                self.assertEqual(0 if switched else 1, code, output)
+
+    def test_crash_between_steps_2_and_5_then_rerun_equals_one_clean_run(self):
+        reference = self.sandbox()
+        self.activated(reference, PROJECT)
+        self.activated(reference, OTHER)
+        expected = snapshot(reference.root)
+        real_engine, real_symlink = SETUP._reconcile_links, os.symlink
+
+        def engine_never_starts(links):
+            raise RuntimeError("crash: before step 3")
+
+        def engine_half_way(links):
+            links = list(links)
+            real_engine(links[:len(links) // 2])
+            raise RuntimeError("crash: inside step 3")
+
+        def no_temporary_pointer(source, destination, *args, **kwargs):
+            if os.path.basename(os.fspath(destination)).startswith(".activate-project."):
+                raise RuntimeError("crash: step 4 before the rename")
+            return real_symlink(source, destination, *args, **kwargs)
+
+        crashes = (
+            ("before step 3", mock.patch.object(SETUP, "_reconcile_links", side_effect=engine_never_starts), PROJECT),
+            ("inside step 3", mock.patch.object(SETUP, "_reconcile_links", side_effect=engine_half_way), PROJECT),
+            ("step 4", mock.patch.object(SETUP.os, "symlink", side_effect=no_temporary_pointer), PROJECT),
+            ("between steps 4 and 5", mock.patch.object(
+                SETUP, "_write_manifest", side_effect=RuntimeError("crash: before step 5")), OTHER),
+        )
+        for label, crash, pointer in crashes:
+            with self.subTest(crash=label):
+                box = self.sandbox()
+                self.activated(box, PROJECT)
+                with crash, self.assertRaises(RuntimeError):
+                    self.activate(box, OTHER)
+                self.assertEqual(pointer, box.pointer())
+                self.activated(box, OTHER)
+                self.assertEqual(expected, snapshot(box.root))
+
+
+class ActivationParameterTests(unittest.TestCase):
+    """--csv-dir (Q1), -y/--yes and its synonym (Q4), the project parameter (N4), through setup's CLI."""
+
+    def test_csv_dir_is_retired_with_a_hint_and_exit_2(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit) as stopped:
+            SETUP._parse_args(["--csv-dir", "/tmp", PROJECT])
+        self.assertEqual(2, exit_code(stopped.exception))
+        self.assertIn("02-devices_config.csv", stderr.getvalue())
+
+    def test_yes_is_the_long_y_and_confirm_project_switch_stays(self):
+        for argv in (["-y", PROJECT], ["--yes", PROJECT]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
+                try:
+                    parsed = SETUP._parse_args(argv)
+                except SystemExit:
+                    self.fail(f"Q4: {argv[0]} is a setup option")
+                self.assertTrue(parsed.auto_yes)
+        self.assertTrue(SETUP._parse_args(["--confirm-project-switch", PROJECT]).confirm_project_switch)
+
+    def test_project_must_be_a_direct_real_subdirectory_of_day0_and_not_template(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-cli-")
+        self.addCleanup(temporary.cleanup)
+        box = Sandbox(Path(temporary.name).resolve())
+        (box.day0 / PROJECT / "nested").mkdir()
+        (box.day0 / ".hidden").mkdir()
+        (box.day0 / "alias").symlink_to(PROJECT)
+        outside = box.root.parent / "elsewhere"
+        shutil.copytree(box.day0 / OTHER, outside)
+        # The writers' deployment lock file (R-016 §4.2 锁) is the one entry main may create before refusing.
+        def state():
+            return {name: value for name, value in snapshot(box.root.parent).items()
+                    if not name.endswith(".deployment.lock")}
+
+        before = state()
+        rejected = (f"{PROJECT}/nested", str(outside), "template", "alias", ".hidden")
+        for argument in rejected:
+            with self.subTest(project=argument), box.patches(), redirect_stdout(io.StringIO()):
+                self.assertEqual(2, SETUP.main(["-y", "--host-role=workstation", "--no-upgrade", argument]))
+            self.assertEqual(before, state())
+        for argument in (PROJECT, f"DAY0-Prepare/{OTHER}", str(box.day0 / PROJECT)):
+            with self.subTest(accepted=argument), box.patches(), redirect_stdout(io.StringIO()) as printed:
+                self.assertEqual(0, SETUP.main(["-y", "--host-role=workstation", "--no-upgrade", argument]),
+                                 printed.getvalue())
+            self.assertEqual(os.path.basename(argument), box.pointer())
+
+
 class ActiveProjectDirTests(unittest.TestCase):
     """R-016 §2, §5.1: the seven cases of 详细工作指导 WP-3, and the exclusions §4.2 adds."""
 
@@ -67,7 +518,10 @@ class ActiveProjectDirTests(unittest.TestCase):
             (self.day0 / name / "01-global.yaml").write_text("common: {}\n", encoding="utf-8")
 
     def point(self, text: str) -> None:
-        os.symlink(text, self.day0 / "activate-project")
+        pointer = self.day0 / "activate-project"
+        if pointer.is_symlink():
+            pointer.unlink()
+        os.symlink(text, pointer)
 
     def assert_invalid(self, *reason_words: str) -> None:
         error = pointer_error()

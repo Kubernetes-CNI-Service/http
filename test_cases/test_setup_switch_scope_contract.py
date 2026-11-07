@@ -131,7 +131,7 @@ class SetupSwitchScopeContractTests(unittest.TestCase):
             _STRICT=SETUP._STRICT, _NO_UPGRADE=SETUP._NO_UPGRADE,
             _CONFIRM_PROJECT_SWITCH=SETUP._CONFIRM_PROJECT_SWITCH,
             _SWITCH_SCOPE=SETUP._SWITCH_SCOPE,
-            _P2P_SOURCE=None, _CSV_DIR=None,
+            _P2P_SOURCE=None,
             IMAGE_DIR=str(project / "no-shared-images"),
         ), mock.patch.object(
             SETUP, "deployment_lock", lambda *_args, **_kwargs: nullcontext(),

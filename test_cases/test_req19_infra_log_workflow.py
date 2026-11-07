@@ -86,11 +86,9 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
     def setup_project(self, root, project):
         unrelated = (
             "_initialize_project_from_template", "_prepare_laptop_public_key",
-            "_remove_legacy_nvos_output_links", "_process_bin_files",
-            "_process_xlsx_files", "_process_bringup_links",
-            "_process_analyzer_links", "_process_pubkeys",
+            "_remove_legacy_links", "_process_bin_files",
+            "_process_xlsx_files", "_reconcile_table_links", "_process_pubkeys",
             "_process_latest_yaml", "_process_optimize_sample",
-            "_process_net_csv_links", "_process_monitor_links",
             "_write_manifest", "_print_next_steps",
         )
         with ExitStack() as patches:
@@ -102,8 +100,8 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                 P2P_INPUT_LINKS=[], P2P_OUTPUT_LINKS=[],
                 P2P_AIR_JSON_LINK=str(root / "ztp/p2p-air.json"),
                 BRINGUP_OUTPUT_MAPPINGS=[], ANALYZER_INPUT_MAPPINGS=[],
-                ANALYZER_OUTPUT_MAPPINGS=[], _CSV_DIR=None, _DRY_RUN=False,
-                _AUTO_YES=True, _CONFIRM_PROJECT_SWITCH=True, _LINK_TRANSACTION=None,
+                ANALYZER_OUTPUT_MAPPINGS=[], _DRY_RUN=False,
+                _AUTO_YES=True, _CONFIRM_PROJECT_SWITCH=True,
             ))
             for name in unrelated:
                 patches.enter_context(mock.patch.object(SETUP, name))
@@ -172,7 +170,7 @@ class Req19InfraLogWorkflowTests(unittest.TestCase):
                     raise OSError(errno.EXDEV, "independent rollback cross-device rename sentinel")
                 return original_rename(source, target)
 
-            with mock.patch.multiple(setup, _INFRA_LOG_MIGRATION=None, _LINK_TRANSACTION=None), \
+            with mock.patch.multiple(setup, _INFRA_LOG_MIGRATION=None), \
                  mock.patch.object(setup.os, "lstat", side_effect=different_device), \
                  mock.patch.object(setup.os, "remove", wraps=original_remove) as remove, \
                  mock.patch.object(setup, "_rename_infra_log_dir_noreplace", side_effect=rename), \

@@ -582,12 +582,11 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
         p2p = root / "p2p.xlsx"
         p2p.write_bytes(b"fixture")
         old_state = (
-            SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+            SETUP._P2P_SOURCE, SETUP._STRICT,
             SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
         )
         try:
             SETUP._P2P_SOURCE = None
-            SETUP._LINK_TRANSACTION = None
             SETUP._STRICT = False
             SETUP._DRY_RUN = True
             SETUP._AUTO_YES = True
@@ -603,14 +602,14 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             ), mock.patch.object(
                 SETUP, "_validate_xlsx", return_value=([], []),
             ), mock.patch.object(
-                SETUP, "_SetupLinkTransaction",
+                SETUP, "_reconcile_table_links",
             ) as transaction:
                 with self.assertRaises(SystemExit):
                     SETUP._setup_impl(str(root))
             transaction.assert_not_called()
         finally:
             (
-                SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                SETUP._P2P_SOURCE, SETUP._STRICT,
                 SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
             ) = old_state
             temporary.cleanup()
@@ -622,12 +621,11 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
         p2p = root / "p2p.xlsx"
         p2p.write_bytes(b"fixture")
         old_state = (
-            SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+            SETUP._P2P_SOURCE, SETUP._STRICT,
             SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
         )
         try:
             SETUP._P2P_SOURCE = None
-            SETUP._LINK_TRANSACTION = None
             SETUP._STRICT = False
             SETUP._DRY_RUN = True
             SETUP._AUTO_YES = True
@@ -641,14 +639,14 @@ class V2MlagSetupPreflightTests(unittest.TestCase):
             ), mock.patch.object(
                 SETUP, "_validate_xlsx", return_value=([], []),
             ), mock.patch.object(
-                SETUP, "_SetupLinkTransaction",
+                SETUP, "_reconcile_table_links",
             ) as transaction, redirect_stdout(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     SETUP._setup_impl(str(root))
             transaction.assert_not_called()
         finally:
             (
-                SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                SETUP._P2P_SOURCE, SETUP._STRICT,
                 SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
             ) = old_state
             temporary.cleanup()
@@ -760,11 +758,10 @@ common:
             p2p = root / "p2p.xlsx"
             p2p.write_bytes(b"fixture")
             old_state = (
-                SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                SETUP._P2P_SOURCE, SETUP._STRICT,
                 SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
             )
             SETUP._P2P_SOURCE = None
-            SETUP._LINK_TRANSACTION = None
             SETUP._STRICT = False
             SETUP._DRY_RUN = True
             SETUP._AUTO_YES = True
@@ -781,14 +778,14 @@ common:
                 ), mock.patch.object(
                     SETUP, "_validate_xlsx", return_value=([], []),
                 ), mock.patch.object(
-                    SETUP, "_SetupLinkTransaction",
+                    SETUP, "_reconcile_table_links",
                 ) as transaction, redirect_stdout(io.StringIO()):
                     with self.assertRaisesRegex(ValueError, "issue-tracker"):
                         SETUP._setup_impl(str(root))
                 transaction.assert_not_called()
             finally:
                 (
-                    SETUP._P2P_SOURCE, SETUP._LINK_TRANSACTION, SETUP._STRICT,
+                    SETUP._P2P_SOURCE, SETUP._STRICT,
                     SETUP._DRY_RUN, SETUP._AUTO_YES, SETUP._FORCE,
                 ) = old_state
         finally:
