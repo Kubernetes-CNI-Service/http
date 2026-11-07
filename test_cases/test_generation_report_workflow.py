@@ -14,6 +14,7 @@ import inspect
 import io
 import json
 from pathlib import Path
+import shutil
 import textwrap
 from types import SimpleNamespace
 import unittest
@@ -138,6 +139,17 @@ class GenerationReportWorkflow(unittest.TestCase):
             self.assertTrue(published.is_symlink())
             self.assertEqual((self.project / name).resolve(), published.resolve(strict=True))
 
+    def populate_private_dhcp_candidate(self, *_args, **kwargs) -> None:
+        """Model c1's private five-file output without publishing over old flat files."""
+        candidate = kwargs.get("dhcp_candidate_dir")
+        self.assertIsNotNone(candidate)
+        source = self.ztp / "config/isc-dhcp-server"
+        for name in (
+            "dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+            "dhcpd_ib.hosts", "dhcpd_nvl.hosts",
+        ):
+            shutil.copy2(source / name, candidate / name)
+
     def real_load_prepare(self):
         parent = LOAD.validate_and_publish_release(
             self.project, self.fixture.inputs, publish=False,
@@ -257,6 +269,7 @@ class GenerationReportWorkflow(unittest.TestCase):
 
     def test_main_report_directory_fsync_failure_preserves_primary_and_stops_services(self):
         """Run real parent/report commits in a private project, never host services."""
+        self.fixture._http_main_public_source_fixture()
         self.real_setup_publish()
         with redirect_stdout(io.StringIO()):
             parent = LOAD.validate_and_publish_release(
@@ -317,6 +330,8 @@ class GenerationReportWorkflow(unittest.TestCase):
         result = None
         caught = None
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
+            stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=97))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
@@ -345,7 +360,9 @@ class GenerationReportWorkflow(unittest.TestCase):
                 LOAD, "snapshot_release_links",
                 return_value={self.project / "99-output-eth/latest": "old-release"},
             ))
-            stack.enter_context(mock.patch.object(LOAD, "generate_configs"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "generate_configs", side_effect=self.populate_private_dhcp_candidate,
+            ))
             stack.enter_context(mock.patch.object(LOAD, "retire_unselected_release_links"))
             stack.enter_context(mock.patch.object(
                 LOAD, "validate_and_publish_release", return_value=parent,
@@ -397,6 +414,7 @@ class GenerationReportWorkflow(unittest.TestCase):
 
     def test_main_success_path_report_cleanup_failure_cannot_claim_success(self):
         """A final cleanup fault is not a completed load or a parent rollback."""
+        self.fixture._http_main_public_source_fixture()
         self.real_setup_publish()
         with redirect_stdout(io.StringIO()):
             parent = LOAD.validate_and_publish_release(
@@ -451,6 +469,8 @@ class GenerationReportWorkflow(unittest.TestCase):
         result = None
         caught = None
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
+            stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=98))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
@@ -480,7 +500,9 @@ class GenerationReportWorkflow(unittest.TestCase):
                 LOAD, "snapshot_release_links",
                 return_value={self.project / "99-output-eth/latest": "old-release"},
             ))
-            stack.enter_context(mock.patch.object(LOAD, "generate_configs"))
+            stack.enter_context(mock.patch.object(
+                LOAD, "generate_configs", side_effect=self.populate_private_dhcp_candidate,
+            ))
             stack.enter_context(mock.patch.object(LOAD, "retire_unselected_release_links"))
             stack.enter_context(mock.patch.object(
                 LOAD, "validate_and_publish_release", return_value=parent,
@@ -494,6 +516,11 @@ class GenerationReportWorkflow(unittest.TestCase):
             ))
             stack.enter_context(mock.patch.object(
                 LOAD, "discard_prepared_release", side_effect=discard_parent,
+            ))
+            # T+ (11-load batch L7): the post-commit flat DHCP publish is isolated here, as in
+            # tlrt's _exercise_main_transaction_failure (P7); test_committed_dhcp_* run it for real.
+            dhcp_publish = stack.enter_context(mock.patch.object(
+                LOAD, "publish_committed_dhcp_candidate",
             ))
             stack.enter_context(mock.patch.object(LOAD, "preflight_services", preflight))
             stack.enter_context(mock.patch.object(LOAD, "start_services", start))
@@ -512,6 +539,7 @@ class GenerationReportWorkflow(unittest.TestCase):
             events,
         )
         unlock.assert_called_once_with(98)
+        dhcp_publish.assert_called_once()
         preflight.assert_called_once()
         start.assert_not_called()
         self.assertEqual(1, quiesce.call_count)

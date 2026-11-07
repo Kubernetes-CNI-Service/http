@@ -1395,7 +1395,7 @@ def _open_subnet_input_file(path: Path):
         opened = os.fstat(descriptor)
         if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1
                 or (opened.st_dev, opened.st_ino) != (initial.st_dev, initial.st_ino)):
-            raise LoadError("02-dhcp-subnet_config.csv 在检查后被替换或不是 single-link 普通文件")
+            raise LoadError("DHCP subnet CSV 来源身份在读取前变化")
         if opened.st_size == 0:
             raise LoadError("02-dhcp-subnet_config.csv 为零字节；必须提供规范表头")
         stream = os.fdopen(descriptor, "r", newline="", encoding="utf-8-sig")
@@ -1586,6 +1586,16 @@ def _subnet_record_lines(stream) -> tuple[int, ...]:
     try:
         return subnet_csv_record_start_lines(stream)
     except RuntimeContractError as exc:
+        # The shared runtime keeps its English diagnostic; LOAD reports DEV's (2848e52) wording.
+        empty_record = re.fullmatch(
+            r"DHCP subnet CSV line (\d+) \(行\1\) contains an empty delimiter/quote record",
+            str(exc),
+        )
+        if empty_record:
+            raise LoadError(
+                f"DHCP subnet CSV 第 {empty_record.group(1)} 行是仅含分隔符或引号的空字段记录；"
+                "若该行无意义请整行删除"
+            ) from exc
         raise LoadError(str(exc)) from exc
 
 
