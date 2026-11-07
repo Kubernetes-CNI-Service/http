@@ -771,6 +771,46 @@ switches:
             errors, _warnings = SETUP._validate_eth_csv(str(csv_path))
             self.assertEqual([], errors)
 
+    def test_setup_ib_scope_skips_unselected_eth_and_mlag_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory)
+            # DEV REQ22 (175cbf1) reads both service modes before any validator runs.
+            (project / "01-global.yaml").write_text(
+                "schema_version: 2\ncommon:\n  mgmt:\n"
+                "    dhcp-server: {status: disabled}\n    ztp: {status: disabled}\n",
+                encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nib01,ib\n", encoding="utf-8",
+            )
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "subnet\n", encoding="utf-8",
+            )
+            sections = []
+
+            def global_validator(_path, section_key="eth"):
+                sections.append(section_key)
+                return [], []
+
+            old_scope = getattr(SETUP, "_SWITCH_SCOPE", "all")
+            SETUP._SWITCH_SCOPE = "ib"
+            try:
+                with mock.patch.object(
+                    SETUP, "_validate_global_yaml", side_effect=global_validator,
+                ), mock.patch.object(
+                    SETUP, "_validate_eth_csv", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_subnet_csv", return_value=([], []),
+                ), mock.patch.object(
+                    SETUP, "_validate_v2_mlag_project", return_value=([], []),
+                ) as mlag_validator, redirect_stdout(io.StringIO()):
+                    self.assertTrue(SETUP._validate_project(str(project)))
+            finally:
+                SETUP._SWITCH_SCOPE = old_scope
+
+        self.assertEqual(["ib"], sections)
+        mlag_validator.assert_not_called()
+
 
 class SchemaSelectionAndIssueTrackerPolicyContractTests(unittest.TestCase):
     """Schema selection plus C-4's strict normalizer and global loader."""
