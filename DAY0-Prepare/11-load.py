@@ -9353,7 +9353,16 @@ def retire_unselected_release_links(
             continue
         if os.path.lexists(path) and not path.is_symlink():
             raise LoadError(f"拒绝退役非软链接 release 入口：{path}")
-        path.unlink(missing_ok=True)
+        # I-022: rename to a fixed same-directory name; main deletes it only
+        # after the parent release commits and restores it on any earlier
+        # failure or interruption.  Not a ".latest.rollback." or
+        # ".latest.setup-rollback." name: those HOLD the same-project A restore.
+        retired = path.parent / ".latest.retired"
+        if os.path.lexists(retired):
+            raise LoadError(f"latest 退役记录已存在，拒绝覆盖：{retired}")
+        if path.is_symlink():
+            os.replace(path, retired)
+            _fsync_parent_directory(path.parent)
 
 
 def restore_release_links(snapshot: dict[Path, Optional[str]]) -> None:
@@ -12777,6 +12786,28 @@ def main(
                 host_role=host_role,
             )
             runtime_restore_safe = True
+        if not args.dry_run:
+            # I-022: a load killed between retiring the unselected latest and
+            # the parent commit left the original link only under
+            # .latest.retired.  Restore it after quiesce and before setup, so
+            # setup starts from the pre-interruption state.
+            failure_phase = "恢复被打断的 latest 退役"
+            for latest in (
+                project / "99-output-eth/latest",
+                project / "99-output-ib_nvl/latest",
+            ):
+                retired = latest.parent / ".latest.retired"
+                if not os.path.lexists(retired):
+                    continue
+                if not retired.is_symlink():
+                    raise LoadError(f"拒绝处理非软链接的 latest 退役记录：{retired}")
+                if os.path.lexists(latest):
+                    retired.unlink()
+                    warn(f"latest 已存在，删除被打断留下的退役记录：{retired}")
+                else:
+                    os.replace(retired, latest)
+                    warn(f"已恢复被打断的 latest 退役：{latest} -> {os.readlink(latest)}")
+                _fsync_parent_directory(latest.parent)
         failure_phase = "活动项目 setup 检查/切换"
         # setup is the first post-quiesce operation allowed to rewrite managed
         # links.  Mark before entry because a child failure may be partial.
@@ -13024,6 +13055,13 @@ def main(
             # single-replace parent commit.
             commit_prepared_release(parent_candidate)
             release_committed = True
+        if release_committed:
+            # I-022: the committed parent no longer needs the retired latest.
+            for latest in release_link_snapshot:
+                retired = latest.parent / ".latest.retired"
+                if retired.is_symlink():
+                    retired.unlink()
+                    _fsync_parent_directory(latest.parent)
         if report_candidate is not None:
             # Parent and report are two separate atomic replacements, not one
             # transaction.  A crash between them leaves an absent/stale report;
@@ -13153,8 +13191,22 @@ def main(
         if release_link_snapshot and not release_committed:
             try:
                 restore_release_links(release_link_snapshot)
+                # I-022: the snapshot restored latest; drop the retired copy.
+                for latest in release_link_snapshot:
+                    retired = latest.parent / ".latest.retired"
+                    if retired.is_symlink():
+                        retired.unlink()
+                        _fsync_parent_directory(latest.parent)
             except (LoadError, OSError) as rollback_exc:
                 cleanup_errors.append(str(rollback_exc))
+                for latest in release_link_snapshot:
+                    retired = latest.parent / ".latest.retired"
+                    # os.path.islink never raises here, inside the cleanup path.
+                    if os.path.islink(retired):
+                        cleanup_errors.append(
+                            f"退役前的 latest 保留在 {retired}；若 {latest} 不存在，"
+                            f"可手工执行 mv {retired} {latest} 恢复"
+                        )
         if prefix_publication_snapshot is not None and not release_committed:
             try:
                 restore_ztp_prefix_publication(prefix_publication_snapshot)

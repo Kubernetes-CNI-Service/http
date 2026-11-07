@@ -11819,6 +11819,498 @@ print("actual-copied-validator-selected-B")
         self.assertEqual(original_environment, dict(os.environ))
 
 
+class LatestRetirementRecoveryTests(unittest.TestCase):
+    """I-022 (v3.1.1 WP-15): retire the unselected latest by rename, delete it after commit.
+
+    Expected behaviour comes from 待确认问题 I-022 (a scoped load that fails or
+    is interrupted must not leave the unselected latest dangling), 开发计划 M5
+    (rename first, delete after the commit, recover on failure) and the owner
+    rule that a same-named real file or directory is reported and never
+    replaced or deleted (需求文档 :925, rule :933).  Observations made inside
+    patched collaborators are recorded and asserted after main() returns,
+    because main() converts an exception raised there into exit status 1.
+    """
+
+    MARKER = ".latest.retired"
+
+    @staticmethod
+    def _scoped_project(root: Path) -> Path:
+        project = root / "DAY0-Prepare/demo"
+        for output, target in (
+            ("99-output-eth", "eth-release"),
+            ("99-output-ib_nvl", "nvos-release"),
+        ):
+            (project / output).mkdir(parents=True)
+            (project / output / "latest").symlink_to(target)
+        return project
+
+    @staticmethod
+    def _occupy(path: Path, kind: str) -> None:
+        if kind == "directory":
+            path.mkdir()
+            (path / "leaf01.yaml").write_bytes(b"hostname: leaf01\n")
+        else:
+            path.write_bytes(b"operator-owned entry\n")
+
+    @staticmethod
+    def _tree(root: Path) -> dict[str, tuple]:
+        state: dict[str, tuple] = {}
+        for directory, names, files in os.walk(root):
+            for name in names + files:
+                path = Path(directory) / name
+                relative = path.relative_to(root).as_posix()
+                if path.is_symlink():
+                    state[relative] = ("link", os.readlink(path))
+                elif path.is_dir():
+                    state[relative] = ("directory",)
+                else:
+                    state[relative] = ("file", path.read_bytes())
+        return state
+
+    @staticmethod
+    def _inputs(project: Path, *, services: bool) -> SimpleNamespace:
+        settings = SimpleNamespace(
+            http_enabled=services, dhcp_enabled=services, ztp_prefix="/ztp",
+            schema_version=1, versions={}, service_ips=("192.0.2.10",),
+            http_port=80,
+        )
+        return SimpleNamespace(
+            settings=settings, pubkeys=(), device_types=frozenset({"eth"}),
+            p2p_file=project / "p2p.xlsx", source_identities={},
+            air_topology_policy=None,
+        )
+
+    def _run_workstation_main(
+        self, project: Path, *extra: str, validate=None, activate=None,
+        restore=None,
+    ) -> tuple[int, str]:
+        """Real main() on a Linux workstation; only collaborators outside I-022 are patched."""
+        candidate = SimpleNamespace(committed=False)
+
+        def commit(prepared) -> None:
+            prepared.committed = True
+
+        stderr = io.StringIO()
+        with ExitStack() as stack:
+            def patch(name: str, **kwargs):
+                return stack.enter_context(mock.patch.object(LOAD, name, **kwargs))
+
+            patch("runtime_os", return_value="Linux")
+            patch("acquire_deployment_lock", return_value=97)
+            patch("release_deployment_lock")
+            patch("resolve_project", return_value=project)
+            patch("ensure_previous_generation_frozen", return_value=None)
+            patch("initialize_from_template")
+            patch("validate_inputs", return_value=(self._inputs(project, services=False), {}))
+            patch("activate_project", side_effect=activate)
+            patch("render_ztp_runtime")
+            patch("_device_types_after_dhcp", return_value=frozenset({"eth"}))
+            patch("generate_configs", return_value=None)
+            patch(
+                "validate_and_publish_release",
+                side_effect=validate or (lambda *_args, **_kwargs: {"validation": "passed"}),
+            )
+            patch("prepare_current_release", return_value=candidate)
+            patch("commit_prepared_release", side_effect=commit)
+            patch("discard_prepared_release")
+            if restore is not None:
+                patch("restore_release_links", side_effect=restore)
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(redirect_stderr(stderr))
+            result = LOAD.main([
+                str(project), "--host-role", "workstation", "--switch", "eth", *extra,
+            ])
+        return result, stderr.getvalue()
+
+    def _run_server_main_until_setup(
+        self, project: Path, *, quiesce, setup,
+    ) -> tuple[int, str]:
+        """Real main() on a Linux management server, stopped by the setup fixture."""
+        stderr = io.StringIO()
+        with ExitStack() as stack:
+            def patch(name: str, **kwargs):
+                return stack.enter_context(mock.patch.object(LOAD, name, **kwargs))
+
+            patch("runtime_os", return_value="Linux")
+            patch("service_runtime_backend", return_value=SimpleNamespace(name="systemd"))
+            patch("acquire_deployment_lock", return_value=97)
+            patch("release_deployment_lock")
+            patch("require_no_pending_dhcp_transaction")
+            patch("resolve_project", return_value=project)
+            patch("load_global", return_value=SimpleNamespace(http_enabled=False))
+            patch("stop_native_ztp_monitors")
+            patch("ensure_previous_generation_frozen", return_value=None)
+            patch("initialize_from_template")
+            patch("validate_inputs", return_value=(self._inputs(project, services=True), {}))
+            patch("validate_management_host", return_value=True)
+            patch("plan_local_dhcp_runtime", return_value=SimpleNamespace())
+            patch("confirm_ztp_monitor_start", return_value=False)
+            patch("quiesce_services", side_effect=quiesce)
+            patch("require_http_project_source_access")
+            patch("activate_project", side_effect=setup)
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(redirect_stderr(stderr))
+            result = LOAD.main([
+                str(project), "--host-role", "management-server",
+                "--switch", "eth", "--skip-infra",
+            ])
+        return result, stderr.getvalue()
+
+    def test_scoped_retire_renames_unselected_latest_to_retired_marker(self) -> None:
+        for scope, retired_output, kept_output, original in (
+            ("eth", "99-output-ib_nvl", "99-output-eth", "nvos-release"),
+            ("ib", "99-output-eth", "99-output-ib_nvl", "eth-release"),
+            ("nvl", "99-output-eth", "99-output-ib_nvl", "eth-release"),
+        ):
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
+                project = self._scoped_project(Path(directory))
+                latest = project / retired_output / "latest"
+                marker = latest.parent / self.MARKER
+                kept = project / kept_output / "latest"
+                kept_target = os.readlink(kept)
+                synchronized: list[Path] = []
+                real_sync = LOAD._fsync_parent_directory
+
+                def spy(path, real_sync=real_sync, synchronized=synchronized):
+                    synchronized.append(Path(path))
+                    return real_sync(path)
+
+                with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=spy):
+                    LOAD.retire_unselected_release_links(project, scope, dry_run=False)
+
+                # 开发计划 M5「先改名」: the unselected latest leaves its name, and
+                # its exact link text survives under the fixed same-directory marker.
+                self.assertFalse(os.path.lexists(latest))
+                self.assertTrue(marker.is_symlink())
+                self.assertEqual(original, os.readlink(marker))
+                # The selected platform is untouched.
+                self.assertEqual(kept_target, os.readlink(kept))
+                self.assertFalse(os.path.lexists(kept.parent / self.MARKER))
+                # WP-15 改什么 1: the rename is made durable before load continues.
+                self.assertEqual([latest.parent], synchronized)
+
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._scoped_project(Path(directory))
+            before = self._tree(project)
+            LOAD.retire_unselected_release_links(project, "all", dry_run=False)
+            # SWITCH_SCOPE_TYPES: --switch all retires nothing.
+            self.assertEqual(before, self._tree(project))
+
+    def test_failure_before_commit_restores_latest_and_clears_marker(self) -> None:
+        def scenario(directory: str, restore=None):
+            project = self._scoped_project(Path(directory))
+            latest = project / "99-output-ib_nvl/latest"
+            marker = latest.parent / self.MARKER
+            observed = []
+
+            def fail_parent(*_args, **_kwargs):
+                observed.append((
+                    os.path.lexists(latest),
+                    os.readlink(marker) if marker.is_symlink() else None,
+                ))
+                raise LOAD.LoadError("injected parent validation failure")
+
+            result, stderr = self._run_workstation_main(
+                project, validate=fail_parent, restore=restore,
+            )
+            return project, latest, marker, observed, result, stderr
+
+        with tempfile.TemporaryDirectory() as directory:
+            project, latest, marker, observed, result, _stderr = scenario(directory)
+            self.assertEqual(1, result)
+            # main really retired by rename before the injected parent failure.
+            self.assertEqual([(False, "nvos-release")], observed)
+            # 待确认问题 I-022「失败时能恢复」: the original text is back and no marker remains.
+            self.assertEqual("nvos-release", os.readlink(latest))
+            self.assertFalse(os.path.lexists(marker))
+            self.assertEqual("eth-release", os.readlink(project / "99-output-eth/latest"))
+
+        with tempfile.TemporaryDirectory() as directory:
+            project, latest, marker, observed, result, stderr = scenario(
+                directory,
+                restore=LOAD.LoadError("YAML release 回滚失败：injected restore failure"),
+            )
+            self.assertEqual(1, result)
+            self.assertEqual([(False, "nvos-release")], observed)
+            # WP-15 改什么 3: when the restore fails the marker is the only copy;
+            # keep it and name it with the manual mv hint.
+            self.assertFalse(os.path.lexists(latest))
+            self.assertEqual("nvos-release", os.readlink(marker))
+            self.assertIn("injected restore failure", stderr)
+            self.assertIn(str(marker), stderr)
+            self.assertIn(f"mv {marker} {latest}", stderr)
+
+    def test_commit_removes_retired_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._scoped_project(Path(directory))
+            latest = project / "99-output-ib_nvl/latest"
+            marker = latest.parent / self.MARKER
+            observed = []
+            synchronized: list[Path] = []
+            real_sync = LOAD._fsync_parent_directory
+
+            def spy(path):
+                synchronized.append(Path(path))
+                return real_sync(path)
+
+            def validate(*_args, **_kwargs):
+                observed.append(os.readlink(marker) if marker.is_symlink() else None)
+                return {"validation": "passed"}
+
+            with mock.patch.object(LOAD, "_fsync_parent_directory", side_effect=spy):
+                result, _stderr = self._run_workstation_main(project, validate=validate)
+
+            self.assertEqual(0, result)
+            self.assertEqual(["nvos-release"], observed)
+            # 开发计划 M5「再删除」: after the parent commit neither name remains.
+            self.assertFalse(os.path.lexists(latest))
+            self.assertFalse(os.path.lexists(marker))
+            self.assertEqual("eth-release", os.readlink(project / "99-output-eth/latest"))
+            # WP-15 改什么 2: the deletion is made durable as well (rename + delete).
+            self.assertEqual(2, synchronized.count(latest.parent))
+
+    def test_next_load_restores_interrupted_retirement_before_setup(self) -> None:
+        # 待确认问题 I-022: a scoped load interrupted mid-way may leave a dangling
+        # latest; 开发计划 M5: recoverable.  WP-15 改什么 4: after quiesce, before setup.
+        for output, original in (
+            ("99-output-ib_nvl", "nvos-release"),
+            ("99-output-eth", "eth-release"),
+        ):
+            for latest_present in (False, True):
+                with self.subTest(output=output, latest_present=latest_present), \
+                        tempfile.TemporaryDirectory() as directory:
+                    project = self._scoped_project(Path(directory))
+                    latest = project / output / "latest"
+                    marker = latest.parent / self.MARKER
+                    # The killed load got as far as the rename.
+                    os.replace(latest, marker)
+                    if latest_present:
+                        latest.symlink_to("republished-release")
+                    expected = "republished-release" if latest_present else original
+                    events = []
+
+                    def state(latest=latest, marker=marker):
+                        return (
+                            os.readlink(latest) if latest.is_symlink() else None,
+                            os.path.lexists(marker),
+                        )
+
+                    def quiesce(*_args, events=events, state=state, **_kwargs):
+                        events.append(("quiesce", state()))
+
+                    def setup(*_args, events=events, state=state, **_kwargs):
+                        events.append(("setup", state()))
+                        raise LOAD.LoadError("stop after the observed setup boundary")
+
+                    result, _stderr = self._run_server_main_until_setup(
+                        project, quiesce=quiesce, setup=setup,
+                    )
+
+                    self.assertEqual(1, result)
+                    self.assertEqual(
+                        [
+                            ("quiesce", ("republished-release" if latest_present else None, True)),
+                            ("setup", (expected, False)),
+                        ],
+                        events[:2],
+                    )
+                    self.assertEqual((expected, False), state())
+
+    def test_regular_file_at_retired_marker_is_refused_without_deletion(self) -> None:
+        # 需求文档 :933 rule 2 (owner 2026-11-03): a real file or directory at a
+        # managed name is reported; nothing is replaced or deleted.
+        for kind in ("file", "directory"):
+            with self.subTest(stage="retire", kind=kind), \
+                    tempfile.TemporaryDirectory() as directory:
+                project = self._scoped_project(Path(directory))
+                marker = project / "99-output-ib_nvl" / self.MARKER
+                self._occupy(marker, kind)
+                before = self._tree(project)
+                with self.assertRaises(LOAD.LoadError) as caught:
+                    LOAD.retire_unselected_release_links(project, "eth", dry_run=False)
+                self.assertIn(str(marker), str(caught.exception))
+                self.assertEqual(before, self._tree(project))
+
+            with self.subTest(stage="recover", kind=kind), \
+                    tempfile.TemporaryDirectory() as directory:
+                project = self._scoped_project(Path(directory))
+                (project / "99-output-ib_nvl/latest").unlink()
+                marker = project / "99-output-ib_nvl" / self.MARKER
+                self._occupy(marker, kind)
+                before = self._tree(project)
+                setup_calls = []
+                result, stderr = self._run_workstation_main(
+                    project, activate=lambda *args, **kwargs: setup_calls.append(args),
+                )
+                self.assertEqual(1, result)
+                self.assertEqual([], setup_calls)
+                self.assertIn(str(marker), stderr)
+                self.assertEqual(before, self._tree(project))
+
+        with tempfile.TemporaryDirectory() as directory:
+            # WP-15 改什么 1: an existing marker is never overwritten by a new retirement.
+            project = self._scoped_project(Path(directory))
+            marker = project / "99-output-ib_nvl" / self.MARKER
+            marker.symlink_to("older-retired-release")
+            before = self._tree(project)
+            with self.assertRaises(LOAD.LoadError) as caught:
+                LOAD.retire_unselected_release_links(project, "eth", dry_run=False)
+            self.assertIn(str(marker), str(caught.exception))
+            self.assertEqual(before, self._tree(project))
+
+    def test_dry_run_retire_changes_nothing(self) -> None:
+        # --dry-run contract: no file is changed (regression protection).
+        with tempfile.TemporaryDirectory() as directory:
+            project = self._scoped_project(Path(directory))
+            before = self._tree(project)
+            with redirect_stdout(io.StringIO()):
+                for scope in ("eth", "ib", "nvl", "all"):
+                    LOAD.retire_unselected_release_links(project, scope, dry_run=True)
+            self.assertEqual(before, self._tree(project))
+
+        with tempfile.TemporaryDirectory() as directory:
+            # WP-15 改什么 4 runs only outside dry-run: an interrupted state stays as found.
+            project = self._scoped_project(Path(directory))
+            latest = project / "99-output-ib_nvl/latest"
+            os.replace(latest, latest.parent / self.MARKER)
+            before = self._tree(project)
+            result, _stderr = self._run_workstation_main(
+                project, "--dry-run", validate=lambda *_args, **_kwargs: None,
+            )
+            self.assertEqual(0, result)
+            self.assertEqual(before, self._tree(project))
+
+    def test_non_symlink_latest_still_refused(self) -> None:
+        # 需求文档 :933 rule 2: the existing refusal stays, and no marker is created.
+        for kind in ("file", "directory"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                project = self._scoped_project(Path(directory))
+                latest = project / "99-output-ib_nvl/latest"
+                latest.unlink()
+                self._occupy(latest, kind)
+                before = self._tree(project)
+                with self.assertRaisesRegex(LOAD.LoadError, "拒绝退役非软链接 release 入口"):
+                    LOAD.retire_unselected_release_links(project, "eth", dry_run=False)
+                self.assertEqual(before, self._tree(project))
+                self.assertFalse(os.path.lexists(latest.parent / self.MARKER))
+
+    def test_workflow_real_publisher_latest_survives_failed_and_interrupted_scoped_load(self) -> None:
+        """Real publisher _set_latest_yaml + real load retirement/recovery + real setup readers."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = root / "DAY0-Prepare/demo"
+            services: dict[str, Path] = {}
+            logical: dict[str, Path] = {}
+            published: dict[str, Path] = {}
+            for platform, output, release in (
+                ("cumulus", "99-output-eth", "20261107_101500_combine"),
+                ("nvos", "99-output-ib_nvl", "20261107_101500-ib"),
+            ):
+                release_dir = project / output / release
+                release_dir.mkdir(parents=True)
+                (release_dir / ".published-complete").write_text(
+                    "20261107_101500\n", encoding="utf-8",
+                )
+                (release_dir / "device01.yaml").write_text("- set: {}\n", encoding="utf-8")
+                service = root / "ztp/config" / platform
+                output_link = service / "template" / (
+                    "99-output" if platform == "cumulus" else output
+                )
+                output_link.parent.mkdir(parents=True)
+                output_link.symlink_to(os.path.relpath(project / output, output_link.parent))
+                with redirect_stdout(io.StringIO()):
+                    self.assertTrue(PUBLISHER._set_latest_yaml(
+                        str(service), str(output_link / release),
+                    ))
+                services[platform] = service
+                logical[platform] = output_link
+                published[platform] = release_dir.resolve()
+            cumulus_entry = services["cumulus"] / "latest_yaml"
+            nvos_entry = services["nvos"] / "latest_yaml"
+            marker = project / "99-output-ib_nvl" / self.MARKER
+            self.assertEqual(published["nvos"], nvos_entry.resolve(strict=True))
+            self.assertEqual(published["cumulus"], cumulus_entry.resolve(strict=True))
+
+            # 1. In-process failure after the retirement (WP-15 改什么 3).
+            observed: dict[str, object] = {}
+
+            def observe_then_fail(*_args, **_kwargs):
+                observed["nvos_entry"] = (os.path.lexists(nvos_entry), nvos_entry.exists())
+                observed["cumulus_entry"] = cumulus_entry.resolve()
+                observed["marker"] = os.readlink(marker) if marker.is_symlink() else None
+                observed["setup_nvos"] = SETUP._latest_nvos_publish_dir(str(logical["nvos"]))
+                observed["setup_cumulus"] = SETUP._latest_cumulus_publish_dir(
+                    str(logical["cumulus"]),
+                )
+                previous = os.getcwd()
+                os.chdir(services["nvos"])
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        observed["publisher_scan"] = PUBLISHER._resolve_yaml_dir()
+                finally:
+                    os.chdir(previous)
+                raise LOAD.LoadError("injected parent validation failure after retirement")
+
+            result, _stderr = self._run_workstation_main(project, validate=observe_then_fail)
+            self.assertEqual(1, result)
+            # R-016 §3.4: latest_yaml belongs to the publisher; a retired platform's
+            # entry dangles without an error while the selected one still resolves.
+            self.assertEqual((True, False), observed["nvos_entry"])
+            self.assertEqual(published["cumulus"], observed["cumulus_entry"])
+            self.assertEqual("20261107_101500-ib", observed["marker"])
+            # Neither setup's release selector nor the publisher's directory scan
+            # takes the dot-named marker link for a publication directory.
+            self.assertEqual(published["nvos"], Path(observed["setup_nvos"]).resolve())
+            self.assertEqual(published["cumulus"], Path(observed["setup_cumulus"]).resolve())
+            self.assertEqual(published["nvos"], Path(observed["publisher_scan"]).resolve())
+            # The rollback brought the entry back and removed the marker.
+            self.assertEqual(published["nvos"], nvos_entry.resolve(strict=True))
+            self.assertFalse(os.path.lexists(marker))
+
+            # 2. A load killed after the rename (WP-15 改什么 4), then a full rerun.
+            with redirect_stdout(io.StringIO()):
+                LOAD.retire_unselected_release_links(project, "eth", dry_run=False)
+            self.assertFalse(nvos_entry.exists())
+            seen: dict[str, object] = {}
+
+            def real_setup_latest(*_args, **_kwargs):
+                seen["entry_at_setup"] = (
+                    nvos_entry.resolve() if nvos_entry.exists() else None
+                )
+                seen["marker_at_setup"] = os.path.lexists(marker)
+                with mock.patch.object(SETUP, "ZTP", str(root / "ztp")), \
+                        mock.patch.object(SETUP, "HTTP_BASE", str(root)), \
+                        mock.patch.object(SETUP, "_DRY_RUN", False), \
+                        mock.patch.object(SETUP, "_AUTO_YES", True), \
+                        redirect_stdout(io.StringIO()):
+                    SETUP._process_latest_yaml(str(project))
+                seen["entry_after_setup"] = (
+                    nvos_entry.resolve() if nvos_entry.exists() else None
+                )
+
+            def observe_retired_again(*_args, **_kwargs):
+                seen["marker_before_commit"] = (
+                    os.readlink(marker) if marker.is_symlink() else None
+                )
+                return {"validation": "passed"}
+
+            result, _stderr = self._run_workstation_main(
+                project, activate=real_setup_latest, validate=observe_retired_again,
+            )
+            self.assertEqual(0, result)
+            # setup starts from the restored pre-interruption state.
+            self.assertEqual(published["nvos"], seen["entry_at_setup"])
+            self.assertFalse(seen["marker_at_setup"])
+            self.assertEqual(published["nvos"], seen["entry_after_setup"])
+            # The same scope retires again and the commit removes the marker.
+            self.assertEqual("20261107_101500-ib", seen["marker_before_commit"])
+            self.assertFalse(os.path.lexists(project / "99-output-ib_nvl/latest"))
+            self.assertFalse(os.path.lexists(marker))
+            self.assertTrue(os.path.lexists(nvos_entry))
+            self.assertFalse(nvos_entry.exists())
+            self.assertEqual(published["cumulus"], cumulus_entry.resolve(strict=True))
+
+
 class InfraNeutralFallbackWorkflowTests(unittest.TestCase):
     def test_global_key_replacement_flows_to_bash_and_family_defaults(self):
         spec = importlib.util.spec_from_file_location(

@@ -842,6 +842,27 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - AIR 不指定 `--switch` 时保存证据证明默认选择 `eth`；显式 `--air --switch ib` 或 `nvl` 必须在
   部署锁、setup、文件写入和服务变化之前失败。完成后执行不带 `--switch` 的正式 load 恢复全平台
   release，并记录三个平台及 DHCP/parent 再次属于同一代。
+- 退役中断恢复补充（v3.1.1 WP-15，I-022；**NOT RUN / REAL_ENV REQUIRED**）：本机先决为
+  `test_cases.test_load_release_transaction.LatestRetirementRecoveryTests` 的 7 个 direct 与 1 个
+  真实发布器 → load → setup 读者 workflow GREEN；它们不证明真实进程被杀与断电后的行为。
+  - 前置条件：AIR 隔离管理服务器；项目已完成一次不带 `--switch` 的正式 load，ETH 与 NVOS 都有带
+    `.published-complete` 的发布目录。保存两条 `99-output-*/latest` 原文、
+    `ztp/config/{cumulus,nvos}/latest_yaml` 的解析结果、`99-output-ztp/current` 是否存在以及服务状态。
+  - 步骤：执行 `load --switch eth`，在 `99-output-ib_nvl/.latest.retired` 出现之后、父 release 提交
+    之前对 load 进程执行 `kill -9`；记录此时 NVOS `latest` 不存在、`.latest.retired` 原文等于原
+    `latest`。然后再执行一次同参数 load。
+  - 期望：第二次 load 在停止服务之后、调用 setup 之前把 NVOS `latest` 恢复成原文并删除
+    `.latest.retired`（日志「已恢复被打断的 latest 退役」早于 setup 段）；随后同一 scope 再次退役，
+    提交后不残留 `.latest.retired`；`ztp/config/nvos/latest_yaml` 悬空属于预期（R-016 §3.4）。
+  - 已知分支（推断，现场须记录）：本项目已有 `99-output-ztp/current` 且就是活动项目时，同项目 A
+    回执在恢复点之前核对 `latest`，第二次 load 预计在那里 HOLD（11-load 批既有的 fail-closed 行为，
+    不属本段失败）；记录 HOLD 原文与当时两条 `latest`，按 HOLD 提示处理后再验证本段。
+  - 负向：把 `.latest.retired` 换成真实文件或目录后再跑 load，必须在 setup 之前报错退出，内容不变、
+    不删除。
+  - 清理与证据：保存两次 load 的退出码与日志，kill 前后两条 `latest` 与 `.latest.retired` 的
+    `ls -l` 原文，`latest_yaml` 解析结果；结束后执行不带 `--switch` 的正式 load 恢复全平台 release。
+  - 风险：`kill -9` 只在 AIR 隔离环境执行；「父 release 已提交、`.latest.retired` 尚未删除」的窄窗口
+    只记录不处理（编码准则 1），下一次 load 会先恢复再由同 scope 退役或发布器替换。
 
 ## TC-REAL-NETWORK-SNAPSHOT-001 — Ubuntu 动态计时字段与拓扑稳定性
 
