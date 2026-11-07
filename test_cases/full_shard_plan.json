@@ -3,8 +3,8 @@
  "description": "Two-phase full-suite shard plan (G5Q-RA shape, re-derived on the current canonical discovery). Correctness never depends on balance: the runner checks exact coverage.",
  "derivation": {
   "status": "provisional",
-  "weights": "per-test seconds measured inside the lanes of the v3.1.0 step-6 pair-2 sharded arm (v310-pair2-shard, candidate b09cf72, 5 contended free lanes, 2 UFM slices; phase B alone); tests added by the 11-load batch are unmeasured and take the module mean, else the median module mean, until FP1",
-  "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0824",
+  "weights": "per-test seconds measured inside the lanes of the v3.1.0 FP1 diagnostic sharded run (v310-fp1-diag, candidate 066dc1e, 5 contended free lanes, 2 UFM slices; phase B alone); tests added after it take the module mean, else the median module mean",
+  "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0812",
   "rerun": "re-derive from a timing log of the tree the plan is for before any timed comparison (B-6)",
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
   "dev_rederivation": "DEV re-derivation (v3.1.0 step 3, 2026-11-06) on the post-G1 tree from the canonical-discovery census; quiet lane = TEST's quiet units re-checked on DEV plus the DEV hazard census (scripts/shard/dev_shard_config.py in the v3.1 docs lists the evidence per item)",
@@ -97,7 +97,12 @@
     "test_cases.test_fleet_ssh",
     "test_cases.test_flow_release_platform_matrix",
     "test_cases.test_full_flow_integration",
-    "test_cases.test_full_shard_workflow",
+    "test_cases.test_full_shard_workflow"
+   ]
+  },
+  {
+   "lane": "w1",
+   "units": [
     "test_cases.test_generation_input_binding_workflow",
     "test_cases.test_generation_report_contract",
     "test_cases.test_generation_report_workflow",
@@ -106,12 +111,7 @@
     "test_cases.test_h_enter_formal_identity",
     "test_cases.test_h_expression_container_wrappers",
     "test_cases.test_h_feedback_real_lock_recovery_workflow",
-    "test_cases.test_h_finite_receiver_attributes"
-   ]
-  },
-  {
-   "lane": "w1",
-   "units": [
+    "test_cases.test_h_finite_receiver_attributes",
     "test_cases.test_h_graph_local_scope_memo",
     "test_cases.test_h_literal_container_update_forms",
     "test_cases.test_h_nested_receiver_escape",
@@ -205,14 +205,14 @@
     "test_cases.test_import_from_download_target",
     "test_cases.test_infra_check_and_manual_reset",
     "test_cases.test_infra_component_contract",
-    "test_cases.test_infra_component_entry_contract",
-    "test_cases.test_infra_component_workflow",
-    "test_cases.test_infra_neutral_defaults"
+    "test_cases.test_infra_component_entry_contract"
    ]
   },
   {
    "lane": "w2",
    "units": [
+    "test_cases.test_infra_component_workflow",
+    "test_cases.test_infra_neutral_defaults",
     "test_cases.test_infra_setup_py",
     "test_cases.test_infra_setup_py_workflow",
     "test_cases.test_initial_setup_authorized_key_quoted_options",
@@ -247,7 +247,12 @@
     "test_cases.test_initial_setup_pty_cleanup",
     "test_cases.test_initial_setup_selfcontained_neutral",
     "test_cases.test_initial_setup_target_credentials_workflow",
-    "test_cases.test_initial_setup_target_outcome_summary",
+    "test_cases.test_initial_setup_target_outcome_summary"
+   ]
+  },
+  {
+   "lane": "w3",
+   "units": [
     "test_cases.test_initial_setup_target_password_policy",
     "test_cases.test_issue0007_role_link_contract",
     "test_cases.test_issue0007_role_link_workflow",
@@ -265,12 +270,7 @@
     "test_cases.test_mlag_evpn_generation",
     "test_cases.test_module_loader_contract",
     "test_cases.test_monitor_authority_entrypoints",
-    "test_cases.test_monitor_authority_source_guard"
-   ]
-  },
-  {
-   "lane": "w3",
-   "units": [
+    "test_cases.test_monitor_authority_source_guard",
     "test_cases.test_monitor_legacy_tracker_retirement",
     "test_cases.test_monitor_legacy_tracker_retirement_workflow",
     "test_cases.test_monitor_ufm_status",
@@ -315,13 +315,13 @@
     "test_cases.test_public_publication_contract",
     "test_cases.test_public_publication_v3_overlap",
     "test_cases.test_public_publication_workflow",
-    "test_cases.test_public_repository_contract",
-    "test_cases.test_public_s_phase_contract"
+    "test_cases.test_public_repository_contract"
    ]
   },
   {
    "lane": "w4",
    "units": [
+    "test_cases.test_public_s_phase_contract",
     "test_cases.test_public_s_phase_workflow",
     "test_cases.test_qos_evpn_uplink_generation",
     "test_cases.test_reference_only_path_disposition",
@@ -342,6 +342,7 @@
     "test_cases.test_req8_template_refactor_contract",
     "test_cases.test_req9_manual_preservation_workflow",
     "test_cases.test_runner_preflight",
+    "test_cases.test_runtime_lock_fdinfo",
     "test_cases.test_server_device_types",
     "test_cases.test_server_device_types_workflow",
     "test_cases.test_service_endpoint_convergence",
