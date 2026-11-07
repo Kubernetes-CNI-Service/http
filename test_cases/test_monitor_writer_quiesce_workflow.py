@@ -2151,10 +2151,14 @@ def _delegated_governed_script_constants(tree: ast.AST) -> set[str]:
 def _source_bound_setup_mapping_seed(
     tree: ast.AST, contract_tree: ast.AST | None = None,
 ) -> set[str]:
-    """Trace one imported authority through setup's real symlink destination.
+    """Trace one imported authority through setup's real link destination.
 
     The mapping rows are read as syntax from their production source.  An
     imported name, an entry table, or a stop call alone is not sink evidence.
+    Since v3.1.1 WP-2 (R-016 §4.3) _process_mapping hands its one
+    ``(link_path, text)`` entry to the reconcile engine _reconcile_links, whose
+    ``os.replace(temporary, link_path)`` of the ``os.symlink(text, temporary)``
+    link is the sink.
     """
     def import_bindings(source: ast.AST, name: str):
         bindings = []
@@ -2229,10 +2233,10 @@ def _source_bound_setup_mapping_seed(
         node.name: node for node in getattr(tree, "body", ())
         if isinstance(node, ast.FunctionDef)
     }
-    if not {"_setup_impl", "_process_mapping", "_make_link"} <= functions.keys():
+    if not {"_setup_impl", "_process_mapping", "_reconcile_links"} <= functions.keys():
         return set()
     setup, process, maker = (
-        functions[name] for name in ("_setup_impl", "_process_mapping", "_make_link")
+        functions[name] for name in ("_setup_impl", "_process_mapping", "_reconcile_links")
     )
     loops = [
         node for node in _walk_local_scope(setup)
@@ -2272,25 +2276,75 @@ def _source_bound_setup_mapping_seed(
         and named(link_path.args[1], "link_rel")
     ):
         return set()
-    link_returns = [
-        node.value for node in _walk_local_scope(process)
-        if isinstance(node, ast.Return)
-        and isinstance(node.value, ast.Call)
-        and named(node.value.func, "_make_link")
+
+    def stores(scope: ast.AST, name: str) -> int:
+        return sum(
+            isinstance(node, ast.Name) and node.id == name
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            for node in _walk_local_scope(scope)
+        )
+
+    def os_calls(scope: ast.AST, attribute: str) -> list[ast.Call]:
+        return [
+            node for node in _walk_local_scope(scope)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and named(node.func.value, "os") and node.func.attr == attribute
+        ]
+
+    # _process_mapping: one entry whose destination is link_path, handed to the engine by
+    # exactly three ``return _reconcile_links(link)[0]``.
+    entries = [
+        node.value for node in process.body if isinstance(node, ast.Assign)
+        and any(named(target, "link") for target in node.targets)
     ]
-    if len(link_returns) != 3 or any(
-        len(call.args) != 2 or not named(call.args[0], "link_path")
+    if (
+        len(entries) != 1 or stores(process, "link") != 1
+        or stores(process, "link_path") != 1
+        or not isinstance(entries[0], ast.List) or len(entries[0].elts) != 1
+        or not isinstance(entries[0].elts[0], ast.Tuple)
+        or len(entries[0].elts[0].elts) != 2
+        or not named(entries[0].elts[0].elts[0], "link_path")
+    ):
+        return set()
+    engine_calls = [
+        node for node in _walk_local_scope(process)
+        if isinstance(node, ast.Call) and named(node.func, "_reconcile_links")
+    ]
+    link_returns = [
+        node.value.value for node in _walk_local_scope(process)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Subscript)
+        and isinstance(node.value.value, ast.Call)
+        and named(node.value.value.func, "_reconcile_links")
+        and isinstance(node.value.slice, ast.Constant) and node.value.slice.value == 0
+    ]
+    if len(link_returns) != 3 or len(engine_calls) != 3 or any(
+        len(call.args) != 1 or call.keywords or not named(call.args[0], "link")
         for call in link_returns
     ):
         return set()
-    sinks = [
+    # _reconcile_links: its one entry loop binds link_path from the parameter, makes the
+    # temporary link and replaces link_path with it; nothing else rebinds link_path.
+    if len(maker.args.args) != 1:
+        return set()
+    parameter = maker.args.args[0].arg
+    loops = [
         node for node in _walk_local_scope(maker)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and named(node.func.value, "os") and node.func.attr == "symlink"
+        if isinstance(node, ast.For) and named(node.iter, parameter)
+        and isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2
+        and named(node.target.elts[0], "link_path")
     ]
-    if len(sinks) != 1 or len(sinks[0].args) != 2 or not named(
-        sinks[0].args[1], "link_path"
+    replaces, symlinks = os_calls(maker, "replace"), os_calls(maker, "symlink")
+    if (
+        len(loops) != 1 or stores(maker, "link_path") != 1
+        or len(replaces) != 1 or len(symlinks) != 1
+        or len(replaces[0].args) != 2 or replaces[0].keywords
+        or not named(replaces[0].args[1], "link_path")
+        or not isinstance(replaces[0].args[0], ast.Name)
+        or len(symlinks[0].args) != 2
+        or not named(symlinks[0].args[1], replaces[0].args[0].id)
+        or not {id(replaces[0]), id(symlinks[0])} <= {id(node) for node in ast.walk(loops[0])}
     ):
         return set()
     return {"MAPPINGS"}
@@ -6840,13 +6894,30 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             ),
             (
                 "link_call_removed", "setup",
-                "return _make_link(link_path, src_path)",
-                "return _other_link(link_path, src_path)",
+                "return _reconcile_links(link)[0]",
+                "return _other_link(link)[0]",
             ),
             (
-                "symlink_destination_diverted", "setup",
-                "os.symlink(rel_target, link_path)",
-                "os.symlink(rel_target, wrong_path)",
+                "link_entry_diverted", "setup",
+                "link = [(link_path, _link_text(link_path, src_path))]",
+                "link = [(wrong_path, _link_text(link_path, src_path))]",
+            ),
+            (
+                "replace_destination_diverted", "setup",
+                "os.replace(temporary, link_path)",
+                "os.replace(temporary, wrong_path)",
+            ),
+            (
+                "temporary_link_diverted", "setup",
+                "os.symlink(text, temporary)",
+                "os.symlink(text, other_temporary)",
+            ),
+            (
+                # v3.1.1 WP-2 counter-proof: the engine writing the link directly, without
+                # its temporary + os.replace, is not the bound sink.
+                "replace_sink_bypassed", "setup",
+                "os.symlink(text, temporary)\n        os.replace(temporary, link_path)",
+                "os.symlink(text, link_path)",
             ),
         )
         for name, source_name, old, new in mutations:
