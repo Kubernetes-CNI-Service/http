@@ -199,7 +199,10 @@ def _private_real_chain(
     document["common"]["mgmt"]["ztp"]["status"] = "enabled"
     if http_enabled:
         document["common"]["mgmt"]["http"]["status"] = "enabled"
-        document["common"]["mgmt"]["http"]["address"] = "192.0.2.20"
+    # ZTP is enabled above, and DEV gate 1 (c395bb6) makes c1 require an
+    # explicit HTTP address whenever HTTP or ZTP is enabled.  192.0.2.20 is
+    # this helper's subnet ztp_service_ip, the host TEST's model derived.
+    document["common"]["mgmt"]["http"]["address"] = "192.0.2.20"
     complete = border_globals()
     eth = document["switches"][0]["eth"]
     eth["bridge"] = complete["bridge"]
@@ -664,8 +667,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
                                  ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
                 mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
-                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
-                                    _SETUP_SWITCH_WAL_CONTEXT=None), \
+                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None), \
                 self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             published = ztp / "config/isc-dhcp-server"
@@ -714,8 +716,7 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
         with mock.patch.multiple(api, HTTP_ROOT=root, MANIFEST=manifest,
                                  DEPLOYMENT_LOCK=root / ".deployment.lock", ZTP_PREFIX_MARKER=root / ".prefix-marker"), \
                 mock.patch.multiple(SETUP, HTTP_BASE=str(root), ZTP=str(ztp), MANIFEST_FILE=str(manifest),
-                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None,
-                                    _SETUP_SWITCH_WAL_CONTEXT=None), \
+                                    _DRY_RUN=False, _LINK_ERRORS=0, _LINK_TRANSACTION=None), \
                 self._known_installed_four_dhcp_leaves(api, root, ztp):
             _parent, generation, _receipt = fixture._publish_a_with_runtime_rollback_receipt(prepare_receipt=False)
             for name, payload in (("laptop.pub", b"A laptop key\n"), ("mgmt-server.pub", b"A management key\n")):
@@ -958,6 +959,15 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                         def real_child(command, **_kwargs):
                             script = command[1]
                             executed.append((script, list(command[2:])))
+                            if script == "p2p-to-validation.py":
+                                # DEV 5c5f24f (owner 2026-10-21): an IB load first converts
+                                # the project P2P into the IB expected topology.  It has no
+                                # switch/deployment axis, runs only for IB, and is not this
+                                # test's subject, so it is recorded but not executed.
+                                if (cls.selected_scope != "ib"
+                                        or list(command) != [sys.executable, script]):
+                                    raise AssertionError((cls.selected_scope, command))
+                                return None
                             if (command[command.index("--switch") + 1]
                                     != cls.selected_scope):
                                 raise AssertionError((cls.selected_scope, command))
@@ -1070,8 +1080,9 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                 with redirect_stdout(io.StringIO()):
                     ScopedNVOSFlow._build_flow(private)
                 self.assertEqual(
-                    ["c1-generate_dhcp.py", "90-c2-generate_configs.py",
-                     "d-hostname2mac.py"],
+                    ["c1-generate_dhcp.py",
+                     *(["p2p-to-validation.py"] if selected == "ib" else []),
+                     "90-c2-generate_configs.py", "d-hostname2mac.py"],
                     [script for script, _ in ScopedNVOSFlow.executed],
                 )
                 dhcp_dir = ScopedNVOSFlow.dhcp
