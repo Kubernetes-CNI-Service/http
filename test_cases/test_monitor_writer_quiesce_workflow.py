@@ -2159,10 +2159,13 @@ def _source_bound_setup_mapping_seed(
 
     The mapping rows are read as syntax from their production source.  An
     imported name, an entry table, or a stop call alone is not sink evidence.
-    Since v3.1.1 WP-2 (R-016 §4.3) _process_mapping hands its one
-    ``(link_path, text)`` entry to the reconcile engine _reconcile_links, whose
-    ``os.replace(temporary, link_path)`` of the ``os.symlink(text, temporary)``
-    link is the sink.
+    Since v3.1.1 WP-3 (R-016 §4.2 第 3 步) the contract's SETUP_ZTP_MAPPINGS
+    rows are the "ztp" section of the link table SETUP_LINK_SPECS; setup's
+    _reconcile_table_links pairs every row's os.path.join(HTTP_BASE, row.path)
+    with _spec_link_text(row) and hands the pairs to the reconcile engine
+    _reconcile_links, whose ``os.replace(temporary, link_path)`` of the
+    ``os.symlink(text, temporary)`` link is the sink.  The imported table is
+    the governed name returned.
     """
     def import_bindings(source: ast.AST, name: str):
         bindings = []
@@ -2181,9 +2184,9 @@ def _source_bound_setup_mapping_seed(
                 )
         return bindings
 
-    imports = import_bindings(tree, "SETUP_ZTP_MAPPINGS")
-    if imports != [("project_contract", "SETUP_ZTP_MAPPINGS", None)]:
-        return set()
+    for name in ("SETUP_LINK_SPECS", "pointer_link_target"):
+        if import_bindings(tree, name) != [("project_contract", name, None)]:
+            return set()
     if contract_tree is None:
         contract_tree = ast.parse(
             (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
@@ -2212,9 +2215,10 @@ def _source_bound_setup_mapping_seed(
     if (
         writes(contract_tree, "SETUP_ZTP_MAPPINGS") != 1
         or import_bindings(contract_tree, "SETUP_ZTP_MAPPINGS")
-        or writes(tree, "SETUP_ZTP_MAPPINGS") != 0
-        or writes(tree, "MAPPINGS") != 1
-        or import_bindings(tree, "MAPPINGS")
+        or writes(contract_tree, "SETUP_LINK_SPECS") != 1
+        or import_bindings(contract_tree, "SETUP_LINK_SPECS")
+        or writes(tree, "SETUP_LINK_SPECS") != 0
+        or writes(tree, "pointer_link_target") != 0
     ):
         return set()
     mapping = assignment(contract_tree, "SETUP_ZTP_MAPPINGS")
@@ -2226,60 +2230,36 @@ def _source_bound_setup_mapping_seed(
         "config/cumulus/template/01-global.yaml", "01-global.yaml", "file"
     ) not in rows:
         return set()
-    binding = assignment(tree, "MAPPINGS")
-    if not (
-        isinstance(binding, ast.Call) and named(binding.func, "list")
-        and len(binding.args) == 1 and not binding.keywords
-        and named(binding.args[0], "SETUP_ZTP_MAPPINGS")
+    # The contract table expands every SETUP_ZTP_MAPPINGS row into a "ztp/"-rooted "ztp" row.
+    table = assignment(contract_tree, "SETUP_LINK_SPECS")
+    sections = [
+        item.value for item in getattr(table, "elts", ())
+        if isinstance(table, ast.Tuple) and isinstance(item, ast.Starred)
+        and isinstance(item.value, ast.GeneratorExp)
+        and len(item.value.generators) == 1
+        and named(item.value.generators[0].iter, "SETUP_ZTP_MAPPINGS")
+    ]
+    if len(sections) != 1 or not (
+        ast.unparse(sections[0].generators[0].target) == "(name, target, kind)"
+        and isinstance(sections[0].elt, ast.Call)
+        and named(sections[0].elt.func, "SetupLinkSpec")
+        and sections[0].elt.args
+        and ast.unparse(sections[0].elt.args[0]) == "'ztp/' + name"
+        and any(keyword.arg == "view" and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value == "ztp" for keyword in sections[0].elt.keywords)
     ):
         return set()
     functions = {
         node.name: node for node in getattr(tree, "body", ())
         if isinstance(node, ast.FunctionDef)
     }
-    if not {"_setup_impl", "_process_mapping", "_reconcile_links"} <= functions.keys():
+    if not {"_setup_impl", "_reconcile_table_links", "_spec_link_text", "_reconcile_links"} \
+            <= functions.keys():
         return set()
-    setup, process, maker = (
-        functions[name] for name in ("_setup_impl", "_process_mapping", "_reconcile_links")
+    setup, walker, text, maker = (
+        functions[name] for name in
+        ("_setup_impl", "_reconcile_table_links", "_spec_link_text", "_reconcile_links")
     )
-    loops = [
-        node for node in _walk_local_scope(setup)
-        if isinstance(node, ast.For) and named(node.iter, "MAPPINGS")
-        and isinstance(node.target, ast.Tuple)
-        and [item.id for item in node.target.elts if isinstance(item, ast.Name)]
-        == ["ztp_rel", "proj_rel", "kind"]
-    ]
-    if len(loops) != 1 or not any(
-        isinstance(call, ast.Call) and named(call.func, "_process_mapping")
-        and len(call.args) >= 2 and named(call.args[1], "ztp_rel")
-        and not any(keyword.arg == "link_root" for keyword in call.keywords)
-        for statement in loops[0].body for call in ast.walk(statement)
-    ):
-        return set()
-    if not (
-        process.args.args and process.args.args[-1].arg == "link_root"
-        and process.args.defaults and named(process.args.defaults[-1], "ZTP")
-    ):
-        return set()
-    link_bindings = [
-        node.value for node in process.body if isinstance(node, ast.Assign)
-        and any(named(target, "link_path") for target in node.targets)
-    ]
-    if len(link_bindings) != 1:
-        return set()
-    link_path = link_bindings[0]
-    if not (
-        isinstance(link_path, ast.Call)
-        and isinstance(link_path.func, ast.Attribute)
-        and isinstance(link_path.func.value, ast.Attribute)
-        and named(link_path.func.value.value, "os")
-        and link_path.func.value.attr == "path"
-        and link_path.func.attr == "join"
-        and len(link_path.args) == 2
-        and named(link_path.args[0], "link_root")
-        and named(link_path.args[1], "link_rel")
-    ):
-        return set()
 
     def stores(scope: ast.AST, name: str) -> int:
         return sum(
@@ -2287,6 +2267,12 @@ def _source_bound_setup_mapping_seed(
             and isinstance(node.ctx, (ast.Store, ast.Del))
             for node in _walk_local_scope(scope)
         )
+
+    def calls(scope: ast.AST, name: str) -> list[ast.Call]:
+        return [
+            node for node in _walk_local_scope(scope)
+            if isinstance(node, ast.Call) and named(node.func, name)
+        ]
 
     def os_calls(scope: ast.AST, attribute: str) -> list[ast.Call]:
         return [
@@ -2296,36 +2282,45 @@ def _source_bound_setup_mapping_seed(
             and named(node.func.value, "os") and node.func.attr == attribute
         ]
 
-    # _process_mapping: one entry whose destination is link_path, handed to the engine by
-    # exactly three ``return _reconcile_links(link)[0]``.
-    entries = [
-        node.value for node in process.body if isinstance(node, ast.Assign)
-        and any(named(target, "link") for target in node.targets)
+    # Step 3 of _setup_impl runs the table walk once.
+    steps = calls(setup, "_reconcile_table_links")
+    if len(steps) != 1 or steps[0].args or steps[0].keywords:
+        return set()
+    # _reconcile_table_links: one loop over the imported table binds row and link_path; one
+    # (link_path, _spec_link_text(row)) pair per row; the pairs go to the engine once.
+    loops = [
+        node for node in _walk_local_scope(walker)
+        if isinstance(node, ast.For) and named(node.iter, "SETUP_LINK_SPECS")
+        and named(node.target, "row")
     ]
+    link_bindings = [
+        node.value for node in _walk_local_scope(walker) if isinstance(node, ast.Assign)
+        and any(named(target, "link_path") for target in node.targets)
+    ]
+    appends = [
+        node for node in _walk_local_scope(walker)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        and named(node.func.value, "pairs") and node.func.attr == "append"
+    ]
+    engine_calls = calls(walker, "_reconcile_links")
     if (
-        len(entries) != 1 or stores(process, "link") != 1
-        or stores(process, "link_path") != 1
-        or not isinstance(entries[0], ast.List) or len(entries[0].elts) != 1
-        or not isinstance(entries[0].elts[0], ast.Tuple)
-        or len(entries[0].elts[0].elts) != 2
-        or not named(entries[0].elts[0].elts[0], "link_path")
+        walker.args.args or len(loops) != 1 or stores(walker, "row") != 1
+        or stores(walker, "link_path") != 1 or stores(walker, "pairs") != 1
+        or len(link_bindings) != 1
+        or ast.unparse(link_bindings[0]) != "os.path.join(HTTP_BASE, row.path)"
+        or len(appends) != 1 or len(appends[0].args) != 1
+        or ast.unparse(appends[0].args[0]) != "(link_path, _spec_link_text(row))"
+        or not {id(link_bindings[0]), id(appends[0])} <= {id(node) for node in ast.walk(loops[0])}
+        or len(engine_calls) != 1 or len(engine_calls[0].args) != 1 or engine_calls[0].keywords
+        or not named(engine_calls[0].args[0], "pairs")
     ):
         return set()
-    engine_calls = [
-        node for node in _walk_local_scope(process)
-        if isinstance(node, ast.Call) and named(node.func, "_reconcile_links")
-    ]
-    link_returns = [
-        node.value.value for node in _walk_local_scope(process)
-        if isinstance(node, ast.Return)
-        and isinstance(node.value, ast.Subscript)
-        and isinstance(node.value.value, ast.Call)
-        and named(node.value.value.func, "_reconcile_links")
-        and isinstance(node.value.slice, ast.Constant) and node.value.slice.value == 0
-    ]
-    if len(link_returns) != 3 or len(engine_calls) != 3 or any(
-        len(call.args) != 1 or call.keywords or not named(call.args[0], "link")
-        for call in link_returns
+    # _spec_link_text: a project row's text routes through project_contract.pointer_link_target.
+    routes = calls(text, "pointer_link_target")
+    if (
+        len(text.args.args) != 1 or text.args.args[0].arg != "row"
+        or len(routes) != 1 or [ast.unparse(argument) for argument in routes[0].args]
+        != ["row.path", "row.target"]
     ):
         return set()
     # _reconcile_links: its one entry loop binds link_path from the parameter, makes the
@@ -2333,7 +2328,7 @@ def _source_bound_setup_mapping_seed(
     if len(maker.args.args) != 1:
         return set()
     parameter = maker.args.args[0].arg
-    loops = [
+    entry_loops = [
         node for node in _walk_local_scope(maker)
         if isinstance(node, ast.For) and named(node.iter, parameter)
         and isinstance(node.target, ast.Tuple) and len(node.target.elts) == 2
@@ -2341,17 +2336,17 @@ def _source_bound_setup_mapping_seed(
     ]
     replaces, symlinks = os_calls(maker, "replace"), os_calls(maker, "symlink")
     if (
-        len(loops) != 1 or stores(maker, "link_path") != 1
+        len(entry_loops) != 1 or stores(maker, "link_path") != 1
         or len(replaces) != 1 or len(symlinks) != 1
         or len(replaces[0].args) != 2 or replaces[0].keywords
         or not named(replaces[0].args[1], "link_path")
         or not isinstance(replaces[0].args[0], ast.Name)
         or len(symlinks[0].args) != 2
         or not named(symlinks[0].args[1], replaces[0].args[0].id)
-        or not {id(replaces[0]), id(symlinks[0])} <= {id(node) for node in ast.walk(loops[0])}
+        or not {id(replaces[0]), id(symlinks[0])} <= {id(node) for node in ast.walk(entry_loops[0])}
     ):
         return set()
-    return {"MAPPINGS"}
+    return {"SETUP_LINK_SPECS"}
 
 
 def _source_bound_unsetup_pointer_sinks(
@@ -7039,16 +7034,17 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         contract_source = (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
         setup_tree = ast.parse(setup_source)
         contract_tree = ast.parse(contract_source)
-        self.assertEqual({"MAPPINGS"}, _source_bound_setup_mapping_seed(
+        # v3.1.1 WP-3: the imported table is the traced authority (R-016 §4.2 第 3 步).
+        self.assertEqual({"SETUP_LINK_SPECS"}, _source_bound_setup_mapping_seed(
             setup_tree, contract_tree,
         ))
         self.assertIn("_setup_impl", literal_governed_mutation_sinks(setup_tree))
 
         mutations = (
             (
-                "import_removed", "setup",
-                "SETUP_ZTP_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS",
-                "UNRELATED_MAPPINGS, SETUP_WORKSPACE_INPUT_MAPPINGS",
+                "table_import_removed", "setup",
+                "PUBLICKEY_DIRECTORIES, SETUP_LINK_SPECS,",
+                "PUBLICKEY_DIRECTORIES, UNRELATED_SPECS,",
             ),
             (
                 "authority_anchor_removed", "contract",
@@ -7067,50 +7063,64 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 "SETUP_WORKSPACE_INPUT_MAPPINGS = (",
             ),
             (
-                "imported_mapping_rebound", "setup",
+                "contract_table_rebound", "contract",
+                "SETUP_WORKSPACE_INPUT_MAPPINGS = (",
+                "SETUP_LINK_SPECS = ()\nSETUP_WORKSPACE_INPUT_MAPPINGS = (",
+            ),
+            (
+                "ztp_section_dropped", "contract",
+                "      for name, target, kind in SETUP_ZTP_MAPPINGS),",
+                "      for name, target, kind in ()),",
+            ),
+            (
+                "ztp_section_rerooted", "contract",
+                'SetupLinkSpec("ztp/" + name, target',
+                'SetupLinkSpec("elsewhere/" + name, target',
+            ),
+            (
+                "imported_table_rebound", "setup",
                 "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
-                "SETUP_ZTP_MAPPINGS = ()\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+                "SETUP_LINK_SPECS = ()\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)",
             ),
             (
-                "mapping_binding_removed", "setup",
-                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)", "MAPPINGS = []",
+                "imported_table_shadowed", "setup",
+                "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
+                "import decimal as SETUP_LINK_SPECS\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)",
             ),
             (
-                "mapping_rebound", "setup",
-                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
-                "MAPPINGS = []\n"
-                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
+                "step3_not_called", "setup",
+                "    results = _reconcile_table_links()",
+                "    results = []",
             ),
             (
-                "mapping_import_rebound", "setup",
-                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
-                "import decimal as MAPPINGS\n"
-                "WORKSPACE_INPUT_MAPPINGS = list(SETUP_WORKSPACE_INPUT_MAPPINGS)",
-            ),
-            (
-                "mapping_loop_removed", "setup",
-                "for ztp_rel, proj_rel, kind in MAPPINGS:",
-                "for ztp_rel, proj_rel, kind in ():",
-            ),
-            (
-                "mapping_argument_diverted", "setup",
-                "_process_mapping(proj_dir, ztp_rel, proj_rel, kind, src_base=_CSV_DIR)",
-                '_process_mapping(proj_dir, "unrelated", proj_rel, kind, src_base=_CSV_DIR)',
+                "table_loop_removed", "setup",
+                "    for row in SETUP_LINK_SPECS:\n        link_path = os.path.join(HTTP_BASE, row.path)",
+                "    for row in ():\n        link_path = os.path.join(HTTP_BASE, row.path)",
             ),
             (
                 "link_destination_diverted", "setup",
-                "link_path = os.path.join(link_root, link_rel)",
-                'link_path = os.path.join(link_root, "unrelated")',
+                "        link_path = os.path.join(HTTP_BASE, row.path)\n",
+                '        link_path = os.path.join(HTTP_BASE, "unrelated")\n',
             ),
             (
-                "link_call_removed", "setup",
-                "return _reconcile_links(link)[0]",
-                "return _other_link(link)[0]",
+                "pair_destination_diverted", "setup",
+                "pairs.append((link_path, _spec_link_text(row)))",
+                "pairs.append((wrong_path, _spec_link_text(row)))",
             ),
             (
-                "link_entry_diverted", "setup",
-                "link = [(link_path, _link_text(link_path, src_path))]",
-                "link = [(wrong_path, _link_text(link_path, src_path))]",
+                "spec_text_bypassed", "setup",
+                "pairs.append((link_path, _spec_link_text(row)))",
+                "pairs.append((link_path, row.target))",
+            ),
+            (
+                "spec_text_unrouted", "setup",
+                "    return pointer_link_target(row.path, row.target)",
+                "    return row.target",
+            ),
+            (
+                "engine_call_removed", "setup",
+                "    return _reconcile_links(pairs)",
+                "    return _other_links(pairs)",
             ),
             (
                 "replace_destination_diverted", "setup",
@@ -7232,20 +7242,21 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
         setup = ast.parse(setup_source)
         contract = ast.parse(contract_source)
         feedback = ast.parse(feedback_source)
-        self.assertEqual({"MAPPINGS"}, _source_bound_setup_mapping_seed(setup, contract))
+        self.assertEqual({"SETUP_LINK_SPECS"}, _source_bound_setup_mapping_seed(setup, contract))
         self.assertIn("_setup_impl", literal_governed_mutation_sinks(setup))
         self.assertIn("main", literal_governed_mutation_sinks(feedback))
         self.assertIn("write_global_yaml", local_call_graph(feedback)["main"])
         self.assertEqual({"parser"}, _literal_argparse_receivers(feedback, "main"))
 
+        # v3.1.1 WP-3: the imported authority is the link table setup walks in step 3.
         setup_mutants = (
             setup_source.replace(
                 "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
-                "MAPPINGS = list(runtime_mappings())", 1,
+                "SETUP_LINK_SPECS = tuple(runtime_table())\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)", 1,
             ),
             setup_source.replace(
                 "MAPPINGS = list(SETUP_ZTP_MAPPINGS)",
-                "MAPPINGS = []", 1,
+                "SETUP_LINK_SPECS = ()\nMAPPINGS = list(SETUP_ZTP_MAPPINGS)", 1,
             ),
         )
         for source in setup_mutants:
