@@ -12814,7 +12814,7 @@ python3 -B tools/tar-for-upload.py DAY0-Prepare/&lt;project&gt; \
   --host &lt;user&gt;@&lt;management-server&gt; --port &lt;ssh-port&gt; \
   --runtime native --exclude-apps \
   --deploy-uploaded DAY0-Prepare/dumps/&lt;project&gt;-&lt;timestamp&gt;-upload.tar.gz</code></pre>
-          <p>也可以在已批准自动写入时把第一次命令改成 <code>--deploy</code>；无论哪种方式，禁止登录服务器后用 <code>tar -x</code>、<code>rsync</code> 或 <code>cp</code> 手工覆盖 live root。</p>
+          <p>也可以在已批准自动写入时把第一次命令改成 <code>--deploy</code>；无论哪种方式，禁止登录服务器后用 <code>tar -x</code>、<code>rsync</code> 或 <code>cp</code> 手工覆盖 live root。当前激活的项目指针 <code>DAY0-Prepare/activate-project</code>（以及 setup 切换时的临时链接 <code>DAY0-Prepare/.activate-project.*.tmp</code>）不随包传：upload、preview、download 包都不带它，写前 guard 拒绝带它的包；服务器上的指针由服务器上的 setup（load 调用）建立。</p>
           <div class="callout warning"><strong>归档类别不能升级</strong>公共构建器要求受管入口显式选择 <code>upload</code>、<code>preview</code> 或 <code>download</code>，且没有默认类别。只有正式 <code>upload</code> 包含 source manifest、<code>deployment_prewrite_guard.py</code> 和 <code>deploy-upload-archive.py</code> 三项部署权威；dry-run 的 <code>preview</code> 与 full-workspace <code>download</code> 即使文件仍存在，也会被真实 installer 按结构拒绝。类别不是允许操作员把预览或 recovery 包升级成部署包的命令行开关。</div>
           <p><strong>成功判据</strong>本地和远端 archive SHA-256 完全一致；部署阶段取得共享 deployment lock，source manifest、成员、父目录、no-follow 和 runtime 检查通过，最终明确显示已部署到 <code>/var/www/html</code>。</p>
           <p><strong>失败处理</strong>proof 失效就返回 Runbook 2；SSH/host-key/权限错误先修连接身份；SHA 或 guard 失败时保留 archive 和日志，不切换为手工解压。若目标已有不可信/半初始化源码，停止并审计 receipt。</p>
@@ -13095,7 +13095,7 @@ cd /var/www/html
 sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
   --prod --switch eth --start-services --start-ztp-monitor \
   --ztp-monitor-scope prod</code></pre>
-          <p><strong>成功判据</strong>本机 load/full proof 通过；dry-run 差异与预期一致；sync 只更新受管源码/输入并保留远端密码哈希及管理 key；远端 load 提交新的 generation，随后 Runbook 6 全部验收通过。</p>
+          <p><strong>成功判据</strong>本机 load/full proof 通过；dry-run 差异与预期一致；sync 只更新受管源码/输入并保留远端密码哈希及管理 key，不传当前激活的项目指针 <code>DAY0-Prepare/activate-project</code>（服务器上的指针由服务器上的 setup 建立）；远端 load 提交新的 generation，随后 Runbook 6 全部验收通过。</p>
           <p><strong>失败处理</strong>本机 proof 失效时禁止 SSH；远端 global/CAS、receipt 或 writer 竞态时禁止覆盖；sync 完成但 load 失败时保留新 source receipt 和失败 marker，修复后完整重跑 load。不要把 sync 成功误认为服务已热加载。</p>
           <p><strong>下一步</strong>重复 Runbook 6；只有新 release、服务、HTTP 和设备证据一致，更新才完成。</p>
         </div>

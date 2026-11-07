@@ -2219,6 +2219,10 @@ NON_DEPLOYMENT_DIR_NAMES = frozenset({
 # monitor/issue-tracker/update-engine.py; the directory itself never ships.
 REFERENCE_ONLY_SUBTREES = frozenset({"monitor/cabletracker-main", "tools/cabletracker"})
 
+# R-016 §4.2 step 4, §7: the temporary link setup renames over ACTIVE_PROJECT_POINTER.  Each host's
+# own setup writes both; no package, sync, image or git carries them.
+ACTIVE_PROJECT_POINTER_TMP_GLOB = "DAY0-Prepare/.activate-project.*.tmp"
+
 # Image-only host state. Do not use this vocabulary to decide live transfers.
 # Each pattern denies its entry AND descendants, including symlink objects;
 # glob stars match one path component only. Dynamic producer families (keys,
@@ -2236,6 +2240,7 @@ IMAGE_HOST_STATE_PATHS = frozenset(name for name, _target in runtime_link_specs(
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx",
     "infiniband/bringup/ufm-setup-upgrade/ib.csv",
     "infiniband/bringup/ufm-setup-upgrade/p2p.xlsx",
+    ACTIVE_PROJECT_POINTER,
 }) | frozenset(name + ".zip" for name in REFERENCE_ONLY_SUBTREES)
 IMAGE_HOST_STATE_SUBTREES = frozenset({
     "Finished-projects", "infra/logs", "infiniband/bringup",
@@ -2246,6 +2251,7 @@ IMAGE_HOST_STATE_SUBTREES = frozenset({
 IMAGE_HOST_STATE_DYNAMIC_PATTERNS = (
     "infra/.logs-migration.*",
     "ztp/config/isc-dhcp-server/dhcpd_*.hosts", "ztp/optimize/*-sample",
+    ACTIVE_PROJECT_POINTER_TMP_GLOB,
 )
 
 
@@ -2515,6 +2521,12 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         }
     ):
         return "local finished-project restore control"
+    if parts[:2] == PurePosixPath(ACTIVE_PROJECT_POINTER).parts or (
+        len(parts) >= 2 and parts[0] == "DAY0-Prepare" and fnmatch.fnmatchcase(
+            parts[1], PurePosixPath(ACTIVE_PROJECT_POINTER_TMP_GLOB).name,
+        )
+    ):
+        return "active project pointer (host runtime)"
     if (len(parts) >= 2 and parts[0] == "infra"
             and (parts[1] == ".logs.lock"
                  or parts[1].startswith(".logs-migration."))):

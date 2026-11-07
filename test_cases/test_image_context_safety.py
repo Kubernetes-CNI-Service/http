@@ -208,6 +208,8 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             "infra/.logs-migration.ABC123",
             "ztp/config/cumulus/template/.claude", "ztp/config/publickey", "ztp/image",
             "tools/ib-tool-Jie", "tools/ibdiagnet-analyze-tool",
+            # R-016 §7: the active project pointer and setup's temporary link for its replace.
+            "DAY0-Prepare/activate-project", "DAY0-Prepare/.activate-project.4242.tmp",
         )
         for name, form in product(names, ("file", "directory", "dangling", "descendant")):
             with self.subTest(name=name, form=form), tempfile.TemporaryDirectory() as directory:
@@ -235,6 +237,24 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(PRODUCER_CONTRACT.is_image_host_state_path(name))
 
+    def test_active_project_pointer_is_image_host_state_in_every_ignore_file(self):
+        # R-016 §7 (AP.5): DAY0-Prepare/activate-project and setup's temporary link
+        # DAY0-Prepare/.activate-project.<pid>.tmp (§4.2 step 4) belong to the host; IMAGE_HOST_STATE
+        # and all three dockerignore files name them, so no image build depends on the project rule.
+        for name in ("DAY0-Prepare/activate-project", "DAY0-Prepare/.activate-project.4242.tmp",
+                     "DAY0-Prepare/activate-project/01-global.yaml"):
+            with self.subTest(host_state=name):
+                self.assertTrue(PRODUCER_CONTRACT.is_image_host_state_path(name))
+        for name in ("DAY0-Prepare/11-load.py", "DAY0-Prepare/template/01-global.yaml",
+                     "DAY0-Prepare/activate-project.py", "DAY0-Prepare/.activate-project.tmp"):
+            with self.subTest(neighbor=name):
+                self.assertFalse(PRODUCER_CONTRACT.is_image_host_state_path(name))
+        for path in IGNORE_FILES:
+            lines = path.read_text().splitlines()
+            for rule in ("DAY0-Prepare/activate-project", "DAY0-Prepare/.activate-project.*.tmp"):
+                with self.subTest(ignore_file=path.relative_to(ROOT).as_posix(), rule=rule):
+                    self.assertIn(rule, lines)
+
     def test_setup_managed_infiniband_inputs_are_git_ignored_runtime_state(self):
         lines = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
         self.assertIn("/infiniband/01-global.yaml", lines)
@@ -256,11 +276,16 @@ class ImageContextSafetyDirectTests(unittest.TestCase):
             "infiniband/publickey/laptop.pub",
             "infra/infra-runtime.conf",
             "infra/infra-status",
+            # R-016 §7: setup's active project pointer is a link, which /DAY0-Prepare/*/ (directories
+            # only) does not match, and the temporary link setup renames over it.
+            "DAY0-Prepare/activate-project",
+            "DAY0-Prepare/.activate-project.4242.tmp",
         ):
             with self.subTest(runtime=relative):
                 self.assertEqual(0, ignored(relative))
         for relative in ("infra/infra-setup.py", "infra/check_infra.py",
-                         "infiniband/bringup/xdr-upgrade/upgrade.py"):
+                         "infiniband/bringup/xdr-upgrade/upgrade.py",
+                         "DAY0-Prepare/11-load.py"):
             with self.subTest(code=relative):
                 self.assertEqual(1, ignored(relative))
 

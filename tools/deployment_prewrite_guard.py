@@ -42,6 +42,9 @@ GUARD_CONTROL_ROOT_PATHS = frozenset({
     (DEFAULT_DEPLOYMENT_LOCK_NAME,),
     (SYNC_MARKER_NAME,),
 })
+# R-016 §7, O8 (owner 2026-11-07): the host's own setup owns its active project pointer and the
+# temporary link it renames over the pointer (DAY0-Prepare/.activate-project.<pid>.tmp).
+ACTIVE_PROJECT_POINTER_PARTS = ("DAY0-Prepare", "activate-project")
 SOURCE_SCAN_ROOTS = frozenset({
     "infra", "monitor", "ethernet", "infiniband", "nvlink", "ztp", "tools",
 })
@@ -1147,6 +1150,14 @@ def _validate_archive_control_paths(
         ):
             raise GuardError(
                 "deployment archive contains a reserved guard control path: "
+                + "/".join(parts)
+            )
+        if parts[:2] == ACTIVE_PROJECT_POINTER_PARTS or (
+            len(parts) >= 2 and parts[0] == "DAY0-Prepare"
+            and __import__("re").fullmatch(r"(?s)\.activate-project\..*\.tmp", parts[1])
+        ):
+            raise GuardError(
+                "deployment archive contains the host's active project pointer: "
                 + "/".join(parts)
             )
 

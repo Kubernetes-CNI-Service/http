@@ -305,6 +305,64 @@ class SyncDeploymentLockTests(unittest.TestCase):
             with self.subTest(runtime_path=runtime_path):
                 self.assertNotIn(runtime_path, transmitted)
 
+    def test_sync_jobs_never_transmit_the_active_project_pointer(self):
+        # R-016 §7 (AP.5): sync leaves DAY0-Prepare/activate-project and setup's temporary link
+        # on the workstation; it sends DAY0 code, the template and the named project only.
+        self.assertIsNotNone(shutil.which("rsync"), "rsync is required by sync-code")
+        pointer_names = (
+            "DAY0-Prepare/activate-project", "DAY0-Prepare/.activate-project.4242.tmp",
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            root = base / "http"
+            day0 = root / "DAY0-Prepare"
+            project = day0 / "customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text(
+                "hostname,type\nleaf01,eth\n", encoding="utf-8",
+            )
+            for directory in SYNC.CODE_DIRECTORIES:
+                (root / directory).mkdir(exist_ok=True)
+            # Both analyzer directories sync once I-034 lands; build_jobs requires what it syncs.
+            (root / "tools/lldp-analyze-tool").mkdir()
+            (root / "tools/ibdiagnet-analyze-tool").mkdir()
+            (day0 / "template").mkdir()
+            (day0 / "template/01-global.yaml").write_text("common: {}\n", encoding="utf-8")
+            (day0 / "11-load.py").write_text("# fixture\n", encoding="utf-8")
+            (root / "requirements-container-top-level.lock").write_bytes(b"fixture-lock\n")
+            for name in pointer_names:
+                (root / name).symlink_to(project.name)
+            with mock.patch.object(SYNC, "ROOT", root), mock.patch.object(SYNC, "DAY0", day0):
+                jobs = SYNC.build_jobs(project, "/var/www/html")
+            transmitted = set()
+            for index, job in enumerate(jobs):
+                command = ["rsync", "-a", "--dry-run", "--out-format=%n"]
+                for pattern in job.excludes:
+                    command += ["--exclude", pattern]
+                command += [
+                    os.fspath(source) + ("/" if source.is_dir() else "")
+                    for source in job.sources
+                ]
+                command.append(os.fspath(base / f"destination-{index}") + "/")
+                result = subprocess.run(
+                    command, capture_output=True, text=True, check=False,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+                prefix = job.remote_dir.removeprefix("/var/www/html").strip("/")
+                for raw_name in result.stdout.splitlines():
+                    name = raw_name.rstrip("/")
+                    if name and name != ".":
+                        transmitted.add("/".join(part for part in (prefix, name) if part))
+        self.assertIn("DAY0-Prepare/11-load.py", transmitted)
+        self.assertIn("DAY0-Prepare/template/01-global.yaml", transmitted)
+        self.assertIn("DAY0-Prepare/customer/02-devices_config.csv", transmitted)
+        for name in pointer_names:
+            with self.subTest(pointer=name):
+                self.assertFalse(
+                    any(item == name or item.startswith(name + "/") for item in transmitted),
+                    sorted(transmitted),
+                )
+
     def test_sync_rejects_unsafe_toplevel_lock_before_remote_side_effects(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -2565,6 +2623,54 @@ class ArchiveDeploymentLockTests(unittest.TestCase):
                     quiesce.assert_not_called()
                     marker.assert_not_called()
                     self.assertFalse(root.exists())
+
+    def test_archive_never_replaces_the_live_active_project_pointer(self):
+        # R-016 §7 (AP.5), O8 (owner 2026-11-07 「同意你的建议。」, relayed by http dev): the
+        # server's own setup owns DAY0-Prepare/activate-project and its temporary link
+        # DAY0-Prepare/.activate-project.<pid>.tmp.  An archive carrying either one (an old or
+        # hand-made package) is refused before the live tree changes.
+        guard = guard_module()
+        pointer_link = tarfile.TarInfo("DAY0-Prepare/activate-project")
+        pointer_link.type = tarfile.SYMTYPE
+        pointer_link.linkname = "site-b"
+        pointer_file = tarfile.TarInfo("DAY0-Prepare/activate-project")
+        pointer_file.size = len(b"site-b\n")
+        temporary_link = tarfile.TarInfo("DAY0-Prepare/.activate-project.4242.tmp")
+        temporary_link.type = tarfile.SYMTYPE
+        temporary_link.linkname = "site-b"
+        cases = (
+            ("pointer-link", pointer_link, b""),
+            ("pointer-file", pointer_file, b"site-b\n"),
+            ("temporary-link", temporary_link, b""),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            for label, member, payload in cases:
+                with self.subTest(member=label):
+                    root = base / f"live-{label}"
+                    for project in ("site-a", "site-b"):
+                        (root / "DAY0-Prepare" / project).mkdir(parents=True)
+                    pointer = root / "DAY0-Prepare/activate-project"
+                    pointer.symlink_to("site-a")
+                    state = base / f"state-{label}"
+                    state.mkdir()
+                    archive_path, digest, manifest = self._minimal_overlay_archive(
+                        base, name=f"{label}.tar.gz", extra_members=((member, payload),),
+                    )
+                    with mock.patch.object(
+                        guard, "quiesce_for_source_update", return_value=False,
+                    ), redirect_stdout(io.StringIO()), self.assertRaisesRegex(
+                        guard.GuardError, "active project pointer",
+                    ):
+                        guard.run_locked_archive(
+                            root / ".deployment.lock", root, archive_path, digest,
+                            hashlib.sha256(manifest).hexdigest(), state_root=state,
+                        )
+                    self.assertEqual("site-a", os.readlink(pointer))
+                    self.assertFalse(
+                        os.path.lexists(root / "DAY0-Prepare/.activate-project.4242.tmp"),
+                    )
+                    self.assertFalse((root / "tools/example.py").exists())
 
     def test_overlay_rolls_back_every_member_directory_mode_and_stale_prune(self):
         guard = guard_module()

@@ -1223,6 +1223,51 @@ class UploadPackageContractTests(unittest.TestCase):
                 with self.subTest(private=relative):
                     self.assertNotIn(relative, names)
 
+    def test_packages_never_carry_the_active_project_pointer(self):
+        # R-016 §7 (AP.5): DAY0-Prepare/activate-project and setup's temporary link
+        # DAY0-Prepare/.activate-project.<pid>.tmp stay on the host that made them; the server's
+        # own setup (run by load) sets its pointer.  Upload, preview and full-workspace download
+        # all leave both out; the selected project still ships.
+        pointer_names = (
+            "DAY0-Prepare/activate-project", "DAY0-Prepare/.activate-project.4242.tmp",
+        )
+        for kind, day0_all in (("upload", False), ("preview", False), ("download", True)):
+            with self.subTest(artifact_kind=kind), \
+                    tempfile.TemporaryDirectory() as temporary:
+                base = Path(temporary)
+                workspace, day0, project = self._minimal_package_workspace(base)
+                for name in pointer_names:
+                    (workspace / name).symlink_to(project.name)
+                output = base / f"{kind}.tar.gz"
+                with mock.patch.multiple(
+                    package, ROOT=workspace, DAY0=day0,
+                    MANIFEST=workspace / "ztp/.setup_manifest",
+                    TOOLS_DIR=workspace / "tools",
+                ):
+                    package.create_package(
+                        self._r22_package_args(project, output),
+                        day0_all=day0_all, artifact_kind=kind,
+                    )
+                with tarfile.open(output, "r:gz") as archive:
+                    names = {
+                        member.name.removeprefix("./")
+                        for member in archive.getmembers()
+                    }
+                self.assertIn("DAY0-Prepare/customer/02-devices_config.csv", names)
+                for name in pointer_names:
+                    with self.subTest(artifact_kind=kind, pointer=name):
+                        self.assertFalse(
+                            any(member == name or member.startswith(name + "/")
+                                for member in names),
+                        )
+        # sync-code.py's matching_files and the image source selector ask the same question.
+        for name in pointer_names:
+            with self.subTest(shared_reason=name):
+                self.assertEqual(
+                    "active project pointer (host runtime)",
+                    package.transfer_exclude_reason(name),
+                )
+
     def test_common_builder_rejects_unknown_artifact_kind_before_output(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)

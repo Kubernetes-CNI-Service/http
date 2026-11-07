@@ -31,6 +31,10 @@ DAY0-Prepare/template/**/*.md
 !requirements-container-top-level.lock
 
 # BEGIN generated image host-state denials
+DAY0-Prepare/.activate-project.*.tmp
+DAY0-Prepare/.activate-project.*.tmp/**
+DAY0-Prepare/activate-project
+DAY0-Prepare/activate-project/**
 Finished-projects
 Finished-projects/**
 ethernet/01-global.yaml
