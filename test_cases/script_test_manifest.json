@@ -195,7 +195,8 @@
         "test_cases.test_runtime_lock_fdinfo",
         "test_cases.test_setup_switch_scope_contract",
         "test_cases.test_setup_link_spec_contract",
-        "test_cases.test_project_link_inputs_workflow"
+        "test_cases.test_project_link_inputs_workflow",
+        "test_cases.test_setup_link_reconcile_contract"
       ]
     },
     {
@@ -1019,7 +1020,8 @@
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
         "test_cases.test_xlsx_zero_row_fail_closed",
         "test_cases.test_xlsx_zero_row_workflow",
-        "test_cases.test_setup_switch_scope_contract"
+        "test_cases.test_setup_switch_scope_contract",
+        "test_cases.test_setup_link_reconcile_contract"
       ]
     },
     {

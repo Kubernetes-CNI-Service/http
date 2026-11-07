@@ -66,14 +66,16 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 for path in (*stale, *active):
                     self.assertIn(str(path), all_paths)
                 transaction = SETUP._SetupLinkTransaction([str(p) for p in (*stale, *active)])
-                original_make_link = SETUP._make_link
+                # v3.1.1 WP-2: setup's links go through the one reconcile engine (was _make_link).
+                original_reconcile = SETUP._reconcile_links
 
-                def fail_second_root(link_path: str, target_path: str) -> str:
-                    if link_path == str(active[1]):
+                def fail_second_root(links):
+                    links = list(links)
+                    if any(link_path == str(active[1]) for link_path, _text in links):
                         raise RuntimeError("injected IB publication failure")
-                    return original_make_link(link_path, target_path)
+                    return original_reconcile(links)
 
-                with mock.patch.object(SETUP, "_make_link", side_effect=fail_second_root):
+                with mock.patch.object(SETUP, "_reconcile_links", side_effect=fail_second_root):
                     with redirect_stdout(io.StringIO()):
                         with self.assertRaisesRegex(RuntimeError, "injected IB publication failure"):
                             SETUP._process_pubkeys(str(project))

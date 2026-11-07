@@ -1327,7 +1327,35 @@ def _meaningful_entries(directory: Path) -> list[Path]:
     return [item for item in directory.iterdir() if item.name not in {".DS_Store"}]
 
 
+def _setup_module():
+    """Load 01-a-setup.py once (its name has hyphens), as _import_publisher_module does.
+
+    Its module level only extends sys.path and imports the same tools/ modules load already uses: no
+    write, no lock (v3.1.1 WP-2 checked every top-level statement).
+    """
+    name = f"_http_load_setup_{abs(hash(os.fspath(SETUP_SCRIPT)))}"
+    existing = sys.modules.get(name)
+    if existing is not None:
+        return existing
+    spec = importlib.util.spec_from_file_location(name, SETUP_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise LoadError(f"cannot load the setup template completion: {SETUP_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
 def initialize_from_template(project: Path, dry_run: bool = False) -> None:
+    """Complete the project from the template with setup's one implementation (v3.1.1 WP-2).
+
+    setup's rules hold here too: only missing items, conflicts are errors, laptop.pub is never copied,
+    .bin placeholders are, nothing is written through a link out of the project, dry-run only prints.
+    """
     if not TEMPLATE_DIR.is_dir():
         raise LoadError(f"项目模板不存在：{TEMPLATE_DIR}")
     initializing = not project.exists() or not _meaningful_entries(project)
@@ -1338,25 +1366,15 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
             f"[SYNC] 按 {TEMPLATE_DIR} 补齐项目模板合同：{project}"
             "（仅补缺失项，不覆盖已有内容）"
         )
-    if dry_run:
-        return
-    project.mkdir(parents=True, exist_ok=True)
-    for source in sorted(TEMPLATE_DIR.rglob("*")):
-        relative = source.relative_to(TEMPLATE_DIR)
-        if source.suffix.casefold() == ".bin":
-            # Image names come from the selected device families and global
-            # versions, never from a static project-template placeholder.
-            continue
-        destination = project / relative
-        if source.is_symlink():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if not destination.exists() and not destination.is_symlink():
-                destination.symlink_to(os.readlink(source))
-        elif source.is_dir():
-            destination.mkdir(parents=True, exist_ok=True)
-        elif not destination.exists():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, destination)
+    setup = _setup_module()
+    # setup's globals are this process's now: set what the completion reads, and hand its error count back.
+    setup.TEMPLATE_DIR = os.fspath(TEMPLATE_DIR)
+    setup._DRY_RUN = dry_run
+    setup._LINK_ERRORS = 0
+    setup._initialize_project_from_template(os.fspath(project))
+    errors, setup._LINK_ERRORS = setup._LINK_ERRORS, 0
+    if errors:
+        raise LoadError(f"项目与模板有 {errors} 处冲突（见上方 [ERROR]）；请处理后再次执行 load")
 
 
 def _nonempty_file(path: Path, label: str) -> None:

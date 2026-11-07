@@ -252,7 +252,8 @@ class SetupUfmOutputLinkTest(unittest.TestCase):
                 self.assertNotIn(str(legacy), [link for link, _target in pairs])
                 link, target = next(pair for pair in pairs if pair[0] == str(occupied))
                 self.assertEqual(str(project / "99-output-monitor"), target)
-                self.assertEqual("error", SETUP._make_link(link, target))
+                # v3.1.1 WP-2: the one reconcile engine replaced _make_link; same position, same rule.
+                self.assertEqual(["error"], SETUP._reconcile_links([(link, os.path.relpath(target, monitor))]))
                 self.assertEqual(1, SETUP._LINK_ERRORS)
             self.assertEqual("operator-owned marker", legacy.read_text(encoding="utf-8"))
             self.assertEqual("operator-owned marker", occupied.read_text(encoding="utf-8"))

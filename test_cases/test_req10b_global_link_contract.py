@@ -36,6 +36,11 @@ EXPECTED_WORKSPACE_INPUTS = {
 
 class Req10BGlobalLinkContractTests(unittest.TestCase):
     def test_ib_public_key_foreign_link_and_regular_file_are_not_silently_replaced(self) -> None:
+        # Contract changed by R-014 第 1 条 (v3.1.1 WP-2; O4 left column, owner 2026-11-02 「如果发现需要创建的
+        # 链接已经存在，那么可以先解开再创建」, 2026-11-03 「只有不存在或者链接文件指向了别的地方才改正」):
+        # the cross-project switch of the whole set keeps its explicit confirmation (R-014 第 1 条, owner
+        # 2026-11-02), but setup itself replaces a managed link that points elsewhere without a prompt and
+        # reports old -> new, so it is never silent; a real file is reported, counted and never replaced (kept).
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = root / "DAY0-Prepare/site-a"
@@ -59,6 +64,19 @@ class Req10BGlobalLinkContractTests(unittest.TestCase):
                         self.assertFalse(SETUP._check_conflicts(str(project)))
                 self.assertTrue(ib_key.is_symlink())
                 self.assertEqual((foreign_project / "laptop.pub").resolve(), ib_key.resolve())
+
+                old_text = os.readlink(ib_key)
+                output = io.StringIO()
+                with mock.patch.object(SETUP, "_LINK_ERRORS", 0), mock.patch(
+                    "builtins.input", side_effect=AssertionError("R-014 第 1 条: no prompt"),
+                ):
+                    with redirect_stdout(output):
+                        SETUP._process_pubkeys(str(project))
+                    self.assertEqual(0, SETUP._LINK_ERRORS)
+                self.assertTrue(ib_key.is_symlink())
+                self.assertEqual((project / "laptop.pub").resolve(), ib_key.resolve())
+                self.assertIn(old_text, output.getvalue(), "the replacement names the old target")
+                self.assertIn(os.readlink(ib_key), output.getvalue(), "and the new one")
 
                 ib_key.unlink()
                 ib_key.write_bytes(b"operator-owned key\n")
