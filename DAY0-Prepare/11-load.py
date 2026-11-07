@@ -3830,7 +3830,12 @@ def activate_project(
         raise LoadError(f"P2P 文件不在项目目录内：{p2p_file}") from exc
     # A nonempty legacy canonical is migrated by setup's no-override path.
     # Passing it as an explicit pin would point at a name moved by the rescue.
-    if p2p_argument != "p2p.xlsx" or p2p_file.is_symlink():
+    # The user's own p2p.xlsx -> p2p/<workbook> link (R-014 第 3 条) is followed
+    # by setup itself; explicit pins stay root-local basenames (REQ-15).
+    if (
+        (p2p_argument != "p2p.xlsx" or p2p_file.is_symlink())
+        and not p2p_argument.startswith("p2p/")
+    ):
         command.append(f"--p2p-file={p2p_argument}")
     command.append(str(project))
     server_delegated_setup = host_role == "management-server"

@@ -87,6 +87,14 @@ PROJECT_DEPLOYMENT_INPUTS = {
 }
 AIR_TOPOLOGY_POLICY_NAME = "03-air-topology-policy.json"
 MINI_AIR_DEVICES_NAME = "04-air-mini-devices.txt"
+# R-014 第 3 条（owner 2026-11-02「同意你的建议。」）：项目根目录里匹配这些 fnmatch 模式的输入
+# 可以是用户建的链接。setup、打包、sync 各在入口用 read_project_input_links 解析一次并按真实
+# 文件校验；打包和 sync 把内容作为同名普通文件带走，打包在 LINKED_INPUTS_RECEIPT_NAME 里记下
+# 来源链接、真实路径和 sha256。R22 的两个必需输入（01-global.yaml、02-dhcp-subnet_config.csv）
+# 不在名单里，本身仍不接受链接。按名单扩展：WP-12 加 "ib.csv"。p2p.xlsx 不在名单里，它走自己的
+# 选择与去图注入（project_p2p_user_link、select_upload_p2p）。
+PROJECT_MATERIALIZED_INPUTS = frozenset({"02-devices_config.csv", "*.pub"})
+LINKED_INPUTS_RECEIPT_NAME = "03-linked-inputs.json"
 REPRODUCIBLE_ARCHIVE_MTIME = 0
 
 P2P_VERSION_TOKEN = re.compile(r"(?<![A-Za-z0-9])v?\d+(?:\.\d+)+", re.IGNORECASE)
@@ -159,11 +167,37 @@ def newest_project_p2p(project: Path) -> Path:
     return ranked[-1][1]
 
 
+def project_p2p_user_link(project: Path) -> Path | None:
+    """Return the workbook of the user's own ``p2p.xlsx -> p2p/<workbook>`` link.
+
+    R-014 第 3 条：用户自己建的链接优先于自动选择（开发计划 G12 关于 I-021）。setup 自己建的
+    ``p2p.xlsx -> <根目录工作簿>`` 不算用户链接，返回 None。返回值是经 ``p2p/`` 的字面路径，
+    p2p/ 本身可以是指向外部资料目录的链接（p2p_source_snapshot 绑定它的身份）。
+    """
+    canonical = project / "p2p.xlsx"
+    if not canonical.is_symlink():
+        return None
+    target = os.readlink(canonical)
+    if PurePosixPath(target).name == target and target not in {".", ".."}:
+        return None
+    parts = PurePosixPath(target).parts
+    if len(parts) != 2 or parts[0] != "p2p" or parts[1] in {".", ".."}:
+        raise P2PSelectionError(f"p2p.xlsx 用户链接只能指向 p2p/<工作簿>.xlsx：{target}")
+    source = project / "p2p" / parts[1]
+    if not _p2p_regular_xlsx(source):
+        raise P2PSelectionError(f"p2p.xlsx 用户链接的目标不存在或不是非空普通 XLSX：{target}")
+    return source
+
+
 def select_project_p2p_source(project: Path, explicit: str | None = None) -> Path:
-    """Select a root-local regular XLSX; explicit pins may have another basename."""
+    """Select a root-local regular XLSX; explicit pins may have another basename.
+
+    Without an explicit pin the user's own p2p.xlsx link wins (R-014 第 3 条);
+    explicit pins stay root-local basenames (REQ-15).
+    """
     project = project.resolve()
     if explicit is None:
-        return newest_project_p2p(project)
+        return project_p2p_user_link(project) or newest_project_p2p(project)
     if not explicit or Path(explicit).name != explicit or explicit in {".", ".."}:
         raise P2PSelectionError("--p2p-file 必须是项目根目录内的 XLSX 文件名")
     path = project / explicit
@@ -1023,16 +1057,82 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+class ProjectInputLink:
+    """One user input link of a project root, resolved and read once (R-014 第 3 条)."""
+
+    def __init__(self, name: str, link: str, real_path: Path, payload: bytes):
+        self.name = name
+        self.link = link
+        self.real_path = real_path
+        self.payload = payload
+        self.sha256 = hashlib.sha256(payload).hexdigest()
+
+
+def read_project_input_links(
+    project: Path, *, maximum_size: int | None = None,
+) -> tuple[ProjectInputLink, ...]:
+    """Resolve each PROJECT_MATERIALIZED_INPUTS link once and read its real file.
+
+    The entry check of setup, packaging and sync: a target must exist and be a
+    non-empty regular file.  Later readers use these bytes or the resolved
+    path; downstream O_NOFOLLOW readers are not relaxed one by one.
+    """
+    result = []
+    for name in sorted(os.listdir(project)):
+        path = project / name
+        if not path.is_symlink() or not any(
+            fnmatch.fnmatchcase(name, pattern) for pattern in PROJECT_MATERIALIZED_INPUTS
+        ):
+            continue
+        link = os.readlink(path)
+        try:
+            real_path = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"项目输入链接的目标不存在：{name} -> {link}") from exc
+        flags = (os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+                 | getattr(os, "O_CLOEXEC", 0))
+        try:
+            descriptor = os.open(real_path, flags)
+        except OSError as exc:
+            raise ValueError(f"项目输入链接的目标无法读取：{name} -> {real_path}：{exc}") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_size == 0
+                    or (maximum_size is not None and metadata.st_size > maximum_size)):
+                raise ValueError(
+                    f"项目输入链接必须指向大小受限的非空普通文件：{name} -> {real_path}"
+                )
+            chunks = []
+            remaining = metadata.st_size
+            while remaining:
+                chunk = os.read(descriptor, min(remaining, 65536))
+                if not chunk:
+                    raise ValueError(f"项目输入链接的目标在读取中变化：{name} -> {real_path}")
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise ValueError(f"项目输入链接的目标在读取中变化：{name} -> {real_path}")
+        finally:
+            os.close(descriptor)
+        result.append(ProjectInputLink(name, link, real_path, b"".join(chunks)))
+    return tuple(result)
+
+
 def select_upload_p2p(project: Path) -> Path:
-    """Bind a setup-selected real root workbook, never discover a fallback."""
+    """Bind the setup-selected workbook, never discover a fallback.
+
+    p2p.xlsx names a real root workbook, or is the user's own
+    ``p2p/<workbook>`` link (R-014 第 3 条); both are packaged as a root file.
+    """
     project = project.resolve()
     canonical = project / "p2p.xlsx"
     if not canonical.is_symlink():
         raise ValueError(f"upload requires setup-selected p2p.xlsx symlink: {canonical}")
     link_target = os.readlink(canonical)
     if Path(link_target).name != link_target or link_target in {".", ".."}:
-        raise ValueError(f"p2p.xlsx must be a relative project-root link: {canonical}")
-    selected = project / link_target
+        selected = project_p2p_user_link(project)
+    else:
+        selected = project / link_target
     if not _p2p_regular_xlsx(selected):
         raise ValueError(f"p2p.xlsx target is not a nonempty regular root XLSX: {selected}")
     if selected.suffix.casefold() != ".xlsx" or not zipfile.is_zipfile(selected):
@@ -2147,9 +2247,10 @@ def create_package(
     mini_air_devices = (
         optional_mini_air_devices(project) if not day0_all else None
     )
+    # The image-free copy is always injected under the workbook's own name at
+    # the project root, also when p2p.xlsx is the user's p2p/<workbook> link.
     selected_p2p_relative = (
-        PurePosixPath(selected_p2p.relative_to(project).as_posix())
-        if selected_p2p is not None else None
+        PurePosixPath(selected_p2p.name) if selected_p2p is not None else None
     )
     raw_output = args.output.expanduser()
     if not raw_output.is_absolute():
@@ -2188,6 +2289,27 @@ def create_package(
         item.member_name: item
         for inputs in bound_inputs.values() for item in inputs
     }
+    # R-014 第 3 条：打包读项目输入的入口。用户输入链接在这里解析、读取一次；原始链接成员
+    # 照旧被 PackageFilter 当作 "non-deployable project link" 拒绝，下面注入同名普通文件，
+    # 并在回执里记下来源。
+    linked_inputs = tuple(
+        item for item in read_project_input_links(
+            project, maximum_size=(package_filter.max_file_size or None),
+        )
+        if f"{package_filter.project_rel}/{item.name}" not in package_filter.managed_pubkeys
+    ) if artifact_kind != "download" and not day0_all else ()
+    linked_records = [
+        {"name": item.name, "link": item.link,
+         "real_path": os.fspath(item.real_path), "sha256": item.sha256}
+        for item in linked_inputs
+    ]
+    if not day0_all and selected_p2p is not None and selected_p2p.parent != project:
+        linked_records.append({
+            "name": "p2p.xlsx", "link": os.readlink(project / "p2p.xlsx"),
+            "real_path": os.fspath(selected_p2p.resolve(strict=True)),
+            "sha256": sha256(selected_p2p),
+        })
+    linked_records.sort(key=lambda record: record["name"])
     output.parent.mkdir(parents=True, exist_ok=True)
     directory_flags = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
                        | getattr(os, "O_NOFOLLOW", 0)
@@ -2285,6 +2407,29 @@ def create_package(
                     receipt_info.mode = 0o644
                     receipt_info.size = len(receipt_data)
                     archive.addfile(_reproducible_tarinfo(receipt_info), io.BytesIO(receipt_data))
+                for item in linked_inputs:
+                    linked_info = tarfile.TarInfo(
+                        f"./{package_filter.project_rel}/{item.name}"
+                    )
+                    linked_info.mode = 0o644
+                    linked_info.size = len(item.payload)
+                    archive.addfile(
+                        _reproducible_tarinfo(linked_info), io.BytesIO(item.payload),
+                    )
+                if linked_records:
+                    linked_receipt = (json.dumps(
+                        {"schema_version": 1, "inputs": linked_records},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ) + "\n").encode("utf-8")
+                    linked_receipt_info = tarfile.TarInfo(
+                        f"./{package_filter.project_rel}/{LINKED_INPUTS_RECEIPT_NAME}"
+                    )
+                    linked_receipt_info.mode = 0o644
+                    linked_receipt_info.size = len(linked_receipt)
+                    archive.addfile(
+                        _reproducible_tarinfo(linked_receipt_info),
+                        io.BytesIO(linked_receipt),
+                    )
                 # Preserve the project contract as an empty placeholder while never
                 # exporting the management server's runtime key material.
                 for relative in sorted(package_filter.managed_pubkeys):
@@ -2379,9 +2524,22 @@ def create_package(
                     f"./{package_filter.project_rel}/{MINI_AIR_DEVICES_NAME}"
                 )
                 required.add(mini_member_name)
+            if linked_records:
+                required.add(
+                    f"./{package_filter.project_rel}/{LINKED_INPUTS_RECEIPT_NAME}"
+                )
             missing = sorted(required - names)
             if missing:
                 raise RuntimeError("package verification missing: " + ", ".join(missing))
+            for item in linked_inputs:
+                member_name = f"./{package_filter.project_rel}/{item.name}"
+                member = archive.getmember(member_name) if member_name in names else None
+                extracted = (
+                    archive.extractfile(member)
+                    if member is not None and member.isfile() else None
+                )
+                if extracted is None or extracted.read() != item.payload:
+                    raise RuntimeError(f"packaged linked input differs: {member_name}")
             for inputs in bound_inputs.values():
                 for item in inputs:
                     member = archive.getmember(item.member_name)
@@ -2492,6 +2650,11 @@ def create_package(
             f"{p2p_stats['images']} media / {p2p_stats['drawing_nodes']} anchors; "
             f"{human_size(p2p_stats['source_size'])} -> "
             f"{human_size(p2p_stats['output_size'])}"
+        )
+    for record in linked_records:
+        print(
+            f"[OK] Linked input     : {record['name']} -> {record['real_path']} "
+            f"(sha256 {record['sha256']})"
         )
     print(f"[OK] Archive          : {output}")
     print(f"[OK] Workspace size   : {human_size(max(0, original_size))}")

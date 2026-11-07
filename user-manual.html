@@ -12742,6 +12742,7 @@ $EDITOR DAY0-Prepare/&lt;project&gt;/02-devices_config.csv
 $EDITOR DAY0-Prepare/&lt;project&gt;/02-dhcp-subnet_config.csv
 # 再选择/更新项目 P2P XLSX 与可选 AIR policy</code></pre>
           <p><strong>成功判据</strong>create 返回 0，项目目录只从模板生成，三份固定输入和一个可识别的 P2P 来源存在；<code>--create</code> 不切换 live runtime，不创建生产 release。</p>
+          <p><strong>用户链接输入</strong><code>02-devices_config.csv</code>、<code>*.pub</code> 可以是指向项目外文件的链接；P2P 可用 <code>p2p.xlsx -&gt; p2p/&lt;工作簿&gt;.xlsx</code>，<code>p2p/</code> 本身可以链到外部资料目录。setup、upload 打包和 sync 各在入口按真实文件校验一次，目标不存在时报错停止；upload 包把链接内容作为普通文件带走，并在 <code>03-linked-inputs.json</code> 记下链接、真实路径和 SHA-256；sync 只对这些文件使用单文件 <code>--copy-links</code>。<code>01-global.yaml</code> 与 <code>02-dhcp-subnet_config.csv</code> 仍须是普通文件。</p>
           <p><strong>失败处理</strong>项目已存在、输入类型错误、重复设备、越界路径或模板不完整时停止；不要用 <code>cp -R</code> 覆盖已有项目，也不要用 <code>--force</code> 隐藏输入问题。保留终端中第一个错误并修正源输入。</p>
           <p><strong>下一步</strong>执行 Runbook 2 的本机正式 load；只有它完整成功后，项目才具备 upload/sync 所需的 full proof。</p>
         </div>

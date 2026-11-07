@@ -83,6 +83,7 @@ from deployment_lock import LOCK_FD_ENV, DeploymentLockError, deployment_lock
 from _package_common import (
     P2PSelectionError,
     newest_project_p2p,
+    read_project_input_links,
     select_project_p2p_source,
 )
 from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
@@ -542,6 +543,10 @@ def _ensure_project_p2p_link(proj_dir, source):
         return source
     relative = os.path.relpath(source, proj_dir)
     if os.path.dirname(relative) or relative in {".", ".."}:
+        if os.path.islink(canonical) and os.readlink(canonical) == relative:
+            # R-014 第 3 条：用户自己建的 p2p.xlsx → p2p/<工作簿> 原样保留。
+            print(f"  [SKIP] p2p.xlsx 是用户链接：{relative}")
+            return canonical
         print(_c(RED, "[ERROR] P2P 链接目标必须是项目根目录普通文件"))
         return None
     old_target = None
@@ -689,6 +694,11 @@ MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
 
 def _prepare_laptop_public_key(proj_dir):
     """Select the local public key and atomically bind this project's laptop.pub."""
+    if os.path.islink(os.path.join(proj_dir, "laptop.pub")):
+        # R-014 第 2、3 条：用户自己的 laptop.pub 链接已在 setup 入口按真实文件校验；
+        # 不换成本机 ~/.ssh 的 key，也不顺着链接写。
+        print("  [SKIP] laptop.pub 是用户链接，按链接目标使用")
+        return
     ssh_dir = Path.home() / ".ssh"
     try:
         if _DRY_RUN:
@@ -4109,6 +4119,16 @@ def _setup_impl(proj_dir, *, server_delegated=False):
     _LINK_ERRORS = 0
     print(f"\n项目目录：{proj_dir}")
     print(f"ZTP 目录：{ZTP}\n")
+
+    # R-014 第 3 条：setup 读项目输入的入口。用户建的输入链接在任何写入之前解析一次、
+    # 按真实文件校验；目标不存在或不是非空普通文件时停止，绝不顺着链接写（R-014 第 2 条）。
+    try:
+        linked_inputs = read_project_input_links(Path(proj_dir))
+    except (OSError, ValueError) as exc:
+        print(_c(RED, f"[ERROR] {exc}"))
+        sys.exit(1)
+    for item in linked_inputs:
+        print(f"  [LINK-INPUT] {item.name} 来自链接 → {item.real_path}（sha256 {item.sha256}）")
 
     if server_delegated:
         _require_delegated_laptop_public_key(proj_dir)

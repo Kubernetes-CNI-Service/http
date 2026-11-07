@@ -197,7 +197,9 @@ p2p.xlsx
         无 --p2p-file 时调和到最新；--p2p-file=<根目录文件名> 可刻意钉选旧版，
         命令会提示最新文件和改名建议。IP Assignment 不参与自动选择。
         原有非空普通 p2p.xlsx 会先无覆盖归档为 p2p-original-时间戳[-N].xlsx；
-        无原子无覆盖移动能力时停止，绝不覆盖客户字节。项目 p2p/ 不再使用。
+        无原子无覆盖移动能力时停止，绝不覆盖客户字节。项目 p2p/ 不参与自动选择。
+        例外：用户自己建的 p2p.xlsx -> p2p/<工作簿>.xlsx 链接优先，setup 不改写它
+        （见下文「用户链接输入」）。
         升级后旧版 current-release 即使 schema_version=1 也缺少真实来源绑定；
         须对当前项目重新正式 load，生成同时绑定真实文件名与摘要的新记录后才能手工部署。
   可能创建的连接：
@@ -244,6 +246,17 @@ mgmt-server.pub 和 .management-pubkeys
 
 README.txt
   作用：本说明文件。它也会被复制到每个真实项目，但不会创建运行时软链接。
+
+用户链接输入
+  02-devices_config.csv、*.pub 可以是指向项目外文件的链接（例如 laptop.pub -> 自己的
+  公钥）；P2P 用 p2p.xlsx -> p2p/<工作簿>.xlsx，p2p/ 本身可以链到外部资料目录。
+  setup、tar-for-upload、sync-code 各在入口跟随链接一次，按真实文件校验：目标不存在或
+  不是非空普通文件时报错停止，setup 不顺着链接往项目外写。tar-for-upload 把链接内容作为
+  同名普通文件带进上传包（P2P 为去图后的根目录工作簿），并在
+  03-linked-inputs.json 里记下每个链接、真实路径和 sha256；sync-code 用单文件
+  --copy-links 推送这些内容，不推送指向项目外的 p2p.xlsx、p2p/ 链接（P2P 用
+  tar-for-upload 带走）。
+  01-global.yaml 和 02-dhcp-subnet_config.csv 仍必须是普通文件，不接受链接。
 
 
 二、项目输出目录

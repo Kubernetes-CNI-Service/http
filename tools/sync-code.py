@@ -199,6 +199,9 @@ class SyncJob:
     sources: tuple[Path, ...]
     remote_dir: str
     excludes: tuple[str, ...] = ()
+    # Only for jobs whose sources are individual user input links (R-014 第 3 条):
+    # rsync sends each link's target content as a regular file.
+    copy_links: bool = False
 
 
 @dataclass
@@ -584,12 +587,41 @@ def build_jobs(
             ).splitlines()
             if line.strip().endswith(".pub") and Path(line.strip()).name == line.strip()
         )
+    # R-014 第 3 条：sync 读项目输入的入口。用户输入链接（PROJECT_MATERIALIZED_INPUTS）
+    # 解析一次，项目 job 排除它们，由单文件 --copy-links job 把目标内容作为普通文件推送；
+    # 不对整个项目 job 用 --copy-unsafe-links。P2P 的用户链接（p2p.xlsx → p2p/<工作簿>、
+    # p2p/ → 外部资料目录）到服务器上会悬空：不推送，P2P 由 tar-for-upload 去图物化并写收据。
+    protected_names = {item.strip("/") for item in protected}
+    linked = tuple(
+        item for item in project_contract.read_project_input_links(project)
+        if item.name not in protected_names
+    )
+    excluded_links = {item.name for item in linked}
+    project_root = project.resolve()
+    for name in ("p2p", "p2p.xlsx"):
+        entry = project / name
+        if not entry.is_symlink():
+            continue
+        try:
+            entry.resolve(strict=True).relative_to(project_root)
+        except (OSError, RuntimeError, ValueError):
+            excluded_links.add(name)
+            print(f"[SKIP] P2P 链接指向项目外，不随 sync 推送：{name} -> {os.readlink(entry)}")
+    for item in linked:
+        print(f"[LINK-INPUT] {item.name} 来自链接 → {item.real_path}（sha256 {item.sha256}）")
+    remote_project = f"{remote_root}/DAY0-Prepare/{project.name}"
     jobs.append(SyncJob(
-        f"project:{project.name}", (project,),
-        f"{remote_root}/DAY0-Prepare/{project.name}",
+        f"project:{project.name}", (project,), remote_project,
         COMMON_EXCLUDES + PROJECT_RUNTIME_EXCLUDES + tuple(sorted(set(protected)))
+        + tuple(f"/{name}" for name in sorted(excluded_links))
         + runtime_link_excludes(f"DAY0-Prepare/{project.name}"),
     ))
+    if linked:
+        jobs.append(SyncJob(
+            f"project-links:{project.name}",
+            tuple(project / item.name for item in linked),
+            remote_project, COMMON_EXCLUDES, copy_links=True,
+        ))
     return jobs
 
 
@@ -1352,6 +1384,8 @@ def rsync_command(job: SyncJob, args: argparse.Namespace) -> list[str]:
     ]
     if args.dry_run:
         command.append("--dry-run")
+    if job.copy_links:
+        command.append("--copy-links")
     if args.runtime == "docker":
         remote_rsync = "sudo -n /usr/bin/rsync" if args.sudo else "/usr/bin/rsync"
     else:
