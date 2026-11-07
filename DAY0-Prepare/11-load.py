@@ -1355,6 +1355,7 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
 
     setup's rules hold here too: only missing items, conflicts are errors, laptop.pub is never copied,
     .bin placeholders are, nothing is written through a link out of the project, dry-run only prints.
+    Afterwards load alone adds an empty laptop.pub placeholder where nothing is (review S1).
     """
     if not TEMPLATE_DIR.is_dir():
         raise LoadError(f"项目模板不存在：{TEMPLATE_DIR}")
@@ -1375,6 +1376,17 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
     errors, setup._LINK_ERRORS = setup._LINK_ERRORS, 0
     if errors:
         raise LoadError(f"项目与模板有 {errors} 处冲突（见上方 [ERROR]）；请处理后再次执行 load")
+    # The configuration-only key preflight runs before setup and accepts only an empty regular laptop.pub
+    # placeholder (_prepare_pubkeys_without_management_injection); setup's completion never copies that
+    # file.  So, as the v3.1.0 load did, add it where nothing is; a link, directory or file stays untouched
+    # (review S1, http dev 2026-11-08 改法 (a)).  The setup child then prepares the real key.
+    laptop = project / LAPTOP_PUBKEY_NAME
+    if not os.path.lexists(laptop):
+        if dry_run:
+            print(f"  [DRY] 创建空占位 {LAPTOP_PUBKEY_NAME}")
+        else:
+            laptop.open("x").close()   # exclusive create: never through a link
+            print(f"  [INIT] {LAPTOP_PUBKEY_NAME} ← 空占位（setup 随后准备本机公钥）")
 
 
 def _nonempty_file(path: Path, label: str) -> None:

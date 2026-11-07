@@ -2,7 +2,8 @@
 
 compare(subset_path, master_path) returns one Mismatch per difference, in the order of the subset file;
 an empty list means consistent.  The rule is the owner's (需求文档 R-016, owner 2026-11-05, Codex RV31-16):
-- the header (column names) is the same; otherwise one HEADER record and nothing else is compared;
+- the header (column names) is the same and has the hostname and type columns; otherwise one HEADER
+  record and nothing else is compared;
 - every subset row has a master row with the same host name (found by trimmed, casefolded name), and
   every column is equal; the host-name column itself is then compared as written, so a case change is
   reported;
@@ -40,7 +41,8 @@ HEADER, NOT_IN_MASTER, DUPLICATE, VALUE, TYPE_NOT_ALLOWED = (
 @dataclass(frozen=True)
 class Mismatch:
     """One difference.  Row-level kinds (NOT_IN_MASTER, DUPLICATE) name the hostname column; HEADER gives
-    both headers joined by commas and no host name."""
+    both headers joined by commas and no host name, and names the missing columns when the headers are
+    the same but lack hostname or type."""
     line: int
     hostname: str
     column: str
@@ -66,6 +68,12 @@ def compare(subset_path: Union[str, Path], master_path: Union[str, Path]) -> lis
     master_header = master[0][1] if master else []
     if header != master_header:
         return [Mismatch(subset[0][0] if subset else 1, "", "", ",".join(header), ",".join(master_header), HEADER)]
+    # The same header without the host-name or type column (two empty files included) is a header
+    # problem too: one HEADER record naming the missing columns, never a bare exception (review A4).
+    missing = [name for name in ("hostname", "type") if name not in header]
+    if missing:
+        return [Mismatch(subset[0][0] if subset else 1, "", ",".join(missing), ",".join(header),
+                         ",".join(master_header), HEADER)]
 
     columns, seen_names = [], {}
     for name in header:

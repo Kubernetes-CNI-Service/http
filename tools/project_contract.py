@@ -2256,9 +2256,11 @@ ANALYZER_TEMPLATE_LINKS = frozenset({
     "ztp/config/cumulus/template/P2P/lldp-analyze-tool",
 })
 
+# .venv and venv: a local Python virtual environment, e.g. beside an analyzer's requirements.txt, is
+# development data like node_modules; the upload package, sync and the runner leave it (review A6).
 NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
-    "node_modules",
+    "node_modules", ".venv", "venv",
 })
 # tools/cabletracker: where the owner drops the current CableTracker project (2026-10-23; it may hold a
 # downloaded online Issue Tracker and instance files). REQ7 copies its sync code with

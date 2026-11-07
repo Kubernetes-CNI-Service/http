@@ -15,6 +15,11 @@ Every expected value is written from the design, never read back from the implem
   laptop.pub never copied, .bin placeholders still copied (R-013 第 2 条), dry-run only prints; the setup entry and
   the load entry complete a project byte for byte alike.  WP-1's hint: one link per project key in each of the four
   public-key directories, only that link removed when the key goes, a real file there reported and kept.
+- review S1, http dev 2026-11-08 (改法 (a)): load's configuration-only key preflight runs before setup and accepts
+  only an empty regular laptop.pub placeholder (11-load.py::_prepare_pubkeys_without_management_injection); so the
+  load entry, after the one completion, adds that 0-byte regular file where nothing is at laptop.pub, as the v3.1.0
+  load (f741269) did, and leaves a link, a directory or any file there alone; setup itself still never copies it.
+  Under dry-run it writes nothing.  The two entries therefore differ by that one placeholder only.
 """
 
 from __future__ import annotations
@@ -550,10 +555,59 @@ class TemplateCompletionTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()):
                 LOAD.initialize_from_template(projects[1])
             by_setup, by_load = snapshot(projects[0]), snapshot(projects[1])
-            self.assertEqual(by_setup, by_load)
-            self.assertNotIn("laptop.pub", by_load)
+            # review S1 (http dev 2026-11-08, 改法 (a)): alike but for the load entry's empty laptop.pub placeholder.
+            self.assertNotIn("laptop.pub", by_setup)
+            self.assertIn("laptop.pub", by_load, "the load entry adds the empty placeholder")
+            self.assertEqual(("file", b""), by_load["laptop.pub"][:2])
+            self.assertEqual(by_setup, {name: item for name, item in by_load.items() if name != "laptop.pub"})
             self.assertTrue(any(name.endswith(".bin") for name in by_load), "R-013 第 2 条: .bin placeholders")
             self.assertEqual(("file", b"customer: global\n"), by_load["01-global.yaml"][:2])
+
+    def test_the_load_entry_adds_an_empty_laptop_placeholder_only_where_nothing_is(self):
+        # review S1, http dev 2026-11-08 (改法 (a)): only where nothing is at laptop.pub; a link (even a dangling
+        # one), a directory or a file already there is left exactly as it is; dry-run writes nothing.
+        def occupy(project: Path, kind: str) -> None:
+            laptop = project / "laptop.pub"
+            if kind == "link":
+                (project / "keys").mkdir()
+                (project / "keys/operator.pub").write_bytes(b"ssh-ed25519 AAAAsynthetic operator@laptop\n")
+                laptop.symlink_to("keys/operator.pub")
+            elif kind == "dangling link":
+                laptop.symlink_to("missing-operator.pub")
+            elif kind == "directory":
+                laptop.mkdir()
+            elif kind == "key":
+                laptop.write_bytes(b"ssh-ed25519 AAAAsynthetic operator@laptop\n")
+            elif kind == "empty file":
+                laptop.write_bytes(b"")
+
+        for kind in ("nothing", "link", "dangling link", "directory", "key", "empty file"):
+            for dry_run in (False, True):
+                with self.subTest(kind=kind, dry_run=dry_run), tempfile.TemporaryDirectory() as directory:
+                    project = Path(directory) / PROJECT
+                    project.mkdir()
+                    (project / "01-global.yaml").write_bytes(b"customer: global\n")
+                    occupy(project, kind)
+                    before = snapshot(project)
+                    identity = os.lstat(project / "laptop.pub") if kind != "nothing" else None
+                    with redirect_stdout(io.StringIO()):
+                        LOAD.initialize_from_template(project, dry_run=dry_run)
+                    after = snapshot(project)
+                    if dry_run:
+                        self.assertEqual(before, after, "dry-run only prints")
+                        continue
+                    if kind == "nothing":
+                        self.assertTrue(os.path.lexists(project / "laptop.pub"), "the empty placeholder is added")
+                        metadata = os.lstat(project / "laptop.pub")
+                        self.assertTrue(stat.S_ISREG(metadata.st_mode))
+                        self.assertEqual((0, 1), (metadata.st_size, metadata.st_nlink))
+                        continue
+                    self.assertEqual(before, {name: item for name, item in after.items() if name in before})
+                    self.assertEqual([], [name for name in set(after) - set(before)
+                                          if name.startswith("laptop.pub" + os.sep)])
+                    held = os.lstat(project / "laptop.pub")
+                    self.assertEqual((identity.st_ino, identity.st_mode), (held.st_ino, held.st_mode))
+                    self.assertFalse(os.path.lexists(project / "missing-operator.pub"), "never through a link")
 
     def test_the_load_entry_stops_on_a_template_conflict(self):
         with tempfile.TemporaryDirectory() as directory:

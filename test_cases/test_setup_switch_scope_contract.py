@@ -8,6 +8,9 @@ Expected behaviour comes from 问题文档 I-023 (owner 2026-11-02「11-load批�
 - an explicit ``--switch`` wins over the inference;
 - v3.1.1 详细工作指导 WP-5 (owner 2026-11-07「同意你的建议。」): ``air`` counts as the
   eth family, the same as 11-load ``SWITCH_SCOPE_TYPES``.
+- review S4, http dev 2026-11-08: I-023 relaxes the family sections only; the common section
+  (YAML root, ``ztp_url_prefix``, ``http.port``, ``http.address``) is checked once whatever the
+  families (详细工作指导 A.12: no existing safety check is dropped), and never reported twice.
 
 The cases drive the real ``main`` argument handling into the real ``_validate_project`` and
 the real validators; only the deployment lock and the link-writing body are stubbed.  They
@@ -222,6 +225,42 @@ class SetupSwitchScopeContractTests(unittest.TestCase):
         self.assertCountEqual(["ib", "nvl"], observed["sections"], observed["output"])
         self.assertEqual(0, observed["mlag_calls"])
         self.assertTrue(observed["passed"], observed["output"])
+
+    def test_a_project_without_switch_families_still_has_its_common_section_checked(self):
+        # I-023 relaxes the family sections only; the common section (YAML root, ztp_url_prefix,
+        # http.port, http.address) is checked once whatever the families -- review S4, http dev
+        # 2026-11-08; 详细工作指导 A.12: no existing safety check is dropped on the way.
+        rows = (
+            device_row("srv01", "server", 71),
+            device_row("ufm01", "server_ufm", 41),
+            device_row("jump01", "eth_jump", 31),
+        )
+        document = global_without()
+        document["common"]["mgmt"]["ztp"].pop("ztp_url_prefix")
+        document["common"]["mgmt"]["http"]["status"] = "enabled"
+        document["common"]["mgmt"]["http"].pop("address")
+        observed = self.validate(self.make_project(rows, document))
+        self.assertEqual([], observed["sections"], observed["output"])
+        for field in ("common.mgmt.ztp.ztp_url_prefix", "common.mgmt.http.address"):
+            self.assertEqual(1, observed["output"].count(field), (field, observed["output"]))
+        self.assertFalse(observed["passed"], observed["output"])
+
+    def test_a_common_error_is_reported_once_beside_ethernet_switches(self):
+        # http dev 2026-11-08 (review S4): the common section is checked once, so a project with
+        # Ethernet switches, alone or beside ib, does not report the same common error twice.
+        document = global_without()
+        document["common"]["mgmt"]["ztp"].pop("ztp_url_prefix")
+        for label, rows in (
+            ("eth", (device_row("leaf01", "eth", 10),)),
+            ("eth+ib", B300_ROWS + (device_row("leaf01", "eth", 10),)),
+        ):
+            with self.subTest(families=label):
+                observed = self.validate(self.make_project(rows, document))
+                self.assertIn("eth", observed["sections"], observed["output"])
+                self.assertEqual(
+                    1, observed["output"].count("common.mgmt.ztp.ztp_url_prefix"), observed["output"],
+                )
+                self.assertFalse(observed["passed"], observed["output"])
 
     def test_air_rows_count_as_the_ethernet_family(self):
         # 详细工作指导 WP-5：air 按 load 的口径（11-load SWITCH_SCOPE_TYPES["eth"]）算 eth 族。

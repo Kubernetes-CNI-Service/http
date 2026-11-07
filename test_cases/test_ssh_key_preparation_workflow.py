@@ -766,6 +766,95 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             self.assertEqual(b"", management.read_bytes())
             self.assertFalse((ssh / "id_ed25519").exists())
 
+    def test_workstation_load_of_a_project_without_laptop_pub_passes_the_key_preflight(self):
+        """review S1 (http dev 2026-11-08, 改法 (a)): nothing mocks the template completion.
+
+        A workstation load of a project holding only 01, 02, the subnet table and the P2P -- no
+        laptop.pub -- runs load's own template entry (setup's one completion on the real template), then
+        its configuration-only key preflight, which runs before setup and accepts only an empty regular
+        laptop.pub placeholder (11-load.py::_prepare_pubkeys_without_management_injection: "Only its
+        explicitly named empty regular placeholder may be planned as a static key").  The v3.1.0 load
+        (f741269) got that placeholder by copying the template's empty file; the preflight must pass
+        again.  The run stops where load hands over to the setup child, which prepares the real key.
+        """
+        loader = load_script("r16_s1_workstation_load", LOAD_PATH)
+
+        class StopAtSetupChild(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="r16-s1-workstation-") as temporary:
+            root = Path(temporary).resolve()
+            home = root / "laptop-home"
+            (home / ".ssh").mkdir(parents=True, mode=0o700)
+            project = root / "project"
+            project.mkdir(mode=0o700)
+            (project / "01-global.yaml").write_text(
+                "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+                "    ztp:\n      status: disabled\n", encoding="utf-8",
+            )
+            (project / "02-devices_config.csv").write_text("hostname,type\n", encoding="utf-8")
+            (project / "02-dhcp-subnet_config.csv").write_text(
+                "shared_network,subnet,netmask,range_start,range_end,routers,"
+                "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+            )
+            (project / "p2p.xlsx").write_bytes(b"p2p.xlsx\n")
+            self.assertFalse(os.path.lexists(project / "laptop.pub"))
+            real_preflight = loader._prepare_pubkeys_without_management_injection
+            preflight: list[tuple] = []
+            reached: list[Path] = []
+
+            def observed_preflight(path, **kwargs):
+                try:
+                    selected = real_preflight(path, **kwargs)
+                except loader.LoadError as exc:
+                    preflight.append(("refused", str(exc)))
+                    raise
+                laptop = os.lstat(path / "laptop.pub")
+                preflight.append((
+                    "passed", [item.name for item in selected],
+                    stat.S_ISREG(laptop.st_mode), laptop.st_size,
+                ))
+                return selected
+
+            def stop_at_setup_child(command, **_kwargs):
+                reached.append(Path(command[1]).resolve())
+                raise StopAtSetupChild
+
+            settings = SimpleNamespace(schema_version=1)
+            with ExitStack() as stack:
+                stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(home)}))
+                stack.enter_context(mock.patch.object(loader, "runtime_os", return_value="Darwin"))
+                stack.enter_context(mock.patch.object(loader, "print_macos_client_requirements"))
+                stack.enter_context(mock.patch.object(loader, "validate_macos_client_requirements"))
+                stack.enter_context(mock.patch.object(loader, "supports_local_ztp_services", return_value=False))
+                stack.enter_context(mock.patch.object(loader, "acquire_deployment_lock", return_value=None))
+                stack.enter_context(mock.patch.object(loader, "release_deployment_lock"))
+                stack.enter_context(mock.patch.object(loader, "resolve_project", return_value=project))
+                stack.enter_context(mock.patch.object(loader, "sync_marker_present", return_value=False))
+                stack.enter_context(mock.patch.object(loader, "_load_global_document", return_value={}))
+                stack.enter_context(mock.patch.object(loader, "load_global", return_value=settings))
+                stack.enter_context(mock.patch.object(loader, "find_placeholder_password_sections", return_value=()))
+                stack.enter_context(mock.patch.object(loader, "apply_subnet_service_ips", return_value=settings))
+                stack.enter_context(mock.patch.object(loader, "load_device_types", return_value=frozenset()))
+                stack.enter_context(mock.patch.object(loader, "select_p2p", return_value=project / "p2p.xlsx"))
+                stack.enter_context(mock.patch.object(loader, "validate_subnet_file"))
+                stack.enter_context(mock.patch.object(loader, "project_air_topology_policy", return_value=None))
+                stack.enter_context(mock.patch.object(loader, "project_mini_air_devices", return_value=(None, None)))
+                stack.enter_context(mock.patch.object(loader, "validate_shared_artifact_receipts"))
+                stack.enter_context(mock.patch.object(loader, "ensure_management_key", side_effect=AssertionError("not a laptop key")))
+                stack.enter_context(mock.patch.object(loader, "active_project", return_value=None))
+                stack.enter_context(mock.patch.object(
+                    loader, "_prepare_pubkeys_without_management_injection", side_effect=observed_preflight,
+                ))
+                stack.enter_context(mock.patch.object(loader, "_run_subprocess", side_effect=stop_at_setup_child))
+                stack.enter_context(redirect_stdout(io.StringIO()))
+                stack.enter_context(redirect_stderr(io.StringIO()))
+                result = loader.main([str(project), "--no-upgrade"])
+
+            self.assertEqual([("passed", ["laptop.pub", "mgmt-server.pub"], True, 0)], preflight)
+            self.assertEqual([SETUP_PATH], reached, "load handed over to the setup child")
+            self.assertEqual(1, result, "the synthetic stop is at the setup child")
+
     def test_config_only_laptop_load_leaves_empty_pub_for_real_setup_child(self):
         """Preflight is read-only; the real setup child prepares the laptop key."""
         loader = load_script("r16_config_only_load", LOAD_PATH)

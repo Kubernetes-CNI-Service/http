@@ -147,6 +147,37 @@ class InventorySubsetTests(unittest.TestCase):
         records = self.compare([",".join(cells), IB1, IB2])
         self.assertOne(records, kind=INV.HEADER)
 
+    # --- a header without the key columns: one HEADER record, never an exception ---------------------
+    # Module contract (docstring, P3b 规则页 §5): compare only returns records; the caller prints them
+    # and exits 2.  P3b §5 rule 1: a header problem is one 「表头」 record and nothing else is compared;
+    # its two values are the two headers joined by commas.  P3b names no column for a header record:
+    # here a missing key column is named in it (取法 of agentRV1, review A4, reported to http dev).
+
+    def test_two_empty_files_give_one_header_record(self):
+        records = self.compare([], [], subset_text="")
+        self.assertOne(records, hostname="", subset_value="", master_value="", kind=INV.HEADER)
+        self.assertEqual("hostname,type", records[0].column)
+
+    def test_the_same_header_without_hostname_or_type_gives_one_header_record(self):
+        for missing in ("hostname", "type"):
+            with self.subTest(missing=missing):
+                header = ",".join(cell for cell in HEADER.split(",") if cell != missing)
+                row = ",".join(cell for name, cell in zip(HEADER.split(","), IB1.split(","))
+                               if name != missing)
+                records = self.compare([header, row], [header, row])
+                self.assertOne(records, line=1, hostname="", column=missing,
+                               subset_value=header, master_value=header, kind=INV.HEADER)
+
+    def test_type_missing_on_one_side_only_gives_one_header_record(self):
+        without_type = ",".join(cell for cell in HEADER.split(",") if cell != "type")
+        row = ",".join(cell for name, cell in zip(HEADER.split(","), IB1.split(",")) if name != "type")
+        records = self.compare([without_type, row])
+        self.assertOne(records, line=1, hostname="", subset_value=without_type, master_value=HEADER,
+                       kind=INV.HEADER)
+        records = self.compare([HEADER, IB1], [without_type, row])
+        self.assertOne(records, line=1, hostname="", subset_value=HEADER, master_value=without_type,
+                       kind=INV.HEADER)
+
     def test_eth_jump_over_a_non_ethernet_type(self):
         for master_type in ("ib", "air"):
             with self.subTest(master_type=master_type):

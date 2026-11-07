@@ -848,6 +848,120 @@ class TemplateContractTests(unittest.TestCase):
                         link.removeprefix("ztp/"), transmitted(jobs["code:ztp"]),
                     )
 
+    def test_analyzer_virtual_environments_stay_off_tar_sync_and_the_runner(self):
+        """review A6 (http dev 2026-11-08): a .venv/ or venv/ inside a deployable analyzer stays local.
+
+        The IB analyzer carries requirements.txt, so a local virtual environment beside the code is
+        likely.  Like node_modules (project_contract.NON_DEPLOYMENT_DIR_NAMES), every file below
+        either name is left out by the upload package (the real tar filter and the archive selector),
+        by sync's analyzer jobs (what a local rsync of each job sends), and by the runner: neither a
+        governed source (discover_source_scripts) nor deployment authority (the union of the three
+        real selectors deployment_authority_paths combines).  .gitignore already ignores both names.
+        """
+        package = load_module("package_analyzer_venv", ROOT / "tools/_package_common.py")
+        sync = load_module("sync_code_analyzer_venv", ROOT / "tools/sync-code.py")
+        activate = load_module("activate_analyzer_venv", ROOT / "infra/docker/activate.py")
+        contract = load_module("project_contract_analyzer_venv", ROOT / "tools/project_contract.py")
+        runner = load_module("related_runner_analyzer_venv", ROOT / "test_cases/run_related_tests.py")
+        code = {
+            "tools/ibdiagnet-analyze-tool": {"analyze.py", "lib/topology.py"},
+            "tools/lldp-analyze-tool": {"analyze_lldp.py"},
+        }
+        self.assertEqual(set(code), {f"tools/{name}" for name in contract.DEPLOYABLE_TOOL_SUBTREES})
+        environment_files = (
+            "pyvenv.cfg", "bin/activate", "bin/pip3.py",
+            "lib/python3.9/site-packages/openpyxl/__init__.py",
+        )
+        local = {
+            f"{subtree}/{environment}/{name}"
+            for subtree in code for environment in (".venv", "venv") for name in environment_files
+        }
+        ignored = subprocess.run(
+            ["git", "check-ignore", "--no-index", *sorted(local)],
+            cwd=ROOT, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(local, set(ignored.stdout.splitlines()), ignored.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve() / "http"
+            day0 = workspace / "DAY0-Prepare"
+            project = day0 / "customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text("hostname\n", encoding="utf-8")
+            (day0 / "template").mkdir()
+            for name in set(sync.CODE_DIRECTORIES) | set(activate.IMAGE_SOURCE_SCAN_ROOTS):
+                (workspace / name).mkdir(exist_ok=True)
+            (workspace / "requirements-container-top-level.lock").write_text(
+                "fixture lock\n", encoding="utf-8",
+            )
+            shipped = {f"{subtree}/{name}" for subtree, names in code.items() for name in names}
+            for relative in shipped | local:
+                target = workspace / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"fixture: {relative}\n", encoding="utf-8")
+
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0, MANIFEST=workspace / "ztp/.setup_manifest",
+            ):
+                archive_filter = package.PackageFilter(
+                    project, Path(directory) / "upload.tar.gz",
+                    include_images=False, include_apps=False, include_firmware=False,
+                    max_file_size=1024 * 1024, day0_all=False, artifact_kind="upload",
+                )
+
+            def tar_keeps(relative: str, kind: bytes) -> bool:
+                info = tarfile.TarInfo(relative)
+                info.type, info.mode, info.size = kind, 0o644, 1 if kind == tarfile.REGTYPE else 0
+                return archive_filter(info) is not None
+
+            with mock.patch.multiple(sync, ROOT=workspace, DAY0=day0), \
+                    mock.patch.multiple(
+                        sync.project_contract, ROOT=workspace, DAY0=day0,
+                        MANIFEST=workspace / "ztp/.setup_manifest",
+                    ):
+                jobs = {job.label: job for job in sync.build_jobs(project, "/var/www/html")}
+                sync_root_selected = {
+                    path.relative_to(workspace).as_posix()
+                    for path in sync.matching_files(workspace, sync.ROOT_CODE_PATTERNS)
+                }
+
+            def transmitted(job):
+                """Files a local rsync of this exact job sends (what sync-code.py hands rsync)."""
+                command = ["rsync", "-a", "--dry-run", "--out-format=%n"]
+                for pattern in job.excludes:
+                    command += ["--exclude", pattern]
+                command += [os.fspath(source) + ("/" if source.is_dir() else "")
+                            for source in job.sources]
+                command.append(os.fspath(Path(directory) / "destination") + "/")
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(0, result.returncode, result.stderr)
+                return {name for name in result.stdout.splitlines()
+                        if name and not name.endswith("/")}
+
+            archive_selected = set(package.deployment_archive_source_paths(workspace))
+            governed = set(runner.discover_source_scripts(workspace))
+            authority = (sync_root_selected | set(activate.image_source_paths(workspace))
+                         | archive_selected)
+            for subtree, names in code.items():
+                for environment in (".venv", "venv"):
+                    with self.subTest(channel="upload directory", path=f"{subtree}/{environment}"):
+                        self.assertFalse(tar_keeps(f"{subtree}/{environment}", tarfile.DIRTYPE))
+                with self.subTest(channel="upload", subtree=subtree):
+                    self.assertEqual(
+                        {f"{subtree}/{name}" for name in names},
+                        {path for path in archive_selected if path.startswith(subtree + "/")},
+                    )
+                    self.assertTrue(all(tar_keeps(f"{subtree}/{name}", tarfile.REGTYPE) for name in names))
+                with self.subTest(channel="sync", subtree=subtree):
+                    self.assertEqual(names, transmitted(jobs["code:" + subtree]))
+            for relative in sorted(local):
+                with self.subTest(channel="upload file", path=relative):
+                    self.assertFalse(tar_keeps(relative, tarfile.REGTYPE))
+                    self.assertIsNotNone(contract.transfer_exclude_reason(relative))
+            self.assertEqual(set(), local & governed, "runner: governed sources")
+            self.assertEqual(set(), local & authority, "runner: deployment authority")
+            self.assertTrue(shipped <= governed, "the analyzers' code stays governed")
+
     def test_every_tracked_ib_analyzer_file_but_docs_and_requirements_is_archive_authority(self):
         # I-034 (owner 2026-11-04): 「我们需要保证被调用的脚本都要放行」.  The analyzer's tracked
         # files are its code, its README files, requirements.txt (pip input, not read at run time)

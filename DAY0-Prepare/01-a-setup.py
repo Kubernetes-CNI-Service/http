@@ -2864,26 +2864,28 @@ def _require_r22_subnet_input(proj_dir):
     return dhcp_enabled, ztp_enabled, source_before
 
 
-def _validate_global_yaml(path, section_key="eth"):
-    """YAML 语法检查 + 必要 key 存在性校验。
+def _validate_global_common(path):
+    """01-global.yaml 的 common 段：YAML 根结构、schema_version、ztp_url_prefix、http.port、http.address。
 
-    section_key: "eth"（Cumulus）、"ib" 或 "nvl"（NVOS）。
+    返回 (errors, warnings, data, schema_version)；data 为 None 表示文件为空、读不了或根不是 mapping，
+    各交换机族的段无从校验。I-023 只放宽各族的段，_validate_project 不论族集合如何都校验这一段一次
+    （review S4，http dev 2026-11-08；详细工作指导 A.12：不借机删除现有检查）。
     """
     errors, warnings = [], []
     try:
         import yaml
     except ImportError:
         warnings.append("  PyYAML 未安装，跳过 YAML 语法检查（pip install pyyaml）")
-        return errors, warnings
+        return errors, warnings, None, None
     try:
         with open(path, encoding="utf-8") as f:
             data = safe_load_global_yaml(f)
         if data is None:
             warnings.append("  文件为空或仅含注释，跳过内容校验")
-            return errors, warnings
+            return errors, warnings, None, None
         if not isinstance(data, dict):
             errors.append("  YAML 根节点应为 mapping，实际为其他类型")
-            return errors, warnings
+            return errors, warnings, None, None
         schema_version = 1
         try:
             schema_version = detect_global_schema_version(data)
@@ -2926,6 +2928,21 @@ def _validate_global_yaml(path, section_key="eth"):
                     )
                 except ValueError as exc:
                     errors.append(f"  common.mgmt.http.address 无效：{exc}")
+    except Exception as ex:
+        errors.append(f"  YAML 语法错误：{ex}")
+        return errors, warnings, None, None
+    return errors, warnings, data, schema_version
+
+
+def _validate_global_yaml(path, section_key="eth"):
+    """YAML 语法检查 + 必要 key 存在性校验：先是 common 段（_validate_global_common），再是所选族的段。
+
+    section_key: "eth"（Cumulus）、"ib" 或 "nvl"（NVOS）。
+    """
+    errors, warnings, data, schema_version = _validate_global_common(path)
+    if data is None:
+        return errors, warnings
+    try:
         # Support merged format: switches list with eth/ib/nvl sections
         if "switches" in data:
             section = next((s[section_key] for s in data["switches"]
@@ -3075,18 +3092,30 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
     # 项目被未使用的 Cumulus 策略阻断。
     csv_path = os.path.join(proj_dir, "02-devices_config.csv")
     families = _switch_families(csv_path)
-    if "eth" in families:
-        _run("01-global.yaml (eth)",
-             os.path.join(proj_dir, "01-global.yaml"),
-             _validate_global_yaml)  # section_key="eth" by default
-    if "ib" in families:
-        _run("01-global.yaml (ib)",
-             os.path.join(proj_dir, "01-global.yaml"),
-             lambda p: _validate_global_yaml(p, section_key="ib"))
-    if "nvl" in families:
-        _run("01-global.yaml (nvl)",
-             os.path.join(proj_dir, "01-global.yaml"),
-             lambda p: _validate_global_yaml(p, section_key="nvl"))
+    # I-023 只放宽各族的段：common 段（根结构、ztp_url_prefix、http.port、http.address）不论族集合
+    # 如何都校验一次，各族的段不再重复报它（review S4，http dev 2026-11-08；A.12 不删现有检查）。
+    global_path = os.path.join(proj_dir, "01-global.yaml")
+    common_errors, common_warnings, global_data, _schema_version = (
+        _validate_global_common(global_path) if os.path.exists(global_path)
+        else ([], [], None, None)
+    )
+    _run("01-global.yaml (common)", global_path,
+         lambda _path: (common_errors, common_warnings))
+
+    def _family_section(path, family):
+        # _validate_global_yaml 先报 common 段、再报本族的段；common 段上面已报过一次，这里只报其后的部分。
+        errors, warnings = _validate_global_yaml(path, section_key=family)
+        if errors[:len(common_errors)] == common_errors:
+            errors = errors[len(common_errors):]
+        if warnings[:len(common_warnings)] == common_warnings:
+            warnings = warnings[len(common_warnings):]
+        return errors, warnings
+
+    if global_data is not None:
+        for family in ("eth", "ib", "nvl"):
+            if family in families:
+                _run(f"01-global.yaml ({family})", global_path,
+                     lambda path, family=family: _family_section(path, family))
 
     # 设备 CSV（eth/eth_spx/spx/ib/nvl/server 共用一个文件，按 type 列区分）
     _run("02-devices_config.csv", csv_path, _validate_eth_csv)

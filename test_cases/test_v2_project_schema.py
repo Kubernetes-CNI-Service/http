@@ -848,10 +848,13 @@ switches:
     def test_setup_ib_scope_skips_unselected_eth_and_mlag_validation(self):
         with tempfile.TemporaryDirectory() as directory:
             project = Path(directory)
-            # DEV REQ22 (175cbf1) reads both service modes before any validator runs.
+            # DEV REQ22 (175cbf1) reads both service modes before any validator runs.  The common
+            # section is checked whatever the scope (review S4, http dev 2026-11-08), so it carries
+            # the one key it requires here; the family sections stay with the patched validator.
             (project / "01-global.yaml").write_text(
                 "schema_version: 2\ncommon:\n  mgmt:\n"
-                "    dhcp-server: {status: disabled}\n    ztp: {status: disabled}\n",
+                "    dhcp-server: {status: disabled}\n"
+                "    ztp: {status: disabled, ztp_url_prefix: /ztp}\n",
                 encoding="utf-8",
             )
             (project / "02-devices_config.csv").write_text(
@@ -866,8 +869,9 @@ switches:
                 sections.append(section_key)
                 return [], []
 
-            old_scope = getattr(SETUP, "_SWITCH_SCOPE", "all")
-            SETUP._SWITCH_SCOPE = "ib"
+            old_scope = getattr(SETUP, "_SWITCH_SCOPE", None)
+            # I-023: --switch ib is the family set {"ib"} (setup main), never the bare string.
+            SETUP._SWITCH_SCOPE = frozenset({"ib"})
             try:
                 with mock.patch.object(
                     SETUP, "_validate_global_yaml", side_effect=global_validator,
