@@ -37,6 +37,13 @@ class Req14SplitterHostnameBinding(unittest.TestCase):
             {"g04-foob-core01": {"swp9": "1to8"}}, "oob-core01",
         ))
 
+    def test_air_child_binds_to_production_topology_owner(self):
+        profiles = {"swp1": "1to2", "swp44": "1to2"}
+        self.assertEqual(profiles, LOAD._sidecar_profiles_for_child(
+            {"a05-tan-pod3-leaf05": profiles},
+            "air-a05-tan-pod3-leaf05",
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()
