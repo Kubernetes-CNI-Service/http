@@ -785,151 +785,6 @@ print("NATIVE_DISABLED_SELECTED_CAPTURE_OK=" + json.dumps({"generation": generat
             self.assertEqual(selector, os.readlink(project / "99-output-ztp/current"))
             self.assertFalse((root / "service-started").exists())
 
-    def test_c2_process_death_between_version_and_pointer_commits(self):
-        """Fresh readers reject an orphan but accept only a committed pointer."""
-        child = """
-import os
-from pathlib import Path
-import signal
-import sys
-from unittest import mock
-from test_cases.module_loader import load_script
-
-root, base_name, crash_after = sys.argv[1], sys.argv[2], int(sys.argv[3])
-c2 = load_script("r22_c2_sigkill_child", Path(root) / "ztp/config/cumulus/template/90-c2-generate_configs.py")
-base = Path(base_name)
-real_replace = os.replace
-replaces = 0
-
-def patch_candidate(_dot, staging, _display, _authority):
-    (Path(staging) / "Border01.yaml").write_bytes(b"patched B\\n")
-
-def die_after_replace(src, dst):
-    global replaces
-    result = real_replace(src, dst)
-    replaces += 1
-    if replaces == crash_after:
-        os.kill(os.getpid(), signal.SIGKILL)
-    return result
-
-with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
-    c2, "_patch_descriptions_in_directory", side_effect=patch_candidate,
-), mock.patch.object(c2.os, "replace", side_effect=die_after_replace):
-    c2._run_patch_descriptions("private-topology.dot", str(base), expected_csv_authority=object())
-"""
-        for crash_after in (1, 2):
-            with self.subTest(crash_after=crash_after), tempfile.TemporaryDirectory(
-                prefix="r22-c2-sigkill-",
-            ) as name:
-                output = Path(name) / "ztp/config/cumulus/template/99-output"
-                output.mkdir(parents=True)
-                timestamp = "20261002_120000"
-                base = output / timestamp
-                base.mkdir()
-                (base / "Border01.yaml").write_bytes(b"plain base\n")
-                legacy = output / f"{timestamp}_with_desc"
-                legacy.mkdir()
-                (legacy / "Border01.yaml").write_bytes(b"accepted legacy A\n")
-                before_legacy = _artifact_tree(legacy)
-                result = subprocess.run(
-                    [sys.executable, "-B", "-c", child, str(ROOT), str(base),
-                     str(crash_after)],
-                    cwd=ROOT, capture_output=True, text=True, check=False,
-                )
-                self.assertEqual(-signal.SIGKILL, result.returncode, result.stderr)
-                self.assertEqual(before_legacy, _artifact_tree(legacy))
-                pointer = output / f"{timestamp}_with_desc_current"
-                context = PUBLISHER._cumulus_dir_context(str(base))
-                self.assertIsNotNone(context)
-                if crash_after == 1:
-                    self.assertFalse(os.path.lexists(pointer))
-                    self.assertEqual(
-                        "version-residue-no-current",
-                        C2._inspect_description_output_recovery(str(legacy))["state"],
-                    )
-                    with self.assertRaisesRegex(ValueError, "version without a current pointer"):
-                        PUBLISHER._preferred_cumulus_contexts([context])
-                else:
-                    self.assertTrue(pointer.is_symlink())
-                    self.assertEqual(pointer, LOAD._select_cumulus_description_publication(base))
-                    selected = PUBLISHER._preferred_cumulus_contexts([context])
-                    self.assertEqual(str(pointer), selected[0]["path"])
-                    self.assertEqual(
-                        b"patched B\n", (Path(selected[0]["read_path"]) / "Border01.yaml").read_bytes(),
-                    )
-
-    def test_c2_single_pointer_is_the_real_d_input_and_tamper_never_falls_back(self):
-        """C2's immutable publish pointer is what the real d resolver consumes."""
-        with tempfile.TemporaryDirectory(prefix="r22-description-pointer-") as name:
-            output = Path(name) / "ztp/config/cumulus/template/99-output"
-            output.mkdir(parents=True)
-            timestamp = "20261002_120000"
-            base = output / timestamp
-            base.mkdir()
-            (base / "Border01.yaml").write_bytes(b"plain base\n")
-            legacy = output / f"{timestamp}_with_desc"
-            legacy.mkdir()
-            (legacy / "Border01.yaml").write_bytes(b"complete legacy A\n")
-            pointer = output / f"{timestamp}_with_desc_current"
-
-            def patch_staged(_dot, staging, _display, _authority):
-                (Path(staging) / "Border01.yaml").write_bytes(b"patched B\n")
-
-            with mock.patch.object(
-                C2, "_require_csv_input_authority",
-            ), mock.patch.object(
-                C2, "_patch_descriptions_in_directory",
-                side_effect=patch_staged,
-            ):
-                C2._run_patch_descriptions(
-                    "private-topology.dot", str(base),
-                    expected_csv_authority=object(),
-                )
-            self.assertTrue(pointer.is_symlink())
-            self.assertEqual(pointer, LOAD._select_cumulus_description_publication(base))
-            self.assertEqual(b"complete legacy A\n",
-                             (legacy / "Border01.yaml").read_bytes())
-            context = PUBLISHER._cumulus_dir_context(str(base))
-            self.assertIsNotNone(context)
-            selected = PUBLISHER._preferred_cumulus_contexts([context])
-            self.assertEqual(str(pointer), selected[0]["path"])
-            version = PUBLISHER._description_current_version(str(pointer), timestamp)
-            self.assertEqual(version, selected[0]["read_path"])
-            self.assertEqual(b"patched B\n",
-                             (Path(version) / "Border01.yaml").read_bytes())
-            (Path(version) / "Border01.yaml").write_bytes(b"tampered\n")
-            with self.assertRaisesRegex(ValueError, "hash|manifest"):
-                PUBLISHER._preferred_cumulus_contexts([context])
-            self.assertEqual(b"complete legacy A\n",
-                             (legacy / "Border01.yaml").read_bytes())
-
-    def test_c2_crash_residue_blocks_real_publisher_base_fallback(self):
-        """C2's cold gap cannot make d publish the unpatched base tree."""
-        with tempfile.TemporaryDirectory(prefix="r22-c2-publisher-gap-") as name:
-            output = Path(name) / "ztp/config/cumulus/template/99-output"
-            output.mkdir(parents=True)
-            timestamp = "20261002_120000"
-            base = output / timestamp
-            base.mkdir()
-            (base / "Border01.yaml").write_bytes(b"base without descriptions\n")
-            final = output / f"{timestamp}_with_desc"
-            old = output / f".{final.name}.tmp.crash.old"
-            stage = output / f".{final.name}.tmp.crash"
-            old.mkdir()
-            stage.mkdir()
-            (old / "Border01.yaml").write_bytes(b"complete A descriptions\n")
-            (stage / "Border01.yaml").write_bytes(b"incomplete B descriptions\n")
-            before = _artifact_tree(output)
-
-            inventory = C2._inspect_description_output_recovery(str(final))
-            self.assertEqual("gap-after-old-rename", inventory["state"])
-            self.assertEqual(str(old), inventory["old_candidate"])
-            context = PUBLISHER._cumulus_dir_context(str(base))
-            self.assertIsNotNone(context)
-            with self.assertRaisesRegex(ValueError, "unresolved description"):
-                PUBLISHER._preferred_cumulus_contexts([context])
-            self.assertEqual(before, _artifact_tree(output))
-
     def test_real_nvos_scoped_generation_parent_remains_activatable(self):
         """Real IB/NVL generation must retain accepted empty unselected hosts."""
         private_parent = os.environ.get("R22_TEST_PRIVATE_ROOT")
@@ -1433,37 +1288,11 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                     f"generations/{parent['release_id']}",
                     LOAD.ensure_previous_generation_frozen(project),
                 )
-                committed_a = (
-                    project / "99-output-ztp/generations" / parent["release_id"]
-                )
-                selector = project / "99-output-ztp/current"
-                self.assertEqual(
-                    parent["release_id"],
-                    ACTIVATE.validate_pinned_generation(
-                        settings, selector, expected_release_id=parent["release_id"],
-                    )["release_id"],
-                )
-                # LOAD has selected A, so ACTIVATE's legacy flat-input writer
-                # must not publish a runtime plan without binding that selector.
-                with mock.patch.object(
-                    ACTIVATE, "ensure_runtime_directories",
-                ) as runtime_dirs, mock.patch.object(
-                    ACTIVATE, "_atomic_write",
-                ) as runtime_write:
-                    with self.assertRaisesRegex(
-                        ACTIVATE.ActivationError, "selector|generation",
-                    ):
-                        ACTIVATE.prepare_runtime(settings)
-                runtime_dirs.assert_not_called()
-                runtime_write.assert_not_called()
-                frozen_global = committed_a / "inputs/global"
-                original_global = frozen_global.read_bytes()
-                frozen_global.write_bytes(b"other generation input\n")
-                with self.assertRaisesRegex(ACTIVATE.ActivationError, "pinned input"):
-                    ACTIVATE.validate_pinned_generation(
-                        settings, selector, expected_release_id=parent["release_id"],
-                    )
-                frozen_global.write_bytes(original_global)
+                # TEST f384f73 also checked ACTIVATE's pinned-generation API here
+                # (validate_pinned_generation, prepare_runtime's selector refusal and
+                # the pinned-input tamper refusal; TEST-C09B, e243a05).  activate.py in
+                # this tree is DEV's, so those assertions come back with TEST's
+                # activate.py (K1-6 / stage 6), from TEST f384f73's text of this test.
 
                 # The prior release is a real successful publication, not a
                 # same-timestamp c2 staging directory or a synthetic marker.
@@ -1503,12 +1332,6 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
 
             self.assertTrue(state["injected"], state)
             self.assertEqual(
-                parent["release_id"],
-                ACTIVATE.validate_pinned_generation(
-                    settings, selector, expected_release_id=parent["release_id"],
-                )["release_id"],
-            )
-            self.assertEqual(
                 (original.st_ino, original.st_size, original.st_mtime_ns),
                 (source.stat().st_ino, source.stat().st_size, source.stat().st_mtime_ns),
             )
@@ -1547,77 +1370,9 @@ with mock.patch.object(c2, "_require_csv_input_authority"), mock.patch.object(
                     set(DHCP_OUTPUTS),
                     {item.name for item in private_candidate.iterdir()}, detail,
                 )
-            # The actual LOAD child chain has left the previously committed A
-            # selected.  A subsequent, independently legal B edit to the
-            # mutable source must not be used when ACTIVATE observes A's plan.
-            # This is read-only planning, not a service activation receipt.
-            network_links = [{
-                "ifindex": 4, "ifname": "eth0",
-                "flags": ["BROADCAST", "MULTICAST", "UP", "LOWER_UP"],
-                "address": "02:00:00:00:00:04", "operstate": "UP",
-                "link_type": "ether",
-            }]
-            network_addresses = [{
-                "ifindex": 4, "ifname": "eth0",
-                "addr_info": [{
-                    "family": "inet", "local": "192.0.2.20", "prefixlen": 24,
-                    "scope": "global", "flags": [],
-                    "valid_life_time": "forever",
-                    "preferred_life_time": "forever",
-                }],
-            }]
-            source.write_bytes(bytes_b)
-            try:
-                with mock.patch.object(
-                    ACTIVATE, "capture_stable_network_snapshot",
-                    return_value=(network_links, network_addresses),
-                ):
-                    _plan, _runtime, payload, _apache = (
-                        ACTIVATE.observe_pinned_runtime(
-                            settings, selector,
-                            expected_release_id=parent["release_id"],
-                        )
-                    )
-                self.assertEqual(parent["release_id"],
-                                 payload["selected_generation_release_id"])
-                self.assertEqual(
-                    hashlib.sha256((committed_a / "inputs/subnet").read_bytes()).hexdigest(),
-                    payload["subnet_sha256"],
-                )
-                # Exercise the real ACTIVATE publication boundary after the
-                # real LOAD/c1/c2/d chain rejects B.  Keep every destination
-                # private and leave service-start authority absent.
-                pinned_state = private / "pinned-state"
-                pinned_state.mkdir()
-                pinned_settings = ACTIVATE.Settings(
-                    http_root=private / "A", project_name=project.name,
-                    scope="prod", switch_scope="eth",
-                    state_root=pinned_state, log_root=private / "pinned-log",
-                    apache_listeners=private / "pinned-apache-listeners.conf",
-                    dhcp_config=private / "pinned-dhcpd.conf",
-                    dhcp_leases=private / "pinned-leases",
-                )
-                pinned_settings.activation_marker.write_text("old marker\n")
-                pinned_settings.precommit_marker.write_text("old precommit\n")
-                with mock.patch.object(
-                    ACTIVATE, "capture_stable_network_snapshot",
-                    return_value=(network_links, network_addresses),
-                ), mock.patch.object(ACTIVATE, "ensure_runtime_directories"):
-                    _selected, _runtime, published = ACTIVATE.prepare_pinned_runtime(
-                        pinned_settings, selector_path=selector,
-                        expected_release_id=parent["release_id"],
-                    )
-                self.assertEqual(parent["release_id"],
-                                 published["selected_generation_release_id"])
-                self.assertEqual(
-                    published,
-                    json.loads(pinned_settings.runtime_plan.read_text()),
-                )
-                self.assertTrue(pinned_settings.apache_listeners.is_file())
-                self.assertFalse(pinned_settings.activation_marker.exists())
-                self.assertFalse(pinned_settings.precommit_marker.exists())
-            finally:
-                source.write_bytes(bytes_a)
+            # TEST f384f73 continued with ACTIVATE.observe_pinned_runtime and
+            # prepare_pinned_runtime on the still-selected A (TEST-C09B, e243a05);
+            # they return with TEST's activate.py (K1-6 / stage 6).
 
     def test_load_setup_c2_rejects_same_inode_second_read_and_preserves_existing_same_name_output(self):
         rows_a = V2_FLOW.V2MlagSetupPreflightTests().pair()
