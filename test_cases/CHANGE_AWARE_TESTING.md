@@ -36,9 +36,9 @@ python3 -B test_cases/run_related_tests.py --suite deployment-runtime -v
 python3 -B test_cases/run_related_tests.py --suite packaging-sync --suite repository-governance -v
 ```
 
-当前主测试域为 `repository-governance`、`packaging-sync`、`deployment-runtime`、
-`configuration-generation`、`monitoring-collection`、`ztp-runtime` 和 `vm-validation`。分类是
-互斥且完备的；新增、删除或重复归类测试模块都会使 manifest 校验失败。
+主测试域包括 `repository-governance`、`packaging-sync`、`deployment-runtime`、
+`configuration-generation`、`monitoring-collection`、`ztp-runtime`、`vm-validation` 等，完整名单以
+`--list-suites` 为准。分类是互斥且完备的；新增、删除或重复归类测试模块都会使 manifest 校验失败。
 
 不需要 public authority 的选测在无 Git 环境也可比较批准哈希并运行；通过后自动更新哈希：
 

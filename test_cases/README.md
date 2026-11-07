@@ -109,7 +109,7 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.py -v
 ```
 
-全部 `test_*.py` 还在同一份 manifest 中归入 7 个互斥主测试域。先查看完整目录，再按域执行；
+全部 `test_*.py` 还在同一份 manifest 中归入互斥的主测试域（以 `--list-suites` 的输出为准）。先查看完整目录，再按域执行；
 `--suite` 可重复，用于一次合并多个域：
 
 ```bash
@@ -146,7 +146,7 @@ TMPDIR）得到的装饰器跳过、或计划 `runtime_skips` 以相同原因列
 TMPDIR、运行期间无人写入的专用父目录下；主 checkout 开跑前须已有空的被忽略文件 `.deployment.lock` 与
 `monitor/.generate-monitor-html.lock`（2026-10-24 S0 修订）。成功时写入与串行 `--all` 逐字节相同的证明，
 执行形态只记在 `ABSOLUTE_NEW_DIR/audit.json`。它不能与 `--validation-only` 等其他模式同用；
-与串行相同，主 checkout 须带有 `refs/remotes/origin/v2` 且第一父链无 merge，车道 clone 原样继承这些引用、从不 fetch。在 `TC-REAL-FULL-SHARD-001` 的专用会话同版对照完成前，不用于正式 load、同步或发布证明。
+与串行相同，主 checkout 须带有 `refs/remotes/origin/v2` 且第一父链无 merge，车道 clone 原样继承这些引用、从不 fetch。`TC-REAL-FULL-SHARD-001` 的专用会话同版对照已于 2026-11-07 在 DEV 上完成（两对，见该卡），分片运行可签发正式证明。
 
 发布前合同是：生产行为变更必须先或同时更新独立测试预期；确认
 `script_test_manifest.json` 的 direct 与 workflow 映射；执行 `--all` 并全部通过；随后执行
