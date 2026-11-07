@@ -1217,15 +1217,17 @@ __NV_CONFIG_END__
             self.assertTrue(manifest["partial"])
             self.assertTrue(any("active runtime project" in item for item in manifest["warnings"]))
 
-    def test_invalid_pointer_is_a_collection_warning_not_a_stop(self):
-        """R-016 §5.1: an invalid DAY0-Prepare/activate-project raises a named error; the collector records it as a
-        warning and keeps collecting, like the missing pointer of I-044 (v3.1.1 WP-9c P3, http dev 2026-11-08).
-        Without an active project, live SSH stays off."""
+    def _collect_without_device_access(self, pointer_text: str, *, broken_yaml: bool = False):
+        """Run the real main for one --host; every collector but the runtime-project check is a no-op.
+
+        broken_yaml: PyYAML cannot be imported, and project_contract (which needs it) is not loaded yet.
+        Returns (exit code, bundle manifest, the validate_ssh_inputs mock).
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             day0 = root / "DAY0-Prepare"
             (day0 / "requested").mkdir(parents=True)
-            (day0 / "activate-project").symlink_to("template")
+            (day0 / "activate-project").symlink_to(pointer_text)
             output = root / "output"
             output.mkdir(mode=0o700)
             document_root = root / "www"
@@ -1252,22 +1254,58 @@ __NV_CONFIG_END__
                     "collect_public_key_fingerprints", "collect_monitor_state", "collect_switch_archives",
                 ):
                     patches.enter_context(mock.patch.object(COLLECTOR, name, no_op))
-                validate_ssh = patches.enter_context(mock.patch.object(COLLECTOR, "validate_ssh_inputs"))
+                validate_ssh = patches.enter_context(mock.patch.object(
+                    COLLECTOR, "validate_ssh_inputs", return_value=(None, None),
+                ))
+                # Never a real device: a wrongly allowed live collection only shows as validate_ssh calls.
+                patches.enter_context(mock.patch.object(COLLECTOR, "collect_live_device", no_op))
                 patches.enter_context(mock.patch("sys.stdout", new_callable=io.StringIO))
                 patches.enter_context(mock.patch("sys.stderr", new_callable=io.StringIO))
+                if broken_yaml:
+                    patches.enter_context(mock.patch.dict(sys.modules, {"yaml": None}))
+                    sys.modules.pop("project_contract", None)
                 rc = COLLECTOR.main([
                     "-p", "requested", "--air", "--host", "leaf01", "--output-dir", str(output),
                 ])
-            self.assertEqual(2, rc)
-            validate_ssh.assert_not_called()
             archives = list(output.glob("*.tar.gz"))
             self.assertEqual(1, len(archives))
             with tarfile.open(archives[0], "r:gz") as archive:
                 name = next(name for name in archive.getnames() if name.endswith("/manifest.json"))
                 manifest = json.load(archive.extractfile(name))
-            self.assertTrue(any("activate-project" in item and "template" in item
-                                for item in manifest["warnings"]), manifest["warnings"])
-            self.assertIsNone(manifest["runtime_active_project"])
+            return rc, manifest, validate_ssh
+
+    def test_invalid_pointer_is_a_collection_warning_not_a_stop(self):
+        """R-016 §5.1: an invalid DAY0-Prepare/activate-project raises a named error; the collector records it as a
+        warning and keeps collecting, like the missing pointer of I-044 (v3.1.1 WP-9c P3, http dev 2026-11-08).
+        Without an active project, live SSH stays off."""
+        rc, manifest, validate_ssh = self._collect_without_device_access("template")
+        self.assertEqual(2, rc)
+        validate_ssh.assert_not_called()
+        self.assertTrue(any("activate-project" in item and "template" in item
+                            for item in manifest["warnings"]), manifest["warnings"])
+        self.assertIsNone(manifest["runtime_active_project"])
+
+    def test_collector_module_starts_without_pyyaml(self):
+        """http dev 2026-11-08 (WP-9c P3b): the collector is for broken environments -- after a failed dependency
+        install or with PyYAML broken -- so loading it must not import PyYAML through project_contract."""
+        with mock.patch.dict(sys.modules, {"yaml": None}):
+            sys.modules.pop("project_contract", None)
+            try:
+                module = load_module("ztp_diagnostic_collector_without_yaml", ROOT / "tools/collect-ztp-diagnostics.py")
+            except ImportError as exc:
+                self.fail(f"the collector must load without PyYAML: {exc}")
+        self.assertIsNone(module.yaml)
+
+    def test_missing_module_for_the_pointer_is_a_collection_warning_not_a_stop(self):
+        """http dev 2026-11-08 (WP-9c P3b): if the pointer check cannot import its module, that is one collection
+        warning naming the missing module -- the path of an invalid pointer: collection continues, no live SSH,
+        runtime_active_project is null."""
+        rc, manifest, validate_ssh = self._collect_without_device_access("requested", broken_yaml=True)
+        self.assertTrue(any("module" in item and "yaml" in item for item in manifest["warnings"]),
+                        manifest["warnings"])
+        self.assertIsNone(manifest["runtime_active_project"])
+        self.assertEqual(2, rc)
+        validate_ssh.assert_not_called()
 
     def test_collector_is_part_of_tools_deployment_contract(self):
         self.assertTrue(CONTRACT.is_tools_deployable_file(

@@ -51,7 +51,6 @@ from ztp_service_runtime import (  # noqa: E402
     ServiceRuntimeBackend,
     runtime_backend_from_environment,
 )
-from project_contract import ActiveProjectPointerError, active_project_dir  # noqa: E402
 DEFAULT_OUTPUT_ROOT = Path("/var/tmp/ztp-diagnostics")
 SCHEMA_VERSION = 1
 MAX_COMMAND_BYTES = 8 * 1024 * 1024
@@ -941,8 +940,12 @@ def runtime_active_project() -> Optional[Path]:
     """Return the project currently wired into the DHCP/ZTP runtime: DAY0-Prepare/activate-project's.
 
     R-016 §5.1 (R16-06): never the parent of a resolved runtime link -- a project input may link outside the
-    project (R-014 第 3 条).  None without a pointer; an invalid pointer raises ActiveProjectPointerError.
+    project (R-014 第 3 条).  None without a pointer; an invalid pointer raises ActiveProjectPointerError (a
+    ValueError).  project_contract is imported here, not at module level: it needs PyYAML, and the collector
+    must still start in a broken environment (http dev 2026-11-08); a failed import raises ImportError.
     """
+    from project_contract import active_project_dir
+
     return active_project_dir(ROOT)
 
 
@@ -2161,10 +2164,14 @@ def _main(argv: Optional[list[str]] = None) -> int:
             with _private_bound_child(output_root) as temporary:
                 with _private_bound_child(temporary, artifact_id) as staging:
                     builder = BundleBuilder(staging, artifact_id)
+                    # Like I-044's missing pointer: an invalid pointer, or a module the check cannot import, is
+                    # recorded as a warning and never a stop; without an active project there is no live SSH.
                     try:
                         active_project = runtime_active_project()
-                    except ActiveProjectPointerError as exc:
-                        # Like I-044's missing pointer: recorded as a warning, never a stop; no live SSH.
+                    except ImportError as exc:
+                        active_project = None
+                        builder.warn(f"active project not resolved, missing module: {exc}")
+                    except ValueError as exc:  # project_contract.ActiveProjectPointerError
                         active_project = None
                         builder.warn(str(exc))
                     snapshot, report = load_latest_report(project)
