@@ -1524,6 +1524,50 @@ PUBLISHED_RUNTIME_FILE_PATHS = (
 )
 # R-016 §2: the one link that changes with the project.
 ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"
+# R-016 §2, §4.2 细节 (R16-19): DAY0-Prepare entries the pointer never selects.
+ACTIVE_PROJECT_EXCLUDED_NAMES = frozenset({"template", "activate-project", "tests", "test_cases", "dumps"})
+
+
+class ActiveProjectPointerError(ValueError):
+    """DAY0-Prepare/activate-project exists but does not select an eligible project (R-016 §2)."""
+
+
+def active_project_dir(http_root: str | os.PathLike[str]) -> Path | None:
+    """The real directory of the project DAY0-Prepare/activate-project selects (R-016 §5.1).
+
+    None when there is no pointer.  The pointer is valid only when it is a link whose text is one plain
+    name, not in ACTIVE_PROJECT_EXCLUDED_NAMES and not starting with ".", DAY0-Prepare/<name> is a real
+    directory by lstat, and require_project_eligible accepts it; otherwise ActiveProjectPointerError names
+    the reason.  Read-only and lock-free: resolve once per run, then read project files through the result.
+    """
+    day0 = Path(http_root) / "DAY0-Prepare"
+    pointer = day0 / "activate-project"
+    try:
+        pointer_mode = pointer.lstat().st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(pointer_mode):
+        raise ActiveProjectPointerError(f"{ACTIVE_PROJECT_POINTER} is not a link: {pointer}")
+    name = os.readlink(pointer)
+    if "/" in name or name.startswith(".") or name in ACTIVE_PROJECT_EXCLUDED_NAMES:
+        raise ActiveProjectPointerError(
+            f"{ACTIVE_PROJECT_POINTER} -> {name} is not a project name (one plain name; not "
+            f"{', '.join(sorted(ACTIVE_PROJECT_EXCLUDED_NAMES))}; no leading '.')"
+        )
+    project = day0 / name
+    try:
+        project_mode = project.lstat().st_mode
+    except FileNotFoundError:
+        raise ActiveProjectPointerError(
+            f"{ACTIVE_PROJECT_POINTER} -> {name}: DAY0-Prepare/{name} does not exist") from None
+    if not stat.S_ISDIR(project_mode):
+        raise ActiveProjectPointerError(
+            f"{ACTIVE_PROJECT_POINTER} -> {name}: DAY0-Prepare/{name} is not a real directory")
+    try:
+        require_project_eligible(project)
+    except ValueError as exc:
+        raise ActiveProjectPointerError(f"{ACTIVE_PROJECT_POINTER} -> {name}: {exc}") from exc
+    return Path(os.path.realpath(project))
 
 
 def _runtime_relative_target(name, project_target, repository_target=None):
