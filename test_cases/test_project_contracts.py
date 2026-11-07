@@ -733,10 +733,142 @@ class TemplateContractTests(unittest.TestCase):
         self.assertFalse(contract.is_tools_deployable_file(
             "tools/lldp-analyze-tool/node_modules/pkg/index.js"
         ))
-        self.assertFalse(contract.is_tools_deployable_file(
+        # I-034 (owner 2026-11-04): 「打包和 sync 都像 lldp-analyze-tool 一样放行
+        # ibdiagnet-analyze-tool的代码」; infiniband/monitor/post-collect.py calls it.
+        self.assertTrue(contract.is_tools_deployable_file(
             "tools/ibdiagnet-analyze-tool/analyze.py"
         ))
         self.assertNotIn("lldp-analyze-tool/", contract.rsync_excludes())
+        # 问题文档 I-034 修法 (2026-11-07 补): the shared rsync patterns stop naming it too.
+        self.assertNotIn("ibdiagnet-analyze-tool/", contract.rsync_excludes())
+
+    def test_ib_analyzer_ships_by_upload_and_sync_on_one_file_list(self):
+        """I-034 (owner 2026-11-04): the upload package and sync both ship the IB analyzer's code.
+
+        Owner: 「打包和 sync 都像 lldp-analyze-tool 一样放行ibdiagnet-analyze-tool的代码。……我们需要
+        保证被调用的脚本都要放行」.  config/port_profiles.csv ships on its own until G14-1 (owner
+        2026-11-04, plan B), and the upload package and sync use one data-file list (问题文档 I-034
+        修法), so an unlisted data file, the README files, requirements.txt and the setup output
+        link stay local on both channels.  O9 (owner 2026-11-07 「同意你的建议。」): neither channel
+        ships the two git-tracked P2P template links into the analyzers.
+        """
+        package = load_module(
+            "package_ib_analyzer_shipping", ROOT / "tools/_package_common.py",
+        )
+        sync = load_module("sync_code_ib_analyzer_shipping", ROOT / "tools/sync-code.py")
+        contract = load_module(
+            "project_contract_ib_analyzer_shipping", ROOT / "tools/project_contract.py",
+        )
+        shipped = {
+            "tools/ibdiagnet-analyze-tool": {
+                "analyze.py", "lib/__init__.py", "lib/topology.py",
+                "scripts/validate_ib_topology.py", "config/port_profiles.csv",
+            },
+            "tools/lldp-analyze-tool": {
+                "analyze_lldp.py", "build_report.py", "04-lldp-device-aliases.json",
+            },
+        }
+        local_only = {
+            "tools/ibdiagnet-analyze-tool": {
+                "README.md", "lib/README.md", "requirements.txt", "config/site-profiles.csv",
+            },
+            "tools/lldp-analyze-tool": {"README.md", "secrets.json"},
+        }
+        template_links = {
+            "ztp/config/nvos/template/P2P/ibdiagnet-analyze-tool":
+                "../../../../../tools/ibdiagnet-analyze-tool",
+            "ztp/config/cumulus/template/P2P/lldp-analyze-tool":
+                "../../../../../tools/lldp-analyze-tool",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory).resolve() / "http"
+            day0 = workspace / "DAY0-Prepare"
+            project = day0 / "customer"
+            project.mkdir(parents=True)
+            (project / "02-devices_config.csv").write_text("hostname\n", encoding="utf-8")
+            (day0 / "template").mkdir()
+            for name in sync.CODE_DIRECTORIES:
+                (workspace / name).mkdir(exist_ok=True)
+            (workspace / "requirements-container-top-level.lock").write_text(
+                "fixture lock\n", encoding="utf-8",
+            )
+            for subtree, names in shipped.items():
+                for name in names | local_only[subtree]:
+                    target = workspace / subtree / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f"fixture: {name}\n", encoding="utf-8")
+            # setup's output links beside the analyzers (ANALYZER_OUTPUT_SPECS)
+            (workspace / "tools/ibdiagnet-analyze-tool/99-output-p2p").symlink_to(
+                "../../DAY0-Prepare/customer/99-output-p2p",
+            )
+            for name in ("99-output-p2p", "99-output-monitor"):
+                (workspace / "tools/lldp-analyze-tool" / name).symlink_to(
+                    f"../../DAY0-Prepare/customer/{name}",
+                )
+            for link, target in template_links.items():
+                (workspace / link).parent.mkdir(parents=True, exist_ok=True)
+                (workspace / link).symlink_to(target)
+
+            archive_selected = set(package.deployment_archive_source_paths(workspace))
+            with mock.patch.multiple(sync, ROOT=workspace, DAY0=day0), \
+                    mock.patch.multiple(
+                        sync.project_contract, ROOT=workspace, DAY0=day0,
+                        MANIFEST=workspace / "ztp/.setup_manifest",
+                    ):
+                jobs = {job.label: job for job in sync.build_jobs(project, "/var/www/html")}
+
+            def transmitted(job):
+                """Files a local rsync of this exact job sends (what sync-code.py hands rsync)."""
+                command = ["rsync", "-a", "--dry-run", "--out-format=%n"]
+                for pattern in job.excludes:
+                    command += ["--exclude", pattern]
+                command += [os.fspath(source) + ("/" if source.is_dir() else "")
+                            for source in job.sources]
+                command.append(os.fspath(Path(directory) / "destination") + "/")
+                result = subprocess.run(command, capture_output=True, text=True, check=False)
+                self.assertEqual(0, result.returncode, result.stderr)
+                return {name for name in result.stdout.splitlines()
+                        if name and not name.endswith("/")}
+
+            for subtree, names in shipped.items():
+                with self.subTest(channel="upload", subtree=subtree):
+                    self.assertEqual(
+                        {f"{subtree}/{name}" for name in names},
+                        {path for path in archive_selected if path.startswith(subtree + "/")},
+                    )
+                with self.subTest(channel="sync", subtree=subtree):
+                    label = "code:" + subtree   # test_ztp_prefix_runtime_boundary takes jobs by label
+                    self.assertIn(label, jobs)
+                    self.assertEqual(f"/var/www/html/{subtree}", jobs[label].remote_dir)
+                    self.assertEqual(names, transmitted(jobs[label]))
+            for link in template_links:
+                with self.subTest(template_link=link):
+                    self.assertIsNotNone(contract.transfer_exclude_reason(link))
+                    self.assertNotIn(
+                        link.removeprefix("ztp/"), transmitted(jobs["code:ztp"]),
+                    )
+
+    def test_every_tracked_ib_analyzer_file_but_docs_and_requirements_is_archive_authority(self):
+        # I-034 (owner 2026-11-04): 「我们需要保证被调用的脚本都要放行」.  The analyzer's tracked
+        # files are its code, its README files, requirements.txt (pip input, not read at run time)
+        # and config/port_profiles.csv, which validate_ib_topology.py reads by default.
+        package = load_module(
+            "package_ib_analyzer_tracked_authority", ROOT / "tools/_package_common.py",
+        )
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--", "tools/ibdiagnet-analyze-tool"],
+            cwd=ROOT, capture_output=True, check=False,
+        )
+        self.assertEqual(0, listed.returncode, listed.stderr)
+        tracked = {item.decode("utf-8") for item in listed.stdout.split(b"\0") if item}
+        self.assertIn("tools/ibdiagnet-analyze-tool/config/port_profiles.csv", tracked)
+        expected = {
+            path for path in tracked
+            if not Path(path).name.casefold().startswith("readme")
+            and path != "tools/ibdiagnet-analyze-tool/requirements.txt"
+        }
+        selected = set(package.deployment_archive_source_paths(ROOT))
+        self.assertEqual(expected, selected & tracked)
 
     def test_readmes_are_excluded_from_sync_and_shared_transfer_contract(self):
         contract = load_module(

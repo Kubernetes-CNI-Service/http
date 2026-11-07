@@ -32,6 +32,7 @@ import zipfile
 import yaml
 
 from project_contract import (
+    DEPLOYABLE_TOOL_SUBTREES,
     FINISHED_HISTORY_DIR_NAME,
     REHYDRATE_COMMIT_NAME,
     REHYDRATE_READY_NAME,
@@ -1453,29 +1454,23 @@ class PackageFilter:
 
         # tools/ normally contributes only top-level runtime source files.
         # README files are excluded by the shared transfer contract.
-        # lldp-analyze-tool is the exception because Ethernet cron invokes it
-        # on the management server.  Keep its small source/dependency manifest,
-        # but never package node_modules, setup links, or generated reports.
+        # DEPLOYABLE_TOOL_SUBTREES are the exception because the Ethernet and
+        # IB post-collect run them on the management server (I-034).  Keep
+        # their code and listed data files (is_tools_deployable_file), but
+        # never package node_modules, setup links, or generated reports.
         if parts and parts[0] == "tools":
             if name == "tools":
                 return info
-            if len(parts) >= 2 and parts[1] == "lldp-analyze-tool":
+            if len(parts) >= 2 and parts[1] in DEPLOYABLE_TOOL_SUBTREES:
                 if len(parts) == 2 and info.isdir():
                     return info
                 if any(part in {"node_modules", "99-output-p2p", "99-output-monitor"}
                        for part in parts[2:]):
-                    self.reject(info, "lldp analyzer runtime/output")
+                    self.reject(info, "analyzer runtime/output")
                     return None
-                if (
-                    path == PurePosixPath(
-                        "tools/lldp-analyze-tool/04-lldp-device-aliases.json"
-                    )
-                    and info.isfile()
-                ):
-                    return info
                 if info.isdir() or (info.isfile() and is_tools_deployable_file(path)):
                     return info
-                self.reject(info, "non-deployable lldp analyzer content")
+                self.reject(info, "non-deployable analyzer content")
                 return None
             if len(parts) == 2 and info.isfile() and is_tools_deployable_file(path):
                 return info

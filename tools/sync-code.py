@@ -34,6 +34,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 import _package_common as project_contract
 from project_contract import (
+    DEPLOYABLE_TOOL_SUBTREES,
+    NON_DEPLOYMENT_DIR_NAMES,
     is_readme_name,
     is_tools_deployable_file,
     path_disposition,
@@ -502,16 +504,38 @@ def build_jobs(
                     "code:tools", tool_files, f"{remote_root}/tools",
                     COMMON_EXCLUDES,
                 ))
-            lldp_analyzer = source / "lldp-analyze-tool"
-            if not lldp_analyzer.is_dir():
-                raise ValueError(f"同步目录不存在：{lldp_analyzer}")
-            jobs.append(SyncJob(
-                "code:tools/lldp-analyze-tool", (lldp_analyzer,),
-                f"{remote_root}/tools/lldp-analyze-tool",
-                COMMON_EXCLUDES + (
-                    "/node_modules/", "/99-output-p2p", "/99-output-monitor",
-                ) + runtime_link_excludes("tools/lldp-analyze-tool"),
-            ))
+            # The analyzers the management server runs (I-034) sync as directories on
+            # the upload package's file list: every file is_tools_deployable_file leaves
+            # out (requirements.txt, unlisted data, links) is excluded by name.
+            for subtree in sorted(DEPLOYABLE_TOOL_SUBTREES):
+                analyzer = source / subtree
+                if not analyzer.is_dir():
+                    raise ValueError(f"同步目录不存在：{analyzer}")
+                local_only = []
+                for directory, dirnames, filenames in os.walk(analyzer):
+                    parent = Path(directory)
+                    for entry in sorted(dirnames) + sorted(filenames):
+                        path = parent / entry
+                        relative = path.relative_to(analyzer).as_posix()
+                        if path.is_symlink():
+                            local_only.append("/" + relative)
+                        elif path.is_dir():
+                            if entry in NON_DEPLOYMENT_DIR_NAMES | {
+                                "99-output-p2p", "99-output-monitor",
+                            }:
+                                local_only.append(f"/{relative}/")
+                                dirnames.remove(entry)
+                        elif not is_tools_deployable_file(
+                            PurePosixPath("tools", subtree, relative)
+                        ):
+                            local_only.append("/" + relative)
+                jobs.append(SyncJob(
+                    f"code:tools/{subtree}", (analyzer,),
+                    f"{remote_root}/tools/{subtree}",
+                    COMMON_EXCLUDES + (
+                        "/node_modules/", "/99-output-p2p", "/99-output-monitor",
+                    ) + tuple(local_only) + runtime_link_excludes(f"tools/{subtree}"),
+                ))
             continue
         rendered_runtime_excludes = (
             () if name != "ztp" or include_ztp_runtime

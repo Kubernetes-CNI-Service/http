@@ -1175,6 +1175,9 @@ class ImpactManifestTests(unittest.TestCase):
                 "test_cases/linux_runtime_lock_model.py",
                 "test_cases/source_tools_fixture.py",
                 "test_cases/subprocess_timeout_evidence.py",
+                # 2026-11-07 (v3.1.1 WP-13, I-034): the IB analyzer's port model table ships
+                # with its code until G14-1, so it is deployment authority.
+                "tools/ibdiagnet-analyze-tool/config/port_profiles.csv",
             ],
             manifest["tracked_support"],
         )

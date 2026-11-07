@@ -2189,11 +2189,26 @@ ZTP_PREFIX_RESERVED_SEQUENCES = (
     ("config", "nvos", "template"),
 )
 
+# Offline analysis tools that never ship.  ibdiagnet-analyze-tool left this set with I-034
+# (owner 2026-11-04): infiniband/monitor/post-collect.py runs it on the management server.
 ANALYSIS_TOOL_NAMES = frozenset({
     "ib-tool-Jie",
-    "ibdiagnet-analyze-tool",
 })
-DEPLOYABLE_TOOL_SUBTREES = frozenset({"lldp-analyze-tool"})
+# tools/ subtrees the production flow runs on the management server (Ethernet and IB post-collect).
+DEPLOYABLE_TOOL_SUBTREES = frozenset({"lldp-analyze-tool", "ibdiagnet-analyze-tool"})
+# The non-code files of those subtrees that ship with their code, one list for the upload package
+# and sync (I-034).  port_profiles.csv leaves when G14-1 moves the port models into
+# 02-port-mapping.log (owner 2026-11-04, plan B); the alias JSON leaves with G14-1's alias CSV.
+DEPLOYABLE_TOOL_DATA_FILES = frozenset({
+    "tools/ibdiagnet-analyze-tool/config/port_profiles.csv",
+    "tools/lldp-analyze-tool/04-lldp-device-aliases.json",
+})
+# Git-tracked P2P template links back into the analyzers.  Neither the upload package nor sync
+# ships them (O9, owner 2026-11-07): the analyzers ship from tools/ themselves.
+ANALYZER_TEMPLATE_LINKS = frozenset({
+    "ztp/config/nvos/template/P2P/ibdiagnet-analyze-tool",
+    "ztp/config/cumulus/template/P2P/lldp-analyze-tool",
+})
 
 NON_DEPLOYMENT_DIR_NAMES = frozenset({
     "test", "tests", "test_cases", "test-results", "__pycache__", ".pytest_cache",
@@ -2437,6 +2452,8 @@ def is_tools_deployable_file(path: PurePosixPath | str) -> bool:
         if any(part in {"node_modules", "99-output-p2p", "99-output-monitor"}
                for part in value.parts[2:]):
             return False
+        if value.as_posix() in DEPLOYABLE_TOOL_DATA_FILES:
+            return True
         return not is_readme_name(value.name) and (
             value.suffix.casefold() in TOOLS_CODE_SUFFIXES
         )
@@ -2535,6 +2552,9 @@ def transfer_exclude_reason(path: PurePosixPath | str) -> str | None:
         return "local workspace metadata/planning data"
     if any(part in ANALYSIS_TOOL_NAMES for part in parts):
         return "offline analysis tool"
+    if any(value.as_posix() == link or value.as_posix().startswith(link + "/")
+           for link in ANALYZER_TEMPLATE_LINKS):
+        return "analyzer template link"
     if any(part == ".DS_Store" or part.startswith("._") for part in parts):
         return "macOS metadata"
     if value.name.startswith("~$"):
@@ -2582,7 +2602,7 @@ def rsync_excludes() -> tuple[str, ...]:
         "Finished-projects/", "finished-history/",
         "*_副本.*", "*_copy.*", "*_bak.*",
         "__pycache__/", ".pytest_cache/", "test/", "tests/", "test_cases/", "test-results/",
-        "ib-tool-Jie/", "ibdiagnet-analyze-tool/",
+        "ib-tool-Jie/",
         "[Rr][Ee][Aa][Dd][Mm][Ee]*",
         "infra-runtime.conf", "container.env", ".env",
         "desired-state.json", "runtime-state.json",

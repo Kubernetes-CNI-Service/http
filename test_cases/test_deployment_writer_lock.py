@@ -322,7 +322,9 @@ class SyncDeploymentLockTests(unittest.TestCase):
                     )
                     for directory in SYNC.CODE_DIRECTORIES:
                         (root / directory).mkdir(exist_ok=True)
+                    # Both synced analyzer directories (I-034), so the run reaches the lock check.
                     (root / "tools/lldp-analyze-tool").mkdir()
+                    (root / "tools/ibdiagnet-analyze-tool").mkdir()
                     (day0 / "template").mkdir()
                     lock = root / "requirements-container-top-level.lock"
                     if kind == "symlink":

@@ -1879,6 +1879,63 @@ class UploadPackageContractTests(unittest.TestCase):
                 self.assertIsNotNone(mini_member)
                 self.assertEqual(mini_payload, mini_member.read())
 
+    def test_upload_ships_the_ib_analyzer_code_and_port_profiles_but_not_its_links(self):
+        # I-034 (owner 2026-11-04): 「打包和 sync 都像 lldp-analyze-tool 一样放行
+        # ibdiagnet-analyze-tool的代码」; config/port_profiles.csv ships on its own until G14-1
+        # (plan B).  README files, requirements.txt, an unlisted data file and setup's output link
+        # stay local.  O9 (owner 2026-11-07 「同意你的建议。」): the git-tracked P2P template links
+        # into the analyzers stay out of the package, as sync-code.py already leaves them out.
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            workspace, day0, project = self._minimal_package_workspace(base)
+            analyzer = workspace / "tools/ibdiagnet-analyze-tool"
+            shipped = (
+                "analyze.py", "lib/__init__.py", "lib/topology.py",
+                "scripts/validate_ib_topology.py", "config/port_profiles.csv",
+            )
+            local_only = (
+                "README.md", "lib/README.md", "requirements.txt", "config/site-profiles.csv",
+            )
+            for relative in shipped + local_only:
+                target = analyzer / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"fixture: {relative}\n", encoding="utf-8")
+            (analyzer / "99-output-p2p").symlink_to("../../DAY0-Prepare/customer/99-output-p2p")
+            lldp = workspace / "tools/lldp-analyze-tool"
+            lldp.mkdir()
+            (lldp / "analyze_lldp.py").write_text("# deployable runtime\n", encoding="utf-8")
+            template_links = {
+                "ztp/config/nvos/template/P2P/ibdiagnet-analyze-tool":
+                    "../../../../../tools/ibdiagnet-analyze-tool",
+                "ztp/config/cumulus/template/P2P/lldp-analyze-tool":
+                    "../../../../../tools/lldp-analyze-tool",
+            }
+            for link, target in template_links.items():
+                (workspace / link).parent.mkdir(parents=True, exist_ok=True)
+                (workspace / link).symlink_to(target)
+            output = base / "upload.tar.gz"
+            with mock.patch.multiple(
+                package, ROOT=workspace, DAY0=day0,
+                MANIFEST=workspace / "ztp/.setup_manifest",
+                TOOLS_DIR=workspace / "tools",
+            ):
+                package.create_package(
+                    self._r22_package_args(project, output),
+                    day0_all=False, artifact_kind="upload",
+                )
+            with tarfile.open(output, "r:gz") as archive:
+                names = {member.name.removeprefix("./") for member in archive.getmembers()}
+        for relative in shipped:
+            with self.subTest(shipped=relative):
+                self.assertIn(f"tools/ibdiagnet-analyze-tool/{relative}", names)
+        for relative in local_only + ("99-output-p2p",):
+            with self.subTest(local_only=relative):
+                self.assertNotIn(f"tools/ibdiagnet-analyze-tool/{relative}", names)
+        self.assertIn("tools/lldp-analyze-tool/analyze_lldp.py", names)
+        for link in template_links:
+            with self.subTest(template_link=link):
+                self.assertNotIn(link, names)
+
     def test_shared_nvos_image_aliases_round_trip_through_upload_into_load(self):
         accepted_names = (
             "nvos-amd64-25.03.1010.bin",
