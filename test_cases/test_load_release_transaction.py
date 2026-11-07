@@ -1809,10 +1809,12 @@ class ReleaseTransactionTests(unittest.TestCase):
                 script = command[1]
                 reached.append(script)
                 if script == "c1-generate_dhcp.py":
-                    self.assertIn("--candidate-output-dir", command)
+                    # DEV #3 under T+: TEST's --candidate-dir names the LOAD-created private child.
+                    self.assertIn("--candidate-dir", command)
                     candidate_dir = command[
-                        command.index("--candidate-output-dir") + 1
+                        command.index("--candidate-dir") + 1
                     ]
+                    self.assertEqual(str(candidate), candidate_dir)
                     generate_dhcp(candidate_dir)
                     pre_c2_observation["changed"] = tuple(sorted(
                         name for name, accepted in accepted_outputs.items()
@@ -1830,6 +1832,8 @@ class ReleaseTransactionTests(unittest.TestCase):
                 elif script == "90-c2-generate_configs.py":
                     raise LOAD.LoadError("controlled c2 rejection after c1 success")
 
+            candidate = LOAD._create_dhcp_candidate_dir(project)
+            candidate_identity = (candidate.lstat().st_dev, candidate.lstat().st_ino)
             with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
                  mock.patch.object(LOAD, "run", side_effect=fail_at_c2), \
                  mock.patch.object(
@@ -1842,9 +1846,13 @@ class ReleaseTransactionTests(unittest.TestCase):
                     LOAD.generate_configs(
                         frozenset({"eth"}), install_dhcp=False,
                         dhcp_enabled=True, switch_scope="eth",
-                        defer_dhcp_publication=True,
+                        dhcp_candidate_dir=candidate,
                     )
             subnet.write_text(source_a, encoding="utf-8")
+            # Under T+ the uncommitted candidate is the caller's (main's finally discards it, G18/G21/G22):
+            # it is still private here, and main's discard leaves no residue.
+            self.assertEqual(set(output_names), {item.name for item in candidate.iterdir()})
+            LOAD._discard_dhcp_candidate_dir(candidate, candidate_identity)
             self.assertEqual(
                 ["b-xlsx_to_dot.py", "c1-generate_dhcp.py",
                  "90-c2-generate_configs.py"],
@@ -1875,42 +1883,47 @@ class ReleaseTransactionTests(unittest.TestCase):
             with self.subTest(gate="accepted parent remains activatable"):
                 self.assertIsNone(activation_error, str(activation_error))
 
-    def test_deferred_dhcp_publication_restores_original_inodes_on_rejection(self):
-        """The parent rejection restores all prior fixed-output file identities."""
-        parent = self.ztp / "config/isc-dhcp-server"
-        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
-        before = {
-            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
-            for name in names
-        }
-        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
-        try:
-            for name in names:
-                (candidate.stage / name).write_bytes(b"candidate " + name.encode())
-            candidate.publish()
-            self.assertEqual(
-                b"candidate dhcpd.conf", (parent / "dhcpd.conf").read_bytes(),
-            )
-            candidate.rollback()
-            for name in names:
-                self.assertEqual(
-                    before[name],
-                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
-                )
-        finally:
-            candidate.discard()
-        self.assertFalse(candidate.stage.exists())
+    # T+ (11-load batch L7, agreed 2026-10-25): DEV's DeferredDHCPOutput guarantees G6-G9 and G20
+    # now live in publish_committed_dhcp_candidate, which main calls right after the parent commit.
+    # These five tests are DEV's deferred-DHCP tests re-targeted at it with DEV's assertions.
+    def _flat_dhcp_with_candidate(self, prefix):
+        """Setup's flat shape (runtime names linked into 99-output-dhcp) plus one complete c1 candidate."""
+        flat = self.project.resolve() / "99-output-dhcp"
+        flat.mkdir(mode=0o755, exist_ok=True)
+        runtime = self.ztp.resolve() / "config/isc-dhcp-server"
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            os.replace(runtime / name, flat / name)
+            (flat / name).chmod(0o644)
+            (runtime / name).symlink_to(os.path.relpath(flat / name, runtime))
+        candidate = LOAD._create_dhcp_candidate_dir(self.project)
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            (candidate / name).write_bytes(prefix + name.encode())
+            (candidate / name).chmod(0o600)
+        before = {name: ((flat / name).stat().st_ino, (flat / name).read_bytes())
+                  for name in LOAD._DHCP_OUTPUT_NAMES}
+        return flat, candidate, before
 
-    def test_deferred_dhcp_partial_publish_failure_restores_prior_set(self):
-        parent = self.ztp / "config/isc-dhcp-server"
-        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
-        before = {
-            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
-            for name in names
-        }
-        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
-        for name in names:
-            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
+    def test_committed_dhcp_publish_rejection_restores_original_inodes(self):
+        """DEV #4 (G6): a rejection after the first install restores every prior output identity."""
+        flat, candidate, before = self._flat_dhcp_with_candidate(b"candidate ")
+        staged = candidate / "dhcpd_eth.hosts"
+        validate = LOAD._validated_dhcp_candidate_dir
+
+        def link_second_after_validation(project, path):
+            result = validate(project, path)
+            os.link(staged, self.root / "independent-second-link")
+            return result
+
+        with mock.patch.object(LOAD, "_validated_dhcp_candidate_dir", side_effect=link_second_after_validation):
+            with self.assertRaisesRegex(LOAD.LoadError, "unsafe DHCP candidate: dhcpd_eth.hosts"):
+                LOAD.publish_committed_dhcp_candidate(self.project, candidate, "eth")
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            self.assertEqual(before[name], ((flat / name).stat().st_ino, (flat / name).read_bytes()))
+        self.assertTrue(candidate.is_dir(), "a failed publish keeps the candidate as HOLD evidence")
+
+    def test_committed_dhcp_partial_publish_failure_restores_prior_set(self):
+        """DEV #5 (G7): a failed second install restores the first and leaves the prior set."""
+        flat, candidate, before = self._flat_dhcp_with_candidate(b"candidate ")
         replace = os.replace
         failed = False
 
@@ -1922,120 +1935,116 @@ class ReleaseTransactionTests(unittest.TestCase):
                 raise OSError("controlled second DHCP publish failure")
             return replace(source, destination, **kwargs)
 
-        try:
-            with mock.patch.object(LOAD.os, "replace", side_effect=fail_second_install):
-                with self.assertRaisesRegex(OSError, "controlled second DHCP publish failure"):
-                    candidate.publish()
-            self.assertTrue(failed)
-            for name in names:
-                self.assertEqual(
-                    before[name],
-                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
-                )
-        finally:
-            candidate.discard()
-        self.assertFalse(candidate.stage.exists())
+        with mock.patch.object(LOAD.os, "replace", side_effect=fail_second_install):
+            with self.assertRaisesRegex(OSError, "controlled second DHCP publish failure"):
+                LOAD.publish_committed_dhcp_candidate(self.project, candidate, "eth")
+        self.assertTrue(failed)
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            self.assertEqual(before[name], ((flat / name).stat().st_ino, (flat / name).read_bytes()))
 
-    def test_deferred_dhcp_rejects_backup_name_collision_without_overwrite(self):
-        parent = self.ztp / "config/isc-dhcp-server"
-        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
-        before = {
-            name: ((parent / name).stat().st_ino, (parent / name).read_bytes())
-            for name in names
-        }
-        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
-        collision = candidate.stage / "backup-dhcpd_eth.hosts"
-        collision.write_bytes(b"independent stage sentinel")
-        for name in names:
-            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
-        try:
+    def test_committed_dhcp_publish_rejects_backup_name_collision_without_overwrite(self):
+        """DEV #6 (G8): a backup name that appears in the candidate is refused, never overwritten."""
+        flat, candidate, before = self._flat_dhcp_with_candidate(b"candidate ")
+        collision = candidate / "backup-dhcpd_eth.hosts"
+        validate = LOAD._validated_dhcp_candidate_dir
+
+        def collide_after_validation(project, path):
+            result = validate(project, path)
+            collision.write_bytes(b"independent stage sentinel")
+            return result
+
+        with mock.patch.object(LOAD, "_validated_dhcp_candidate_dir", side_effect=collide_after_validation):
             with self.assertRaisesRegex(LOAD.LoadError, "backup name collision"):
-                candidate.publish()
-            self.assertEqual(b"independent stage sentinel", collision.read_bytes())
-            for name in names:
-                self.assertEqual(
-                    before[name],
-                    ((parent / name).stat().st_ino, (parent / name).read_bytes()),
-                )
-        finally:
-            collision.unlink(missing_ok=True)
-            candidate.rollback()
-            candidate.discard()
+                LOAD.publish_committed_dhcp_candidate(self.project, candidate, "eth")
+        self.assertEqual(b"independent stage sentinel", collision.read_bytes())
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            self.assertEqual(before[name], ((flat / name).stat().st_ino, (flat / name).read_bytes()))
 
-    def test_deferred_dhcp_copy_rejects_source_rebind_before_open(self):
-        source = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
+    def test_committed_dhcp_publish_accepts_and_removes_candidate(self):
+        """DEV #8 (G2, G20): after the parent commit flat equals the candidate and no candidate remains.
+
+        DEV's separate "cannot discard before accept" step has no counterpart: publish and accept are one
+        call that main makes only after the commit.
+        """
+        flat, candidate, before = self._flat_dhcp_with_candidate(b"accepted ")
+        LOAD.publish_committed_dhcp_candidate(self.project, candidate, "eth")
+        self.assertFalse(os.path.lexists(candidate))
+        self.assertEqual([], list(flat.glob(".load-dhcp-candidate-*")))
+        for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json"):
+            self.assertEqual(b"accepted " + name.encode(), (flat / name).read_bytes())
+        for name in ("dhcpd_ib.hosts", "dhcpd_nvl.hosts"):
+            self.assertEqual(before[name], ((flat / name).stat().st_ino, (flat / name).read_bytes()))
+        runtime = self.ztp / "config/isc-dhcp-server"
+        self.assertEqual(b"accepted dhcpd.conf", (runtime / "dhcpd.conf").read_bytes())
+
+    def test_committed_dhcp_candidate_rebind_never_publishes_foreign_outputs(self):
+        """DEV #9 (G9): a candidate directory replaced during publish is refused and rolled back."""
+        flat, candidate, before = self._flat_dhcp_with_candidate(b"candidate ")
+        held = flat / "independent-held-candidate"
+        sync = os.fsync
+        rebound = []
+
+        def rebind_at_first_payload_sync(descriptor):
+            result = sync(descriptor)
+            if not rebound and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                candidate.rename(held)
+                candidate.mkdir(mode=0o700)
+                (candidate / "dhcpd.conf").write_bytes(b"foreign sentinel")
+                rebound.append(True)
+            return result
+
+        with mock.patch.object(LOAD.os, "fsync", side_effect=rebind_at_first_payload_sync):
+            with self.assertRaisesRegex(LOAD.LoadError, "directory changed"):
+                LOAD.publish_committed_dhcp_candidate(self.project, candidate, "eth")
+        self.assertTrue(rebound)
+        for name in LOAD._DHCP_OUTPUT_NAMES:
+            self.assertEqual(before[name], ((flat / name).stat().st_ino, (flat / name).read_bytes()))
+        self.assertEqual(b"foreign sentinel", (candidate / "dhcpd.conf").read_bytes())
+
+    def test_c1_prior_output_copy_rejects_source_rebind_before_open(self):
+        """DEV #7 (G10), re-targeted: c1 carries the prior-output copy since the batch's P4 (T+)."""
+        directory = self.ztp / "config/isc-dhcp-server"
+        source = directory / "dhcpd.conf"
         previous = source.lstat()
         alternate = source.with_name("dhcpd.conf.alternate")
         alternate.write_bytes(b"X" * previous.st_size)
         os.utime(alternate, ns=(previous.st_atime_ns, previous.st_mtime_ns))
-        destination = self.root / "copied.conf"
         open_file = os.open
         rebound = False
 
         def swap_before_open(path, *args, **kwargs):
             nonlocal rebound
-            if not rebound and os.fspath(path) == os.fspath(source):
+            if not rebound and os.fspath(path) == "dhcpd.conf":
                 rebound = True
                 os.replace(alternate, source)
             return open_file(path, *args, **kwargs)
 
-        with mock.patch.object(LOAD.os, "open", side_effect=swap_before_open):
-            with self.assertRaisesRegex(LOAD.LoadError, "changed before copy"):
-                LOAD.DeferredDHCPOutput._copy_prior_output(
-                    source, destination, previous,
-                )
+        directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with mock.patch.object(DHCP.os, "open", side_effect=swap_before_open):
+                with self.assertRaisesRegex(OSError, "changed before copy"):
+                    DHCP._prior_output_bytes(directory_fd, "dhcpd.conf")
+        finally:
+            os.close(directory_fd)
         self.assertTrue(rebound)
-        self.assertFalse(destination.exists())
-
-    def test_deferred_dhcp_accept_cleans_backups_only_after_commit(self):
-        parent = self.ztp / "config/isc-dhcp-server"
-        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
-        names = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json")
-        for name in names:
-            (candidate.stage / name).write_bytes(b"accepted " + name.encode())
-        candidate.publish()
-        with self.assertRaisesRegex(LOAD.LoadError, "cannot discard"):
-            candidate.discard()
-        candidate.accept_committed()
-        self.assertFalse(candidate.stage.exists())
-        for name in names:
-            self.assertEqual(b"accepted " + name.encode(),
-                             (parent / name).read_bytes())
-
-    def test_deferred_dhcp_parent_rebind_never_publishes_foreign_outputs(self):
-        parent = self.ztp / "config/isc-dhcp-server"
-        candidate = LOAD.DeferredDHCPOutput.create(self.ztp, "eth")
-        for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcp-release-manifest.json"):
-            (candidate.stage / name).write_bytes(b"candidate " + name.encode())
-        held_parent = parent.with_name("held-isc-dhcp-server")
-        parent.rename(held_parent)
-        parent.mkdir()
-        sentinel = parent / "dhcpd.conf"
-        sentinel.write_bytes(b"foreign sentinel")
-        foreign_identity = (sentinel.stat().st_ino, sentinel.read_bytes())
-        with self.assertRaisesRegex(LOAD.LoadError, "directory changed"):
-            candidate.publish()
-        self.assertEqual(foreign_identity,
-                         (sentinel.stat().st_ino, sentinel.read_bytes()))
-        candidate.discard()
-        self.assertEqual([], list(held_parent.glob(".load-dhcp-*")))
-        self.assertEqual(b"dhcpd.conf\n", (held_parent / "dhcpd.conf").read_bytes())
 
     def test_c1_private_candidate_flag_keeps_five_public_outputs_unchanged(self):
-        """The real C1 CLI writes only the load-owned sibling candidate."""
+        """The real C1 CLI writes only the load-owned sibling candidate.
+
+        DEV #10 under T+: the flag is TEST's --candidate-dir, whose contract is an empty LOAD-created
+        0700 .load-dhcp-candidate-* directory (DEV's --candidate-output-dir took a prefilled one).
+        """
         _inputs, outputs, _child = prepare_r22_empty_unselected_dhcp_fixture(self)
         before = {
             name: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
             for name in LOAD._DHCP_OUTPUT_NAMES
             for path in (outputs / name,)
         }
-        candidate = outputs / ".load-dhcp-direct-proof"
-        candidate.mkdir(mode=0o700)
-        for name in LOAD._DHCP_OUTPUT_NAMES:
-            shutil.copy2(outputs / name, candidate / name)
+        # c1 compares the path lexically with HTTP_ROOT, so spell it under the fixture root (/tmp alias).
+        candidate = outputs / LOAD._create_dhcp_candidate_dir(self.project).name
         with mock.patch.object(sys, "argv", [
             "c1-generate_dhcp.py", "-y", "--deployment-scope", "prod",
-            "--switch", "eth", "--candidate-output-dir", str(candidate),
+            "--switch", "eth", "--candidate-dir", str(candidate),
         ]), mock.patch.multiple(
             DHCP, HTTP_ROOT=str(self.root),
             SCRIPT_DIR=str(self.ztp / "config/isc-dhcp-server"),
@@ -2058,18 +2067,23 @@ class ReleaseTransactionTests(unittest.TestCase):
             )
         self.assertTrue((candidate / "dhcp-release-manifest.json").is_file())
         self.assertTrue((candidate / "dhcpd.conf").is_file())
+        self.assertEqual(set(LOAD._DHCP_OUTPUT_NAMES), {item.name for item in candidate.iterdir()})
 
     def test_c1_private_candidate_flag_rejects_foreign_directory_before_writes(self):
+        # DEV #11 under T+: TEST's --candidate-dir.  The old flag no longer exists, so the old call was
+        # rejected by argparse (also exit 2) without reaching the candidate check; the message pins it.
         foreign = self.root / ".load-dhcp-foreign"
         foreign.mkdir(mode=0o700)
         public = self.ztp / "config/isc-dhcp-server/dhcpd.conf"
         before = (public.stat().st_ino, public.read_bytes())
+        stderr = io.StringIO()
         with mock.patch.object(sys, "argv", [
-            "c1-generate_dhcp.py", "-y", "--candidate-output-dir", str(foreign),
-        ]), mock.patch.object(DHCP, "OUTPUT_CONF", str(public)):
+            "c1-generate_dhcp.py", "-y", "--candidate-dir", str(foreign),
+        ]), mock.patch.object(DHCP, "OUTPUT_CONF", str(public)), redirect_stderr(stderr):
             with self.assertRaises(SystemExit) as caught:
                 DHCP.main()
         self.assertEqual(2, caught.exception.code)
+        self.assertIn("DHCP candidate directory is not a protected output sibling", stderr.getvalue())
         self.assertEqual(before, (public.stat().st_ino, public.read_bytes()))
         self.assertEqual([], list(foreign.iterdir()))
 
@@ -7958,10 +7972,8 @@ print("actual-copied-validator-selected-B")
 
     def test_parent_load_is_the_only_dhcp_runtime_publication_owner(self) -> None:
         generator_main = inspect.getsource(DHCP.main)
-        parent_generation = (
-            inspect.getsource(LOAD.generate_configs)
-            + inspect.getsource(LOAD._generate_configs_impl)
-        )
+        # DEV #12 under T+: TEST's 11-load has no _generate_configs_impl; generate_configs is the whole body.
+        parent_generation = inspect.getsource(LOAD.generate_configs)
         parent_install = inspect.getsource(LOAD.mount_and_test_dhcp)
 
         self.assertNotIn("subprocess.run", generator_main)

@@ -499,29 +499,48 @@ class Req22RuntimeInputTests(unittest.TestCase):
             fixture.tearDown()
 
     def test_generator_candidate_option_targets_protected_sibling_before_inputs(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            public = root / "dhcpd.conf"
-            public.write_bytes(b"accepted DHCP output\n")
-            candidate = root / ".load-dhcp-contract"
-            candidate.mkdir(mode=0o700)
-            missing_subnet = root / "missing-subnet.csv"
-            with mock.patch.object(sys, "argv", [
-                "c1-generate_dhcp.py", "-y", "--candidate-output-dir",
-                str(candidate),
-            ]), mock.patch.object(DHCP, "OUTPUT_CONF", str(public)), \
-                    mock.patch.object(DHCP, "SUBNET_CSV", str(missing_subnet)):
-                with self.assertRaises(SystemExit) as caught:
-                    DHCP.main()
-                self.assertEqual(1, caught.exception.code)
-                self.assertEqual(str(candidate / public.name), DHCP.OUTPUT_CONF)
-            self.assertEqual(b"accepted DHCP output\n", public.read_bytes())
-            self.assertEqual([], list(candidate.iterdir()))
+        """DEV #13 under T+: c1's --candidate-dir is qualified before any input is read.
 
-    def test_deferred_dhcp_set_rolls_back_original_file_identities(self):
+        A LOAD-owned empty private candidate reaches the input check (missing subnet: exit 1); a foreign
+        candidate is refused first (exit 2) although the same input is missing. Public bytes and the
+        candidate stay untouched either way. TEST's c1 does not rebind OUTPUT_CONF, so DEV's check of
+        that global has no counterpart.
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            private = root / "DAY0-Prepare/fixture/99-output-dhcp"
+            project = root / "DAY0-Prepare/fixture"
+            outputs = project / "99-output-dhcp"
+            outputs.mkdir(parents=True)
+            (project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
+            public = outputs / "dhcpd.conf"
+            public.write_bytes(b"accepted DHCP output\n")
+            names = {"OUTPUT_CONF": "dhcpd.conf", "OUTPUT_ETH": "dhcpd_eth.hosts",
+                     "OUTPUT_IB": "dhcpd_ib.hosts", "OUTPUT_NVL": "dhcpd_nvl.hosts",
+                     "OUTPUT_MANIFEST": "dhcp-release-manifest.json"}
+            own = outputs / LOAD._create_dhcp_candidate_dir(project).name
+            foreign = root / ".load-dhcp-candidate-foreign0"
+            foreign.mkdir(mode=0o700)
+            missing_subnet = project / "missing-subnet.csv"
+            for candidate, code in ((own, 1), (foreign, 2)):
+                with self.subTest(candidate=candidate.parent.name), mock.patch.object(sys, "argv", [
+                    "c1-generate_dhcp.py", "-y", "--candidate-dir", str(candidate),
+                ]), mock.patch.multiple(
+                    DHCP, HTTP_ROOT=str(root), GLOBAL_YAML=str(project / "01-global.yaml"),
+                    SUBNET_CSV=str(missing_subnet),
+                    **{key: str(outputs / name) for key, name in names.items()},
+                ):
+                    with self.assertRaises(SystemExit) as caught:
+                        DHCP.main()
+                    self.assertEqual(code, caught.exception.code)
+                    self.assertEqual(b"accepted DHCP output\n", public.read_bytes())
+                    self.assertEqual([], list(candidate.iterdir()))
+
+    def test_committed_dhcp_publish_failure_rolls_back_original_file_identities(self):
+        """DEV #14 under T+: a failed post-commit publish restores every original flat identity."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "DAY0-Prepare/fixture"
+            private = project / "99-output-dhcp"
             private.mkdir(parents=True)
             public = root / "ztp/config/isc-dhcp-server"
             public.mkdir(parents=True)
@@ -533,32 +552,36 @@ class Req22RuntimeInputTests(unittest.TestCase):
             for name in names:
                 target = private / name
                 target.write_bytes(b"old:" + name.encode("ascii"))
-                (public / name).symlink_to(target)
+                (public / name).symlink_to(os.path.relpath(target, public))
                 before[name] = (target.stat().st_ino, target.read_bytes())
-            candidate = LOAD.DeferredDHCPOutput.create(root / "ztp", "all")
-            try:
-                for name in names:
-                    (candidate.stage / name).write_bytes(
-                        b"new:" + name.encode("ascii"),
-                    )
-                candidate.publish()
-                self.assertEqual(
-                    b"new:dhcpd.conf", (private / "dhcpd.conf").read_bytes(),
-                )
-                candidate.rollback()
-                self.assertEqual(
-                    before,
-                    {name: ((private / name).stat().st_ino,
-                            (private / name).read_bytes()) for name in names},
-                )
-            finally:
-                candidate.discard()
-            self.assertFalse(candidate.stage.exists())
+            candidate = LOAD._create_dhcp_candidate_dir(project)
+            for name in names:
+                (candidate / name).write_bytes(b"new:" + name.encode("ascii"))
+                (candidate / name).chmod(0o600)
+            replace = os.replace
+
+            def fail_last_install(source, destination, **kwargs):
+                if (source == destination == "dhcp-release-manifest.json"
+                        and kwargs.get("src_dir_fd") is not None):
+                    raise OSError("controlled last DHCP publish failure")
+                return replace(source, destination, **kwargs)
+
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
+                    mock.patch.object(LOAD.os, "replace", side_effect=fail_last_install):
+                with self.assertRaisesRegex(OSError, "controlled last DHCP publish failure"):
+                    LOAD.publish_committed_dhcp_candidate(project, candidate, "all")
+            self.assertEqual(
+                before,
+                {name: ((private / name).stat().st_ino,
+                        (private / name).read_bytes()) for name in names},
+            )
 
     def test_load_generator_keeps_c1_private_when_c2_rejects(self):
+        """DEV #15 under T+: c1 writes only the LOAD-created candidate; main's discard leaves no residue."""
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            private = root / "DAY0-Prepare/fixture/99-output-dhcp"
+            root = Path(directory).resolve()
+            project = root / "DAY0-Prepare/fixture"
+            private = project / "99-output-dhcp"
             private.mkdir(parents=True)
             public = root / "ztp/config/isc-dhcp-server"
             public.mkdir(parents=True)
@@ -572,16 +595,19 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 target.write_bytes(b"accepted:" + name.encode("ascii"))
                 (public / name).symlink_to(target)
                 before[name] = (target.stat().st_ino, target.read_bytes())
+            candidate = LOAD._create_dhcp_candidate_dir(project)
+            identity = (candidate.lstat().st_dev, candidate.lstat().st_ino)
             reached = []
 
             def generator(command, **_kwargs):
                 script = command[1]
                 reached.append(script)
                 if script == "c1-generate_dhcp.py":
-                    self.assertIn("--candidate-output-dir", command)
-                    candidate = Path(command[command.index("--candidate-output-dir") + 1])
+                    self.assertIn("--candidate-dir", command)
+                    target = Path(command[command.index("--candidate-dir") + 1])
+                    self.assertEqual(candidate, target)
                     for name in names:
-                        (candidate / name).write_bytes(
+                        (target / name).write_bytes(
                             b"candidate:" + name.encode("ascii"),
                         )
                 if script == "90-c2-generate_configs.py":
@@ -596,7 +622,7 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 with self.assertRaisesRegex(LOAD.LoadError, "controlled C2 rejection"):
                     LOAD.generate_configs(
                         frozenset({"eth"}), install_dhcp=False,
-                        defer_dhcp_publication=True,
+                        dhcp_candidate_dir=candidate,
                     )
             self.assertEqual(
                 ["b-xlsx_to_dot.py", "c1-generate_dhcp.py",
@@ -607,19 +633,29 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 {name: ((private / name).stat().st_ino,
                         (private / name).read_bytes()) for name in names},
             )
+            LOAD._discard_dhcp_candidate_dir(candidate, identity)
             self.assertEqual([], list(private.glob(".load-dhcp-*")))
 
     def test_load_main_defers_dhcp_until_parent_transaction(self):
+        """DEV #16 under T+: flat DHCP outputs change only after the parent and selector commits."""
         source = inspect.getsource(LOAD.main)
-        prepare = source.index("_LOAD_DEFER_DHCP.set(")
-        publish = source.index("deferred_dhcp_candidate.publish()")
+        create = source.index("dhcp_candidate_dir = _create_dhcp_candidate_dir(project)")
+        generate = source.index("generated_inventory = generate_configs(")
         validate = source.index("parent_release = validate_and_publish_release(")
-        rollback = source.index("deferred_dhcp_candidate.rollback()")
-        accept = source.index("deferred_dhcp_candidate.accept_committed()")
-        self.assertLess(prepare, publish)
-        self.assertLess(publish, validate)
-        self.assertLess(validate, rollback)
-        self.assertLess(rollback, accept)
+        prepare = source.index("parent_candidate = prepare_current_release(")
+        commit = source.index("commit_pinned_generation(")
+        gate = source.index("if dhcp_candidate_dir is not None and release_committed and not args.dry_run:")
+        publish = source.index("publish_committed_dhcp_candidate(project, dhcp_candidate_dir, switch_scope)")
+        discard_gate = source.index("if dhcp_candidate_dir is not None and not release_committed:")
+        discard = source.index("_discard_dhcp_candidate_dir(dhcp_candidate_dir, dhcp_candidate_identity)")
+        self.assertLess(create, generate)
+        self.assertLess(generate, validate)
+        self.assertLess(validate, prepare)
+        self.assertLess(prepare, commit)
+        self.assertLess(commit, gate)
+        self.assertLess(gate, publish)
+        self.assertLess(discard_gate, discard)
+        self.assertEqual(1, source.count("publish_committed_dhcp_candidate("))
 
 
 if __name__ == "__main__":

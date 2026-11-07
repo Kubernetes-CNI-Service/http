@@ -72,8 +72,11 @@ def prepare_r22_selected_nvos_core_flow(
         name: ((outputs / name).stat().st_ino, (outputs / name).read_bytes())
         for name in names
     }
-    candidate = (LOAD.DeferredDHCPOutput.create(flow.ztp, selected)
-                 if defer_dhcp else None)
+    # DEV #1 under T+ (11-load batch L7): main's candidate path -- a LOAD-created private c1 candidate,
+    # the parent validated and committed from it, then the post-commit publish to the flat outputs.
+    candidate = LOAD._create_dhcp_candidate_dir(flow.project) if defer_dhcp else None
+    candidate_identity = (None if candidate is None
+                          else (candidate.lstat().st_dev, candidate.lstat().st_ino))
     parent_committed = False
     try:
         c1_args = [
@@ -81,7 +84,8 @@ def prepare_r22_selected_nvos_core_flow(
             "--switch", selected,
         ]
         if candidate is not None:
-            c1_args.extend(["--candidate-output-dir", str(candidate.stage)])
+            # c1 compares the path lexically with HTTP_ROOT: spell it under the fixture root.
+            c1_args.extend(["--candidate-dir", str(outputs / candidate.name)])
         with mock.patch.object(sys, "argv", c1_args), mock.patch.multiple(
             DHCP, HTTP_ROOT=str(root), SCRIPT_DIR=str(flow.dhcp),
             OUTPUT_CONF=str(outputs / "dhcpd.conf"),
@@ -133,18 +137,25 @@ def prepare_r22_selected_nvos_core_flow(
             device_types=frozenset({"eth", "air", "ib", "nvl"}), pubkeys=(),
             settings=settings, deployment_scope="prod", switch_scope=selected,
         )
-        if candidate is not None:
-            candidate.publish()
         with mock.patch.object(LOAD, "ZTP_DIR", flow.ztp):
-            parent = LOAD.validate_and_publish_release(flow.project, inputs)
+            if candidate is None:
+                parent = LOAD.validate_and_publish_release(flow.project, inputs)
+            else:
+                parent = LOAD.validate_and_publish_release(
+                    flow.project, inputs, publish=False, dhcp_candidate_dir=candidate,
+                )
+                prepared = LOAD.prepare_current_release(
+                    flow.project, parent, dhcp_candidate_dir=candidate,
+                )
+                LOAD.commit_prepared_release(prepared)
         parent_committed = True
         if candidate is not None:
-            candidate.accept_committed()
+            with mock.patch.object(LOAD, "ZTP_DIR", flow.ztp):
+                LOAD.publish_committed_dhcp_candidate(flow.project, candidate, selected)
         return flow, outputs, parent
     finally:
         if candidate is not None and not parent_committed:
-            candidate.rollback()
-            candidate.discard()
+            LOAD._discard_dhcp_candidate_dir(candidate, candidate_identity)
 
 
 class DhcpOptionalWorkflowTests(unittest.TestCase):
