@@ -2122,6 +2122,10 @@ def _delegated_governed_script_constants(tree: ast.AST) -> set[str]:
                     primitive in source
                     for primitive in (".replace(", ".remove(", ".unlink(")
                 )
+            ) or (
+                # v3.1.1 WP-6: unsetup unbinds through the pointer and spells no governed name.
+                "ACTIVE_PROJECT_POINTER" in source
+                and _source_bound_unsetup_pointer_sinks(ast.parse(source))
             ):
                 _GOVERNED_SCRIPT_BASENAMES.add(path.name)
     governed = set()
@@ -2350,6 +2354,212 @@ def _source_bound_setup_mapping_seed(
     return {"MAPPINGS"}
 
 
+def _source_bound_unsetup_pointer_sinks(
+    tree: ast.AST,
+    contract_tree: ast.AST | None = None,
+    sample_tree: ast.AST | None = None,
+) -> set[str]:
+    """Bind R-016 unsetup's deletions to their one real remove sink.
+
+    Since v3.1.1 WP-6 (R-016 §4.4, Q7, O14) unsetup spells no governed name.
+    It unbinds every governed project file by deleting
+    DAY0-Prepare/activate-project, the pointer project_contract routes every
+    project link through (pointer_link_target), and it deletes the manifest,
+    the four legacy ztp names, the retired links of project_contract
+    (RETIRED_SETUP_LINKS, monitor/99-output-ufm) and the table's dynamic
+    section, whose sample links carry governed names (sample_links.LINK_NAMES).  Every family is traced as
+    syntax from its production source into the os.remove of one function,
+    whose label is returned; anything else returns an empty set.
+    """
+    def named(node: ast.AST, name: str) -> bool:
+        return isinstance(node, ast.Name) and node.id == name
+
+    def stores(scope: ast.AST, name: str) -> int:
+        return sum(
+            isinstance(node, ast.Name) and node.id == name
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            for node in ast.walk(scope)
+        )
+
+    def imported(source: ast.AST, name: str) -> list[tuple]:
+        return [
+            (getattr(node, "module", None), alias.name, alias.asname)
+            for node in ast.walk(source)
+            if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+            if (alias.asname or alias.name.partition(".")[0]) == name
+        ]
+
+    def assignment(source: ast.AST, name: str) -> ast.AST | None:
+        values = [
+            node.value for node in getattr(source, "body", ())
+            if isinstance(node, ast.Assign)
+            and any(named(target, name) for target in node.targets)
+        ]
+        return values[0] if len(values) == 1 else None
+
+    def os_call(node: ast.AST, *attributes: str) -> bool:
+        return (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and named(node.func.value, "os") and node.func.attr in attributes
+        )
+
+    def path_join(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Attribute)
+            and named(node.func.value.value, "os")
+            and node.func.value.attr == "path" and node.func.attr == "join"
+        )
+
+    # Unsetup imports the pointer, the retired links and the dynamic section from project_contract and
+    # never rebinds them.
+    for name in ("ACTIVE_PROJECT_POINTER", "RETIRED_SETUP_LINKS", "setup_dynamic_link_patterns"):
+        if imported(tree, name) != [("project_contract", name, None)] or stores(tree, name):
+            return set()
+    if contract_tree is None:
+        contract_tree = ast.parse(
+            (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
+        )
+    if sample_tree is None:
+        sample_tree = ast.parse(
+            (ROOT / "ztp/optimize/sample_links.py").read_text(encoding="utf-8")
+        )
+    contract_functions = {
+        node.name: node for node in getattr(contract_tree, "body", ())
+        if isinstance(node, ast.FunctionDef)
+    }
+    # The contract: one literal pointer; pointer_link_target routes a project name through it; the
+    # table's project rows name governed files; the dynamic section holds the sample glob, whose
+    # links carry governed names.
+    pointer = assignment(contract_tree, "ACTIVE_PROJECT_POINTER")
+    retired = assignment(contract_tree, "RETIRED_SETUP_LINKS")
+    if (
+        not isinstance(pointer, ast.Constant)
+        or pointer.value != "DAY0-Prepare/activate-project"
+        or stores(contract_tree, "ACTIVE_PROJECT_POINTER") != 1
+        or imported(contract_tree, "ACTIVE_PROJECT_POINTER")
+        or stores(contract_tree, "RETIRED_SETUP_LINKS") != 1
+        or imported(contract_tree, "RETIRED_SETUP_LINKS")
+        or not isinstance(retired, ast.Tuple) or not retired.elts
+        or not all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+                   for item in retired.elts)
+        or not {"pointer_link_target", "setup_dynamic_link_patterns"} <= contract_functions.keys()
+    ):
+        return set()
+    route = contract_functions["pointer_link_target"]
+    parameters = [argument.arg for argument in route.args.args]
+    returns = [node for node in ast.walk(route) if isinstance(node, ast.Return)]
+    if len(parameters) != 2 or len(returns) != 1 or not (
+        isinstance(returns[0].value, ast.Call)
+        and ast.unparse(returns[0].value.func) == "posixpath.relpath"
+        and returns[0].value.args
+        and ast.unparse(returns[0].value.args[0])
+        == f"ACTIVE_PROJECT_POINTER + '/' + {parameters[1]}"
+    ):
+        return set()
+    try:
+        rows = ast.literal_eval(assignment(contract_tree, "SETUP_ZTP_MAPPINGS"))
+        sample_names = ast.literal_eval(assignment(sample_tree, "LINK_NAMES"))
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return set()
+    dynamic = contract_functions["setup_dynamic_link_patterns"]
+    if (
+        not isinstance(rows, tuple)
+        or not any(isinstance(row, tuple) and len(row) == 3 and row[1] in GOVERNED_AUTHORITY_NAMES
+                   for row in rows)
+        or not isinstance(sample_names, dict)
+        or not set(sample_names.values()) & GOVERNED_AUTHORITY_NAMES
+        or not any(isinstance(node, ast.Constant) and node.value == "ztp/optimize/*-sample/*"
+                   for node in ast.walk(dynamic))
+    ):
+        return set()
+    functions = {
+        node.name: node for node in getattr(tree, "body", ())
+        if isinstance(node, ast.FunctionDef)
+    }
+    # The manifest and the four legacy names are module literals.
+    manifest = assignment(tree, "MANIFEST_FILE")
+    legacy = assignment(tree, "LEGACY_ZTP_LINKS")
+    if (
+        stores(tree, "MANIFEST_FILE") != 1 or stores(tree, "LEGACY_ZTP_LINKS") != 1
+        or not path_join(manifest) or len(manifest.args) != 2
+        or not named(manifest.args[0], "ZTP")
+        or not isinstance(manifest.args[1], ast.Constant)
+        or manifest.args[1].value != ".setup_manifest"
+        or not isinstance(legacy, ast.Tuple) or not legacy.elts
+        or not all(isinstance(item, ast.Constant) and isinstance(item.value, str)
+                   for item in legacy.elts)
+        or not {"_known_ztp_project_links", "_known_workspace_links"} <= functions.keys()
+    ):
+        return set()
+    # Both finders glob the dynamic section; the ztp one joins the legacy names, the other the retired links.
+    for finder in ("_known_ztp_project_links", "_known_workspace_links"):
+        loops = [
+            node for node in ast.walk(functions[finder])
+            if isinstance(node, ast.For) and isinstance(node.iter, ast.Call)
+            and named(node.iter.func, "setup_dynamic_link_patterns") and not node.iter.args
+            and any(isinstance(call, ast.Call) and ast.unparse(call.func) == "glob.glob"
+                    for call in ast.walk(node))
+        ]
+        if len(loops) != 1:
+            return set()
+    for finder, names in (("_known_ztp_project_links", "LEGACY_ZTP_LINKS"),
+                          ("_known_workspace_links", "RETIRED_SETUP_LINKS")):
+        if not any(
+            isinstance(node, ast.comprehension) and named(node.iter, names)
+            for node in ast.walk(functions[finder])
+        ):
+            return set()
+    # The sink: one function collects both finders into links, puts the pointer first, removes each
+    # entry of links, and removes the manifest.
+    sinks = set()
+    for function in functions.values():
+        inserts = [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and named(node.func.value, "links") and node.func.attr == "insert"
+            and len(node.args) == 2 and path_join(node.args[1])
+            and [ast.unparse(argument) for argument in node.args[1].args]
+            == ["HTTP_BASE", "ACTIVE_PROJECT_POINTER"]
+        ]
+        if not inserts:
+            continue
+        collected = [
+            node.value for node in ast.walk(function)
+            if isinstance(node, ast.Assign) and any(named(target, "links") for target in node.targets)
+        ]
+        called = {
+            node.func.id for node in ast.walk(collected[0]) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+        } if len(collected) == 1 else set()
+        # Other passes over links (the listing) may read it; exactly one removes from it.
+        loops = [
+            node for node in ast.walk(function)
+            if isinstance(node, ast.For) and named(node.iter, "links") and named(node.target, "path")
+            and any(os_call(call, "remove", "unlink") for call in ast.walk(node))
+        ]
+        removes = [
+            node for node in ast.walk(loops[0]) if os_call(node, "remove", "unlink")
+        ] if len(loops) == 1 else []
+        manifest_removes = [
+            node for node in ast.walk(function)
+            if os_call(node, "remove", "unlink") and len(node.args) == 1
+            and named(node.args[0], "MANIFEST_FILE")
+        ]
+        if (
+            len(inserts) != 1 or stores(function, "links") != 1
+            or not {"_known_ztp_project_links", "_known_workspace_links"} <= called
+            or len(removes) != 1 or len(removes[0].args) != 1 or removes[0].keywords
+            or not named(removes[0].args[0], "path")
+            or sum(stores(statement, "path") for statement in loops[0].body)
+            or len(manifest_removes) != 1
+        ):
+            return set()
+        sinks.add(function.name)
+    return sinks if len(sinks) == 1 else set()
+
+
 def _owned_attribute_mutation_calls(tree: ast.AST) -> set[ast.Call]:
     """Conservative field-to-sink discovery within one original class owner.
 
@@ -2424,7 +2634,7 @@ def literal_governed_mutation_sinks(
     tree: ast.AST, source_path: str | None = None,
 ) -> set[str]:
     """Find sinks from their destination spelling, independent of quiesce calls."""
-    result = set()
+    result = _source_bound_unsetup_pointer_sinks(tree)
     module_aliases = _mutation_aliases(tree)
     native_calls = (
         _source_bound_native_rename_calls(tree, source_path)
@@ -6928,6 +7138,87 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                 setup = ast.parse(changed if source_name == "setup" else setup_source)
                 contract = ast.parse(changed if source_name == "contract" else contract_source)
                 self.assertEqual(set(), _source_bound_setup_mapping_seed(setup, contract))
+
+    def test_unsetup_pointer_deletion_reaches_real_remove_sink(self) -> None:
+        """Since v3.1.1 WP-6 unsetup unbinds through the pointer; the census binds that, not a name."""
+        sources = {
+            "unsetup": (ROOT / "DAY0-Prepare/02-unsetup.py").read_text(encoding="utf-8"),
+            "contract": (ROOT / "tools/project_contract.py").read_text(encoding="utf-8"),
+            "sample": (ROOT / "ztp/optimize/sample_links.py").read_text(encoding="utf-8"),
+        }
+
+        def bound(changed: dict[str, str]) -> set[str]:
+            return _source_bound_unsetup_pointer_sinks(
+                ast.parse(changed["unsetup"]), ast.parse(changed["contract"]),
+                ast.parse(changed["sample"]),
+            )
+
+        self.assertEqual({"_main_locked_impl"}, bound(sources))
+        unsetup_tree = ast.parse(sources["unsetup"])
+        self.assertIn("_main_locked_impl", literal_governed_mutation_sinks(unsetup_tree))
+        # 13-unload delegates to unsetup: the structural binding keeps that script a governed target.
+        unload_tree = ast.parse((ROOT / "DAY0-Prepare/13-unload.py").read_text(encoding="utf-8"))
+        self.assertIn("UNSETUP_SCRIPT", _delegated_governed_script_constants(unload_tree))
+        self.assertIn("remove_project_links", literal_governed_mutation_sinks(unload_tree))
+
+        mutations = (
+            ("pointer_import_removed", "unsetup",
+             "    ACTIVE_PROJECT_POINTER, RETIRED_SETUP_LINKS, ActiveProjectPointerError,",
+             "    UNRELATED_POINTER, RETIRED_SETUP_LINKS, ActiveProjectPointerError,"),
+            ("retired_import_removed", "unsetup",
+             "    ACTIVE_PROJECT_POINTER, RETIRED_SETUP_LINKS, ActiveProjectPointerError,",
+             "    ACTIVE_PROJECT_POINTER, UNRELATED_LINKS, ActiveProjectPointerError,"),
+            ("contract_retired_unbound", "contract",
+             "RETIRED_SETUP_LINKS = (", "RETIRED_SETUP_LINKS_UNUSED = ("),
+            ("retired_links_unbound", "unsetup",
+             "for name in RETIRED_SETUP_LINKS]", "for name in ()]"),
+            ("pointer_rebound", "unsetup",
+             "LEGACY_ZTP_LINKS = (", 'ACTIVE_PROJECT_POINTER = "elsewhere"\nLEGACY_ZTP_LINKS = ('),
+            ("contract_pointer_changed", "contract",
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"',
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/other-pointer"'),
+            ("contract_route_bypasses_pointer", "contract",
+             'posixpath.relpath(ACTIVE_PROJECT_POINTER + "/" + project_name,',
+             'posixpath.relpath("DAY0-Prepare/" + project_name,'),
+            ("governed_rows_unbound", "contract",
+             "SETUP_ZTP_MAPPINGS = (", "SETUP_ZTP_MAPPINGS_UNUSED = ("),
+            ("sample_glob_dropped", "contract",
+             '"ztp/optimize/*-sample/*")', '"ztp/optimize/*-other/*")'),
+            ("sample_names_unbound", "sample", "LINK_NAMES = {", "LINK_NAMES_UNUSED = {"),
+            ("manifest_unbound", "unsetup",
+             'MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")',
+             'MANIFEST_FILE = os.path.join(ZTP, ".other")'),
+            ("legacy_names_unbound", "unsetup",
+             "for rel in LEGACY_ZTP_LINKS]", "for rel in ()]"),
+            ("ztp_dynamic_section_unbound", "unsetup",
+             '    for pattern in setup_dynamic_link_patterns():\n        if pattern.startswith("ztp/"):',
+             '    for pattern in ():\n        if pattern.startswith("ztp/"):'),
+            ("workspace_dynamic_section_unbound", "unsetup",
+             '    for pattern in setup_dynamic_link_patterns():\n        if not pattern.startswith("ztp/"):',
+             '    for pattern in ():\n        if not pattern.startswith("ztp/"):'),
+            ("pointer_insert_removed", "unsetup",
+             "links.insert(0, os.path.join(HTTP_BASE, ACTIVE_PROJECT_POINTER))",
+             'links.insert(0, os.path.join(HTTP_BASE, "unrelated"))'),
+            ("finder_dropped", "unsetup",
+             "for path in (*_known_ztp_project_links(), *_known_workspace_links())",
+             "for path in (*_known_ztp_project_links(),)"),
+            ("remove_destination_diverted", "unsetup",
+             "            os.remove(path)\n", "            os.remove(other_path)\n"),
+            # Counter-proof: the removal sink replaced by another primitive is not the bound sink.
+            ("remove_sink_bypassed", "unsetup",
+             "            os.remove(path)\n", '            os.rename(path, path + ".kept")\n'),
+            ("manifest_sink_diverted", "unsetup",
+             "os.remove(MANIFEST_FILE)", "os.remove(OTHER_FILE)"),
+            ("path_rebound_in_loop", "unsetup",
+             "            target = os.readlink(path)\n",
+             "            target = os.readlink(path)\n            path = target\n"),
+        )
+        for name, source_name, old, new in mutations:
+            with self.subTest(mutation=name):
+                self.assertEqual(1, sources[source_name].count(old))
+                changed = dict(sources)
+                changed[source_name] = sources[source_name].replace(old, new, 1)
+                self.assertEqual(set(), bound(changed))
 
     def test_imported_mapping_argparse_real_writers_still_require_governed_literals(self) -> None:
         """Imported authority and parser termination need real source bindings.
