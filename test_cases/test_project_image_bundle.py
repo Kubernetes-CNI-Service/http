@@ -601,16 +601,19 @@ def trusted_installer_loader_for_workflow(
                 if state['upload_guard_calls'] <= fail_upload_guard_times:
                     # Retain the existing explicit fault lane, not a fake success.
                     return SimpleNamespace(returncode=74, stdout=b'', stderr=b'injected upload failure')
-                if set(kwargs) - {'env', 'archive_fd', 'timeout'}:
+                if set(kwargs) - {'env', 'archive_fd', 'timeout', 'guard_source'}:
                     raise AssertionError('unknown original guard keyword')
                 command = list(command)
-                if command[:2] != [sys.executable, '-c']:
+                # F16 (TEST ee9dd8f): the verified source travels on stdin, argv carries only '-'.
+                if command[:2] != [sys.executable, '-']:
                     raise AssertionError('original fixed interpreter activation differs')
-                guard_source = command[2].encode('utf-8')
+                if type(kwargs.get('guard_source')) is not str:
+                    raise AssertionError('verified guard source not handed to the original guard')
+                guard_source = kwargs['guard_source'].encode('utf-8')
                 if hashlib.sha256(guard_source).hexdigest() != OWNED_NATIVE_GUARD_SOURCE_SHA256:
                     raise AssertionError('embedded source differs from frozen original guard')
                 command[command.index('--runtime')+1] = 'native'  # existing test premise
-                domain = command[3:]
+                domain = command[2:]
                 root = Path(domain[domain.index('--root')+1])
                 if root != owned_parent/'live' or root.resolve(strict=True) != root:
                     raise AssertionError('guard root is not this explicit local fixture')

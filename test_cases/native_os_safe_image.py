@@ -31,8 +31,13 @@ COPY_FILES = BASE_FILES + EXTRA_FILES
 # TEST f384f73's P2P receipt, private escrow exclusion, latest_yaml links, DHCP/inventory readers) and d0fea37
 # (TEST F06 746680e: infiniband/publickey is host state); was the 95c6c3c (= DEV ad4bc3c) bytes. An independent
 # review found no changed hunk on the native OS/BIOS image path. Both are compared whole only; no inverse layer.
+# 2026-11-07 (v3.1.0 F16, TEST ee9dd8f): tools/_package_common.py re-pinned again for the stdin guard transport;
+# was 0e37977856ae432fdb16472d4d1003281c84367fbdab9cc67c3016eb74cf6d87 (the batch bytes above).
+# An independent review found every hunk verbatim from ee9dd8f (= f384f73), none on the native OS/BIOS/CPLD
+# image path (it imports only _source_identity and _package_project_identity), and no check weakened.
+# Compared whole only; no inverse layer.
 PRODUCTION_PINS = {
-    'tools/_package_common.py': '0e37977856ae432fdb16472d4d1003281c84367fbdab9cc67c3016eb74cf6d87',
+    'tools/_package_common.py': 'b210563aee0de0c8835c8de625595157a03c9e123cdb9080bf869cef2c8e63b3',
     'tools/project_contract.py': 'dbf501dd7997f0450a069e73dca4738cb0a4f43021b1035f9ed5ea9b9311bf78',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
