@@ -198,7 +198,9 @@
         "test_cases.test_project_link_inputs_workflow",
         "test_cases.test_setup_link_reconcile_contract",
         "test_cases.test_activate_project_contract",
-        "test_cases.test_activate_project_unsetup_workflow"
+        "test_cases.test_activate_project_unsetup_workflow",
+        "test_cases.test_activate_project_air_contract",
+        "test_cases.test_activate_project_air_workflow"
       ]
     },
     {
@@ -2280,6 +2282,21 @@
       "tests": [
         "test_cases.test_inventory_subset"
       ]
+    },
+    {
+      "id": "activate_project_air_readers_direct",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/dynamic_air_inventory.py",
+        "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
+        "ztp/backup/yaml-collect.py",
+        "ztp/optimize/feedback.py"
+      ],
+      "tests": [
+        "test_cases.test_activate_project_air_contract"
+      ]
     }
   ],
   "workflows": [
@@ -3930,7 +3947,8 @@
         "ztp/optimize/feedback.py"
       ],
       "tests": [
-        "test_cases.test_activate_project_unsetup_workflow"
+        "test_cases.test_activate_project_unsetup_workflow",
+        "test_cases.test_activate_project_air_workflow"
       ]
     }
   ],

@@ -372,7 +372,7 @@ README.txt
     ztp/backup/yaml-backup -----> DAY0-Prepare/<项目>/99-output-backup
 
 99-output-p2p/
-  作用：保存 P2P 转换产生的 *-lldpq.dot、*-air.dot、上传 NVIDIA AIR 的 *-air.json、
+  作用：保存 P2P 转换产生的 *-lldpq.dot、*-air.dot、上传 NVIDIA AIR 的 p2p-air.json（固定名）、
        HTML 或其他拓扑派生文件，以及拓扑分析器的报告。
   可能创建的连接：
     ztp/config/cumulus/template/P2P/output-p2p -----> DAY0-Prepare/<项目>/99-output-p2p

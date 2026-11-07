@@ -338,7 +338,11 @@ def dhcp_mode_release_fixture(http_root: Path, mode: str, *, legacy: bool = Fals
         "release_id": "dhcp-a", "outputs": outputs,
     }) + "\n", encoding="utf-8")
     public_dhcp = dhcp_dir / "dhcp-release-manifest.json"
-    public_dhcp.symlink_to(os.path.relpath(dhcp_manifest, dhcp_dir))
+    # R-016 §2 (O4 左列): setup's publication link goes through DAY0-Prepare/activate-project.
+    (http_root / "DAY0-Prepare/activate-project").symlink_to("site-a")
+    public_dhcp.symlink_to(os.path.relpath(
+        http_root / "DAY0-Prepare/activate-project/99-output-dhcp/dhcp-release-manifest.json", dhcp_dir,
+    ))
     if mode == "enabled":
         components["dhcp"] = {
             "release_id": "dhcp-a", "manifest_sha256": digest(dhcp_manifest),

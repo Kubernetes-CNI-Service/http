@@ -55,6 +55,7 @@ from threading import Lock
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ZTP_DIR = os.path.dirname(SCRIPT_DIR)
+HTTP_ROOT = os.path.dirname(ZTP_DIR)
 if ZTP_DIR not in sys.path:
     sys.path.insert(0, ZTP_DIR)
 from environment_probe import detect_environment
@@ -1467,15 +1468,34 @@ def load_devices_csv(path):
     return devices
 
 
+def _active_project_air_json():
+    """The active project's AIR json (I-031 fixed name); None when no project is active (R-016 §5.1).
+
+    The project is DAY0-Prepare/activate-project's: the inventory link may resolve outside the project
+    (R-014 第 3 条), so its directory never names the project.  project_contract is imported here, not at
+    module level: only AIR collection needs it, and prod collection keeps importing just its ztp/ siblings.
+    """
+    tools = os.path.join(HTTP_ROOT, "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    from project_contract import active_project_dir
+
+    project = active_project_dir(HTTP_ROOT)
+    return None if project is None else project / "99-output-p2p" / "p2p-air.json"
+
+
 def load_dynamic_air_backup_devices(
     inventory_path,
     leases_path="/var/lib/dhcp/dhcpd.leases",
 ):
-    """Adapt resolved AIR-only DHCP identities to the backup device shape."""
+    """Adapt resolved AIR-only DHCP identities to the backup device shape (AIR json: the active project's)."""
     resolved = []
     warnings = []
+    air_json = _active_project_air_json()
+    if air_json is None:
+        return resolved, ["没有激活的项目（DAY0-Prepare/activate-project），没有 AIR 拓扑可读"]
     for runtime in dynamic_air_devices(
-        Path(inventory_path).resolve(), leases=Path(leases_path),
+        Path(inventory_path), air_json=air_json, leases=Path(leases_path),
     ):
         hostname = str(runtime.get("hostname") or "")
         ip = str(runtime.get("ip") or "")
@@ -1508,7 +1528,10 @@ def load_dynamic_air_backup_devices(
 def apply_static_air_lease_fallbacks(
     devices, inventory_path, leases_path="/var/lib/dhcp/dhcpd.leases",
 ):
-    """Add a promoted AIR device's old lease as a MAC-verified transport."""
+    """Add a promoted AIR device's old lease as a MAC-verified transport (AIR json: the active project's)."""
+    air_json = _active_project_air_json()
+    if air_json is None:
+        return
     by_name = {
         dev["hostname"].casefold(): dev for dev in devices if dev["fmt"] == "air"
     }
@@ -1517,7 +1540,7 @@ def apply_static_air_lease_fallbacks(
         if dev["fmt"] == "air" and normalize_mac(dev.get("eth0_mac"))
     }
     for transition in static_air_lease_fallbacks(
-        Path(inventory_path).resolve(), leases=Path(leases_path),
+        Path(inventory_path), air_json=air_json, leases=Path(leases_path),
     ):
         dev = (
             by_name.get(str(transition.get("hostname") or "").casefold())

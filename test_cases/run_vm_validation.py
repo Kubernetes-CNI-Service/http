@@ -1817,11 +1817,12 @@ def mini_air_summary(project: Path) -> tuple[int, int]:
             raise ValueError("mini 清单设备必须位于两个 section 中")
     if minimum == 0:
         raise ValueError("mini 最低必需集合为空")
-    # SETUP binds this exact source stem to the runtime AIR JSON. Retained
-    # historical outputs are not current authority and must never be a fallback.
+    # The producer writes the selected workbook's AIR JSON under the fixed name
+    # p2p-air.json (问题文档 I-031).  Workbook-named <stem>-air.json files are older
+    # outputs, not current authority, and must never be a fallback.
     source = p2p_input_path(project)
     source_hash = sha256_file(source)
-    air = load_json(project / "99-output-p2p" / (source.stem + "-air.json"))
+    air = load_json(project / "99-output-p2p" / "p2p-air.json")
     if p2p_input_path(project) != source or sha256_file(source) != source_hash:
         raise ValueError("P2P selected source changed during mini AIR summary")
     nodes = air.get("content", {}).get("nodes")

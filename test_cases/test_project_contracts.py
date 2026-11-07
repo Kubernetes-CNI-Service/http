@@ -1777,7 +1777,10 @@ class TemplateContractTests(unittest.TestCase):
             "monitor_dynamic_air_contract", ROOT / "monitor/generate-monitor-html.py",
         )
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
+            # R-016 §5.1 (O4 左列): yaml-collect names the AIR project by DAY0-Prepare/activate-project.
+            project = Path(directory) / "DAY0-Prepare/site"
+            project.mkdir(parents=True)
+            (project.parent / "activate-project").symlink_to("site")
             inventory = project / "02-devices_config.csv"
             inventory.write_text(
                 "hostname,type,template,eth0_ip,netmask,eth0_mac\n"
@@ -1786,7 +1789,7 @@ class TemplateContractTests(unittest.TestCase):
             )
             output = project / "99-output-p2p"
             output.mkdir()
-            air_json = output / "sample-air.json"
+            air_json = output / "p2p-air.json"  # 问题文档 I-031: the producer's fixed name
             air_json.write_text(json.dumps({"content": {"nodes": {
                 "AIR-EXAMPLE-Leaf01": {
                     "os": "cumulus-vx-5.16.4",
@@ -1875,9 +1878,10 @@ class TemplateContractTests(unittest.TestCase):
             runner.mkdir()
             inventory_link = runner / "02-devices_config.csv"
             inventory_link.symlink_to(inventory)
-            backup_devices, backup_warnings = backup.load_dynamic_air_backup_devices(
-                inventory_link, leases,
-            )
+            with mock.patch.object(backup, "HTTP_ROOT", directory):
+                backup_devices, backup_warnings = backup.load_dynamic_air_backup_devices(
+                    inventory_link, leases,
+                )
             self.assertEqual(["AIR-EXAMPLE-FW01"], [d["hostname"] for d in backup_devices])
             self.assertTrue(backup_devices[0]["dynamic_dhcp"])
             self.assertTrue(any("AIR-EXAMPLE-FW02" in warning for warning in backup_warnings))
@@ -2065,7 +2069,10 @@ class TemplateContractTests(unittest.TestCase):
             "monitor_dynamic_air_promotion", ROOT / "monitor/generate-monitor-html.py",
         )
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory)
+            # R-016 §5.1 (O4 左列): yaml-collect names the AIR project by DAY0-Prepare/activate-project.
+            project = Path(directory) / "DAY0-Prepare/site"
+            project.mkdir(parents=True)
+            (project.parent / "activate-project").symlink_to("site")
             inventory = project / "02-devices_config.csv"
             inventory.write_text(
                 "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,"
@@ -2076,7 +2083,8 @@ class TemplateContractTests(unittest.TestCase):
             )
             output = project / "99-output-p2p"
             output.mkdir()
-            (output / "sample-air.json").write_text(json.dumps({"content": {"nodes": {
+            # 问题文档 I-031: the producer's fixed name.
+            (output / "p2p-air.json").write_text(json.dumps({"content": {"nodes": {
                 # The topology still carries the pre-promotion alias.  MAC is
                 # the physical identity and must suppress a duplicate row.
                 "AIR-EXAMPLE-Old-FW01": {
@@ -2155,9 +2163,10 @@ class TemplateContractTests(unittest.TestCase):
                 (True, ""), manual.dedicated_yaml_ready(project, manual_device),
             )
             backup_device = backup.load_devices_csv(inventory)[0]
-            backup.apply_static_air_lease_fallbacks(
-                [backup_device], inventory, leases,
-            )
+            with mock.patch.object(backup, "HTTP_ROOT", directory):
+                backup.apply_static_air_lease_fallbacks(
+                    [backup_device], inventory, leases,
+                )
             self.assertEqual(["192.0.2.21"], backup_device["transition_ssh_ips"])
 
             report_dir = project / "ztp-status" / "20260830_170000"

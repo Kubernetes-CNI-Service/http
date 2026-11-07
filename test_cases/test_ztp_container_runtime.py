@@ -20,6 +20,7 @@ from functools import wraps
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -185,129 +186,134 @@ IMAGE_COUPLED_SOURCE_PATHS_EXPECTED = (
     "tools/ztp_service_runtime.py",
     "tools/control-auth.py",
 )
+# O4 左列：R-016 §2 (owner 2026-11-03/04): every tree link to a project file reads
+# relpath("DAY0-Prepare/activate-project/<fixed name>", link directory); repository aliases keep
+# their text.  Native and Docker share the one form (R-016 §9, decision D).
 REQUIRED_PUBLISHED_LINKS = {
     "monitor/01-global.yaml": (
-        "../DAY0-Prepare/{project}/01-global.yaml", "01-global.yaml", "file",
+        "../DAY0-Prepare/activate-project/01-global.yaml", "01-global.yaml", "file",
     ),
     "monitor/02-devices_config.csv": (
-        "../DAY0-Prepare/{project}/02-devices_config.csv",
+        "../DAY0-Prepare/activate-project/02-devices_config.csv",
         "02-devices_config.csv", "file",
     ),
     "monitor/99-output-p2p": (
-        "../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
+        "../DAY0-Prepare/activate-project/99-output-p2p", "99-output-p2p", "dir",
     ),
     # monitor/99-output-ufm left with 需求文档 R-013 第 3 条 (owner 2026-11-03; v3.1.1 WP-8, Docker side a
     # mechanical sync only, 开发计划 :112 owner 2026-11-06).
     "monitor/ethernet": (
-        "../DAY0-Prepare/{project}/99-output-monitor/ethernet",
+        "../DAY0-Prepare/activate-project/99-output-monitor/ethernet",
         "99-output-monitor/ethernet", "dir",
     ),
     "monitor/infiniband": (
-        "../DAY0-Prepare/{project}/99-output-monitor/infiniband",
+        "../DAY0-Prepare/activate-project/99-output-monitor/infiniband",
         "99-output-monitor/infiniband", "dir",
     ),
     "monitor/nvlink": (
-        "../DAY0-Prepare/{project}/99-output-monitor/nvlink",
+        "../DAY0-Prepare/activate-project/99-output-monitor/nvlink",
         "99-output-monitor/nvlink", "dir",
     ),
     "monitor/ztp-status": ("../ztp/status", "99-output-ztp", "dir"),
     "ztp/status": (
-        "../DAY0-Prepare/{project}/99-output-ztp", "99-output-ztp", "dir",
+        "../DAY0-Prepare/activate-project/99-output-ztp", "99-output-ztp", "dir",
     ),
     "ethernet/eth.csv": (
-        "../DAY0-Prepare/{project}/02-devices_config.csv",
+        "../DAY0-Prepare/activate-project/02-devices_config.csv",
         "02-devices_config.csv", "file",
     ),
     "ethernet/monitor/eth.csv": (
         "../eth.csv", "02-devices_config.csv", "file",
     ),
     "infiniband/ib.csv": (
-        "../DAY0-Prepare/{project}/02-devices_config.csv",
+        "../DAY0-Prepare/activate-project/02-devices_config.csv",
         "02-devices_config.csv", "file",
     ),
     "infiniband/monitor/ib.csv": (
         "../ib.csv", "02-devices_config.csv", "file",
     ),
     "nvlink/nvsw.csv": (
-        "../DAY0-Prepare/{project}/02-devices_config.csv",
+        "../DAY0-Prepare/activate-project/02-devices_config.csv",
         "02-devices_config.csv", "file",
     ),
     "nvlink/monitor/nvsw.csv": (
         "../nvsw.csv", "02-devices_config.csv", "file",
     ),
     "ethernet/monitor/eth-info": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/eth-info",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/ethernet/eth-info",
         "99-output-monitor/ethernet/eth-info", "dir",
     ),
     "ethernet/monitor/spx-link": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/spx-link",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/ethernet/spx-link",
         "99-output-monitor/ethernet/spx-link", "dir",
     ),
     "ethernet/monitor/cronjob.log": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/ethernet/cronjob.log",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/ethernet/cronjob.log",
         "99-output-monitor/ethernet/cronjob.log", "file",
     ),
     "infiniband/monitor/ib-info": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-info",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ib-info",
         "99-output-monitor/infiniband/ib-info", "dir",
     ),
     "infiniband/monitor/ib-link": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ib-link",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ib-link",
         "99-output-monitor/infiniband/ib-link", "dir",
     ),
     "infiniband/monitor/cronjob.log": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/cronjob.log",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/cronjob.log",
         "99-output-monitor/infiniband/cronjob.log", "file",
     ),
     # UFM lane of the IB collector (2026-10-23 integration, UFM-MONITOR.md 14.3).
     "infiniband/monitor/ufm-info": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ufm-info",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ufm-info",
         "99-output-monitor/infiniband/ufm-info", "dir",
     ),
     "infiniband/monitor/ufm-ibdiagnet": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/infiniband/ufm-ibdiagnet",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/infiniband/ufm-ibdiagnet",
         "99-output-monitor/infiniband/ufm-ibdiagnet", "dir",
     ),
     "infiniband/monitor/01-global.yaml": ("../01-global.yaml", "01-global.yaml", "file"),
     "infiniband/monitor/99-output-p2p": (
-        "../../DAY0-Prepare/{project}/99-output-p2p", "99-output-p2p", "dir",
+        "../../DAY0-Prepare/activate-project/99-output-p2p", "99-output-p2p", "dir",
     ),
     # REQ7 online Issue Tracker sync: prepared data and log (owner 2026-10-23).
     "monitor/99-output-monitor": (
-        "../DAY0-Prepare/{project}/99-output-monitor", "99-output-monitor", "dir",
+        "../DAY0-Prepare/activate-project/99-output-monitor", "99-output-monitor", "dir",
     ),
     # IBSW 2.25 upgrade inventory alias (NETWORK_INVENTORY_LINKS).
     "infiniband/bringup/xdr-upgrade/ib.csv": ("../../ib.csv", "02-devices_config.csv", "file"),
     "nvlink/monitor/nvsw-info": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/nvsw-info",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/nvlink/nvsw-info",
         "99-output-monitor/nvlink/nvsw-info", "dir",
     ),
     "nvlink/monitor/nvsw-link": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/nvsw-link",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/nvlink/nvsw-link",
         "99-output-monitor/nvlink/nvsw-link", "dir",
     ),
     "nvlink/monitor/cronjob.log": (
-        "../../DAY0-Prepare/{project}/99-output-monitor/nvlink/cronjob.log",
+        "../../DAY0-Prepare/activate-project/99-output-monitor/nvlink/cronjob.log",
         "99-output-monitor/nvlink/cronjob.log", "file",
     ),
     "tools/lldp-analyze-tool/99-output-p2p": (
-        "../../DAY0-Prepare/{project}/99-output-p2p",
+        "../../DAY0-Prepare/activate-project/99-output-p2p",
         "99-output-p2p", "dir",
     ),
     "tools/lldp-analyze-tool/99-output-monitor": (
-        "../../DAY0-Prepare/{project}/99-output-monitor",
+        "../../DAY0-Prepare/activate-project/99-output-monitor",
         "99-output-monitor", "dir",
     ),
 }
 
+# The P2P input goes through the project's p2p.xlsx (R-016 §3.3); the AIR json has the fixed name
+# 99-output-p2p/p2p-air.json, written by b-xlsx_to_dot.py itself and optional (I-031; R-016 §3.4, R16-04).
 REQUIRED_DYNAMIC_P2P_LINKS = {
     "ztp/config/cumulus/template/P2P/p2p.xlsx": (
-        "../../../../../DAY0-Prepare/{project}/p2p.xlsx",
+        "../../../../../DAY0-Prepare/activate-project/p2p.xlsx",
         "p2p.xlsx",
     ),
     "ztp/config/isc-dhcp-server/p2p-air.json": (
-        "../../../DAY0-Prepare/{project}/99-output-p2p/fixture-p2p-air.json",
-        "99-output-p2p/fixture-p2p-air.json",
+        "../../../DAY0-Prepare/activate-project/99-output-p2p/p2p-air.json",
+        "99-output-p2p/p2p-air.json",
     ),
 }
 
@@ -4889,9 +4895,12 @@ class ActivationContractTests(QuietContractTest):
                 (project / name).write_text("fixture\n", encoding="utf-8")
             key = project / "laptop.pub"
             key.write_text("ssh-ed25519 fixture\n", encoding="utf-8")
+            # R-016 §3.2 / §5.2 (R16-02): one link per key, through DAY0-Prepare/activate-project.
+            pointer = http_root / "DAY0-Prepare/activate-project"
+            pointer.symlink_to("site-a")
             public = http_root / "ztp/config/publickey/laptop.pub"
             public.parent.mkdir(parents=True)
-            public.symlink_to("../../../DAY0-Prepare/site-a/laptop.pub")
+            public.symlink_to("../../../DAY0-Prepare/activate-project/laptop.pub")
             for relative in activate.PUBLISHED_RUNTIME_FILES:
                 artifact = http_root / relative
                 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -4901,8 +4910,12 @@ class ActivationContractTests(QuietContractTest):
             )
             identity = activate.published_runtime_identity(settings)
             self.assertEqual(
-                "../../../DAY0-Prepare/site-a/laptop.pub",
+                "../../../DAY0-Prepare/activate-project/laptop.pub",
                 identity["ztp/config/publickey/laptop.pub"]["target"],
+            )
+            self.assertEqual(
+                "DAY0-Prepare/site-a/laptop.pub",
+                identity["ztp/config/publickey/laptop.pub"]["resolved"],
             )
 
             sibling = http_root / "DAY0-Prepare/site-b/laptop.pub"
@@ -4913,6 +4926,20 @@ class ActivationContractTests(QuietContractTest):
             with self.assertRaisesRegex(
                 activate.ActivationError, "current project|non-canonical",
             ):
+                activate.published_runtime_identity(settings)
+
+            # R-016 §2: the direct text is not canonical even for the container's own project.
+            public.unlink()
+            public.symlink_to("../../../DAY0-Prepare/site-a/laptop.pub")
+            with self.assertRaisesRegex(activate.ActivationError, "non-canonical"):
+                activate.published_runtime_identity(settings)
+
+            # The canonical text with the pointer on another project is not this project's key.
+            public.unlink()
+            public.symlink_to("../../../DAY0-Prepare/activate-project/laptop.pub")
+            pointer.unlink()
+            pointer.symlink_to("site-b")
+            with self.assertRaisesRegex(activate.ActivationError, "current project"):
                 activate.published_runtime_identity(settings)
 
     def test_apache_binds_each_service_ip_exactly_and_never_wildcard(self) -> None:
@@ -5750,9 +5777,11 @@ class ActivationContractTests(QuietContractTest):
             )
             outside = http_root.parent / "outside-dhcp-release.json"
             outside.write_bytes(target_manifest.read_bytes())
+            # R-016 §2: the publication link goes through DAY0-Prepare/activate-project.
+            (http_root / "DAY0-Prepare/activate-project").symlink_to("site-a")
             public_manifest = dhcp / "dhcp-release-manifest.json"
             public_manifest.symlink_to(
-                "../../../DAY0-Prepare/site-a/99-output-dhcp/"
+                "../../../DAY0-Prepare/activate-project/99-output-dhcp/"
                 "dhcp-release-manifest.json",
             )
             current = project / "99-output-ztp/current-release.json"
@@ -5790,6 +5819,16 @@ class ActivationContractTests(QuietContractTest):
             public_manifest.symlink_to(outside)
             with self.assertRaisesRegex(
                 activate.ActivationError, "dhcp manifest.*(canonical|current project)",
+            ):
+                activate.validate_parent_release(settings, current)
+            # The direct ../DAY0-Prepare/<project>/... text is no longer canonical (R-016 §2).
+            public_manifest.unlink()
+            public_manifest.symlink_to(
+                "../../../DAY0-Prepare/site-a/99-output-dhcp/"
+                "dhcp-release-manifest.json",
+            )
+            with self.assertRaisesRegex(
+                activate.ActivationError, "dhcp manifest.*canonical",
             ):
                 activate.validate_parent_release(settings, current)
 
@@ -6243,8 +6282,10 @@ class ActivationContractTests(QuietContractTest):
             )
             project_output.mkdir(parents=True)
             (http_root / "ztp").mkdir()
+            # R-016 §2: setup's ztp/status goes through DAY0-Prepare/activate-project.
+            (http_root / "DAY0-Prepare/activate-project").symlink_to("site-a")
             (http_root / "ztp/status").symlink_to(
-                "../DAY0-Prepare/site-a/99-output-ztp"
+                "../DAY0-Prepare/activate-project/99-output-ztp"
             )
             monitor_status = http_root / "monitor/status"
             monitor_status.mkdir(parents=True)
@@ -6296,8 +6337,10 @@ class ActivationContractTests(QuietContractTest):
             )
             project_output.mkdir(parents=True)
             (http_root / "ztp").mkdir()
+            # R-016 §2: setup's ztp/status goes through DAY0-Prepare/activate-project.
+            (http_root / "DAY0-Prepare/activate-project").symlink_to("site-a")
             (http_root / "ztp/status").symlink_to(
-                "../DAY0-Prepare/site-a/99-output-ztp"
+                "../DAY0-Prepare/activate-project/99-output-ztp"
             )
             monitor_status = http_root / "monitor/status"
             monitor_status.mkdir(parents=True)
@@ -6361,8 +6404,11 @@ class ActivationContractTests(QuietContractTest):
             own_output.mkdir(parents=True)
             other_output.mkdir(parents=True)
             (http_root / "ztp").mkdir()
+            # R-016 §2: the canonical text selects whatever DAY0-Prepare/activate-project selects.
+            pointer = http_root / "DAY0-Prepare/activate-project"
+            pointer.symlink_to("site-b")
             (http_root / "ztp/status").symlink_to(
-                "../DAY0-Prepare/site-b/99-output-ztp"
+                "../DAY0-Prepare/activate-project/99-output-ztp"
             )
             (http_root / "monitor/status").mkdir(parents=True)
             settings = activate.Settings(
@@ -6380,9 +6426,22 @@ class ActivationContractTests(QuietContractTest):
                 (http_root / "monitor/status/switch-collection.request").exists()
             )
 
+            # The direct text reaches site-a but is not the canonical pointer form (R-016 §2).
+            pointer.unlink()
+            pointer.symlink_to("site-a")
             (http_root / "ztp/status").unlink()
             (http_root / "ztp/status").symlink_to(
                 "../DAY0-Prepare/site-a/99-output-ztp"
+            )
+            with self.assertRaisesRegex(activate.ActivationError, "non-canonical"):
+                activate.initialize_worker_control_files(
+                    settings, owner_uid=os.getuid(), owner_gid=os.getgid(),
+                )
+            self.assertFalse((own_output / "ztp-monitor.control").exists())
+
+            (http_root / "ztp/status").unlink()
+            (http_root / "ztp/status").symlink_to(
+                "../DAY0-Prepare/activate-project/99-output-ztp"
             )
             (http_root / "monitor/status").rmdir()
             outside_status = root / "outside-status"
@@ -6887,32 +6946,38 @@ class ActivationContractTests(QuietContractTest):
         with tempfile.TemporaryDirectory() as temporary:
             http_root = Path(temporary) / "html"
             project = http_root / "DAY0-Prepare/site-a"
-            project.mkdir(parents=True)
-            (project / "02-dhcp-subnet_config.csv").write_text(
-                "network,netmask,interface\n", encoding="utf-8",
-            )
-            for relative, (target_template, resolved_name, kind) in (
+            sibling = http_root / "DAY0-Prepare/site-b"
+            # R-016 §2: the one link that changes with the project.
+            pointer = http_root / "DAY0-Prepare/activate-project"
+            for owner in (project, sibling):
+                owner.mkdir(parents=True)
+                (owner / "02-dhcp-subnet_config.csv").write_text(
+                    "network,netmask,interface\n", encoding="utf-8",
+                )
+            pointer.symlink_to("site-a")
+            for relative, (target_text, resolved_name, kind) in (
                 REQUIRED_PUBLISHED_LINKS.items()
             ):
-                resolved = project / resolved_name
-                if kind == "dir":
-                    resolved.mkdir(parents=True, exist_ok=True)
-                else:
-                    resolved.parent.mkdir(parents=True, exist_ok=True)
-                    if not resolved.exists():
-                        resolved.write_text(
-                            f"independent fixture for {resolved_name}\n",
-                            encoding="utf-8",
-                        )
+                for owner in (project, sibling):
+                    resolved = owner / resolved_name
+                    if kind == "dir":
+                        resolved.mkdir(parents=True, exist_ok=True)
+                    else:
+                        resolved.parent.mkdir(parents=True, exist_ok=True)
+                        if not resolved.exists():
+                            resolved.write_text(
+                                f"independent fixture for {resolved_name}\n",
+                                encoding="utf-8",
+                            )
                 link = http_root / relative
                 link.parent.mkdir(parents=True, exist_ok=True)
-                link.symlink_to(target_template.format(project="site-a"))
+                link.symlink_to(target_text)
             for dynamic_relative, (dynamic_target, dynamic_resolved) in (
                 REQUIRED_DYNAMIC_P2P_LINKS.items()
             ):
                 dynamic_link = http_root / dynamic_relative
                 dynamic_link.parent.mkdir(parents=True, exist_ok=True)
-                dynamic_link.symlink_to(dynamic_target.format(project="site-a"))
+                dynamic_link.symlink_to(dynamic_target)
                 dynamic_file = project / dynamic_resolved
                 dynamic_file.parent.mkdir(parents=True, exist_ok=True)
                 if dynamic_file.suffix == ".xlsx":
@@ -6922,7 +6987,9 @@ class ActivationContractTests(QuietContractTest):
                 else:
                     dynamic_file.write_text("{}\n", encoding="utf-8")
             # setup's own bridge (not a published link) that infiniband/monitor/01-global.yaml goes through
-            (http_root / "infiniband/01-global.yaml").symlink_to("../DAY0-Prepare/site-a/01-global.yaml")
+            (http_root / "infiniband/01-global.yaml").symlink_to(
+                "../DAY0-Prepare/activate-project/01-global.yaml",
+            )
             settings = activate.Settings(
                 project_name="site-a", scope="air", http_root=http_root,
             )
@@ -6937,31 +7004,57 @@ class ActivationContractTests(QuietContractTest):
             )
             air_relative = "ztp/config/isc-dhcp-server/p2p-air.json"
             air_target = REQUIRED_DYNAMIC_P2P_LINKS[air_relative][0]
+            air_file = project / "99-output-p2p/p2p-air.json"
             dynamic_link = http_root / air_relative
-            self.assertEqual(
-                air_target.format(project="site-a"),
-                identity[air_relative]["target"],
-            )
+            self.assertEqual(air_target, identity[air_relative]["target"])
             original_air_sha = identity[air_relative]["sha256"]
-            (project / "99-output-p2p/fixture-p2p-air.json").write_text(
-                '{"changed": true}\n', encoding="utf-8",
-            )
+            air_file.write_text('{"changed": true}\n', encoding="utf-8")
             self.assertNotEqual(
                 original_air_sha,
                 activate.published_link_identity(settings)[air_relative]["sha256"],
             )
 
             dynamic_link.unlink()
-            wrong_air = http_root / "DAY0-Prepare/site-b/99-output-p2p/fixture-p2p-air.json"
+            wrong_air = http_root / "DAY0-Prepare/site-b/99-output-p2p/p2p-air.json"
             wrong_air.parent.mkdir(parents=True, exist_ok=True)
             wrong_air.write_text("{}\n", encoding="utf-8")
             dynamic_link.symlink_to(
-                "../../../DAY0-Prepare/site-b/99-output-p2p/fixture-p2p-air.json",
+                "../../../DAY0-Prepare/site-b/99-output-p2p/p2p-air.json",
             )
             with self.assertRaisesRegex(activate.ActivationError, "current project|canonical"):
                 activate.published_link_identity(settings)
             dynamic_link.unlink()
-            dynamic_link.symlink_to(air_target.format(project="site-a"))
+            dynamic_link.symlink_to(air_target)
+
+            # R-016 §3.4: the AIR json is optional.  A project without it (the tree link dangles) binds
+            # every other link, and an older <workbook>-air.json is not the AIR json (I-031).
+            air_file.unlink()
+            (project / "99-output-p2p/fixture-p2p-air.json").write_text("{}\n", encoding="utf-8")
+            without_air = activate.published_link_identity(settings)
+            self.assertEqual(
+                set(REQUIRED_PUBLISHED_LINKS) | {"ztp/config/cumulus/template/P2P/p2p.xlsx"},
+                set(without_air),
+            )
+            air_file.write_text("{}\n", encoding="utf-8")
+
+            # R-016 §2: the direct ../DAY0-Prepare/<project>/... text is no longer canonical, even though
+            # it reaches the right project.
+            direct = http_root / "monitor/99-output-p2p"
+            direct.unlink()
+            direct.symlink_to("../DAY0-Prepare/site-a/99-output-p2p")
+            with self.assertRaisesRegex(activate.ActivationError, "non-canonical"):
+                activate.published_link_identity(settings)
+            direct.unlink()
+            direct.symlink_to(REQUIRED_PUBLISHED_LINKS["monitor/99-output-p2p"][0])
+
+            # The canonical texts select whatever the pointer selects: a pointer to another project is
+            # not the container's project.
+            pointer.unlink()
+            pointer.symlink_to("site-b")
+            with self.assertRaisesRegex(activate.ActivationError, "does not select current project"):
+                activate.published_link_identity(settings)
+            pointer.unlink()
+            pointer.symlink_to("site-a")
 
             # A collector's first-level CSV pointer cannot silently select a
             # different project even when its static monitor alias is intact.
@@ -6975,11 +7068,7 @@ class ActivationContractTests(QuietContractTest):
                 activate.published_link_identity(settings)
 
             link.unlink()
-            link.symlink_to(
-                REQUIRED_PUBLISHED_LINKS["ethernet/eth.csv"][0].format(
-                    project="site-a",
-                ),
-            )
+            link.symlink_to(REQUIRED_PUBLISHED_LINKS["ethernet/eth.csv"][0])
             escaped = http_root / "infiniband/monitor/ib.csv"
             escaped.unlink()
             escaped.symlink_to("../../../../outside.csv")
@@ -8035,8 +8124,10 @@ class ContainerTransactionContractTests(QuietContractTest):
                 self.assertNotIn("--start-ztp-monitor", command)
                 output = http_root / "DAY0-Prepare/site-a/99-output-ztp"
                 output.mkdir(parents=True)
+                # setup (load's child) leaves the R-016 §2 layout: the pointer plus fixed links.
+                (http_root / "DAY0-Prepare/activate-project").symlink_to("site-a")
                 (http_root / "ztp/status").symlink_to(
-                    "../DAY0-Prepare/site-a/99-output-ztp"
+                    "../DAY0-Prepare/activate-project/99-output-ztp"
                 )
                 events.append("11-load-no-start")
 
@@ -10024,6 +10115,71 @@ class ContainerTransactionContractTests(QuietContractTest):
             )
             self.assertEqual("marker-a", quarantine["marker_identity"])
             self.assertIn("confirmed failure", quarantine["reason"])
+
+    def test_container_load_then_activation_binds_the_pointer_layout(self) -> None:
+        """R-016 §9 第 3 点 (R16-07, owner 2026-11-04 decision D; O5 owner 2026-11-07): the container runs the
+        same load and its setup child as native, so activation binds the one R-016 §2 layout.
+
+        Real scripts in a copied workspace: setup, then 11-load.py --dry-run plans its setup child, that child runs,
+        then activate.py binds the published links, the worker control parents and the per-key links.  The
+        AIR json is optional (R-016 §3.4) and bound once the producer has written it (I-031).
+        """
+        from test_cases import test_project_link_inputs_workflow as LINKED
+
+        activate = load_script("activate.py")
+        with tempfile.TemporaryDirectory(prefix="container-load-activate-") as temporary:
+            sandbox = LINKED.LinkedProjectSandbox(Path(temporary).resolve())
+            project = sandbox.project.resolve()
+            (sandbox.project / "02-devices_config.csv").write_bytes(sandbox.devices)
+            LINKED.workbook(sandbox.project / "Site P2P_v1.0.xlsx", "selected")
+            # The operator's setup comes first (it prepares the project keys); then the container's load.
+            setup = sandbox.setup()
+            self.assertEqual(0, setup.returncode, setup.stdout)
+            load = sandbox.load_dry_run()
+            self.assertEqual(0, load.returncode, load.stdout)
+            planned = [
+                line for line in load.stdout.splitlines()
+                if line.startswith("[DRY] (") and "01-a-setup.py" in line
+            ]
+            self.assertEqual(1, len(planned), load.stdout)
+            child = sandbox.run(shlex.split(re.sub(r"^\[DRY\] \(.*?\) ", "", planned[0])))
+            self.assertEqual(0, child.returncode, child.stdout)
+            pointer = sandbox.http / "DAY0-Prepare/activate-project"
+            self.assertTrue(pointer.is_symlink(), "R-016 §4.2: setup leaves DAY0-Prepare/activate-project")
+            self.assertEqual(LINKED.PROJECT, os.readlink(pointer))
+            (sandbox.http / "monitor/status").mkdir(parents=True, exist_ok=True)
+            settings = activate.Settings(
+                project_name=LINKED.PROJECT, scope="air", http_root=sandbox.http,
+            )
+
+            identity = activate.published_link_identity(settings)
+            p2p_input = "ztp/config/cumulus/template/P2P/p2p.xlsx"
+            self.assertEqual(set(REQUIRED_PUBLISHED_LINKS) | {p2p_input}, set(identity))
+            for relative, (text, _resolved, _kind) in REQUIRED_PUBLISHED_LINKS.items():
+                self.assertEqual(text, identity[relative]["target"], relative)
+            self.assertEqual(REQUIRED_DYNAMIC_P2P_LINKS[p2p_input][0], identity[p2p_input]["target"])
+
+            air_relative = "ztp/config/isc-dhcp-server/p2p-air.json"
+            (project / "99-output-p2p/p2p-air.json").write_text("{}\n", encoding="utf-8")
+            with_air = activate.published_link_identity(settings)
+            self.assertEqual(REQUIRED_DYNAMIC_P2P_LINKS[air_relative][0], with_air[air_relative]["target"])
+
+            self.assertEqual(
+                project / "99-output-ztp",
+                activate._worker_control_parents(settings)[Path("ztp/status")],
+            )
+            for relative in activate.PUBLISHED_RUNTIME_FILES:
+                published = sandbox.http / relative
+                if published.is_symlink() or not published.exists():
+                    published.unlink(missing_ok=True)
+                    published.write_text("fixture publisher output\n", encoding="utf-8")
+            runtime = activate.published_runtime_identity(settings)
+            keys = sorted(name for name in runtime if name.startswith("ztp/config/publickey/"))
+            self.assertTrue(keys, runtime)
+            for name in keys:
+                self.assertEqual(
+                    "../../../DAY0-Prepare/activate-project/" + Path(name).name, runtime[name]["target"],
+                )
 
 
 class ContainerTransferContractTests(QuietContractTest):

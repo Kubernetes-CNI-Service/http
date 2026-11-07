@@ -13039,7 +13039,13 @@ python3 infra/deps.py check --target venv-cabletracker --target venv-ibsw-upgrad
         生成期间漂移都在 release basis/current/output 发布前失败关闭。</p>
         <p>load 固定客户 mini 源，允许本轮生成器刷新旧 canonical 04，随后再次核对源身份；成功
         parent release 同时绑定 policy 和最终 04 的 SHA-256。请用选择报告、真实角色容量和
-        <code>TC-REAL-AIR-MINI-H19-001</code> 证明异构 AIR 结果，不得用同质 fixture 替代。</p></div>
+        <code>TC-REAL-AIR-MINI-H19-001</code> 证明异构 AIR 结果，不得用同质 fixture 替代。</p>
+        <p><strong>AIR JSON 固定名（v3.1.1，I-031）：</strong><code>b-xlsx_to_dot.py</code> 把 AIR 导入 JSON
+        写成项目的 <code>99-output-p2p/p2p-air.json</code>，文件内的 <code>name</code> 仍是
+        <code>&lt;P2P 工作簿名&gt;-air</code>，AIR 平台上看到的名字不变。setup 建的
+        <code>ztp/config/isc-dhcp-server/p2p-air.json</code> 是可选链接：非 AIR 项目、或 AIR 项目首次 load
+        之前，它悬空是正常状态。旧版按工作簿名写出的 <code>&lt;名&gt;-air.json</code> 不再被任何脚本读取，
+        可以手工删除。</p></div>
         <div id="v2-scenario-scoped-production" data-nav-title="按交换机类型生成" class="scenario" data-scenario="scoped-production"><span id="v2-scenario-scoped-production-steps" class="manual-contract-anchor" data-manual-role="steps" aria-label="操作步骤"></span><span id="v2-scenario-scoped-production-risk" class="manual-contract-anchor" data-manual-role="risk" aria-label="风险"></span><span id="v2-scenario-scoped-production-rollback" class="manual-contract-anchor" data-manual-role="rollback" aria-label="回滚与恢复"></span><h3>Scoped production generation</h3>
         <p>Production 可以生成全部平台，也可以显式限制一个平台：</p>
         <pre><code>python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; --prod --switch eth

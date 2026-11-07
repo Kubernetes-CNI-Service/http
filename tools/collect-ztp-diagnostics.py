@@ -997,9 +997,12 @@ def collect_project_inputs(builder: BundleBuilder, project: Path) -> None:
             builder, source, f"project/inputs/{name}",
             allowed_roots=[project], structured=True,
         )
-    for source in sorted((project / "99-output-p2p").glob("*-air.json"))[-2:]:
+    # I-031: the AIR json has one fixed name; an older <workbook>-air.json is not the project's.  It is
+    # optional (R-016 §3.4): a project without AIR has none, which is not a collection warning.
+    air_json = project / "99-output-p2p/p2p-air.json"
+    if os.path.lexists(air_json):
         capture_file(
-            builder, source, f"project/inputs/p2p/{safe_component(source.name)}",
+            builder, air_json, "project/inputs/p2p/p2p-air.json",
             allowed_roots=[project], structured=True,
         )
     capture_file(
@@ -1021,7 +1024,8 @@ def collect_runtime_files(builder: BundleBuilder, project: Path) -> None:
         "ztp/ztp-bootstrap_oob.sh": "server/apache/runtime/ztp-bootstrap_oob.sh",
         "ztp/ztp-bootstrap_oobofoob.sh": "server/apache/runtime/ztp-bootstrap_oobofoob.sh",
         "ztp/ztp.json": "server/apache/runtime/ztp.json",
-        "ztp/.setup_manifest.json": "server/apache/runtime/setup-manifest.json",
+        # I-044: setup writes ztp/.setup_manifest; the member name stays for the bundle's readers.
+        "ztp/.setup_manifest": "server/apache/runtime/setup-manifest.json",
         ".ztp-prefix-publication.json": "server/apache/runtime/prefix-publication.json",
     }
     for source_text, relative in runtime_files.items():
@@ -1030,6 +1034,19 @@ def collect_runtime_files(builder: BundleBuilder, project: Path) -> None:
             builder, source, relative, allowed_roots=roots,
             structured=source.suffix in {".json", ".yaml", ".yml", ".csv"},
         )
+
+    # I-044 / R-016 §2: which project is active is the pointer's own text; it is recorded, never followed.
+    pointer = DAY0_ROOT / "activate-project"
+    try:
+        pointer_text = os.readlink(pointer)
+    except OSError as exc:
+        pointer_text = None
+        builder.warn(f"{pointer}: {exc}")
+    builder.write_json(
+        "server/apache/runtime/activate-project.json",
+        {"path": "DAY0-Prepare/activate-project", "link_text": pointer_text},
+        source="collector:activate-project",
+    )
 
     system_roots = [Path("/etc/dhcp"), Path("/etc/default")]
     for name in ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts", "dhcpd_nvl.hosts"):

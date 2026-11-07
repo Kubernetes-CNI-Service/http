@@ -62,10 +62,12 @@ def prepare_r22_selected_nvos_core_flow(
         "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
         "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
     )
+    # R-016 §2 (O4 左列): setup's links go through DAY0-Prepare/activate-project (the flow made the pointer).
+    pointer = flow.project.parent / "activate-project"
     for name in names:
         public = flow.dhcp / name
         public.rename(outputs / name)
-        public.symlink_to(os.path.relpath(outputs / name, flow.dhcp))
+        public.symlink_to(os.path.relpath(pointer / "99-output-dhcp" / name, flow.dhcp))
     for family in {"eth", "ib", "nvl"} - {selected}:
         (outputs / f"dhcpd_{family}.hosts").write_bytes(b"")
     before = {

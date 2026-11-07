@@ -63,6 +63,7 @@ TOOLS_DIR    = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "..", "..", "tool
 if TOOLS_DIR not in sys.path:
     sys.path.insert(0, TOOLS_DIR)
 from project_contract import (
+    active_project_dir,
     detect_global_schema_version,
     parse_device_csv_layout,
     require_device_csv_row_width,
@@ -1494,12 +1495,14 @@ def _private_candidate_location(candidate_dir):
         raise ValueError("--candidate-dir requires an absolute project path")
     candidate_dir = os.path.normpath(candidate_dir)
     project_root = os.path.join(os.path.realpath(HTTP_ROOT), "DAY0-Prepare")
-    global_source = os.path.realpath(GLOBAL_YAML)
-    project = os.path.dirname(global_source)
+    # R-016 §5.1 (R16-06): the current project is DAY0-Prepare/activate-project's, not the directory of the
+    # resolved 01-global.yaml (a user link may take that outside the project, R-014 第 3 条).
+    active = active_project_dir(HTTP_ROOT)
+    if active is None:
+        raise ValueError("DHCP candidate has no canonical current project")
+    project = os.fspath(active)
     project_name = os.path.basename(project)
-    if (os.path.basename(global_source) != "01-global.yaml"
-            or os.path.dirname(project) != project_root
-            or project_name in {"", ".", ".."}):
+    if os.path.dirname(project) != project_root:
         raise ValueError("DHCP candidate has no canonical current project")
     output = os.path.join(project, "99-output-dhcp")
     candidate_name = os.path.basename(candidate_dir)

@@ -249,6 +249,8 @@ class PlatformReleaseFlowTests(unittest.TestCase):
         cls.root = root
         cls.project = root / "DAY0-Prepare/demo"
         cls.project.mkdir(parents=True)
+        # R-016 §2 (O4 左列): the readers identify the project through DAY0-Prepare/activate-project.
+        (root / "DAY0-Prepare/activate-project").symlink_to("demo")
         cls.ztp = root / "ztp"
         cls.cumulus = cls.ztp / "config/cumulus"
         cls.nvos = cls.ztp / "config/nvos"
@@ -357,7 +359,8 @@ switches:
         # as load does before Cumulus AIR YAML generation.
         p2p_output = cls.cumulus / "template/P2P/output-p2p"
         p2p_output.mkdir(parents=True)
-        cls.air_json = p2p_output / "demo-air.json"
+        # 问题文档 I-031: the producer writes the AIR json under the fixed name p2p-air.json.
+        cls.air_json = p2p_output / "p2p-air.json"
         cls.air_json.write_text(json.dumps({
             "content": {"nodes": {
                 AIR_HOST: {

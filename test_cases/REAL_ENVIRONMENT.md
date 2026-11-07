@@ -1466,7 +1466,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   结果当作真机证据。
 - 前置条件：一次性 Ubuntu 22.04/24.04 Native 管理 VM；当前项目已正式 load；detached
   `12-ztp-monitor.py --watch` 正在运行；记录 deployment lock、Monitor PID/starttime/cmdline、
-  `current-release.json`、项目 `01-global.yaml`、`02-devices_config.csv` 与 active `p2p-air.json` 的
+  `current-release.json`、项目 `01-global.yaml`、`02-devices_config.csv` 与 active `p2p-air.json`（v3.1.1 起
+  是项目 `99-output-p2p/p2p-air.json` 固定名，I-031）的
   inode/hash。不得在生产服务器或仍服务真实交换机的环境执行。
 - 步骤：分别从干净快照执行 setup、unsetup、load、unload、独立 DHCP generator、独立 P2P
   generator、password update、feedback global writeback，以及通过 deployment prewrite guard 的
@@ -1494,7 +1495,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   刷新 unhealthy sidecar，再从 last-good 报告刷新告警页面，且 `latest`/报告不变；恢复后同一
   进程成功并清零预算。再连续注入五次、注入边界外异常，并逐项原子替换 project/scope 关联的
   setup manifest、active inventory、current release、`01-global.yaml`、`02-devices_config.csv` 与
-  active `p2p-air.json`，确认下一轮工作前永久退出。用重复/变更 fingerprint 的故障核对首次日志、
+  active `p2p-air.json`（项目 `99-output-p2p/p2p-air.json` 固定名，I-031），确认下一轮工作前永久退出。用重复/变更 fingerprint 的故障核对首次日志、
   `max(300, 10 * max(watch, 5))` 摘要、恢复日志和无凭据泄漏。并发触发 Native load 与 Docker
   activation/Monitor cleanup，验证官方 writer/remover 都取得同一持久 sibling lock 后才发布或
   删除 PID，失败时没有孤儿子进程或残留自身 PID。
@@ -2589,7 +2590,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 前置条件与输入
 
 - owner 授权的隔离 AIR 管理服务器和项目副本；当前源码的正式 full proof。
-- 项目有 AIR 拓扑（`p2p-air.json`），`--switch` 为 all 或 eth，部署范围不是 prod。只有这时 load 才生成派生清单。
+- 项目有 AIR 拓扑（项目 `99-output-p2p/p2p-air.json`：v3.1.1 起 `b-xlsx_to_dot.py` 以这个固定名写出，旧的
+  `<P2P 文件名>-air.json` 不再被读取，I-031），`--switch` 为 all 或 eth，部署范围不是 prod。只有这时 load 才生成派生清单。
 - 先保存客户设备 CSV、P2P、global、拓扑策略和健康 parent release 的 SHA-256，并记录服务状态。
 - 不在真实客户源文件上做篡改负例，负例只在隔离副本上做。
 - 权限：运行 load 和 manual-ztp 的正常操作员权限。

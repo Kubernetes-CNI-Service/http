@@ -203,7 +203,11 @@ class XlsxFailClosedDirectTests(unittest.TestCase):
     def test_real_entrypoint_mini_still_requires_project_sampling_policy(self):
         with tempfile.TemporaryDirectory() as name:
             paths = prepare_runtime(Path(name), make_zero_row_workbook)
-            project = paths["devices"].parent.resolve()
+            # R-016 §5.1 (O4 左列): --mini resolves the project by DAY0-Prepare/activate-project.
+            project = paths["p2p_dir"].parents[4] / "DAY0-Prepare/site"
+            project.mkdir(parents=True)
+            (project.parent / "activate-project").symlink_to("site")
+            project = project.resolve()
             policy = project / "03-air-topology-policy.json"
             policy.write_text('{}\n', encoding="utf-8")
             caught, _stdout, stderr = invoke_main(paths, [

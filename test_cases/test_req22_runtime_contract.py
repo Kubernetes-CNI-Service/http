@@ -36,6 +36,8 @@ class Req22RuntimeInputTests(unittest.TestCase):
     def _project(root: Path, *, dhcp: str, ztp: str) -> Path:
         project = root / "DAY0-Prepare" / "fixture"
         project.mkdir(parents=True)
+        # R-016 §2 (O4 左列): the project is DAY0-Prepare/activate-project's.
+        (root / "DAY0-Prepare/activate-project").symlink_to("fixture")
         (project / "01-global.yaml").write_text(
             "common:\n  mgmt:\n"
             f"    dhcp-server:\n      status: {dhcp}\n"
@@ -351,7 +353,9 @@ class Req22RuntimeInputTests(unittest.TestCase):
                 }},
             }
             child_path.write_text(json.dumps(child), encoding="utf-8")
-            (public / child_path.name).symlink_to(os.path.relpath(child_path, public))
+            (public / child_path.name).symlink_to(os.path.relpath(
+                root / "DAY0-Prepare/activate-project/99-output-dhcp" / child_path.name, public,
+            ))
             parent_path = project / "99-output-ztp/current-release.json"
             parent_path.parent.mkdir()
             parent = {
@@ -511,6 +515,8 @@ class Req22RuntimeInputTests(unittest.TestCase):
             project = root / "DAY0-Prepare/fixture"
             outputs = project / "99-output-dhcp"
             outputs.mkdir(parents=True)
+            # R-016 §5.1 (O4 左列): c1 names the current project by DAY0-Prepare/activate-project.
+            (root / "DAY0-Prepare/activate-project").symlink_to("fixture")
             (project / "01-global.yaml").write_text("schema_version: 2\n", encoding="utf-8")
             public = outputs / "dhcpd.conf"
             public.write_bytes(b"accepted DHCP output\n")

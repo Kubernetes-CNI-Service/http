@@ -5799,7 +5799,7 @@ def _air_source_hostnames_for_devices(devices):
     """Derive exact Production sources represented by the active AIR JSON."""
     air_files = _topology_air_json_files()
     if not air_files:
-        raise ValueError("AIR deployment scope 缺少当前 *-air.json")
+        raise ValueError("AIR deployment scope 缺少当前 p2p-air.json")
     air_json = max(air_files, key=os.path.getmtime)
     try:
         document = json.loads(Path(air_json).read_text(encoding="utf-8"))
@@ -6656,12 +6656,12 @@ def _topology_dot_files(suffix):
 
 
 def _topology_air_json_files():
-    """Return AIR JSON exports, preferring the file for the active P2P XLSX."""
-    candidates = sorted(glob.glob(os.path.join(P2P_OUTPUT_DIR, "*-air.json")))
-    input_file = os.path.realpath(os.path.join(P2P_INPUT_DIR, "p2p.xlsx"))
-    input_stem = os.path.splitext(os.path.basename(input_file))[0]
-    expected = os.path.join(P2P_OUTPUT_DIR, f"{input_stem}-air.json")
-    return [expected] if os.path.isfile(expected) else candidates
+    """Return the AIR JSON export: only the fixed name p2p-air.json (I-031).
+
+    An older <workbook>-air.json left in the project is ignored, whatever its mtime.
+    """
+    expected = os.path.join(P2P_OUTPUT_DIR, "p2p-air.json")
+    return [expected] if os.path.isfile(expected) else []
 
 
 def prompt_patch_descriptions(output_dir):
@@ -7381,10 +7381,10 @@ def generate_air_hostname_configs(source_dir, output_dir):
     if not air_json_files:
         if inventory_hosts:
             raise ValueError(
-                f"AIR inventory 有 {len(inventory_hosts)} 台设备，但未找到 *-air.json；"
+                f"AIR inventory 有 {len(inventory_hosts)} 台设备，但未找到 p2p-air.json；"
                 "请先运行 P2P b-xlsx_to_dot.py"
             )
-        print("[INFO] 当前项目没有 AIR inventory/*-air.json，不生成 AIR YAML")
+        print("[INFO] 当前项目没有 AIR inventory/p2p-air.json，不生成 AIR YAML")
         return None
     air_json = max(air_json_files, key=os.path.getmtime)
     try:

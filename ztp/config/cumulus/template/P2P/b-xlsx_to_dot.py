@@ -10,7 +10,7 @@ link rows, including rows whose peer device is ``NA``.
 
 Reads TAN/OOB sheets from the P2P xlsx file, resolves device ports via the
 inventory / port-mapping files plus global splitter inference, and writes DOT topologies plus
-an NVIDIA AIR import JSON file.
+an NVIDIA AIR import JSON file under the fixed name output-p2p/p2p-air.json (I-031).
 The input is always p2p.xlsx beside this script; DAY0 setup manages that link.
 
 Column auto-detection:
@@ -55,7 +55,9 @@ from topology_rules import (  # noqa: E402
     resolve_inventory_device_type,
 )
 from deployment_lock import DeploymentLockError, deployment_lock  # noqa: E402
-from project_contract import AIR_OUTBOUND_ENDPOINT, AIR_UNCONNECTED_ENDPOINT  # noqa: E402
+from project_contract import (  # noqa: E402
+    AIR_OUTBOUND_ENDPOINT, AIR_UNCONNECTED_ENDPOINT, ActiveProjectPointerError, active_project_dir,
+)
 from ztp_service_runtime import (  # noqa: E402
     RuntimeContractError,
     stop_native_ztp_monitors,
@@ -1659,8 +1661,18 @@ def main():
             )
         air_link_policy_file = os.path.abspath(air_link_policy_file)
     mini_devices_file = None
+    project_root = None
     if mini_devices_argument is not None:
-        project_root = Path(os.path.realpath(DEVICES_CONFIG)).parent.resolve()
+        # R-016 §5.1 (R16-06): the project is DAY0-Prepare/activate-project's, never the directory of a
+        # resolved input link (a project's 02-devices_config.csv may link outside it, R-014 第 3 条).
+        try:
+            project_root = active_project_dir(HTTP_ROOT)
+        except ActiveProjectPointerError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if project_root is None:
+            print("ERROR: --mini needs an active project (DAY0-Prepare/activate-project)", file=sys.stderr)
+            sys.exit(1)
         candidate = Path(mini_devices_argument)
         if not candidate.is_absolute():
             candidate = project_root / candidate
@@ -1703,11 +1715,7 @@ def main():
     if air_link_policy_file is not None:
         try:
             air_topology_policy = load_air_topology_policy(
-                air_link_policy_file,
-                project_root=(
-                    Path(os.path.realpath(DEVICES_CONFIG)).parent
-                    if mini_devices_file is not None else None
-                ),
+                air_link_policy_file, project_root=project_root,
             )
         except ValueError as exc:
             print(f"[ERROR] {exc}", file=sys.stderr)
@@ -1949,7 +1957,9 @@ def main():
 
             # ── Generate AIR dot file ─────────────────────────────────────────────────
             air_file = os.path.join(out_dir, base + "-air.dot")
-            air_json_file = os.path.join(out_dir, base + "-air.json")
+            # I-031 / R-016 R16-04: one fixed name every reader knows; an older <workbook>-air.json is left
+            # alone and no longer read.  The document keeps the workbook's name (O12).
+            air_json_file = os.path.join(out_dir, "p2p-air.json")
             if explicit_os_version is not None:
                 os_ver = explicit_os_version
                 print(f"使用显式 AIR Cumulus OS 版本：{os_ver}")
@@ -1988,6 +1998,7 @@ def main():
                 air_json_template,
                 lldpq_file=output_file,
                 air_topology_policy=air_topology_policy,
+                document_name=base + "-air",
             )
 
             print(f"DOT and AIR JSON files are ready in: {out_dir}")
@@ -2754,11 +2765,13 @@ def generate_air_dot(
                         and not _air_drop_server_port(server, server_port)):
                     retained_neighbours.add(switch)
         required_net_devs.update(retained_neighbours)
-        source = Path(
-            mini_devices_file
-            or Path(os.path.realpath(DEVICES_CONFIG)).parent
-            / _MINI_AIR_DEVICES_NAME
-        )
+        if mini_devices_file is None:
+            # R-016 §5.1: the default list is the active project's.
+            project_root = active_project_dir(HTTP_ROOT)
+            if project_root is None:
+                raise ValueError("mini AIR needs an active project (DAY0-Prepare/activate-project)")
+            mini_devices_file = project_root / _MINI_AIR_DEVICES_NAME
+        source = Path(mini_devices_file)
         canonical = source.parent / _MINI_AIR_DEVICES_NAME
         ztp_server_names = {
             name for edge in edges for name in (edge[0], edge[2])
@@ -3657,8 +3670,12 @@ def generate_air_json(
     *,
     lldpq_file=None,
     air_topology_policy=None,
+    document_name=None,
 ):
-    """Build AIR JSON from AIR nodes and, when supplied, full LLDPQ links."""
+    """Build AIR JSON from AIR nodes and, when supplied, full LLDPQ links.
+
+    ``document_name`` is the name the AIR platform shows; it defaults to the file's stem.
+    """
     nodes, air_links = _parse_air_dot(air_file)
     if lldpq_file is None:
         links = air_links
@@ -3935,7 +3952,7 @@ def generate_air_json(
             "links": json_links,
             "oob": _air_oob_config(template_oob, management_ips),
         },
-        "name": os.path.basename(json_file)[:-5],
+        "name": document_name if document_name is not None else os.path.basename(json_file)[:-5],
     }
 
     os.makedirs(os.path.dirname(os.path.abspath(json_file)), exist_ok=True)

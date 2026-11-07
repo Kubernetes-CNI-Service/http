@@ -192,6 +192,8 @@ def _private_real_chain(
     """Build only the files real LOAD/b/c1/c2/d read under a private root."""
     project = root / "DAY0-Prepare/project"
     project.parent.mkdir(parents=True)
+    # R-016 §5.1 (O4 左列): c1 names the current project by DAY0-Prepare/activate-project.
+    (project.parent / "activate-project").symlink_to(project.name)
     _write_legal_project(project, V2_FLOW.V2MlagSetupPreflightTests().pair())
     global_file = project / "01-global.yaml"
     document = yaml.safe_load(global_file.read_text(encoding="utf-8"))
@@ -307,12 +309,16 @@ def _publish_private_dhcp_outputs(project: Path, ztp: Path) -> None:
     dhcp_dir = ztp / "config/isc-dhcp-server"
     project_dhcp = project / "99-output-dhcp"
     project_dhcp.mkdir()
+    # R-016 §2 (O4 左列): the project is DAY0-Prepare/activate-project's; setup's links go through it.
+    pointer = project.parent / "activate-project"
+    if not os.path.lexists(pointer):
+        pointer.symlink_to(project.name)
     for name in DHCP_OUTPUTS:
         public_output = dhcp_dir / name
         project_output = project_dhcp / name
         shutil.copy2(public_output, project_output)
         public_output.unlink()
-        public_output.symlink_to(os.path.relpath(project_output, dhcp_dir))
+        public_output.symlink_to(os.path.relpath(pointer / "99-output-dhcp" / name, dhcp_dir))
 
 
 def _write_same_inode(path: Path, data: bytes, original: os.stat_result) -> None:

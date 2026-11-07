@@ -679,11 +679,10 @@ def _process_xlsx_files(proj_dir, source):
     for link_path in P2P_OUTPUT_LINKS:
         rel = os.path.relpath(link_path, ZTP)
         _process_mapping(proj_dir, rel, "99-output-p2p", "dir")
-    source_stem = os.path.splitext(os.path.basename(os.path.realpath(source)))[0]
-    air_json = os.path.join(
-        proj_dir, "99-output-p2p", f"{source_stem}-air.json"
-    )
-    _reconcile_links([(P2P_AIR_JSON_LINK, _link_text(P2P_AIR_JSON_LINK, air_json))])
+    # I-031 / R-016 R16-04: b-xlsx_to_dot.py writes the fixed 99-output-p2p/p2p-air.json itself; the tree link is
+    # the table's optional row (R-016 §3.4: dangling until the producer runs, or for good without AIR).
+    air_row = next(row for row in SETUP_LINK_SPECS if row.path == P2P_AIR_PATH)
+    _reconcile_links([(P2P_AIR_JSON_LINK, _spec_link_text(air_row, proj_dir))])
 
 
 def _bringup_link_pairs(proj_dir):

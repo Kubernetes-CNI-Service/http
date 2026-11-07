@@ -540,13 +540,17 @@ def prepare_r22_empty_unselected_dhcp_fixture(fixture):
         "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
         "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
     )
+    # R-016 §2 (O4 左列): the project is DAY0-Prepare/activate-project's; setup's links go through it.
+    pointer = project.parent / "activate-project"
+    if not os.path.lexists(pointer):
+        pointer.symlink_to(project.name)
     for name in names:
         public = dhcp_dir / name
         public.unlink()
         target = outputs / name
         if name in {"dhcpd_ib.hosts", "dhcpd_nvl.hosts"}:
             target.write_bytes(b"")
-        public.symlink_to(os.path.relpath(target, dhcp_dir))
+        public.symlink_to(os.path.relpath(pointer / "99-output-dhcp" / name, dhcp_dir))
     with mock.patch.object(sys, "argv", [
         "c1-generate_dhcp.py", "-y", "--deployment-scope", "prod",
         "--switch", "eth",
@@ -1548,11 +1552,12 @@ class ReleaseTransactionTests(unittest.TestCase):
                 "dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
                 "dhcpd_nvl.hosts", "dhcp-release-manifest.json",
             )
+            # R-016 §2 (O4 左列): setup's links go through DAY0-Prepare/activate-project.
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
             for output_name in output_names:
-                target = dhcp_outputs / output_name
-                (public / output_name).symlink_to(
-                    os.path.relpath(target, public),
-                )
+                (public / output_name).symlink_to(os.path.relpath(
+                    root / "DAY0-Prepare/activate-project/99-output-dhcp" / output_name, public,
+                ))
 
             def generate_dhcp(candidate_dir=None):
                 output_dir = Path(candidate_dir) if candidate_dir else dhcp_outputs

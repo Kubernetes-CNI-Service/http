@@ -39,7 +39,9 @@ def actual_site():
         project.mkdir(parents=True);(http/"monitor").mkdir()
         (project/"01-global.yaml").write_bytes(GLOBAL_BYTES)
         (project/"02-devices_config.csv").write_bytes(CSV_BYTES)
-        (http/"monitor/02-devices_config.csv").symlink_to("../DAY0-Prepare/project/02-devices_config.csv")
+        # O4 左列：R-016 §2 -- the tree link goes through DAY0-Prepare/activate-project.
+        (http/"DAY0-Prepare/activate-project").symlink_to("project")
+        (http/"monitor/02-devices_config.csv").symlink_to("../DAY0-Prepare/activate-project/02-devices_config.csv")
         logs=owned/"private/xdr-initial-setup-logs";logs.mkdir(parents=True);logs.chmod(0o700)
         yield http,project,logs
 

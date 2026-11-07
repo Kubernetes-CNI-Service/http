@@ -33,6 +33,8 @@ def private_project(root: Path):
     fixture = ScopedDhcpFixture(root)
     project = root / "DAY0-Prepare" / "site"
     project.mkdir(parents=True)
+    # R-016 §5.1 (O4 左列): c1 names the current project by DAY0-Prepare/activate-project.
+    (root / "DAY0-Prepare/activate-project").symlink_to("site")
     output = project / "99-output-dhcp"
     output.mkdir()
     for source, name in (

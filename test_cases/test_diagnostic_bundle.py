@@ -1519,5 +1519,69 @@ class DiagnosticOutputRaceTests(unittest.TestCase):
             )
 
 
+class WP9cSetupManifestAndAirJsonTests(unittest.TestCase):
+    """v3.1.1 WP-9c.  问题文档 I-044 (owner 2026-11-07「同意你的建议。」): the bundle carries setup's real manifest
+    ztp/.setup_manifest under the unchanged member name, and the raw text of DAY0-Prepare/activate-project, never
+    followed.  问题文档 I-031: the project's AIR json is only the fixed 99-output-p2p/p2p-air.json."""
+
+    def runtime_bundle(self, root: Path, project: Path) -> Path:
+        staging = root / "staging"
+        builder = COLLECTOR.BundleBuilder(staging, "i044")
+        with mock.patch.multiple(COLLECTOR, ROOT=root, DAY0_ROOT=root / "DAY0-Prepare"):
+            COLLECTOR.collect_runtime_files(builder, project)
+        return staging
+
+    def test_bundle_carries_the_setup_manifest_and_the_pointer_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            manifest = root / "ztp/.setup_manifest"
+            manifest.parent.mkdir(parents=True)
+            payload = b"proj: site-a\nztp/status\n"
+            manifest.write_bytes(payload)
+            (root / "DAY0-Prepare/activate-project").symlink_to("site-a")
+
+            staging = self.runtime_bundle(root, project)
+            member = staging / "server/apache/runtime/setup-manifest.json"
+            self.assertTrue(member.is_file(), "I-044: the bundle carries ztp/.setup_manifest")
+            self.assertEqual(payload, member.read_bytes())
+            pointer_record = staging / "server/apache/runtime/activate-project.json"
+            self.assertTrue(pointer_record.is_file(), "I-044: the bundle records the pointer text")
+            record = json.loads(pointer_record.read_text())
+            self.assertEqual({"path": "DAY0-Prepare/activate-project", "link_text": "site-a"}, record)
+
+    def test_pointer_text_is_recorded_without_following_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            project = root / "DAY0-Prepare/site-a"
+            project.mkdir(parents=True)
+            # A dangling pointer: its text is the evidence; nothing resolved is recorded beside it.
+            (root / "DAY0-Prepare/activate-project").symlink_to("no-such-project")
+            staging = self.runtime_bundle(root, project)
+            pointer_record = staging / "server/apache/runtime/activate-project.json"
+            self.assertTrue(pointer_record.is_file(), "I-044: the bundle records the pointer text")
+            record = json.loads(pointer_record.read_text())
+            self.assertEqual({"path": "DAY0-Prepare/activate-project", "link_text": "no-such-project"}, record)
+
+    def test_project_inputs_carry_only_the_fixed_air_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = Path(directory).resolve() / "DAY0-Prepare/site-a"
+            output = project / "99-output-p2p"
+            output.mkdir(parents=True)
+            for name in ("01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv"):
+                (project / name).write_text("safe: example\n", encoding="utf-8")
+            (output / "p2p-air.json").write_text('{"name": "Site P2P_v1.0-air"}\n', encoding="utf-8")
+            (output / "Site P2P_v1.0-air.json").write_text('{"name": "older"}\n', encoding="utf-8")
+            (output / "other-air.json").write_text('{"name": "other"}\n', encoding="utf-8")
+            builder = COLLECTOR.BundleBuilder(project.parent.parent / "staging", "i031")
+            COLLECTOR.collect_project_inputs(builder, project)
+            self.assertEqual(
+                ["project/inputs/p2p/p2p-air.json"],
+                sorted(entry["path"] for entry in builder.entries
+                       if entry["path"].startswith("project/inputs/p2p/")),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

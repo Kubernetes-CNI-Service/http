@@ -1196,7 +1196,8 @@ class VmMiniSelectedOutputTests(unittest.TestCase):
             source = project / "Pinned P2P_v1.0.xlsx"
             source.write_bytes(b"selected workbook bytes")
             (project / "p2p.xlsx").symlink_to(source.name)
-            (output / (source.stem + "-air.json")).write_text(
+            # 问题文档 I-031 (v3.1.1): the producer writes the AIR json under the fixed name p2p-air.json.
+            (output / "p2p-air.json").write_text(
                 json.dumps({"content": {"nodes": {"leaf10": {}}}}), encoding="utf-8",
             )
             historical = output / "Other P2P_v99.0-air.json"
@@ -1223,7 +1224,7 @@ class VmMiniSelectedOutputTests(unittest.TestCase):
             source = project / "Selected P2P_v2.0.xlsx"
             source.write_bytes(b"selected workbook A")
             (project / "p2p.xlsx").symlink_to(source.name)
-            (output / (source.stem + "-air.json")).write_text(
+            (output / "p2p-air.json").write_text(  # I-031 fixed name
                 json.dumps({"content": {"nodes": {"leaf10": {}}}}), encoding="utf-8",
             )
             read_json = VM.load_json
@@ -1246,8 +1247,12 @@ class VmMiniSelectedOutputTests(unittest.TestCase):
             newer = workbook(project / "Fabric P2P_v9.0.xlsx", "unselected")
             workflow.select_and_link(project, older.name)
             self.assertEqual(older, workflow.load.select_p2p(project, older.name))
-            (output / (older.stem + "-air.json")).write_text(
+            # I-031: the selected workbook's AIR json is the fixed p2p-air.json; workbook-named files are older.
+            (output / "p2p-air.json").write_text(
                 json.dumps({"content": {"nodes": {"leaf10": {}, "spine": {}}}}), encoding="utf-8",
+            )
+            (output / (older.stem + "-air.json")).write_text(
+                json.dumps({"content": {"nodes": {"stale-older": {}}}}), encoding="utf-8",
             )
             retained = output / (newer.stem + "-air.json")
             retained.write_text(json.dumps({"content": {"nodes": {"wrong": {}}}}), encoding="utf-8")

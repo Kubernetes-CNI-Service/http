@@ -17,7 +17,8 @@
 ## 输入与输出
 
 - `02-devices_config.csv`：当前项目设备清单软链接。
-- AIR-only 动态设备：从当前项目 `*-air.json` 取得 hostname/MAC，并按 MAC 从
+- AIR-only 动态设备：从当前激活项目（`DAY0-Prepare/activate-project`）的 `99-output-p2p/p2p-air.json`
+  取得 hostname/MAC，并按 MAC 从
   `/var/lib/dhcp/dhcpd.leases` 解析当前地址；可用 `DHCP_LEASES_FILE` 覆盖测试路径。
 - 已转正 AIR 设备仍持有旧 lease：以静态 hostname/MAC 为权威，把旧地址放在标准 IP 之前作为
   临时传输候选；仅该候选允许 hostname 尚未更新，实际 eth0 MAC 必须完全一致。

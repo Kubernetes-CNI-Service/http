@@ -63,6 +63,7 @@ from tools.project_contract import (
     DEVICE_SOURCE_METADATA_COLUMNS,
     DEVICE_V2_EVPN_COLUMNS,
     DEVICE_V2_VLAN_COLUMNS,
+    active_project_dir,
     detect_global_schema_version,
     normalize_v2_mlag_policy,
     parse_device_csv_layout,
@@ -4509,12 +4510,8 @@ def discover_sample_inputs(raw_inputs):
         if project:
             break
     if project is None and not candidates:
-        active_output = http_base / "ztp" / "config" / "cumulus" / "template" / "99-output"
-        if active_output.is_dir():
-            resolved = active_output.resolve()
-            possible_project = resolved.parent
-            if (possible_project / "02-devices_config.csv").is_file():
-                project = possible_project
+        # R-016 §5.1 (R16-06): without inputs the project is DAY0-Prepare/activate-project's.
+        project = active_project_dir(http_base)
     if project is None:
         return SampleInputPlan(
             http_base, optimize_dir, candidates, None, selected,

@@ -43,6 +43,7 @@ from project_contract import (  # noqa: E402
     is_image_credential_name, is_image_host_state_path,
     IMAGE_HOST_STATE_PATHS, IMAGE_HOST_STATE_SUBTREES, IMAGE_MANIFEST_CARRIER,
     PUBLISHED_RUNTIME_FILE_PATHS, published_runtime_link_specs, P2P_INPUT_PATHS, P2P_AIR_PATH,
+    pointer_link_specs, pointer_link_target,
     path_disposition, transfer_exclude_reason, validate_service_endpoint,
     safe_load_global_yaml,
     validate_http_listener_ownership,
@@ -103,8 +104,11 @@ CONTROL_CGI = (
     (Path("monitor/manual-ztp-control.cgi"), "manual-ztp-control"),
 )
 PUBLISHED_RUNTIME_FILES = tuple(Path(name) for name in PUBLISHED_RUNTIME_FILE_PATHS)
-PUBLISHED_RUNTIME_LINKS = tuple((Path(name), target, Path(project_target))
-                                for name, target, project_target in published_runtime_link_specs())
+# R-016 §2, §9 (owner 2026-11-04 decision D; O5 owner 2026-11-07): the container runs the same setup, so every
+# tree link has the one canonical text -- through DAY0-Prepare/activate-project for project files.
+POINTER_LINK_TEXT = dict(pointer_link_specs())
+PUBLISHED_RUNTIME_LINKS = tuple((Path(name), POINTER_LINK_TEXT[name], Path(project_target))
+                                for name, _direct, project_target in published_runtime_link_specs())
 PUBLISHED_P2P_INPUT_LINK = Path(P2P_INPUT_PATHS[0])
 PUBLISHED_P2P_AIR_LINK = Path(P2P_AIR_PATH)
 # The receipt is intentionally directory-derived rather than a hand-maintained
@@ -1843,9 +1847,7 @@ def _worker_control_parents(settings: Settings) -> dict[Path, Path]:
         )
 
     ztp_status = settings.http_root / "ztp/status"
-    expected_raw_target = (
-        f"../DAY0-Prepare/{settings.project_name}/99-output-ztp"
-    )
+    expected_raw_target = POINTER_LINK_TEXT["ztp/status"]
     project_output = (
         settings.http_root
         / "DAY0-Prepare" / settings.project_name / "99-output-ztp"
@@ -2888,9 +2890,9 @@ def validate_parent_release(settings: Settings, release_manifest: Path) -> dict:
                         "parent release dhcp manifest publication must be one symlink"
                     )
                 public_target = os.readlink(manifest_path)
-                expected_target = os.path.relpath(
-                    expected_manifest, canonical_dhcp_directory,
-                )
+                expected_target = POINTER_LINK_TEXT[
+                    "ztp/config/isc-dhcp-server/dhcp-release-manifest.json"
+                ]
                 if public_target != expected_target:
                     raise ActivationError(
                         "parent release dhcp manifest target is non-canonical or "
@@ -3101,9 +3103,7 @@ def published_runtime_identity(settings: Settings) -> dict:
                     f"published public key must be one canonical symlink: {path}"
                 )
             target = os.readlink(path)
-            expected_target = (
-                f"../../../DAY0-Prepare/{settings.project_name}/{path.name}"
-            )
+            expected_target = pointer_link_target(relative.as_posix(), path.name)
             if target != expected_target:
                 raise ActivationError(
                     f"published public key target is non-canonical: "
@@ -3216,18 +3216,14 @@ def published_link_identity(settings: Settings) -> dict:
             "resolved": resolved.relative_to(root).as_posix(),
         }
 
-    for relative, target_template, project_relative in PUBLISHED_RUNTIME_LINKS:
+    for relative, target_text, project_relative in PUBLISHED_RUNTIME_LINKS:
         path = settings.http_root / relative
         expected = project_terminal(project_relative)
-        bind_link(
-            path,
-            target_template.format(project=settings.project_name),
-            expected,
-        )
+        bind_link(path, target_text, expected)
 
-    # The selected P2P workbook name is project data, so its canonical raw
-    # target cannot be a static format string.  It may live directly below the
-    # project or in its real `p2p/` directory, but nowhere else.
+    # The tree link has the canonical text to the project's fixed p2p.xlsx (R-016 §2, §3.3).  The selected
+    # workbook's name is project data: project/p2p.xlsx is the workbook itself or setup's one alias to it,
+    # directly below the project or in its real `p2p/` directory, but nowhere else.
     p2p_link = settings.http_root / PUBLISHED_P2P_INPUT_LINK
     if not os.path.lexists(p2p_link):
         raise ActivationError(f"published project link is missing: {p2p_link}")
@@ -3238,36 +3234,18 @@ def published_link_identity(settings: Settings) -> dict:
                 f"published project path must be one symlink: {p2p_link}"
             )
         p2p_target = os.readlink(p2p_link)
-        if Path(p2p_target).is_absolute():
-            raise ActivationError("published P2P target must be relative")
-        canonical_link_parent = p2p_link.parent.resolve(strict=True)
-        lexical = Path(os.path.abspath(os.path.join(canonical_link_parent, p2p_target)))
-        lexical.relative_to(project)
-        if lexical.parent not in {project, project / "p2p"}:
-            raise ActivationError(
-                "published P2P workbook must be in the current project root or p2p/"
-            )
-        if lexical.suffix.casefold() != ".xlsx":
-            raise ActivationError("published P2P workbook must have an .xlsx suffix")
-        expected_raw = os.path.relpath(lexical, canonical_link_parent)
-        if p2p_target != expected_raw:
+        if p2p_target != POINTER_LINK_TEXT[PUBLISHED_P2P_INPUT_LINK.as_posix()]:
             raise ActivationError(
                 f"published P2P link target is non-canonical: {p2p_target!r}"
             )
-        if lexical.parent == project / "p2p":
-            p2p_dir_metadata = lexical.parent.lstat()
-            if (
-                not stat.S_ISDIR(p2p_dir_metadata.st_mode)
-                or lexical.parent.resolve(strict=True) != lexical.parent
-            ):
-                raise ActivationError("project p2p/ must be one real directory")
+        lexical = project / "p2p.xlsx"
         lexical_metadata = lexical.lstat()
         alias_target = None
         if stat.S_ISLNK(lexical_metadata.st_mode):
             # The repository's canonical project/p2p.xlsx is itself one
             # setup-managed alias to the human-named workbook.  Permit exactly
             # this one extra hop and bind its raw target as well.
-            if lexical != project / "p2p.xlsx" or lexical_metadata.st_nlink != 1:
+            if lexical_metadata.st_nlink != 1:
                 raise ActivationError(
                     "only current-project p2p.xlsx may be a P2P workbook alias"
                 )
@@ -3308,17 +3286,19 @@ def published_link_identity(settings: Settings) -> dict:
         "sha256": sha256_path(p2p_source),
     }
 
-    air_relative = Path("99-output-p2p") / f"{p2p_source.stem}-air.json"
-    air_target = project_terminal(air_relative, regular=True)
-    air_link = settings.http_root / PUBLISHED_P2P_AIR_LINK
-    bind_link(
-        air_link,
-        os.path.relpath(air_target, air_link.parent.resolve(strict=True)),
-        air_target,
-    )
-    identity[PUBLISHED_P2P_AIR_LINK.as_posix()]["sha256"] = sha256_path(
-        air_target,
-    )
+    # The AIR json has the fixed name the producer writes (I-031) and is optional (R-016 §3.4): a project
+    # without it publishes no AIR json, and its dangling tree link is not bound.
+    air_relative = Path("99-output-p2p/p2p-air.json")
+    if os.path.lexists(project / air_relative):
+        air_target = project_terminal(air_relative, regular=True)
+        bind_link(
+            settings.http_root / PUBLISHED_P2P_AIR_LINK,
+            POINTER_LINK_TEXT[PUBLISHED_P2P_AIR_LINK.as_posix()],
+            air_target,
+        )
+        identity[PUBLISHED_P2P_AIR_LINK.as_posix()]["sha256"] = sha256_path(
+            air_target,
+        )
     return dict(sorted(identity.items()))
 
 

@@ -75,17 +75,14 @@ def _valid_static_air_rows(rows: Iterable[dict[str, str]]) -> list[dict[str, str
 
 
 def find_air_json(inventory: Path, explicit: Path | None = None) -> Path | None:
-    """Return the AIR topology JSON associated with an inventory/project."""
+    """Return the AIR topology JSON associated with an inventory/project.
+
+    Only the fixed name 99-output-p2p/p2p-air.json (I-031); an older <workbook>-air.json is ignored.
+    """
     if explicit is not None:
         return explicit if explicit.is_file() else None
-    output = inventory.parent / "99-output-p2p"
-    candidates = [
-        path for path in output.glob("*-air.json")
-        if path.is_file() and path.name.casefold() != "air-template.json"
-    ] if output.is_dir() else []
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: (path.stat().st_mtime_ns, path.name))
+    fixed = inventory.parent / "99-output-p2p" / "p2p-air.json"
+    return fixed if fixed.is_file() else None
 
 
 def topology_nodes(path: Path | None) -> list[dict[str, str]]:
