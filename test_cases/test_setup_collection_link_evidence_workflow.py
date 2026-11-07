@@ -1,12 +1,19 @@
 """R0 (2026-10-23): v2 collection evidence through setup's collection output links.
 
 setup makes <network>/monitor/<output> (eth-info, spx-link, ib-info, ib-link, nvsw-info, nvsw-link,
-ufm-info, ufm-ibdiagnet) links to ../../DAY0-Prepare/<project>/99-output-monitor/<network>/<output>
-(tools/project_contract.py::MONITOR_RUNTIME_MAPPINGS). cron.sh hands the emitter its archives below those
-links; the evidence readers refused any symlink on the way, so on a real management server every worker
-slot failed v2 publication (checked 2026-10-23 with a probe of collection_v2_emitter.regular_member).
-Exactly those links, pointing exactly at their project directory, may now be walked; any other link is
-still refused. Evidence bytes stay bound by sha256.
+ufm-info, ufm-ibdiagnet) links through the pointer to
+../../DAY0-Prepare/activate-project/99-output-monitor/<network>/<output> (R-016 §2; the text is
+tools/project_contract.py::pointer_link_target, the spec table's own rule). cron.sh hands the emitter its
+archives below those links; the evidence readers refused any symlink on the way, so on a real management
+server every worker slot failed v2 publication (checked 2026-10-23 with a probe of
+collection_v2_emitter.regular_member). Exactly those links may now be walked, and only into the project
+DAY0-Prepare/activate-project selects (R-016 §5.2: resolve the pointer, then check the real project
+directory); any other link is still refused. Evidence bytes stay bound by sha256.
+
+v3.1.1 WP-9 (O4 左列: R-016): the direct ../../DAY0-Prepare/<project>/... text of the old layout is no
+longer setup's link and is refused; a setup link that cannot be walked because there is no active
+project, the pointer is invalid or the project's output directory is missing raises ValueError naming
+that reason instead of "traverses a symlink" (详细工作指导 WP-9 类 2: 报错文字改准确).
 
 The completed cycle is replayed by the worker's own slot check (codex REQ7 retirement, batch 1,
 2026-10-23: the old REQ7 IB cycle reader and its switch-runtime walker were retired with the rest of the
@@ -27,20 +34,28 @@ from unittest import mock
 from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
 from test_cases.test_collection_cycle_persistence import WORKER, TOKEN_1, TOKEN_2
 from test_cases.test_collection_v2_emitter_contract import EMITTER
-from tools.project_contract import setup_collection_link_hop, summarize_collection_cycle_results
+from tools.project_contract import (pointer_link_target, setup_collection_link_hop,
+                                    summarize_collection_cycle_results)
 
 OUTPUTS = {"ethernet": ("eth-info", "spx-link"), "infiniband": ("ib-info", "ib-link"),
            "nvlink": ("nvsw-info", "nvsw-link")}
 
 
+def collection_link_text(network: str, output: str) -> str:
+    """setup's text for one collection output link (R-016 §2, through the pointer)."""
+    return pointer_link_target(f"{network}/monitor/{output}", f"99-output-monitor/{network}/{output}")
+
+
 def link_outputs(root: Path, project: str = "site") -> None:
+    """The pointer layout: real output directories in the project, the pointer, setup's links."""
     for network, outputs in OUTPUTS.items():
         for output in outputs:
             real = root / "DAY0-Prepare" / project / "99-output-monitor" / network / output
             real.mkdir(parents=True, exist_ok=True)
             link = root / network / "monitor" / output
             link.parent.mkdir(parents=True, exist_ok=True)
-            link.symlink_to(f"../../DAY0-Prepare/{project}/99-output-monitor/{network}/{output}")
+            link.symlink_to(collection_link_text(network, output))
+    (root / "DAY0-Prepare/activate-project").symlink_to(project)
 
 
 class SetupCollectionLinkHopTest(unittest.TestCase):
@@ -58,7 +73,7 @@ class SetupCollectionLinkHopTest(unittest.TestCase):
         ufm = self.root / "DAY0-Prepare/site/99-output-monitor/infiniband/ufm-ibdiagnet"
         ufm.mkdir(parents=True)
         (self.root / "infiniband/monitor/ufm-ibdiagnet").symlink_to(
-            "../../DAY0-Prepare/site/99-output-monitor/infiniband/ufm-ibdiagnet")
+            collection_link_text("infiniband", "ufm-ibdiagnet"))
         self.assertTrue(setup_collection_link_hop(self.root, self.root / "infiniband/monitor/ufm-ibdiagnet"))
 
     def test_any_other_link_is_refused(self):
@@ -68,8 +83,12 @@ class SetupCollectionLinkHopTest(unittest.TestCase):
         cases = {
             "absolute target": str(self.root / "DAY0-Prepare/site/99-output-monitor/infiniband/ib-info"),
             "other directory": "../../elsewhere",
-            "another network's directory": "../../DAY0-Prepare/site/99-output-monitor/nvlink/nvsw-info",
+            "another network's directory": collection_link_text("nvlink", "nvsw-info"),
             "a dot project": "../../DAY0-Prepare/./99-output-monitor/infiniband/ib-info",
+            # R-016 §8: the old layout's direct text is rewritten by setup, never walked
+            "the old direct text": "../../DAY0-Prepare/site/99-output-monitor/infiniband/ib-info",
+            "a detour through the project name": "../../DAY0-Prepare/activate-project/../site/"
+                                                 "99-output-monitor/infiniband/ib-info",
         }
         for label, target in cases.items():
             with self.subTest(label=label):
@@ -77,16 +96,53 @@ class SetupCollectionLinkHopTest(unittest.TestCase):
                 (monitor / "ib-info").symlink_to(target)
                 self.assertFalse(setup_collection_link_hop(self.root, monitor / "ib-info"))
         (monitor / "ib-info").unlink()
-        (monitor / "ib-info").symlink_to("../../DAY0-Prepare/site/99-output-monitor/infiniband/ib-info")
+        (monitor / "ib-info").symlink_to(collection_link_text("infiniband", "ib-info"))
         # a link name setup never makes, and a path that is not a link at all
-        (monitor / "notes").symlink_to("../../DAY0-Prepare/site/99-output-monitor/infiniband/ib-info")
+        (monitor / "notes").symlink_to(collection_link_text("infiniband", "ib-info"))
         self.assertFalse(setup_collection_link_hop(self.root, monitor / "notes"))
         self.assertFalse(setup_collection_link_hop(self.root, self.root / "DAY0-Prepare"))
-        # the project directory behind the link must itself be real
+        # a symlink inside the project on the way to the output directory
+        output = self.root / "DAY0-Prepare/site/99-output-monitor/infiniband/ib-info"
+        output.rename(self.root / "elsewhere/ib-info")
+        output.symlink_to(self.root / "elsewhere/ib-info")
+        self.assertFalse(setup_collection_link_hop(self.root, monitor / "ib-info"))
+        output.unlink()
+        (self.root / "elsewhere/ib-info").rename(output)
+        # the project directory behind the pointer must itself be real (R-016 §2): refused, with the reason
         real_project = self.root / "DAY0-Prepare/site"
         real_project.rename(self.root / "DAY0-Prepare/site-real")
         real_project.symlink_to("site-real")
-        self.assertFalse(setup_collection_link_hop(self.root, monitor / "ib-info"))
+        with self.assertRaisesRegex(ValueError, "not a real directory"):
+            setup_collection_link_hop(self.root, monitor / "ib-info")
+
+    def test_an_unwalkable_setup_link_names_why(self):
+        monitor = self.root / "infiniband/monitor"
+        # the project has no output directory yet: dangling, not "traverses a symlink"
+        (self.root / "DAY0-Prepare/site/99-output-monitor/infiniband/ib-info").rmdir()
+        with self.assertRaisesRegex(ValueError, "ib-info is dangling"):
+            setup_collection_link_hop(self.root, monitor / "ib-info")
+        # no pointer: no active project (R-016 §5.1)
+        (self.root / "DAY0-Prepare/activate-project").unlink()
+        with self.assertRaisesRegex(ValueError, "no active project"):
+            setup_collection_link_hop(self.root, monitor / "ib-link")
+        # a pointer to template is invalid; its reason is kept
+        (self.root / "DAY0-Prepare/template").mkdir()
+        (self.root / "DAY0-Prepare/activate-project").symlink_to("template")
+        with self.assertRaisesRegex(ValueError, "template"):
+            setup_collection_link_hop(self.root, monitor / "ib-link")
+
+    def test_the_pointer_selects_which_project_is_walked(self):
+        other = self.root / "DAY0-Prepare/site-q/99-output-monitor/infiniband/ib-info"
+        other.mkdir(parents=True)
+        (other / "20261108-0100.tar.gz").write_bytes(b"site-q archive")
+        relative = "infiniband/monitor/ib-info/20261108-0100.tar.gz"
+        with self.assertRaisesRegex(ValueError, "missing"):
+            WORKER._collection_artifact_path(self.root, relative)
+        pointer = self.root / "DAY0-Prepare/activate-project"
+        pointer.unlink()
+        pointer.symlink_to("site-q")
+        self.assertTrue(setup_collection_link_hop(self.root, self.root / "infiniband/monitor/ib-info"))
+        self.assertEqual(self.root / relative, WORKER._collection_artifact_path(self.root, relative))
 
     def test_the_emitter_and_worker_walkers_follow_the_rule(self):
         archive = self.root / "DAY0-Prepare/site/99-output-monitor/infiniband/ib-info/20261023-0110.tar.gz"
@@ -103,6 +159,15 @@ class SetupCollectionLinkHopTest(unittest.TestCase):
         with mock.patch.object(EMITTER, "ROOT", self.root), self.assertRaisesRegex(ValueError, "symlink"):
             EMITTER.regular_member(self.root / relative, "infiniband", "ib-info", ".tar.gz")
         with self.assertRaisesRegex(ValueError, "symlink"):
+            WORKER._collection_artifact_path(self.root, relative)
+        # setup's own link without an active project: both walkers name the real reason
+        (self.root / "infiniband/monitor/ib-info").unlink()
+        (self.root / "infiniband/monitor/ib-info").symlink_to(collection_link_text("infiniband", "ib-info"))
+        (self.root / "DAY0-Prepare/activate-project").unlink()
+        with mock.patch.object(EMITTER, "ROOT", self.root), \
+                self.assertRaisesRegex(ValueError, "no active project"):
+            EMITTER.regular_member(self.root / relative, "infiniband", "ib-info", ".tar.gz")
+        with self.assertRaisesRegex(ValueError, "no active project"):
             WORKER._collection_artifact_path(self.root, relative)
 
 

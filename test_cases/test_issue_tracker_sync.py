@@ -777,14 +777,24 @@ class MainFlowTests(unittest.TestCase):
             self.assertEqual(link, self.sync.monitor_output(self.project, False))
         self.assertEqual(self.project / "99-output-monitor", self.sync.monitor_output(self.project, True))
 
-    def test_project_comes_from_the_setup_link_when_not_given(self):
-        anchor = Path(self.directory.name) / "monitor-01-global.yaml"
-        with mock.patch.object(self.sync, "PROJECT_ANCHOR", anchor):
-            with self.assertRaises(self.sync.SyncError):
+    def test_project_comes_from_the_activate_project_pointer_when_not_given(self):
+        # R-016 §5.1, §5.2 (v3.1.1 WP-9, O4 左列: R-016): without --project-dir the project is the one
+        # DAY0-Prepare/activate-project selects, never where monitor/01-global.yaml resolves.
+        root = Path(self.directory.name) / "http"
+        day0 = root / "DAY0-Prepare"
+        day0.mkdir(parents=True)
+        site = day0 / "site"
+        self.project.rename(site)
+        self.project = site
+        with mock.patch.object(self.sync, "HTTP_ROOT", root):
+            with self.assertRaisesRegex(self.sync.SyncError, "no active project"):
                 self.sync.project_directory(None)
-            (self.project / "01-global.yaml").write_text("common: {}\n")
-            anchor.symlink_to(self.project / "01-global.yaml")
-            self.assertEqual(self.project.resolve(), self.sync.project_directory(None))
+            (day0 / "activate-project").symlink_to(site.name)
+            self.assertEqual(site.resolve(), self.sync.project_directory(None))
+            (day0 / "activate-project").unlink()
+            (day0 / "activate-project").symlink_to("template")
+            with self.assertRaisesRegex(self.sync.SyncError, "template"):
+                self.sync.project_directory(None)
 
 
 if __name__ == "__main__":

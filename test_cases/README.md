@@ -533,11 +533,12 @@ setup/upload 的监控清单合同还要求部署包继续排除运行态 CSV �
 必须在 fresh HTTP root 中重建三条固定别名：`ethernet/monitor/eth.csv -> ../eth.csv`、
 `infiniband/monitor/ib.csv -> ../ib.csv` 和 `nvlink/monitor/nvsw.csv -> ../nvsw.csv`。
 三条别名必须纳入 setup 的冲突检查、整批回滚和 manifest，并最终解析到当前项目唯一的
-`02-devices_config.csv`；采集器由该 canonical 链定位项目 `mgmt-server.pub`，不得在 monitor
-目录复制公钥或用环境变量绕过活动项目身份。三个发布入口必须按自身 lexical area 精确绑定：
-Ethernet 只读 `eth.csv`、InfiniBand 只读 `ib.csv`、NVLink 只读 `nvsw.csv`；即使同目录存在
-指向其他项目且完全有效的异类 inventory，也不得用“第一个存在文件”替代。`MGMT_PUBKEY_FILE`
-环境值不受信，公钥只能从该精确 inventory 的项目目录推导。
+`02-devices_config.csv`。采集器的管理公钥按 owner 2026-11-04（R-016 §5.2）只读本网络的
+`<类型>/publickey/mgmt-server.pub`（setup 经 `DAY0-Prepare/activate-project` 建的逐把公钥链接），不从
+inventory 链推导项目目录（inventory 可以是指向项目外的用户链接），不得在 monitor 目录复制公钥或用环境
+变量绕过活动项目身份。三个发布入口按自身 lexical area 精确绑定：Ethernet 读 `ethernet/publickey`、
+InfiniBand 读 `infiniband/publickey`、NVLink 读 `nvlink/publickey`；同目录存在指向其他项目的异类
+inventory 也不改变所读的公钥。`MGMT_PUBKEY_FILE` 环境值不受信。
 
 手工 ZTP 契约覆盖具体 hostname/多个通配符的展开与去重、类型和环境边界、任一未匹配即
 整次拒绝、GUI `preview → diff → confirm` 两阶段协议、精确 `operation_id`/`trigger_id`、

@@ -70,8 +70,6 @@ FORMAT_PRECHECK = BASE / "format_precheck.py"
 LLDP_ANALYZER = HTTP_ROOT / "tools/lldp-analyze-tool/analyze_lldp.py"
 IB_POST_COLLECT = HTTP_ROOT / "infiniband/monitor/post-collect.py"
 ETH_POST_COLLECT = HTTP_ROOT / "ethernet/monitor/post-collect.py"
-# setup link -> DAY0-Prepare/<project>/01-global.yaml; its directory is the project
-PROJECT_ANCHOR = HTTP_ROOT / "monitor/01-global.yaml"
 # setup link beside this directory (owner 2026-10-23) -> DAY0-Prepare/<project>/99-output-monitor:
 # prepared data and the log
 MONITOR_LINK = HTTP_ROOT / "monitor/99-output-monitor"
@@ -240,10 +238,16 @@ def project_directory(explicit: Path | None) -> Path:
     if explicit is not None:
         directory = explicit.expanduser().resolve()
     else:
-        if not PROJECT_ANCHOR.is_symlink():
-            raise SyncError(f"{PROJECT_ANCHOR} is not a setup link; run DAY0-Prepare/01-a-setup.py "
-                            "or pass --project-dir")
-        directory = PROJECT_ANCHOR.resolve().parent
+        # R-016 §5.1: the project DAY0-Prepare/activate-project selects, never the directory a project
+        # file's link resolves into (a project input may be a link elsewhere, R-014 第 3 条).
+        from tools.project_contract import active_project_dir
+        try:
+            directory = active_project_dir(HTTP_ROOT)
+        except ValueError as exc:  # project_contract.ActiveProjectPointerError
+            raise SyncError(f"{exc}; rerun DAY0-Prepare/01-a-setup.py or pass --project-dir") from None
+        if directory is None:
+            raise SyncError("no active project (DAY0-Prepare/activate-project is missing); "
+                            "run DAY0-Prepare/01-a-setup.py or pass --project-dir")
     if not directory.is_dir():
         raise SyncError(f"project directory does not exist: {directory}")
     return directory

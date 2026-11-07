@@ -1307,6 +1307,149 @@ class WP4CheckTemplateTests(unittest.TestCase):
                 code, _printed = wp4_run_main(self.root, argv)
                 self.assertEqual(2, code)
 
+# v3.1.1 WP-9a: imports for the classes below, kept here so WP-3's header stays as it is.
+from contextlib import ExitStack  # noqa: E402
+import json  # noqa: E402
+from unittest import mock  # noqa: E402
+
+
+class WP9aServiceReaderTests(unittest.TestCase):
+    """v3.1.1 WP-9a direct cases: the readers and resident services resolve the pointer themselves.
+
+    R-016 §5.1 (one function names the active project; resolve once per run), §5.2 (class 1: setup's
+    canonical text; class 6: never the parent of a resolved project file), §6 (worker: skip a cycle
+    without a pointer and keep the schedule; monitor: stop when the pointer moves), 问题文档 I-030 (the
+    AIR json link is resolved first and is optional).  The pointer layout is the workflow module's
+    PointerTree, built by the test itself.
+    """
+
+    def setUp(self):
+        from test_cases import test_activate_project_services_workflow as services
+
+        self.services = services
+        temporary = tempfile.TemporaryDirectory(prefix="wp9a-direct-")
+        self.addCleanup(temporary.cleanup)
+        self.tree = services.PointerTree(Path(temporary.name))
+
+    def invalid_pointer(self) -> None:
+        (self.tree.day0 / "template").mkdir(exist_ok=True)
+        self.tree.point("template")   # R-016 §2: never a project
+
+    def test_gate_names_the_pointer_project_and_never_the_inventory_link(self):
+        worker = self.services.WORKER
+        # monitor/02-devices_config.csv names Q, the pointer names P: the pointer wins (R-016 §5.2).
+        inventory = self.tree.root / "monitor/02-devices_config.csv"
+        inventory.unlink()
+        inventory.symlink_to(f"../DAY0-Prepare/{self.services.PROJECT_Q}/02-devices_config.csv")
+        self.assertEqual(str(self.tree.real(self.services.PROJECT_P)),
+                         worker.active_project_identity(self.tree.root))
+        self.tree.unpoint()
+        with self.assertRaises(worker.NoActiveProjectError) as raised:
+            worker.active_project_identity(self.tree.root)
+        self.assertIsInstance(raised.exception, worker.CollectionGateError)
+        self.assertEqual("没有激活的项目", str(raised.exception))
+        self.invalid_pointer()
+        with self.assertRaisesRegex(worker.CollectionGateError, "template") as raised:
+            worker.active_project_identity(self.tree.root)
+        self.assertNotIsInstance(raised.exception, worker.NoActiveProjectError)
+
+    def test_continuous_cycles_without_a_pointer_wait_one_interval_and_stay_enabled(self):
+        worker = self.services.WORKER
+        self.tree.unpoint()
+        cases = (
+            ("collection", worker.run_continuous_collection_cycle, "CONTINUOUS_STATUS_FILE",
+             {"_CONTINUOUS_COLLECTION_INTERVAL_SECONDS": 600, "_CONTINUOUS_COLLECTION_NEXT_RUN": 0.0}),
+            ("backup", worker.run_continuous_backup_cycle, "CONTINUOUS_BACKUP_STATUS_FILE",
+             {"_CONTINUOUS_BACKUP_INTERVAL_SECONDS": 600, "_CONTINUOUS_BACKUP_NEXT_RUN": 0.0,
+              "_CONTINUOUS_BACKUP_PASSWORD": "unused"}),
+        )
+        for lane, cycle, status_name, schedule in cases:
+            with self.subTest(lane=lane), \
+                    self.services.ActivateProjectServicesWorkflowTests.worker(self, self.tree, mock.Mock()) \
+                    as status, mock.patch.multiple(worker, **schedule), \
+                    mock.patch.object(worker, "collect_safely") as collect, \
+                    mock.patch.object(worker, "run_yaml_backup_safely") as backup:
+                self.assertTrue(cycle("prod", 60, 0))
+                document = json.loads(getattr(worker, status_name).read_text(encoding="utf-8"))
+                collect.assert_not_called()
+                backup.assert_not_called()
+                # R-016 §6: the cycle is skipped, the schedule is kept (not "failed", not stopped).
+                self.assertEqual(("waiting", True, "没有激活的项目", 600),
+                                 (document["state"], document["enabled"], document["wait_reason"],
+                                  document["remaining_seconds"]))
+                self.assertTrue(status.is_dir())
+
+    def monitor_paths(self):
+        root = self.tree.root
+        return mock.patch.multiple(
+            self.services.MONITOR, HERE=self.tree.day0,
+            ACTIVE_INVENTORY=root / "ztp/config/isc-dhcp-server/02-devices_config.csv",
+            ACTIVE_AIR_JSON=root / "ztp/config/isc-dhcp-server/p2p-air.json",
+            ZTP_STATUS_DIR=root / "ztp/status",
+        )
+
+    def test_monitor_stops_only_when_the_pointer_moves(self):
+        monitor = self.services.MONITOR
+        project = self.tree.projects[self.services.PROJECT_P]
+        with self.monitor_paths():
+            self.assertIsNone(monitor.active_project_moved(project))
+            self.tree.point(self.services.PROJECT_Q)
+            self.assertIn("已指向其他项目：site-q", monitor.active_project_moved(project))
+            self.tree.unpoint()
+            self.assertIn("没有激活的项目", monitor.active_project_moved(project))
+            self.invalid_pointer()
+            self.assertIn("template", monitor.active_project_moved(project))
+
+    def test_monitor_requires_setup_canonical_text_not_the_old_direct_link(self):
+        monitor = self.services.MONITOR
+        project = self.tree.projects[self.services.PROJECT_P]
+        inventory = self.tree.root / "ztp/config/isc-dhcp-server/02-devices_config.csv"
+        with self.monitor_paths():
+            monitor.require_active_project(project)
+            # R-016 §8: the old direct text resolves to the same file but is no longer setup's link.
+            inventory.unlink()
+            inventory.symlink_to("../../../DAY0-Prepare/site-p/02-devices_config.csv")
+            with self.assertRaisesRegex(ValueError, "活动项目身份无效（active inventory）"):
+                monitor.require_active_project(project)
+
+    def test_monitor_reads_the_air_json_through_its_link_and_treats_dangling_as_absent(self):
+        monitor = self.services.MONITOR
+        air = self.tree.projects[self.services.PROJECT_P] / "99-output-p2p/p2p-air.json"
+        with self.monitor_paths():
+            link = monitor.ACTIVE_AIR_JSON
+            self.assertIsNone(monitor.active_air_json(link))      # dangling: not an AIR project
+            air.write_text("{}\n", encoding="utf-8")
+            resolved = monitor.active_air_json(link)
+            self.assertEqual(self.tree.real(self.services.PROJECT_P) / "99-output-p2p/p2p-air.json", resolved)
+            self.assertFalse(resolved.is_symlink())
+            link.unlink()
+            self.assertIsNone(monitor.active_air_json(link))      # no link at all
+
+    def test_project_readers_follow_the_pointer_even_without_the_monitor_global_link(self):
+        services = self.services
+        (self.tree.root / "monitor/01-global.yaml").unlink()   # the issue tracker's old anchor
+        (self.tree.root / "ztp/status").unlink()                # manual-ztp's old anchor
+        real = self.tree.real(services.PROJECT_P)
+        with ExitStack() as stack:
+            for module in (services.ISSUE_SYNC, services.SWITCH_STATUS, services.MANUAL_WORKER, services.MANUAL):
+                stack.enter_context(mock.patch.object(module, "HTTP_ROOT", self.tree.root))
+            self.assertEqual(real, services.ISSUE_SYNC.project_directory(None))
+            self.assertEqual(real, services.SWITCH_STATUS.project_directory(None))
+            self.assertEqual(real, services.MANUAL_WORKER.active_project())
+            self.assertEqual(real, services.MANUAL.resolve_project(None))
+            # an explicit project still wins where the reader takes one
+            explicit = self.tree.projects[services.PROJECT_Q]
+            self.assertEqual(explicit.resolve(), services.ISSUE_SYNC.project_directory(explicit))
+            self.assertEqual(explicit.resolve(), services.SWITCH_STATUS.project_directory(explicit))
+            self.invalid_pointer()
+            with self.assertRaisesRegex(services.ISSUE_SYNC.SyncError, "template"):
+                services.ISSUE_SYNC.project_directory(None)
+            with self.assertRaisesRegex(services.SWITCH_STATUS.InputError, "template"):
+                services.SWITCH_STATUS.project_directory(None)
+            self.assertIsNone(services.MANUAL_WORKER.active_project())
+            with self.assertRaisesRegex(services.MANUAL.ManualZtpError, "template"):
+                services.MANUAL.resolve_project(None)
+
 
 if __name__ == "__main__":
     unittest.main()

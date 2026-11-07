@@ -196,10 +196,14 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             manifest["devices"][0]["config_sha256"] = hashlib.sha256(expected.encode()).hexdigest()
             manifest_path.write_text(json.dumps(manifest))
             fixture_module.LOAD.validate_and_publish_release(project, fixture.inputs, publish=True)
-            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
+            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air-link.json"
             apache.write_text("")
             dhcp.write_text("")
-            air.write_text('{"nodes": {}}')
+            # I-030 (问题文档): live monitor_once reads setup's AIR json link every cycle; here a relative
+            # link to a real file (the next test: a dangling link), never a patched regular file.
+            air.symlink_to("99-output-p2p/p2p-air.json")
+            (project / "99-output-p2p").mkdir(exist_ok=True)
+            (project / "99-output-p2p/p2p-air.json").write_text('{"nodes": {}}')
             args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"),
                                                "--apache-log", str(apache), "--dhcp-log", str(dhcp)])
             root = project / "99-output-ztp/configuration-methods"
@@ -620,10 +624,11 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             (project / "02-devices_config.csv").write_text(
                 "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,config_method\n"
                 "EXAMPLE-Leaf01,eth,oob,192.0.2.10,24,192.0.2.1,02:00:00:00:00:01,,,,,,ztp\n", encoding="utf-8")
-            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
+            apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air-link.json"
             apache.write_text("")
             dhcp.write_text("")
-            air.write_text('{"nodes": {}}')
+            # I-030 (问题文档): a project without AIR leaves setup's AIR json link dangling; skipped.
+            air.symlink_to("99-output-p2p/p2p-air.json")
             args = monitor.parser().parse_args([str(project), "--output-dir", str(project / "reports"),
                                                "--apache-log", str(apache), "--dhcp-log", str(dhcp)])
             # Actual collector/decoder, not a synthetic positive trusted flag.
@@ -962,7 +967,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             project = Path(directory).resolve()
             devices, receipt, produced, _summary = self.worker_bundle(project)
             original = receipt.read_bytes()
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 self.assertEqual(produced, self.accept_own_writer())
                 # JSON whitespace does not alter its journal digest, so only
                 # the raw-file versioned bound can reject this input.
@@ -990,7 +995,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             self.assertEqual(produced, self.manual.config_sync_authority.decode_receipt(
                 self.manual.config_sync_authority.wire(produced),
             ))
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 self.assertEqual(produced, self.accept_own_writer())
             self.assertEqual(produced, json.loads(receipt.read_text()))
 
@@ -1127,7 +1132,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                              "effective_operation": "replace-config", "generation": 1}],
                 "results": [produced],
             })
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 imported = self.worker.latest_cli_operations()["example-leaf01"]
             self.assertEqual(produced["finished_at"], imported["finished_at"])
             self.assertTrue(self.worker.config_sync_promotion_ready(imported))
@@ -1263,7 +1268,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 root = receipt.parents[2]
                 before = receipt.read_bytes()
                 authority = self.manual.config_sync_authority
-                with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                     self.assertEqual(produced, self.accept_own_writer())
                     if transition == "revoke":
                         authority.revoke(root, "EXAMPLE-Leaf01")
@@ -1282,7 +1287,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
             project = Path(directory).resolve()
             devices, receipt, produced, summary = self.worker_bundle(project)
             summary_path = receipt.parent.parent / "summary.json"
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 self.assertEqual(produced, self.accept_own_writer())
                 for field, value in (("generation", None), ("generation", True),
                                      ("generation", 1.0), ("generation", 2),
@@ -1323,7 +1328,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                         receipt.parents[2], "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
                     )
                 return value
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices), \
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent), \
                     mock.patch.object(self.worker, "_read_new_config_sync_receipt", side_effect=next_era_after_summary):
                 self.assertEqual({}, self.accept_own_writer())
             self.assertTrue(changed)
@@ -1354,7 +1359,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
                 "results": [current],
             })
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 imported = self.worker.latest_cli_operations()["example-leaf01"]
                 self.assertEqual(("op-2", "trigger-2", 2, current["source_identity"]), (
                     imported["operation_id"], imported["trigger_id"], imported.get("generation"),
@@ -1373,7 +1378,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 devices, receipt, produced, summary = self.worker_bundle(project)
                 root = receipt.parents[2]
                 before = receipt.read_bytes()
-                with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+                with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                     self.assertTrue(self.worker.config_sync_promotion_ready(
                         self.worker.latest_cli_operations()["example-leaf01"],
                     ))
@@ -1410,7 +1415,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 "targets": [{**summary["targets"][0], "generation": 2, "trigger_id": "trigger-2"}],
                 "results": [],
             })
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 value = self.worker.latest_cli_operations()["example-leaf01"]
             self.assertEqual(("op-2", "trigger-2", 2, "running"), (
                 value["operation_id"], value["trigger_id"], value.get("generation"), value["state"],
@@ -1443,7 +1448,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                     receipt.parents[2], "EXAMPLE-Leaf01", "op-2", "trigger-2", "manual_config_sync_cli",
                 )
                 return value
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices), \
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent), \
                     mock.patch.object(self.worker, "accepted_result", side_effect=advance_after_acceptance):
                 self.assertEqual({}, self.worker.latest_cli_operations())
 
@@ -1461,7 +1466,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                 "results": [],
             }
             path = root / "pending/summary.json"
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 for defect in ("operation", "effective_operation", "target-effective"):
                     with self.subTest(defect=defect):
                         mutant = {**pending, defect: "ztp"} if defect != "target-effective" else {
@@ -1478,8 +1483,12 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
         if not queue.exists():
             queue.write_text("{}\n", encoding="utf-8")
         with ExitStack() as stack:
+            # R-016 §6: the worker resolves the request's project once; this fixture's project
+            stack.enter_context(mock.patch.object(
+                self.worker, "active_project", return_value=devices.resolve().parent,
+            ))
             for name, path in (
-                ("DEVICES_CSV", devices), ("STATUS_DIR", status_dir),
+                ("STATUS_DIR", status_dir),
                 ("STATUS_FILE", status_dir / "status.json"),
                 ("REQUEST_FILE", queue), ("PID_FILE", status_dir / "own.pid"),
                 ("ZTP_STATUS_DIR", project / "isolated-ztp-status"),
@@ -1726,7 +1735,7 @@ class ConfigSyncAuthorityWorkflowTests(unittest.TestCase):
                     operation="replace-config", trigger_source="manual_config_sync_cli",
                 )
 
-            with mock.patch.object(self.worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.worker, "active_project", return_value=devices.resolve().parent):
                 self.manual.atomic_json(summary_path, summary)
                 self.assertEqual(produced, accept())
                 other_target = {"hostname": "OTHER-Leaf02", "trigger_id": "other-trigger", "effective_operation": "replace-config", "generation": 1}

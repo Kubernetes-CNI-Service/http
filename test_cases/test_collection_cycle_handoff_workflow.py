@@ -1175,7 +1175,9 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
             (area / name).write_text(
                 "hostname,type,eth0_ip\n" + row, encoding="utf-8",
             )
-            (area / "mgmt-server.pub").write_text(
+            # owner 2026-11-04 (R-016 §5.2): cron.sh reads <type>/publickey/mgmt-server.pub
+            (area.parent / "publickey").mkdir()
+            (area.parent / "publickey/mgmt-server.pub").write_text(
                 "ssh-ed25519 AAAATEST workflow-fixture\n", encoding="utf-8",
             )
         for area in (infiniband, nvlink):

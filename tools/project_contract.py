@@ -1495,31 +1495,40 @@ SETUP_COLLECTION_LINKS = {
 def setup_collection_link_hop(root: str | os.PathLike[str], path: str | os.PathLike[str]) -> bool:
     """Whether evidence readers may walk ``path``: one of setup's collection output links.
 
-    cron.sh writes its archives below <network>/monitor/<output>, which setup links to
-    ../../DAY0-Prepare/<project>/99-output-monitor/<network>/<output>. Only that exact link text,
-    reaching a real directory without another symlink, is walkable; the evidence bytes stay bound
-    by sha256 (R0, 2026-10-23: without this every worker slot failed v2 publication on a real
-    management server).
+    cron.sh writes its archives below <network>/monitor/<output>, which setup links through the pointer
+    (R-016 §2) to ../../DAY0-Prepare/activate-project/99-output-monitor/<network>/<output>.  Only that
+    exact link text is walkable, and only into the project the pointer selects (R-016 §5.2: resolve the
+    pointer first, then check the real project directory): DAY0-Prepare, the project and every directory
+    down to <output> must be real.  The evidence bytes stay bound by sha256 (R0, 2026-10-23: without this
+    every worker slot failed v2 publication on a real management server).
+
+    False for any other path or link text, and for a symlink on the way inside the project.  When the
+    link is setup's but cannot be walked -- no active project, an invalid pointer, or the output directory
+    missing in the active project -- ValueError names the reason (v3.1.1 WP-9: a dangling link used to be
+    reported as "traverses a symlink").
     """
     root, path = Path(root), Path(path)
     try:
         relative = path.relative_to(root).as_posix()
     except ValueError:
         return False
-    names = SETUP_COLLECTION_LINKS.get(relative)
-    if names is None or not path.is_symlink():
+    if relative not in SETUP_COLLECTION_LINKS or not path.is_symlink():
         return False
-    network, output = names
-    parts = PurePosixPath(os.readlink(path)).parts
-    if (len(parts) != 7 or parts[:3] != ("..", "..", "DAY0-Prepare")
-            or parts[4:] != ("99-output-monitor", network, output)
-            or parts[3] in {"", ".", ".."} or "/" in parts[3]):
+    target = _SETUP_LINK_ROWS[relative].target
+    if os.readlink(path) != pointer_link_target(relative, target):
         return False
+    project = active_project_dir(root)
+    if project is None:
+        raise ValueError(f"collection output link {relative}: no active project "
+                         f"({ACTIVE_PROJECT_POINTER} is missing)")
     current = root
-    for part in parts[2:]:
+    for part in ("DAY0-Prepare", project.name, *PurePosixPath(target).parts):
         current = current / part
-        if current.is_symlink() or not current.is_dir():
+        if current.is_symlink():
             return False
+        if not current.is_dir():
+            raise ValueError(f"collection output link {relative} is dangling: "
+                             f"{current.relative_to(root).as_posix()} is not a directory")
     return True
 
 

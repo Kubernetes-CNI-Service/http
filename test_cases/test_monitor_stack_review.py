@@ -28,6 +28,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from tools.project_contract import pointer_link_target
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -1289,17 +1291,17 @@ class MonitorEvidenceAndModeContractTests(unittest.TestCase):
                 "hostname,type,template\nEXAMPLE-Leaf01,eth,oob-leaf\n",
                 encoding="utf-8",
             )
+        # R-016 §2: setup's pointer layout; the two monitor links go through the pointer.
+        (day0 / "activate-project").symlink_to(active.name)
         ztp = root / "ztp"
         runtime = ztp / "config/isc-dhcp-server"
         runtime.mkdir(parents=True)
         inventory = runtime / "02-devices_config.csv"
-        inventory.symlink_to(os.path.relpath(
-            active / "02-devices_config.csv", inventory.parent,
+        inventory.symlink_to(pointer_link_target(
+            "ztp/config/isc-dhcp-server/02-devices_config.csv", "02-devices_config.csv",
         ))
         status_link = ztp / "status"
-        status_link.symlink_to(os.path.relpath(
-            active / "99-output-ztp", status_link.parent,
-        ))
+        status_link.symlink_to(pointer_link_target("ztp/status", "99-output-ztp"))
         manifest = ztp / ".setup_manifest"
         manifest.write_text(
             f"# setup manifest — proj: {active.resolve()}\n"
@@ -5992,7 +5994,8 @@ print('{{"factory_records_active":true,"valid":true}}')
                 ["replace-config"], 0, stdout="accepted\n", stderr="",
             )
             with mock.patch.object(
-                self.manual_worker, "DEVICES_CSV", devices,
+                self.manual_worker, "active_project",
+                return_value=devices.resolve().parent,
             ), mock.patch.object(
                 self.manual_worker, "write_device_status", side_effect=record,
             ), mock.patch.object(
@@ -6028,7 +6031,8 @@ print('{{"factory_records_active":true,"valid":true}}')
             }), encoding="utf-8")
             writes.clear()
             with mock.patch.object(
-                self.manual_worker, "DEVICES_CSV", devices,
+                self.manual_worker, "active_project",
+                return_value=devices.resolve().parent,
             ), mock.patch.object(
                 self.manual_worker, "write_device_status", side_effect=record,
             ), mock.patch.object(
@@ -6087,7 +6091,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                     trigger_source="manual_config_sync_web",
                 )
 
-            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.manual_worker, "active_project", return_value=devices.resolve().parent):
                 receipt.write_text(json.dumps(expected), encoding="utf-8")
                 write_summary(receipt.parent.parent / "summary.json", expected)
                 self.assertEqual(expected, read())
@@ -6151,7 +6155,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                     trigger_source="manual_config_sync_web",
                 )
 
-            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.manual_worker, "active_project", return_value=devices.resolve().parent):
                 self.assertEqual({}, read(), "result alone is not CLI completion")
                 for variant in (
                     {**final, "state": "running"},
@@ -6211,7 +6215,8 @@ print('{{"factory_records_active":true,"valid":true}}')
                     )
 
                 with mock.patch.object(
-                    self.manual_worker, "DEVICES_CSV", devices,
+                    self.manual_worker, "active_project",
+                    return_value=devices.resolve().parent,
                 ), mock.patch.object(
                     self.manual_worker, "write_device_status",
                     side_effect=lambda _host, state, **values: writes.append((state, values)),
@@ -6269,7 +6274,8 @@ print('{{"factory_records_active":true,"valid":true}}')
                 )
 
             with mock.patch.object(
-                self.manual_worker, "DEVICES_CSV", devices,
+                self.manual_worker, "active_project",
+                return_value=devices.resolve().parent,
             ), mock.patch.object(
                 self.manual_worker, "write_device_status",
                 side_effect=lambda _host, state, **values: writes.append((state, values)),
@@ -6415,7 +6421,8 @@ print('{{"factory_records_active":true,"valid":true}}')
                 writes.append((state, values))
 
             with mock.patch.object(
-                self.manual_worker, "DEVICES_CSV", devices,
+                self.manual_worker, "active_project",
+                return_value=devices.resolve().parent,
             ), mock.patch.object(
                 self.manual_worker, "write_device_status", side_effect=record,
             ), mock.patch.object(
@@ -6541,7 +6548,8 @@ print('{{"factory_records_active":true,"valid":true}}')
                 return subprocess.CompletedProcess(actual_command, result, "", "")
 
             with mock.patch.object(
-                self.manual_worker, "DEVICES_CSV", devices,
+                self.manual_worker, "active_project",
+                return_value=devices.resolve().parent,
             ), mock.patch.object(
                 self.manual_worker, "write_device_status",
                 side_effect=lambda _host, state, **values: writes.append((state, values)),
@@ -6577,7 +6585,7 @@ print('{{"factory_records_active":true,"valid":true}}')
 
             preview = run_cli(preview_command)
             self.assertEqual(0, preview.returncode)
-            with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+            with mock.patch.object(self.manual_worker, "active_project", return_value=devices.resolve().parent):
                 self.assertEqual({}, self.manual_worker.accepted_result(
                     "req-5-preview-trigger", hostname="EXAMPLE-Leaf01",
                     operation_id="req-5-preview-operation",
@@ -6618,7 +6626,7 @@ print('{{"factory_records_active":true,"valid":true}}')
                     receipt.parent.mkdir(parents=True)
                     receipt.write_text(json.dumps(result), encoding="utf-8")
                     self.assertFalse((receipt.parent.parent / "summary.json").exists())
-                    with mock.patch.object(self.manual_worker, "DEVICES_CSV", devices):
+                    with mock.patch.object(self.manual_worker, "active_project", return_value=devices.resolve().parent):
                         self.assertEqual(result, self.manual_worker.accepted_result(
                             result["trigger_id"], hostname="EXAMPLE-Leaf01",
                             operation_id="legacy-operation", operation=operation,
@@ -7906,11 +7914,13 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
             monitor = root / "monitor"
             tools = root / "tools"
             ethernet = root / "ethernet/monitor"
-            project = root / "project"
+            # R-016 §2, §6: the worker's cycle project is the one DAY0-Prepare/activate-project selects.
+            project = root / "DAY0-Prepare/project"
             monitor.mkdir(parents=True)
             tools.mkdir()
             ethernet.mkdir(parents=True)
-            project.mkdir()
+            project.mkdir(parents=True)
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
             shutil.copy2(
                 ROOT / "monitor/switch-collection-worker.py",
                 monitor / "switch-collection-worker.py",
@@ -7927,7 +7937,9 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
             shutil.copy2(ROOT / "tools/log_rotation.py", tools / "log_rotation.py")
             inventory = project / "02-devices_config.csv"
             inventory.write_text("hostname,type\n", encoding="utf-8")
-            (monitor / "02-devices_config.csv").symlink_to(inventory)
+            (monitor / "02-devices_config.csv").symlink_to(pointer_link_target(
+                "monitor/02-devices_config.csv", "02-devices_config.csv",
+            ))
             (monitor / "generate-monitor-html.py").write_text(
                 "raise SystemExit(0)\n", encoding="utf-8",
             )

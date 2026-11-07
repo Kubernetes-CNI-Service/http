@@ -33,6 +33,7 @@ from switch_collection_gate import (
     CollectionGate,
     CollectionGateCancelled,
     CollectionGateError,
+    NoActiveProjectError,
     active_project_identity,
     collection_keys_for_scope,
     project_inventory_targets,
@@ -56,6 +57,8 @@ from project_contract import (
     COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES,
     YAML_BACKUP_FAILED_DEVICE_OPERATIONS,
     _validate_collection_cycle_legacy_result,
+    active_project_dir,
+    pointer_link_target,
     setup_collection_link_hop,
     build_collection_cycle_identity,
     canonical_collection_cycle_json,
@@ -2334,26 +2337,28 @@ def _collection_activity_link_identity(path: Path) -> tuple:
 
 
 def _collection_activity_selected_workbook(fixed: Path) -> tuple[Path, str, tuple]:
-    """Resolve the exact two links installed by setup, inside one project."""
+    """Resolve setup's P2P link through the pointer, then the project's own selection link.
+
+    R-016 §5.2: the tree link must be setup's exact text through DAY0-Prepare/activate-project; the
+    pointer is resolved once (active_project_dir) and the original checks run on the real project
+    directory.  The pointer's own link identity is bound with the two links, so a project switch
+    during the snapshot is detected like a retargeted link.
+    """
     outer = _collection_activity_link_identity(fixed)
-    if not outer[1] or os.path.isabs(outer[1]):
-        raise ValueError("activity P2P selection must be relative")
-    # Resolve the containing directory first: macOS exposes /var through
-    # /private/var, so lexical /var and canonical /private/var must not diverge.
-    canonical = Path(os.path.abspath(os.path.join(
-        fixed.parent.resolve(strict=True), outer[1],
-    )))
-    project_root = HTTP_ROOT.resolve(strict=True) / "DAY0-Prepare"
-    try:
-        relative = canonical.relative_to(project_root)
-    except ValueError as exc:
-        raise ValueError("activity P2P selection escapes project root") from exc
-    if len(relative.parts) != 2 or relative.parts[1] != "p2p.xlsx":
-        raise ValueError("activity P2P selection is not project/p2p.xlsx")
-    for directory in (project_root, canonical.parent):
+    if outer[1] != pointer_link_target(fixed.relative_to(HTTP_ROOT).as_posix(), "p2p.xlsx"):
+        raise ValueError("activity P2P selection is not setup's link through activate-project")
+    project = active_project_dir(HTTP_ROOT)
+    if project is None:
+        raise ValueError("activity P2P selection has no active project")
+    pointer = HTTP_ROOT / "DAY0-Prepare/activate-project"
+    pointed = _collection_activity_link_identity(pointer)
+    if pointed[1] != project.name:
+        raise ValueError("activity P2P selection changed during snapshot")
+    for directory in (HTTP_ROOT / "DAY0-Prepare", project):
         metadata = directory.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("activity P2P project directory is not real")
+    canonical = project / "p2p.xlsx"
     inner = _collection_activity_link_identity(canonical)
     target_name = inner[1]
     if not target_name or target_name in {".", "..", "p2p.xlsx"} \
@@ -2364,15 +2369,19 @@ def _collection_activity_selected_workbook(fixed: Path) -> tuple[Path, str, tupl
     metadata = selected.lstat()
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise ValueError("activity P2P selected workbook is not one regular file")
-    return selected, selected.stem, (fixed, outer, canonical, inner,
+    return selected, selected.stem, ((fixed, outer), (pointer, pointed), (canonical, inner),
                                      _collection_activity_file_identity(metadata))
 
 
 def _collection_activity_verify_selection(selection: tuple, digest: str) -> None:
-    fixed, outer, canonical, inner, initial_target = selection
-    if (_collection_activity_link_identity(fixed) != outer
-            or _collection_activity_link_identity(canonical) != inner):
+    *links, initial_target = selection
+
+    def links_unchanged() -> bool:
+        return all(_collection_activity_link_identity(path) == identity for path, identity in links)
+
+    if not links_unchanged():
         raise ValueError("activity P2P selection changed during snapshot")
+    canonical, inner = links[-1]
     target = canonical.parent / inner[1]
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(target, flags)
@@ -2398,8 +2407,7 @@ def _collection_activity_verify_selection(selection: tuple, digest: str) -> None
             raise ValueError("activity P2P selected workbook changed during snapshot")
     finally:
         os.close(descriptor)
-    if (_collection_activity_link_identity(fixed) != outer
-            or _collection_activity_link_identity(canonical) != inner):
+    if not links_unchanged():
         raise ValueError("activity P2P selection changed during snapshot")
 
 
@@ -2525,9 +2533,15 @@ def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
     frozen_lease = freeze(lease_source, ".leases")
     hashes = {"leases": hashlib.sha256(frozen_lease.read_bytes()).hexdigest()}
     if slot == "ethernet/air":
-        air_source = HTTP_ROOT / "ztp/config/isc-dhcp-server/p2p-air.json"
+        # I-030: setup's AIR json link is resolved to its real file first, and that file is read
+        # without following links; a project without an AIR json (absent or dangling link, R-016
+        # §3.4 optional) leaves this slot unavailable, as before.
+        try:
+            air_source = (HTTP_ROOT / "ztp/config/isc-dhcp-server/p2p-air.json").resolve(strict=True)
+        except FileNotFoundError:
+            return unavailable()
         helper = HTTP_ROOT / "ztp/dynamic_air_inventory.py"
-        if air_source.is_symlink() or helper.is_symlink():
+        if helper.is_symlink():
             raise ValueError("AIR resolver input or helper is unsafe")
         if not air_source.is_file() or not helper.is_file():
             return unavailable()
@@ -3154,6 +3168,13 @@ def run_yaml_backup(password: str, scope: str, timeout: int, lock_wait: int) -> 
     except CollectionGateCancelled:
         write_yaml_backup_status("idle", scope=scope, stopped_at=timestamp())
         return False
+    except NoActiveProjectError as exc:
+        # R-016 §6: no DAY0-Prepare/activate-project, no project: skip this cycle.
+        write_yaml_backup_status(
+            "skipped", scope=scope, started_at=started_at,
+            finished_at=timestamp(), reason=str(exc),
+        )
+        return False
     except (CollectionGateError, OSError, ValueError) as exc:
         write_yaml_backup_status(
             "failed", scope=scope, started_at=started_at,
@@ -3394,6 +3415,10 @@ def run_continuous_collection_cycle(
         interval_minutes = interval_seconds // 60
     try:
         wait = continuous_cooldown_wait(scope, COLLECTION_LANE)
+    except NoActiveProjectError as exc:
+        # R-016 §6: no project this cycle; keep the schedule and wait one interval.
+        wait = {"remaining_seconds": interval_seconds, "wait_reason": str(exc),
+                "next_allowed_at": ""}
     except CollectionGateError as exc:
         stop_continuous_collection_mode("cooldown gate failed")
         write_continuous_status(
@@ -3456,6 +3481,10 @@ def run_continuous_backup_cycle(
         interval_minutes = interval_seconds // 60
     try:
         wait = continuous_cooldown_wait(scope, BACKUP_LANE)
+    except NoActiveProjectError as exc:
+        # R-016 §6: no project this cycle; keep the schedule and wait one interval.
+        wait = {"remaining_seconds": interval_seconds, "wait_reason": str(exc),
+                "next_allowed_at": ""}
     except CollectionGateError as exc:
         stop_continuous_backup_mode("cooldown gate failed")
         write_continuous_backup_status(
@@ -3646,6 +3675,13 @@ def collect(scope: str, timeout: int, lock_wait: int) -> bool:
     except CollectionGateCancelled:
         write_status(
             "idle", scope=scope, stopped_at=timestamp(), stopped_pids=[],
+        )
+        return False
+    except NoActiveProjectError as exc:
+        # R-016 §6: no DAY0-Prepare/activate-project, no project: skip this cycle.
+        write_status(
+            "skipped", scope=scope, started_at=started_at,
+            finished_at=timestamp(), reason=str(exc),
         )
         return False
     except (CollectionGateError, CollectionCycleHoldError) as exc:

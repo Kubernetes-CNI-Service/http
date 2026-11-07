@@ -47,6 +47,7 @@ from project_contract import (
     service_url,
     validate_service_endpoint,
     validate_ztp_url_prefix,
+    active_project_dir,
 )
 from deployment_lock import (
     DeploymentLockError,
@@ -65,7 +66,6 @@ from ztp.nvue_normalizer import (
 from ztp import config_sync_authority
 
 DAY0_ROOT = HTTP_ROOT / "DAY0-Prepare"
-STATUS_LINK = HTTP_ROOT / "ztp/status"
 DEPLOYMENT_LOCK = HTTP_ROOT / ".deployment.lock"
 DHCP_RELEASE_MANIFEST = (
     HTTP_ROOT / "ztp/config/isc-dhcp-server/dhcp-release-manifest.json"
@@ -320,13 +320,17 @@ def resolve_project(value: str | None) -> Path:
             candidate = DAY0_ROOT / candidate
         candidate = candidate.resolve()
     else:
+        # R-016 §5.1: the project DAY0-Prepare/activate-project selects, resolved once for this run.
         try:
-            output = STATUS_LINK.resolve(strict=True)
-        except OSError as exc:
+            candidate = active_project_dir(HTTP_ROOT)
+        except ValueError as exc:  # project_contract.ActiveProjectPointerError
             raise ManualZtpError(
-                "无法识别当前项目；请先运行 setup 或使用 -p/--project"
+                f"无法识别当前项目：{exc}；请重新运行 setup 或使用 -p/--project"
             ) from exc
-        candidate = output.parent if output.name == "99-output-ztp" else output
+        if candidate is None:
+            raise ManualZtpError(
+                "没有激活的项目（DAY0-Prepare/activate-project 不存在）；请先运行 setup 或使用 -p/--project"
+            )
     if not (candidate / "02-devices_config.csv").is_file():
         raise ManualZtpError(f"项目缺少 02-devices_config.csv: {candidate}")
     if not (candidate / "02-dhcp-subnet_config.csv").is_file():
@@ -501,7 +505,11 @@ def read_devices(
         if transition_ips:
             row["dynamic_lease_ips"] = list(dict.fromkeys(transition_ips))
 
-    for runtime in dynamic_air_devices(csv_path.resolve(), leases=dhcp_leases):
+    # The AIR json sits in the project beside its inventory name: csv_path is <project>/02-devices_config.csv
+    # of the project resolve_project() selected (the pointer, R-016 §5.1), never resolved first -- the
+    # inventory may be a user link to a file outside the project (R-014 第 3 条; v3.1.1 WP-9, WP-9c P4).
+    # dynamic_air_inventory.find_air_json accepts only the fixed 99-output-p2p/p2p-air.json (I-031).
+    for runtime in dynamic_air_devices(csv_path, leases=dhcp_leases):
         ip = str(runtime.get("ip") or "").strip()
         rows.append({
             "hostname": runtime["hostname"],

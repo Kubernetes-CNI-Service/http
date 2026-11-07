@@ -11,12 +11,19 @@ import math
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import time
 from typing import Callable, Optional
 
 
 HTTP_ROOT = Path(__file__).resolve().parent.parent
+# active_project_identity imports project_contract when it runs: the worker imports this gate before it
+# puts tools/ first and then imports its own interval authorities from project_contract (its import order
+# and its fail-closed import errors are pinned).  Appended, never prepended, so nothing in tools/ may
+# shadow a name here.
+if str(HTTP_ROOT / "tools") not in sys.path:
+    sys.path.append(str(HTTP_ROOT / "tools"))
 DEFAULT_STATUS_DIR = HTTP_ROOT / "monitor/status"
 COOLDOWN_SECONDS = 10 * 60
 YAML_BACKUP_COLLECTION_KEY = "yaml-backup"
@@ -45,6 +52,10 @@ class CollectionGateCancelled(CollectionGateError):
     """A caller cancelled while waiting for the shared gate."""
 
 
+class NoActiveProjectError(CollectionGateError):
+    """DAY0-Prepare/activate-project does not exist: there is no project to collect for (R-016 §6)."""
+
+
 @dataclass(frozen=True)
 class GateDecision:
     allowed: bool
@@ -55,17 +66,22 @@ class GateDecision:
 
 
 def active_project_identity(http_root: Path = HTTP_ROOT) -> str:
-    """Resolve the active project from the setup-managed inventory link."""
-    inventory = http_root / "monitor/02-devices_config.csv"
+    """The real directory of the project DAY0-Prepare/activate-project selects (R-016 §5.1).
+
+    A collection cycle resolves it once, at its start, and keeps it for the whole cycle (R-016 §6).
+    No pointer raises NoActiveProjectError (the worker skips that cycle); an invalid pointer raises
+    CollectionGateError with the pointer's own reason.  The project is never inferred from where a
+    project file's link resolves: a project input may itself be a link elsewhere (R-014 第 3 条).
+    """
+    from project_contract import active_project_dir
+
     try:
-        resolved = inventory.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise CollectionGateError(
-            f"cannot resolve active project inventory: {inventory}: {exc}"
-        ) from exc
-    if not resolved.is_file():
-        raise CollectionGateError(f"active inventory is not a regular file: {resolved}")
-    return str(resolved.parent)
+        project = active_project_dir(http_root)
+    except ValueError as exc:  # project_contract.ActiveProjectPointerError
+        raise CollectionGateError(f"invalid active project pointer: {exc}") from exc
+    if project is None:
+        raise NoActiveProjectError("没有激活的项目")
+    return str(project)
 
 
 def _first_two_csv_fields(line: str) -> tuple[str, str]:

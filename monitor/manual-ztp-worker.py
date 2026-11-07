@@ -24,6 +24,7 @@ HTTP_ROOT = Path(__file__).resolve().parent.parent
 if str(HTTP_ROOT) not in sys.path:
     sys.path.insert(0, str(HTTP_ROOT))
 from ztp import config_sync_authority
+from tools.project_contract import active_project_dir
 
 STATUS_DIR = HTTP_ROOT / "monitor/status"
 REQUEST_FILE = STATUS_DIR / "manual-ztp.request.json"
@@ -32,7 +33,6 @@ PID_FILE = STATUS_DIR / "manual-ztp.pid"
 MANUAL_SCRIPT = HTTP_ROOT / "ztp/manual-ztp.py"
 RESET_SCRIPT = HTTP_ROOT / "ztp/manual-reset.py"
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp/status"
-DEVICES_CSV = HTTP_ROOT / "monitor/02-devices_config.csv"
 SAFE_HOSTNAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$")
 BUSY_STATES = {"queued", "running", "ztp_running"}
 PREVIEW_STATES = {
@@ -55,6 +55,19 @@ CONFIG_SYNC_PROOF_FIELDS = (
     "batch_identity_verified_at", "finished_at", "live_state_sha256",
     "transport_ip", "interface", "generation", "source_identity",
 )
+
+
+def active_project():
+    """The project one request reads: DAY0-Prepare/activate-project, resolved once (R-016 §5.1, §6).
+
+    None without a valid pointer: no active project, so no manual result can be found (as a
+    dangling setup link answered before).  Never inferred from where a project file's link
+    resolves (a project input may be a link elsewhere, R-014 第 3 条).
+    """
+    try:
+        return active_project_dir(HTTP_ROOT)
+    except ValueError:  # project_contract.ActiveProjectPointerError
+        return None
 
 
 def timestamp():
@@ -593,9 +606,8 @@ def latest_device_state(hostname):
 
 def latest_cli_operations():
     """Import current config eras; retain legacy ZTP/reset time ordering."""
-    try:
-        project = DEVICES_CSV.resolve(strict=True).parent
-    except OSError:
+    project = active_project()
+    if project is None:
         return {}
     operations = {}
     config_authorities = {}
@@ -768,14 +780,16 @@ def _current_config_sync_authority(project, hostname):
 
 def accepted_result(
     trigger_id, *, hostname="", operation_id="", operation="", trigger_source="",
-    exclude_paths=(), exclude_inodes=(),
+    exclude_paths=(), exclude_inodes=(), project=None,
 ):
-    """Find one matching web/CLI result outside the pre-launch path snapshot."""
+    """Find one matching web/CLI result outside the pre-launch path snapshot.
+
+    ``project`` is the request's project, resolved once when the request started (R-016 §6).
+    """
     if not trigger_id:
         return {}
-    try:
-        project = DEVICES_CSV.resolve(strict=True).parent
-    except OSError:
+    project = active_project() if project is None else project
+    if project is None:
         return {}
     if operation == "replace-config":
         if not (
@@ -909,9 +923,8 @@ def preview_result(operation_id, trigger_id, hostname):
     """Return exact preflight evidence for one completed preview request."""
     if not operation_id or not trigger_id:
         return {}
-    try:
-        project = DEVICES_CSV.resolve(strict=True).parent
-    except OSError:
+    project = active_project()
+    if project is None:
         return {}
     candidates = []
     for directory in ("manual-trigger", "manual-reset", "manual-config-sync"):
@@ -1128,7 +1141,9 @@ def reconcile_config_sync_authority(scope, active_hostnames=()):
                 and all(current.get(field) == receipt.get(field) for field in CONFIG_SYNC_PROOF_FIELDS)):
             continue
         try:
-            project = DEVICES_CSV.resolve(strict=True).parent
+            project = active_project()
+            if project is None:
+                raise OSError("no active project (DAY0-Prepare/activate-project)")
             authority = _current_config_sync_authority(project, hostname)
             if (authority and type(current.get("generation")) is int
                     and current["generation"] == authority["generation"]
@@ -1429,6 +1444,7 @@ def execute(
 ):
     requested_operation = requested_operation or operation
     started = timestamp()
+    project = active_project()  # R-016 §6: one project for this whole request
     baseline_state = latest_device_state(hostname)
     config_sync = operation == "replace-config"
     baseline_round = 0 if operation == "reset" else int((baseline_state or {}).get("ztp_round") or 0)
@@ -1458,20 +1474,15 @@ def execute(
     )
     previous_receipt_paths = frozenset()
     previous_receipt_inodes = frozenset()
-    if config_sync:
-        try:
-            project = DEVICES_CSV.resolve(strict=True).parent
-        except OSError:
-            pass
-        else:
-            receipt_root = project / "99-output-ztp" / "manual-config-sync"
-            previous_receipt_paths = frozenset(receipt_root.glob("*/*/result.json"))
-            previous_receipt_inodes = frozenset(
-                identity for path in (
-                    *previous_receipt_paths, *receipt_root.glob("*/summary.json")
-                )
-                if (identity := _config_sync_file_identity(path)) is not None
+    if config_sync and project is not None:
+        receipt_root = project / "99-output-ztp" / "manual-config-sync"
+        previous_receipt_paths = frozenset(receipt_root.glob("*/*/result.json"))
+        previous_receipt_inodes = frozenset(
+            identity for path in (
+                *previous_receipt_paths, *receipt_root.glob("*/summary.json")
             )
+            if (identity := _config_sync_file_identity(path)) is not None
+        )
     print(f"[{timestamp()}] [RUN] {' '.join(command)}", flush=True)
     try:
         result = subprocess.run(
@@ -1516,8 +1527,8 @@ def execute(
             trigger_id, hostname=hostname, operation_id=operation_id,
             operation=operation, trigger_source=trigger_source,
             exclude_paths=previous_receipt_paths,
-            exclude_inodes=previous_receipt_inodes,
-        ) if config_sync else accepted_result(trigger_id)
+            exclude_inodes=previous_receipt_inodes, project=project,
+        ) if config_sync else accepted_result(trigger_id, project=project)
     )
     if not accepted or accepted.get("state") != "triggered":
         detail = (

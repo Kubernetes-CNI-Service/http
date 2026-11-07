@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from test_cases import test_collection_cycle_handoff_workflow as handoff_workflow
+from tools.project_contract import pointer_link_target
 from test_cases.test_collection_cycle_worker_contract import WORKER
 from monitor.issue_tracker_cycle_source import read_completed_cycle_evidence
 from monitor.issue_tracker_activity_source import validate_eth_cycle_binding
@@ -100,8 +101,10 @@ class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
             selected = project / "selected-fabric.xlsx"
             selected.write_bytes(b"literal selected P2P source bytes")
             (project / "p2p.xlsx").symlink_to(selected.name)
+            # R-016 §2: the pointer layout; setup's P2P link goes through activate-project.
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
             (p2p / "p2p.xlsx").symlink_to(
-                os.path.relpath(project / "p2p.xlsx", p2p),
+                pointer_link_target("ztp/config/cumulus/template/P2P/p2p.xlsx", "p2p.xlsx"),
             )
             (p2p / "01-inventory.log").write_bytes(b"[Eth-SW]\nleaf-*\n")
             topology_rules = root / "ztp/config/topology_rules.py"

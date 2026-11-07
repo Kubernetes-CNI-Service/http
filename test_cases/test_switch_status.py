@@ -474,23 +474,29 @@ class IsolationTest(SwitchStatusCase):
         self.assertEqual(sorted(path.name for path in directory.iterdir()), ["eth-switch-status.json"],
                          "no temporary file is left behind")
 
-    def test_the_project_is_found_through_setups_monitor_link(self):
-        # a published tree: the script beside the real page parser, and setup's monitor/01-global.yaml link
-        tree = Path(self.tmp.name) / "http"
+    def test_the_project_is_found_through_the_activate_project_pointer(self):
+        # A published tree around the fixture project (DAY0-Prepare/site): the script beside the real page
+        # parser and project_contract.  R-016 §5.1, §5.2 (v3.1.1 WP-9, O4 左列: R-016): without --project-dir
+        # the project is the one DAY0-Prepare/activate-project selects, not where monitor/01-global.yaml resolves.
+        tree = Path(self.tmp.name)
         (tree / "monitor/issue-tracker").mkdir(parents=True)
         (tree / "monitor/issue-tracker/switch-status.py").write_bytes(SCRIPT.read_bytes())
         (tree / "monitor/generate-monitor-html.py").symlink_to(ROOT / "monitor/generate-monitor-html.py")
-        (tree / "monitor/01-global.yaml").symlink_to(self.project / "01-global.yaml")
+        (tree / "tools").mkdir()
+        (tree / "tools/project_contract.py").symlink_to(ROOT / "tools/project_contract.py")
+        pointer = tree / "DAY0-Prepare/activate-project"
+        pointer.symlink_to(self.project.name)
         archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01", health="Not OK")})
         result = subprocess.run([sys.executable, "-B", str(tree / "monitor/issue-tracker/switch-status.py"),
                                  "--type", "eth", "--archive", str(archive)],
                                 capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("leaf-oob-01", {row["Host Name"] for row in self.document("eth")["rows"]})
-        (tree / "monitor/01-global.yaml").unlink()
+        pointer.unlink()
         result = subprocess.run([sys.executable, "-B", str(tree / "monitor/issue-tracker/switch-status.py"),
                                  "--type", "eth"], capture_output=True, text=True, timeout=120)
-        self.assertEqual(result.returncode, 2, "without setup's link and without --project-dir")
+        self.assertEqual(result.returncode, 2, "without the pointer and without --project-dir")
+        self.assertIn("no active project", result.stdout + result.stderr)
 
     def test_input_errors_exit_2_and_write_nothing(self):
         result = self.run_script("--type", "eth", "--archive", str(self.output / "ethernet/eth-info/none.tar.gz"))

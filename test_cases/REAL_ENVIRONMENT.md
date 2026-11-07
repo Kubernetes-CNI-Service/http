@@ -627,8 +627,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   `99-output-monitor/<type>`。
 - 在 InfiniBand/NVLink monitor 目录额外放置可解析、指向另一项目且带有效不同公钥的
   `eth.csv`/`ib.csv` 异类别名，并为进程设置指向该外部公钥的 `MGMT_PUBKEY_FILE`。Ethernet、
-  InfiniBand、NVLink 三个真实入口仍必须分别选择 `eth.csv`、`ib.csv`、`nvsw.csv`，并从各自最终
-  inventory 的项目目录读取公钥；不得按第一个存在文件扫描，也不得接受环境覆盖。
+  InfiniBand、NVLink 三个真实入口仍必须分别选择 `eth.csv`、`ib.csv`、`nvsw.csv`；公钥按 owner
+  2026-11-04（R-016 §5.2，v3.1.1 WP-9）只读各自的 `<类型>/publickey/mgmt-server.pub`（经
+  `DAY0-Prepare/activate-project` 的链接），不从 inventory 推导，也不得接受环境覆盖。
 - 删除任一 monitor CSV 别名并重新执行同一受支持 load，别名必须自动恢复；若上层网络 CSV 缺失或
   monitor 路径是普通文件，load 必须 fail closed 且不得覆盖该对象。上层链接指向其他项目时，缺少
   独立项目切换授权必须阻断；只有正式 load 明确确认目标后才能在同一事务内切换全部链接。清理只
@@ -1508,6 +1509,50 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   `.ztp-monitor.pid.lock` 只串行遵守协议的受支持 writer/remover；可绕过 advisory lock 的并发
   root 在保证边界外。每个场景恢复 VM 快照并确认无 Monitor、Supervisor child、临时 PID 或锁
   holder；锁文件本身按合同保留，不手工删除。
+
+## TC-REAL-ACTIVATE-PROJECT-003 — 采集 worker 与 ZTP monitor 跨项目切换，AIR 上单项目重复 load
+
+- 类型：real-environment。对应需求：R-016 详细设计 v1.1 §5.1、§6（Q3，owner 2026-11-03「好的」），
+  owner 2026-11-04「cron.sh 改读 `<类型>/publickey/mgmt-server.pub`」，问题文档 I-030；v3.1.1 WP-9a。
+- 自动化：`test_cases/test_activate_project_services_workflow.py`（worker 两个周期各用一个项目、monitor
+  在指针换走或消失时退出、各类读者、I-030 的链接与悬空夹具）、`test_activate_project_contract.py`
+  的 `WP9aServiceReaderTests`、`test_setup_collection_link_evidence_workflow.py`、
+  `test_collector_inventory_pubkey.py`；`SetupActivatesServicesWorkflowTests` 用真实 setup 切换后核对读者与
+  公钥。自动化只用合成目录、进程替身和 mock 的协调器，未在 systemd/AIR 下运行真实 worker、monitor 或 cron.sh。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 前置条件：
+  - 切换：一次性 Ubuntu 22.04 Native 管理 VM（不服务真实交换机），两个合成测试项目 P、Q 都能单独
+    load 成功；先对 P 正式 load，使 worker、monitor 由 load 启动。
+  - AIR：一次性 AIR 仿真与一台 Ubuntu 22.04 Native 管理服务器，只有一个项目 P（单项目服务器前提，
+    R-016 §5.1）；P 是 AIR 项目，`99-output-p2p/p2p-air.json` 存在。记录 `DAY0-Prepare/activate-project`
+    原文、`<类型>/publickey/mgmt-server.pub` 链接原文与指纹、worker 与 monitor 的 PID/starttime/argv。
+  - prod：只读核验，不在 prod 上做切换或重复 load。
+- 步骤：
+  1. 切换 VM：P 已 load，开启 10 分钟持续采集；在 worker 一个周期进行中执行 `01-a-setup.py Q --yes`
+     （只切指针，不 load，R16-16 会提示混用）；等下一个周期开始。再执行 `02-unsetup.py`（删除指针），
+     等再下一个周期。最后对 P 正式 load，恢复服务。
+  2. AIR：对 P 连续执行两次正式 load（同一项目重复 load）；每次 load 后触发一次页面采集，并让 monitor
+     至少跑两轮。
+  3. AIR：临时把项目的 `99-output-p2p/p2p-air.json`（固定名，I-031）改名，使树链接
+     `ztp/config/isc-dhcp-server/p2p-air.json` 悬空（模拟非 AIR 项目，I-030），
+     让 monitor 与 worker 的 `ethernet/air` 槽各跑一轮，然后改回。
+- 预期与证据：
+  - 步骤 1：切换前开始的周期，其 `monitor/status/collection-cycles/<project_key>` 与冷却状态都属于 P；
+    切换后的周期属于 Q。monitor 在下一轮开始前写一行「activate-project 已指向其他项目：Q；ZTP 监控退出，
+    由下一次 load 重新启动」并以 0 退出，Q 的 `99-output-ztp` 里没有它写的 watch state。unsetup 后
+    worker 状态为 `skipped`、`reason` 为「没有激活的项目」，持续采集保持启用并显示等待；monitor 记
+    「没有激活的项目」并退出。
+  - 步骤 2：两次 load 后指针原文不变（仍为 P），worker、monitor、cron.sh 读到的项目与管理公钥指纹都是 P 的；
+    monitor 不因重复 load 报 governed identity 漂移以外的错误；没有 `activate-project` 相关报错。
+  - 步骤 3：monitor 与 worker 都不报 `O_NOFOLLOW`/「unsafe」错误；AIR json 不存在时 monitor 跳过它，
+    worker 的 `ethernet/air` 槽只出 v1（`resolver_unavailable`）；改回后恢复 v2。
+  - 保存：脱敏的 worker/monitor 日志片段、`switch-collection.status.json`、`continuous-collection.status.json`、
+    watch state、指针与公钥链接原文、指纹（只记指纹，不存私钥或完整公钥）。
+- 故障注入与清理：切换只用 setup，删除只用 unsetup；不手工改指针或删除锁、PID、request 文件。结束后
+  对 P 正式 load，确认 worker、monitor 由 load 重新启动；切换 VM 与 AIR 都恢复快照。
+- 风险：切换那一刻正在运行、经树链接读文件的工具（cron.sh 等）结果不保证（R16-01），只验证 worker 与
+  monitor 的「一个周期一个项目」和「换项目就退出」；在服务真实交换机的服务器上切换会让发布内容混用两个
+  项目，因此只在一次性 VM 和一次性 AIR 环境执行。
 
 ## TC-REAL-P-DEPENDENCY-CAPSULE-001 — macOS 正式证明的同 UID 并发边界
 

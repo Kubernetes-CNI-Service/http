@@ -12952,6 +12952,16 @@ sudo python3 tools/deploy-upload-archive.py /tmp/&lt;archive&gt; --runtime nativ
           <code>max(300, 10 * max(watch, 5))</code>。Native load、Docker activation 与 Monitor cleanup
           通过持久 sibling <code>.ztp-monitor.pid.lock</code> 串行 PID 发布/删除；该 advisory lock
           只保护参与协议的官方 writer/remover，不声称阻止可绕过锁的并发 root。</p>
+        <p><strong>当前项目（activate-project）：</strong>采集 worker、持续 Monitor、手工 ZTP worker 和
+          <code>cron.sh</code> 都按 <code>DAY0-Prepare/activate-project</code> 认当前项目，不再从某个项目文件的
+          链接推导项目目录。worker 在每个周期开始时读一次指针，这个周期只用这一个项目；没有激活的项目时
+          跳过这个周期，状态写「没有激活的项目」（手工收集、YAML 备份为 <code>skipped</code>，持续收集或
+          备份保持启用、等一个间隔后再试）。持续 Monitor 每一轮先检查指针：指向别的项目或指针已不存在时，
+          记一行日志并退出，不再向 <code>ztp/status</code> 写任何内容，由下一次 load 重新启动。手工 ZTP
+          worker 在每个请求开始时读一次指针。<code>cron.sh</code> 读本网络的
+          <code>&lt;类型&gt;/publickey/mgmt-server.pub</code>（setup 经指针建的链接）作为管理服务器公钥。
+          AIR json（<code>ztp/config/isc-dhcp-server/p2p-air.json</code>）先解析成真实文件再读取，不是 AIR
+          项目、链接悬空时跳过。</p>
         <p><strong>操作命令</strong></p>
         <pre><code># 浏览器：Switch Status → 手工 Collect，或选择最小 10m 的持续收集
 # 浏览器：Yaml Backup，或选择最小 10m 的持续备份

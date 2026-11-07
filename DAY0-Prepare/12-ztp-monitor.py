@@ -57,7 +57,8 @@ from ztp_service_runtime import (  # noqa: E402
     write_monitor_pid_record_locked,
 )
 from project_contract import (resolve_device_config_method, safe_load_global_yaml,
-                              MacStringSafeLoader, GlobalSafeLoader)
+                              MacStringSafeLoader, GlobalSafeLoader,
+                              active_project_dir, pointer_link_target)
 from ztp.nvue_normalizer import deep_merge_nvue, normalize_nvue_selectors
 from ztp import config_sync_authority
 
@@ -5178,7 +5179,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     dhcp_enabled = dhcp_status == "enabled"
     previous_report = _previous_report(output_root)
     switch_timezone = project_timezone(project)
-    air_json = args.air_json if offline else ACTIVE_AIR_JSON
+    air_json = args.air_json if offline else active_air_json(ACTIVE_AIR_JSON)
     dhcp_leases = args.dhcp_leases if dhcp_enabled else None
     identity_devices = read_devices(
         project / "02-devices_config.csv",
@@ -6340,19 +6341,37 @@ def _file_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _require_exact_runtime_link(
-    link: Path, target: Path, *, label: str, target_directory: bool = False,
-) -> None:
-    """Require setup's direct relative link, rejecting equivalent detours."""
+def active_air_json(link: Path) -> Path | None:
+    """I-030: setup's AIR json link (ACTIVE_AIR_JSON) resolved to its real file; None when there is none.
+
+    The link is resolved first and the real file is then read without following links
+    (_read_bounded_regular_text); a missing or dangling link is a project without an AIR json
+    (R-016 §3.4 optional) and is skipped.
+    """
     try:
+        return link.resolve(strict=True)
+    except FileNotFoundError:
+        return None
+
+
+def _require_exact_runtime_link(
+    link: Path, project: Path, name: str, *, label: str, target_directory: bool = False,
+) -> None:
+    """Require setup's canonical link through DAY0-Prepare/activate-project (R-016 §2).
+
+    The text must be exactly relpath(DAY0-Prepare/activate-project/<name>, link's directory), and it
+    must reach <name> in the project the pointer selects, rejecting equivalent detours.
+    """
+    target = project / name
+    try:
+        expected_raw = pointer_link_target(link.relative_to(HERE.parent).as_posix(), name)
         metadata = link.lstat()
         target_metadata = target.lstat()
         raw_target = os.readlink(link)
         resolved = link.resolve(strict=True)
         expected_target = target.resolve(strict=True)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         raise ValueError(f"活动项目身份无效（{label}）: {exc}") from exc
-    expected_raw = os.path.relpath(target, link.parent)
     target_ok = (
         stat.S_ISDIR(target_metadata.st_mode)
         if target_directory else
@@ -6370,37 +6389,46 @@ def _require_exact_runtime_link(
         )
 
 
+def active_project_moved(project: Path) -> str | None:
+    """R-016 §6, Q3: why this live monitor must stop, or None while the pointer still selects project.
+
+    Read every round: a pointer to another project or no pointer at all ends this process; the next
+    load starts a monitor for the project it activates.
+    """
+    try:
+        active = active_project_dir(HERE.parent)
+    except ValueError as exc:  # project_contract.ActiveProjectPointerError
+        return f"activate-project 无效：{exc}"
+    if active is None:
+        return "没有激活的项目（DAY0-Prepare/activate-project 不存在）"
+    if active != Path(os.path.realpath(project)):
+        return f"activate-project 已指向其他项目：{active.name}"
+    return None
+
+
 def require_active_project(project: Path) -> None:
-    """Bind live logs and publications to the exact setup-managed project."""
+    """Bind live logs and publications to the project DAY0-Prepare/activate-project selects.
+
+    R-016 §5.1, §5.2: the project is identified only by the pointer (never by the setup manifest's
+    first line), and the monitor's two runtime links are checked for setup's canonical text.
+    """
     try:
         canonical = project.resolve(strict=True)
-        day0 = HERE.resolve(strict=True)
     except OSError as exc:
         raise ValueError(f"无法解析活动项目身份: {exc}") from exc
-    if canonical.parent != day0 or canonical.name == "template":
-        raise ValueError(f"live 监控项目不属于 DAY0-Prepare: {canonical}")
-    manifest_text = _read_bounded_regular_text(
-        SETUP_MANIFEST, label="setup manifest",
-    )
-    lines = manifest_text.splitlines()
-    expected_header = f"# setup manifest — proj: {canonical}"
-    if not lines or lines[0] != expected_header:
-        active = lines[0] if lines else "missing"
+    active = active_project_dir(HERE.parent)
+    if active is None:
+        raise ValueError("请求项目不是 active-project；没有激活的项目（DAY0-Prepare/activate-project 不存在）")
+    if canonical != active:
         raise ValueError(
             f"请求项目不是 active-project；requested={canonical}, active={active}"
         )
-    manifest_links = set(lines[1:])
-    required_links = {str(ACTIVE_INVENTORY), str(ZTP_STATUS_DIR)}
-    if not required_links.issubset(manifest_links):
-        raise ValueError("活动项目身份无效：setup manifest 缺少监控关键链接")
     _require_exact_runtime_link(
-        ACTIVE_INVENTORY,
-        project / "02-devices_config.csv",
+        ACTIVE_INVENTORY, active, "02-devices_config.csv",
         label="active inventory",
     )
     _require_exact_runtime_link(
-        ZTP_STATUS_DIR,
-        project / "99-output-ztp",
+        ZTP_STATUS_DIR, active, "99-output-ztp",
         label="status publication",
         target_directory=True,
     )
@@ -6575,7 +6603,11 @@ def load_release_identity(project: Path) -> dict[str, str]:
 def _governed_watch_identity(
     args: argparse.Namespace, project: Path,
 ) -> tuple[str, ...]:
-    """Capture the live setup and exact four per-cycle governed inputs."""
+    """Capture the live setup and exact four per-cycle governed inputs.
+
+    The project is the one the pointer selects (require_active_project); the AIR json is optional
+    and read through its resolved real file (I-030); a project without one has no AIR digest.
+    """
     require_active_project(project)
     release = load_release_identity(project)
     paths = (
@@ -6583,14 +6615,14 @@ def _governed_watch_identity(
         project / "01-global.yaml",
         project / "02-devices_config.csv",
         project / "99-output-ztp/current-release.json",
-        ACTIVE_AIR_JSON,
     )
+    air_json = active_air_json(ACTIVE_AIR_JSON)
     digests = tuple(
         hashlib.sha256(
             _read_bounded_regular_text(path, label=f"monitor identity {path.name}")
             .encode("utf-8")
         ).hexdigest()
-        for path in paths
+        for path in (*paths, *(() if air_json is None else (air_json,)))
     )
     try:
         active_link = os.readlink(ACTIVE_INVENTORY)
@@ -6899,6 +6931,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pause_announced = False
             try:
                 if governed_identity is not None:
+                    # R-016 §6, Q3: before any write; ztp/status may already be another project's.
+                    moved = active_project_moved(project)
+                    if moved is not None:
+                        log(f"[INFO] {moved}；ZTP 监控退出，由下一次 load 重新启动")
+                        return 0
                     current_identity = _governed_watch_identity(args, project)
                     if current_identity != governed_identity:
                         raise ValueError("同一监控进程的 governed identity 已变化")

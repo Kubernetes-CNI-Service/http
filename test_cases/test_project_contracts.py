@@ -7505,7 +7505,9 @@ class ManualZtpContractTests(unittest.TestCase):
 
     def test_worker_discovers_cli_operation_from_active_project(self):
         with tempfile.TemporaryDirectory() as directory:
-            project = Path(directory) / "project"
+            # R-016 §5.1, §6 (v3.1.1 WP-9): the active project is the one DAY0-Prepare/activate-project selects.
+            root = Path(directory)
+            project = root / "DAY0-Prepare/project"
             devices_csv = project / "02-devices_config.csv"
             trigger_dir = project / "99-output-ztp/manual-trigger/20260824_150000"
             trigger_dir.mkdir(parents=True)
@@ -7521,12 +7523,9 @@ class ManualZtpContractTests(unittest.TestCase):
                     "finished_at": "2026-08-24T15:00:09+00:00",
                 }],
             }), encoding="utf-8")
-            original = self.worker.DEVICES_CSV
-            try:
-                self.worker.DEVICES_CSV = devices_csv
+            (root / "DAY0-Prepare/activate-project").symlink_to(project.name)
+            with mock.patch.object(self.worker, "HTTP_ROOT", root):
                 operations = self.worker.latest_cli_operations()
-            finally:
-                self.worker.DEVICES_CSV = original
         operation = operations["air-example-leaf01"]
         self.assertEqual("triggered", operation["state"])
         self.assertEqual("cli-123", operation["operation_id"])

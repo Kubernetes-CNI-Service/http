@@ -29,6 +29,7 @@ from project_contract import (
     COLLECTION_CYCLE_MAX_FAILED_DEVICES,
     COLLECTION_CYCLE_MAX_FAILED_DEVICE_TEXT_BYTES,
     YAML_BACKUP_FAILED_DEVICE_OPERATIONS,
+    pointer_link_target,
 )
 
 
@@ -222,6 +223,10 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
             root = Path(directory)
             project = root / "DAY0-Prepare" / "fixture-project"
             project.mkdir(parents=True)
+            # R-016 §2: setup's pointer layout; the P2P tree link goes through activate-project.
+            pointer = root / "DAY0-Prepare/activate-project"
+            pointer.symlink_to(project.name)
+            fixed_text = pointer_link_target("ztp/config/cumulus/template/P2P/p2p.xlsx", "p2p.xlsx")
             selected = project / "selected-fabric.xlsx"
             selected.write_bytes(b"independent selected workbook bytes")
             canonical = project / "p2p.xlsx"
@@ -230,7 +235,7 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
             output = p2p / "output-p2p"
             output.mkdir(parents=True)
             fixed = p2p / "p2p.xlsx"
-            fixed.symlink_to(os.path.relpath(canonical, p2p))
+            fixed.symlink_to(fixed_text)
             dot = output / "selected-fabric-lldpq.dot"
             dot.write_bytes(b'"leaf-a":"swp1" -- "leaf-z":"swp2"\n')
             (p2p / "01-inventory.log").write_bytes(b"[Eth-SW]\nleaf-*\n")
@@ -314,8 +319,38 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
                             "ethernet/prod", third_bindings,
                         )
 
+                # A project switch during the freeze (R-016 §6: one project per cycle) is detected
+                # like a retargeted link: the pointer is bound with the two links.
+                fixed.unlink()
+                fixed.symlink_to(fixed_text)
+                def switch_pointer(source, destination, *, maximum):
+                    digest = original_freeze(source, destination, maximum=maximum)
+                    if source.resolve(strict=True) == selected.resolve(strict=True):
+                        pointer.unlink()
+                        pointer.symlink_to(other_project.name)
+                    return digest
+                switched_bindings = WORKER._collection_managed_bindings(
+                    {**IDENTITY, "sequence": IDENTITY["sequence"] + 4}, "ethernet/prod",
+                )
+                Path(switched_bindings["input_inventory"]).parent.mkdir(parents=True)
+                with mock.patch.object(
+                    WORKER, "_collection_freeze_activity_member",
+                    side_effect=switch_pointer,
+                ):
+                    with self.assertRaisesRegex(ValueError, "selection changed"):
+                        WORKER._collection_snapshot_activity_sources(
+                            "ethernet/prod", switched_bindings,
+                        )
+                pointer.unlink()
+                pointer.symlink_to(project.name)
+                # The old layout's direct text is not setup's link any more (R-016 §8: setup rewrites it).
                 fixed.unlink()
                 fixed.symlink_to(os.path.relpath(canonical, p2p))
+                with self.assertRaisesRegex(ValueError, "through activate-project"):
+                    WORKER._collection_snapshot_activity_sources("ethernet/prod", switched_bindings)
+
+                fixed.unlink()
+                fixed.symlink_to(fixed_text)
                 fourth_identity = {**IDENTITY, "sequence": IDENTITY["sequence"] + 3}
                 fourth_bindings = WORKER._collection_managed_bindings(
                     fourth_identity, "ethernet/prod",

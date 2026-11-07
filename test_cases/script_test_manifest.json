@@ -203,7 +203,8 @@
         "test_cases.test_activate_project_air_workflow",
         "test_cases.test_activate_project_workflow",
         "test_cases.test_activate_project_status_workflow",
-        "test_cases.test_independent_ib_csv_workflow"
+        "test_cases.test_independent_ib_csv_workflow",
+        "test_cases.test_activate_project_services_workflow"
       ]
     },
     {
@@ -1050,7 +1051,8 @@
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
         "test_cases.test_ztp_collection_attribution",
-        "test_cases.test_config_sync_authority_workflow"
+        "test_cases.test_config_sync_authority_workflow",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -1067,7 +1069,8 @@
         "test_cases.test_collector_inventory_pubkey",
         "test_cases.test_collector_inventory_pubkey_workflow",
         "test_cases.test_collector_publication",
-        "test_cases.test_collector_retrieval"
+        "test_cases.test_collector_retrieval",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -1202,7 +1205,8 @@
         "test_cases.test_monitor_authority_entrypoints",
         "test_cases.test_monitor_authority_semantic_workflow",
         "test_cases.test_ztp_monitor_watch_resilience",
-        "test_cases.test_ztp_monitor_watch_runtime_workflow"
+        "test_cases.test_ztp_monitor_watch_runtime_workflow",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -1654,7 +1658,8 @@
         "test_cases.test_manual_applied_config",
         "test_cases.test_ztp_applied_receipt",
         "test_cases.test_project_contracts",
-        "test_cases.test_infra_check_and_manual_reset"
+        "test_cases.test_infra_check_and_manual_reset",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -1833,7 +1838,8 @@
         "monitor/switch-collection-worker.py"
       ],
       "tests": [
-        "test_cases.test_setup_collection_link_evidence_workflow"
+        "test_cases.test_setup_collection_link_evidence_workflow",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -2132,7 +2138,8 @@
       ],
       "tests": [
         "test_cases.test_issue_tracker_sync",
-        "test_cases.test_issue_tracker_sync_workflow"
+        "test_cases.test_issue_tracker_sync_workflow",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -2142,7 +2149,8 @@
       ],
       "tests": [
         "test_cases.test_switch_status",
-        "test_cases.test_switch_status_workflow"
+        "test_cases.test_switch_status_workflow",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
@@ -3954,7 +3962,8 @@
         "test_cases.test_activate_project_unsetup_workflow",
         "test_cases.test_activate_project_air_workflow",
         "test_cases.test_activate_project_workflow",
-        "test_cases.test_activate_project_status_workflow"
+        "test_cases.test_activate_project_status_workflow",
+        "test_cases.test_activate_project_services_workflow"
       ]
     },
     {

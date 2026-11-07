@@ -185,6 +185,8 @@ class UfmCronCase(unittest.TestCase):
         key = self.root / "fixture-key"
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
         shutil.copy(key.with_suffix(".pub"), self.project / "mgmt-server.pub")
+        # owner 2026-11-04 (R-016 §5.2): cron.sh reads <type>/publickey/mgmt-server.pub, setup's key link
+        (self.mkdir("infiniband/publickey") / "mgmt-server.pub").symlink_to(self.project / "mgmt-server.pub")
         (monitor / "ib.csv").symlink_to(self.project / "02-devices_config.csv")
         self.output = self.mkdir("DAY0-Prepare/site/99-output-monitor/infiniband/ufm-info")
         (monitor / "ufm-info").symlink_to(self.output)

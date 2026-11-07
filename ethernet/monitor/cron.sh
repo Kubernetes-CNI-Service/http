@@ -281,22 +281,20 @@ UFM_PLANNED=0
 
 # Shared public key deployed to all switch types.  It must come from the active
 # project; embedding a former management server's key would silently authorize
-# the wrong host after a project migration.
+# the wrong host after a project migration.  Owner 2026-11-04 (R-016 §5.2): read
+# this network's <type>/publickey/mgmt-server.pub, setup's link through
+# DAY0-Prepare/activate-project, never the directory an inventory link resolves
+# into (an inventory may be a user link to a file outside the project).
 _collector_area=$(basename "$(dirname "$BASE")")
 case "$_collector_area" in
-    ethernet)   _inventory_name="eth.csv" ;;
-    infiniband) _inventory_name="ib.csv" ;;
-    nvlink)     _inventory_name="nvsw.csv" ;;
+    ethernet|infiniband|nvlink) ;;
     *)
         echo "[ERROR] unsupported collector entrypoint area: ${_collector_area}" >&2
         exit 1
         ;;
 esac
-_inventory="${BASE}/${_inventory_name}"
-ACTIVE_INVENTORY=$(readlink -f "$_inventory" 2>/dev/null || true)
-ACTIVE_PROJECT_DIR=${ACTIVE_INVENTORY%/*}
-MGMT_PUBKEY_FILE=${ACTIVE_PROJECT_DIR}/mgmt-server.pub
-if [[ -z "$ACTIVE_INVENTORY" || ! -s "$MGMT_PUBKEY_FILE" ]]; then
+MGMT_PUBKEY_FILE=$(dirname "$BASE")/publickey/mgmt-server.pub
+if [[ ! -s "$MGMT_PUBKEY_FILE" ]]; then
     echo "[ERROR] active project mgmt-server.pub is missing or empty: ${MGMT_PUBKEY_FILE}" >&2
     exit 1
 fi

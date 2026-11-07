@@ -22,6 +22,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from tools.project_contract import pointer_link_target
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MONITOR_PATH = ROOT / "DAY0-Prepare/12-ztp-monitor.py"
@@ -176,6 +178,13 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
         )
 
     def test_real_main_and_monitor_once_retry_actual_publication_boundary(self):
+        # I-030 (问题文档): setup makes the AIR json a link; a relative link to a real file and a
+        # dangling link (a project without AIR) both run, instead of a patched regular file.
+        for air_fixture in ("relative link", "dangling link"):
+            with self.subTest(air=air_fixture):
+                self._run_publication_boundary(air_fixture)
+
+    def _run_publication_boundary(self, air_fixture: str) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             project = base / "site-a"
@@ -185,8 +194,12 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                 "switch-a,eth,prod,02:00:00:00:00:10\n",
                 encoding="utf-8",
             )
-            runtime_air = base / "p2p-air.json"
-            runtime_air.write_text("{}\n", encoding="utf-8")
+            runtime_air = base / "ztp/config/isc-dhcp-server/p2p-air.json"
+            runtime_air.parent.mkdir(parents=True)
+            runtime_air.symlink_to("../../../site-a/99-output-p2p/p2p-air.json")
+            if air_fixture == "relative link":
+                (project / "99-output-p2p").mkdir()
+                (project / "99-output-p2p/p2p-air.json").write_text("{}\n", encoding="utf-8")
             output_root = base / "status"
             args = self._args(output_root)
             args.no_ssh = True
@@ -374,11 +387,18 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
             self.assertEqual(0, state["consecutive_failures"])
 
     def test_same_process_rejects_governed_identity_drift_before_next_cycle(self):
-        for drift in (
-            "current-release", "global-yaml", "inventory-bytes", "p2p-air",
-            "setup-manifest", "active-inventory",
+        # R-016 §2: setup's pointer layout (DAY0-Prepare/activate-project and canonical links through it).
+        # I-030: the AIR json is a relative link to a real file, or a dangling link (no AIR); for the
+        # dangling link the "p2p-air" drift is the AIR json appearing.
+        for air_fixture, drift in (
+            (air_fixture, drift)
+            for air_fixture in ("relative link", "dangling link")
+            for drift in (
+                "current-release", "global-yaml", "inventory-bytes", "p2p-air",
+                "setup-manifest", "active-inventory",
+            )
         ):
-            with self.subTest(drift=drift), tempfile.TemporaryDirectory() as directory:
+            with self.subTest(air=air_fixture, drift=drift), tempfile.TemporaryDirectory() as directory:
                 base = Path(directory)
                 day0 = base / "DAY0-Prepare"
                 project = day0 / "site-a"
@@ -419,15 +439,22 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                     ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                 ).encode("utf-8")).hexdigest()[:20]
                 release.write_text(json.dumps(release_payload) + "\n", encoding="utf-8")
+                (day0 / "activate-project").symlink_to("site-a")
                 active_inventory = base / "ztp/config/isc-dhcp-server/02-devices_config.csv"
                 active_inventory.parent.mkdir(parents=True)
-                active_inventory.symlink_to(os.path.relpath(inventory, active_inventory.parent))
+                active_inventory.symlink_to(pointer_link_target(
+                    "ztp/config/isc-dhcp-server/02-devices_config.csv", "02-devices_config.csv"))
+                project_air = project / "99-output-p2p/p2p-air.json"
+                project_air.parent.mkdir()
+                if air_fixture == "relative link":
+                    project_air.write_text(
+                        '{"schema_version":1,"devices":[]}\n', encoding="utf-8",
+                    )
                 runtime_air = base / "ztp/config/isc-dhcp-server/p2p-air.json"
-                runtime_air.write_text(
-                    '{"schema_version":1,"devices":[]}\n', encoding="utf-8",
-                )
+                runtime_air.symlink_to(pointer_link_target(
+                    "ztp/config/isc-dhcp-server/p2p-air.json", "99-output-p2p/p2p-air.json"))
                 status_link = base / "ztp/status"
-                status_link.symlink_to(os.path.relpath(output_root, status_link.parent))
+                status_link.symlink_to(pointer_link_target("ztp/status", "99-output-ztp"))
                 setup_manifest = base / "ztp/.setup_manifest"
                 manifest_bytes = (
                     f"# setup manifest — proj: {project.resolve()}\n"
@@ -469,7 +496,7 @@ class MonitorWatchResilienceDirectTests(unittest.TestCase):
                         )
                     elif drift == "p2p-air":
                         atomic_replace(
-                            runtime_air,
+                            project_air,
                             b'{"schema_version":1,"devices":[{"hostname":"air-a"}]}\n',
                         )
                     elif drift == "setup-manifest":
