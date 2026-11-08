@@ -2724,9 +2724,11 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 补充段（WP-11，R-014 第 3 条；v3.1.1 LP 补齐 `laptop.pub` 一条）：**P2P 放在 `p2p/` 链接目录的项目，上传到 AIR 后能正常 load**。
   自动化部分：`test_cases.test_project_link_inputs_workflow`（`ProjectLinkInputsWorkflowTests` 四例，合起来覆盖 setup、load
   `--dry-run`、打包、写前守卫落盘与 sync；`LPLaptopKeyLinkLoadWorkflowTests`：`laptop.pub` 链到项目外时 setup → load `--dry-run`
-  → load 计划的 setup 子命令）与 `test_cases.test_ssh_key_preparation_contract.LPLinkedLaptopKeyConfigOnlyPreflightContract`
-  （本机 load 的公钥预检）。自动化不能证明：真实 AIR 管理服务器上的受控部署与服务器 load、本机正式 load（临时副本里
-  会被 load 自身的测试门禁拦下，只验证了 `--dry-run`）、真实外部资料目录。
+  → load 计划的 setup 子命令；`RV5FormalLoadWithUserLinksWorkflowTests` 三例：02 链到项目外、`p2p/` 链到项目外、schema 2
+  项目两种链接同时存在，真实 setup + 真实 `11-load.py main()` 非 dry-run 跑到提交，pin 等于链接目标的 sha256——v3.1.1
+  RV5、RV6 补，第四轮审查 B1）与 `test_cases.test_ssh_key_preparation_contract.LPLinkedLaptopKeyConfigOnlyPreflightContract`
+  （本机 load 的公钥预检）。自动化不能证明：真实 AIR 管理服务器上的受控部署与服务器 load、本机工作区上的正式 load（测试里
+  的正式 load 跑在替身服务和 DHCP 上）、真实外部资料目录。
   - 前置：本机项目 `p2p -> <外部资料目录>`、`p2p.xlsx -> p2p/<工作簿>.xlsx`；`02-devices_config.csv` 与 `laptop.pub`
     都是指向项目外的链接（`laptop.pub -> <操作员自己的公钥>`）；本机 setup、load `--dry-run`、本机正式 load 均通过；
     `test_cases.test_project_link_inputs_workflow` 绿。开始前保存：各链接的原文与 realpath、链接目标的 sha256、
