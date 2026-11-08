@@ -965,10 +965,12 @@ def _source_bound_load_report_path(
         # 2026-11-07 M1a: 11-load.py changed for option A, third revision (2026-11-07: every way a DEV-era flat parent cannot be frozen is warned and skipped) (was 3ca01436f207b28039cd27ded192010af3bbfc70f17d739fe6154b076a1b014e); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 WP-17 (written by m1a/repin_quiesce_load.py): 11-load.py changed with v3.1.1 (M5 6ba644f I-022 interrupted latest retirement restore, WP-11 c0086c7 p2p/ user link, WP-2 67e6739 setup's template completion, RV1 7170eae laptop.pub placeholder, WP-9b 610e348 active_project() through the pointer) (was d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 after rebase onto v3.1.0: 11-load.py final v3.1.1 bytes: v3.1.0 option A (b968c00, 87ceaf5) merged with the v3.1.1 changes (M5 6ba644f, WP-11 c0086c7, WP-2 67e6739, RV1 7170eae, WP-9b 610e348, LP 5a18e31; pre-rebase ids) (was 38d44058cd7f4f7c9ad986f0fa800d253ce1862438817d86ed383223ffba4539); the structural path was checked on the current files before re-pinning.
-        (load_tree, "828d2ab26015572b29dc868d4cf8919bccc0fa20f09539ba2eddd0a8e4818c52"),
+        # 2026-11-08 v3.1.1 RV3: 11-load.py changed with RV3 (review 3 S1: prepare_active_runtime_rollback_receipt treats an invalid pointer like activate_project; A3: key and DHCP receipt errors name the cause) (was 828d2ab26015572b29dc868d4cf8919bccc0fa20f09539ba2eddd0a8e4818c52); the structural path was checked on the current files before re-pinning.
+        (load_tree, "a87a56a59530be9fc285dfdfe62e16b150e95695f0a2ee00d67c381dacdda691"),
         # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 WP-17: tools/generation_report.py changed with WP-9b (610e348: _public_key accepts a published key only through DAY0-Prepare/activate-project, R-016 3.2) (was bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585); the structural path was checked on the current files before re-pinning.
-        (report_tree, "0e1a49f0a3cc0f784ac4d2eaee2362bef572d18ed9a87b8c91cc061f6fea9819"),
+        # 2026-11-08 v3.1.1 RV3: tools/generation_report.py changed with RV3 (review 3 A3: _public_key names a missing DAY0-Prepare/activate-project before the old 'another project or role' text) (was 0e1a49f0a3cc0f784ac4d2eaee2362bef572d18ed9a87b8c91cc061f6fea9819); the structural path was checked on the current files before re-pinning.
+        (report_tree, "f665b7ef1f8ed2cdf951a152d90255eea60b5fd1c6f4e505ae12ece2ed82841f"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
