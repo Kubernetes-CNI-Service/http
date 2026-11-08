@@ -5166,7 +5166,7 @@ def write_report(report: dict[str, Any], output_root: Path,
 
 def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     scope = getattr(args, "scope", "all")
-    output_root = args.output_dir or ZTP_STATUS_DIR
+    output_root = args.output_dir or live_output_root(args)
     offline = bool(getattr(args, "offline", False))
     runtime_backend = None if offline else service_runtime_backend()
     release = load_release_identity(project)
@@ -6406,11 +6406,12 @@ def active_project_moved(project: Path) -> str | None:
     return None
 
 
-def require_active_project(project: Path) -> None:
+def require_active_project(project: Path) -> Path:
     """Bind live logs and publications to the project DAY0-Prepare/activate-project selects.
 
     R-016 §5.1, §5.2: the project is identified only by the pointer (never by the setup manifest's
     first line), and the monitor's two runtime links are checked for setup's canonical text.
+    Returns the real project directory, which the run then uses instead of the tree links.
     """
     try:
         canonical = project.resolve(strict=True)
@@ -6432,6 +6433,16 @@ def require_active_project(project: Path) -> None:
         label="status publication",
         target_directory=True,
     )
+    return active
+
+
+def live_output_root(args: argparse.Namespace) -> Path:
+    """This run's ZTP output root: the real <project>/99-output-ztp bound by the live checks, else ztp/status.
+
+    R-016 §5.1: resolved once per run.  ztp/status follows the pointer on every open, so after the pointer
+    moves it would name another project (review 3 A2).
+    """
+    return getattr(args, "_live_output_root", None) or ZTP_STATUS_DIR
 
 
 def _validate_release_generated_inputs(project: Path, value: object) -> None:
@@ -6652,7 +6663,7 @@ def validate_monitor_mode(args: argparse.Namespace, project: Path) -> None:
             raise ValueError("自定义 DHCP/AIR 证据必须使用 --offline")
         args.apache_log = DEFAULT_APACHE_LOG
         args.dhcp_leases = Path("/var/lib/dhcp/dhcpd.leases")
-        require_active_project(project)
+        args._live_output_root = require_active_project(project) / "99-output-ztp"
         if args.watch:
             args._validated_live_watch = True
         return
@@ -6894,7 +6905,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         project = resolve_project(args.project)
         validate_monitor_mode(args, project)
-        output_root = args.output_dir or ZTP_STATUS_DIR
+        output_root = args.output_dir or live_output_root(args)
         watch_state_path = output_root / WATCH_STATE_NAME
         handoff_state_path = output_root / HANDOFF_STATE_NAME
         handed_off_signatures = (
@@ -7053,7 +7064,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 2
     finally:
         if not args.offline:
-            remove_own_pid_file(ZTP_STATUS_DIR / "ztp-monitor.pid")
+            remove_own_pid_file(live_output_root(args) / "ztp-monitor.pid")
 
 
 if __name__ == "__main__":

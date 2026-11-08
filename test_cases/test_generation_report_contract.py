@@ -346,6 +346,25 @@ class GenerationReportContract(unittest.TestCase):
         with self.assertRaisesRegex(helper.GenerationReportError, "another project"):
             helper.build_report(self.project, self.parent, published_dir=self.published)
 
+    def test_without_a_pointer_the_key_refusal_names_the_missing_pointer(self):
+        # 第三轮审查 A3: without DAY0-Prepare/activate-project the cause is 「no active project (DAY0-Prepare/
+        # activate-project is missing)」.  The original 「targets another project or role」 text is matched by the
+        # test above, so it stays beside the cause; a pointer to another project keeps the original text alone.
+        helper = report_helper()
+        self.pointer.unlink()
+        with self.assertRaises(helper.GenerationReportError) as absent:
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+        self.assertIn("no active project (DAY0-Prepare/activate-project is missing)", str(absent.exception))
+        other = self.root / "DAY0-Prepare/other"
+        other.mkdir(mode=0o700)
+        for name, content in (("laptop.pub", self.laptop), ("mgmt-server.pub", self.management)):
+            (other / name).write_bytes(content)
+        self.pointer.symlink_to("other")
+        with self.assertRaises(helper.GenerationReportError) as foreign:
+            helper.build_report(self.project, self.parent, published_dir=self.published)
+        self.assertRegex(str(foreign.exception),
+                         r"\Apublished key targets another project or role: (laptop|mgmt-server)\.pub\Z")
+
     def test_missing_empty_duplicate_and_changed_published_keys_fail_closed(self):
         helper = report_helper()
         management = self.project / "mgmt-server.pub"

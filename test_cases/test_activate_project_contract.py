@@ -1424,6 +1424,52 @@ class WP9aServiceReaderTests(unittest.TestCase):
             link.unlink()
             self.assertIsNone(monitor.active_air_json(link))      # no link at all
 
+    def test_a_live_run_keeps_its_output_and_pid_record_in_the_project_it_started_for(self):
+        # 第三轮审查 A2 (R-016 §5.1: a run resolves the pointer once, then reads and writes through the returned real
+        # project path; §6, Q3): after the live checks pass for P, moving the pointer to Q or removing it does not
+        # move this run's round output or its PID record -- both stay in P's 99-output-ztp, never through
+        # ztp/status (which follows the pointer on every open).
+        services = self.services
+        monitor = services.MONITOR
+        project = self.tree.projects[services.PROJECT_P]
+        own = self.tree.real(services.PROJECT_P) / "99-output-ztp"
+
+        class OutputChosen(Exception):
+            pass
+
+        def chosen(root):
+            roots.append(Path(os.path.realpath(root)))
+            raise OutputChosen
+
+        for change in ("switch", "unsetup"):
+            with self.subTest(change=change):
+                self.tree.point(services.PROJECT_P)
+                args = monitor.parser().parse_args([str(project), "--watch", "7", "--scope", "prod"])
+                roots = []
+                with self.monitor_paths():
+                    monitor.validate_monitor_mode(args, project)
+                    if change == "unsetup":
+                        self.tree.unpoint()
+                    else:
+                        self.tree.point(services.PROJECT_Q)
+                    with mock.patch.object(monitor, "service_runtime_backend", return_value=None), \
+                            mock.patch.object(monitor, "_previous_report", side_effect=chosen), \
+                            self.assertRaises(OutputChosen):
+                        monitor.monitor_once(args, project)
+                self.assertEqual([own], roots, "the round reads and writes P's 99-output-ztp")
+        # The exit cleanup: load's PID record (written through ztp/status while P was active) is P's to remove.
+        from tools.ztp_service_runtime import monitor_pid_lock, write_monitor_pid_record_locked
+        self.tree.point(services.PROJECT_P)
+        with monitor_pid_lock(self.tree.root / "ztp/status/ztp-monitor.pid"):
+            write_monitor_pid_record_locked(self.tree.root / "ztp/status/ztp-monitor.pid", os.getpid())
+        real_remove = monitor.remove_own_pid_file
+        with services.ActivateProjectServicesWorkflowTests.live_monitor(
+                self, self.tree, lambda _seconds: self.tree.point(services.PROJECT_Q)), \
+                mock.patch.object(monitor, "remove_own_pid_file", real_remove):
+            self.assertEqual(0, monitor.main([]))
+        self.assertFalse((own / "ztp-monitor.pid").exists())
+        self.assertFalse(os.path.lexists(self.tree.real(services.PROJECT_Q) / "99-output-ztp/.ztp-monitor.pid.lock"))
+
     def test_project_readers_follow_the_pointer_even_without_the_monitor_global_link(self):
         services = self.services
         (self.tree.root / "monitor/01-global.yaml").unlink()   # the issue tracker's old anchor
@@ -1729,6 +1775,128 @@ class RV2FreshProjectDryRunTests(unittest.TestCase):
         self.assertEqual(0, code, output.getvalue())
         self.assertEqual(before, tree_state(box.root), "--dry-run writes nothing, in the tree or the project")
         self.assertIsNone(box.pointer())
+
+
+# ── v3.1.1 RV3: 第三轮审查 S1（http dev 2026-11-08，改法 (a)）、A3 ──
+# Expected values come from the review and the design, never from 11-load.py:
+# - R-016 §5.1: active_project_dir returns None without a pointer and names the reason when the pointer is invalid.
+# - 第三轮审查 S1, 改法 (a): load leaves an invalid pointer to setup (activate_project warns 「setup 将重建指针」); the
+#   earlier same-project rollback-receipt step on the management server (the target already has 99-output-ztp/current)
+#   treats it as 「no valid active project」, the same as no pointer: it neither creates nor reuses a receipt, does not
+#   fail, and prints the reason.
+# - 第三轮审查 A3: a refused same-project receipt link names its cause -- no pointer, an invalid pointer, or the direct
+#   text written before activate-project (possibly an A receipt left by v3.1.0; handling in the release notes
+#   「v3.1.0 的 A 回执」); only a link that reaches another project keeps 「escaped its owning project」.
+RV3_GENERATION = "0123456789abcdef0123"
+
+
+class RV3LoadPointerStateTests(unittest.TestCase):
+    """第三轮审查 S1 and A3 (11-load): the receipt step and the receipt links under each pointer state."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.load = load_script("activate_project_contract_rv3_load", ROOT / "DAY0-Prepare/11-load.py")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-rv3-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        self.project = self.day0 / "site-b"
+        (self.project / "99-output-ztp/generations" / RV3_GENERATION).mkdir(parents=True)
+        (self.project / "99-output-ztp/current").symlink_to("generations/" + RV3_GENERATION)
+        self.pointer = self.day0 / "activate-project"
+
+    def point(self, name):
+        if os.path.lexists(self.pointer):
+            self.pointer.unlink()
+        if name is not None:
+            self.pointer.symlink_to(name)
+
+    def receipt_step(self):
+        """The management-server receipt step for the selected A; what it returned and printed."""
+        printed = io.StringIO()
+        with mock.patch.object(self.load, "HTTP_ROOT", self.root), \
+                mock.patch.object(self.load, "prepare_runtime_rollback_receipt",
+                                  side_effect=AssertionError("no same-project receipt without a valid pointer")), \
+                redirect_stdout(printed), redirect_stderr(printed):
+            try:
+                result = self.load.prepare_active_runtime_rollback_receipt(
+                    self.project, "generations/" + RV3_GENERATION)
+            except self.load.LoadError as exc:
+                self.fail(f"the receipt step stopped load on this pointer state: {exc}")
+        return result, printed.getvalue()
+
+    def test_an_invalid_pointer_is_no_active_project_at_the_receipt_step(self):
+        self.point(None)
+        absent, absent_output = self.receipt_step()
+        self.assertIsNone(absent)
+        absent_lines = [line for line in absent_output.splitlines() if line.strip()]
+        self.assertTrue(absent_lines, "the no-pointer step says why no receipt is made")
+        (self.day0 / "template").mkdir()
+        # The project directory was renamed or removed; a name that is never a project (R-016 §2).
+        for target in ("site-a", "template"):
+            with self.subTest(pointer=target):
+                self.point(target)
+                result, output = self.receipt_step()
+                self.assertIsNone(result)
+                self.assertIn(f"activate-project -> {target}", output, "the reason is printed")
+                for line in absent_lines:
+                    self.assertIn(line, output, "the same consequence as without a pointer")
+        self.assertFalse(os.path.lexists(self.project / "99-output-ztp/rollback-receipts"))
+
+    def test_a_refused_receipt_link_names_its_cause(self):
+        # 第三轮审查 A3: no pointer, an invalid pointer and the direct text written before activate-project (possibly an
+        # A receipt left by v3.1.0; handling in the release notes 「v3.1.0 的 A 回执」) are not escapes and say so; only a
+        # link that reaches another project keeps the original 「escaped its owning project」 text.
+        load = self.load
+        project = self.project.resolve()
+        other = self.day0 / "site-q"
+        for owner in (project, other):
+            (owner / "99-output-dhcp").mkdir(parents=True)
+            (owner / "laptop.pub").write_text("ssh-ed25519 AAAAsynthetic laptop\n", encoding="ascii")
+            (owner / "99-output-dhcp/dhcpd.conf").write_text("# synthetic\n", encoding="ascii")
+        key_dir = self.root / "ztp/config/publickey"
+        dhcp_dir = self.root / "ztp/config/isc-dhcp-server"
+        key_dir.mkdir(parents=True)
+        dhcp_dir.mkdir(parents=True)
+        key, dhcp = key_dir / "laptop.pub", dhcp_dir / "dhcpd.conf"
+        key.symlink_to("../../../DAY0-Prepare/activate-project/laptop.pub")          # R-016 §2
+        dhcp.symlink_to("../../../DAY0-Prepare/activate-project/99-output-dhcp/dhcpd.conf")
+        through = (os.readlink(key), os.readlink(dhcp))
+        direct = (os.path.relpath(project / "laptop.pub", key_dir),
+                  os.path.relpath(project / "99-output-dhcp/dhcpd.conf", dhcp_dir))
+        foreign = (os.path.relpath(other / "laptop.pub", key_dir),
+                   os.path.relpath(other / "99-output-dhcp/dhcpd.conf", dhcp_dir))
+
+        def refusals(texts):
+            messages = []
+            for check in (lambda: load._runtime_key_source(key, project, texts[0]),
+                          lambda: load._runtime_dhcp_link_source(project, dhcp, texts[1])):
+                with self.assertRaises(load.LoadError) as refused:
+                    check()
+                messages.append(str(refused.exception))
+            return messages
+
+        with mock.patch.multiple(load, HTTP_ROOT=self.root, ZTP_DIR=self.root / "ztp"):
+            self.point("site-b")    # control: setup's text while the pointer selects this project is admitted
+            self.assertEqual(project / "laptop.pub", load._runtime_key_source(key, project, through[0]))
+            self.assertEqual(project / "99-output-dhcp/dhcpd.conf",
+                             load._runtime_dhcp_link_source(project, dhcp, through[1]))
+            for pointer, texts, cause in (
+                    (None, through, "没有激活的项目（DAY0-Prepare/activate-project 不存在）"),
+                    ("missing", through, "activate-project -> missing"),
+                    ("site-b", direct, "发布说明「v3.1.0 的 A 回执」")):
+                with self.subTest(pointer=pointer, texts=texts):
+                    self.point(pointer)
+                    for message in refusals(texts):
+                        self.assertIn(cause, message)
+                        self.assertNotIn("escaped its owning project", message)
+            for pointer, texts in (("site-q", through), ("site-b", foreign)):
+                with self.subTest(pointer=pointer, texts=texts):
+                    self.point(pointer)
+                    self.assertEqual(["rollback public key source escaped its owning project",
+                                      "rollback DHCP publication escaped its owning project"], refusals(texts))
 
 
 if __name__ == "__main__":

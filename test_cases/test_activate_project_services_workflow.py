@@ -278,6 +278,43 @@ class ActivateProjectServicesWorkflowTests(unittest.TestCase):
                 self.assertEqual("healthy", first["state"])
                 self.assertFalse((tree.projects[PROJECT_Q] / "99-output-ztp" / state_name).exists())
 
+    def test_monitor_exit_clears_its_own_pid_record_and_leaves_the_new_project_untouched(self):
+        # 第三轮审查 A2 (R-016 §5.1: a run resolves the pointer once and then uses the real project path; §6, Q3):
+        # load records the monitor's PID through ztp/status while the pointer selects P.  When the pointer moves
+        # -- to Q, gone after unsetup, or to Q while a round is running -- the monitor exits; its exit removes
+        # P's PID record (a stale one makes every later stop_native_ztp_monitors fail closed), and nothing --
+        # no lock, no watch state, no PID -- appears in Q's 99-output-ztp.  remove_own_pid_file is the real one.
+        from tools.ztp_service_runtime import monitor_pid_lock, write_monitor_pid_record_locked
+
+        state_name = ".ztp-monitor-watch-state.json"
+        real_remove = MONITOR.remove_own_pid_file
+        for change in ("switch", "unsetup", "switch during a round"):
+            with self.subTest(change=change):
+                tree = self.tree()
+                own = tree.projects[PROJECT_P] / "99-output-ztp"
+                new = tree.projects[PROJECT_Q] / "99-output-ztp"
+                status = tree.root / "ztp/status"
+                with monitor_pid_lock(status / "ztp-monitor.pid"):
+                    write_monitor_pid_record_locked(status / "ztp-monitor.pid", os.getpid())
+                self.assertTrue((own / "ztp-monitor.pid").is_file(), "fixture: load's record is P's")
+                untouched = sorted(entry.name for entry in new.iterdir())
+                move = tree.unpoint if change == "unsetup" else (lambda: tree.point(PROJECT_Q))
+                with self.live_monitor(
+                    tree, (lambda _seconds: None) if change == "switch during a round" else (lambda _seconds: move()),
+                ) as (monitor_once, _log), mock.patch.object(MONITOR, "remove_own_pid_file", real_remove):
+                    if change == "switch during a round":
+                        def during_round(*_args):
+                            if monitor_once.call_count > 1:
+                                raise AssertionError("a round ran after the switch")
+                            move()
+                            return own / "round-1"
+
+                        monitor_once.side_effect = during_round
+                    self.assertEqual(0, MONITOR.main([]))
+                self.assertFalse((own / "ztp-monitor.pid").exists(), "the exit removed P's own PID record")
+                self.assertEqual(untouched, sorted(entry.name for entry in new.iterdir()))
+                self.assertEqual("healthy", json.loads((own / state_name).read_text())["state"])
+
     def test_every_reader_names_the_pointer_project_not_where_a_linked_input_resolves(self):
         for fixture in ("plain", "inputs linked elsewhere"):
             with self.subTest(fixture=fixture):

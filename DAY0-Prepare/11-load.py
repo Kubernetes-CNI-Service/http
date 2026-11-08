@@ -5635,15 +5635,26 @@ def _runtime_key_identity(metadata: os.stat_result) -> dict[str, int]:
     return {field: getattr(metadata, field) for field in _RUNTIME_KEY_IDENTITY_FIELDS}
 
 
-def _selected_through_pointer(project: Path, lexical: Path, relative: str) -> bool:
-    """Whether a SETUP link's lexical target is DAY0-Prepare/activate-project/<relative> beside this
-    canonical project, and that pointer selects it (R-016 §2: the text names the pointer, the pointer
-    names the project)."""
-    try:
-        selected = active_project_dir(project.parent.parent)
-    except ActiveProjectPointerError:
-        return False
-    return lexical == project.parent / "activate-project" / relative and selected == project
+def _require_through_pointer(project: Path, lexical: Path, relative: str, label: str) -> None:
+    """Admit a SETUP link only when its lexical target is DAY0-Prepare/activate-project/<relative> beside
+    this canonical project and that pointer selects it (R-016 §2: the text names the pointer, the pointer
+    names the project).  A refusal names its cause; only a real escape says "escaped" (review 3 A3)."""
+    if lexical == project / relative:
+        raise LoadError(
+            f"{label}：链接原文是 activate-project 之前（v3.1.0）的直连写法，不是经指针的写法，"
+            "可能是 v3.1.0 留下的 A 回执；不能复用，HOLD，处理见发布说明「v3.1.0 的 A 回执」")
+    if lexical == project.parent / "activate-project" / relative:
+        try:
+            selected = active_project_dir(project.parent.parent)
+        except ActiveProjectPointerError as exc:
+            raise LoadError(f"{label}：活动项目指针无效：{exc}；请先运行 01-a-setup.py <项目> 重建指针") from exc
+        if selected is None:
+            raise LoadError(
+                f"{label}：没有激活的项目（DAY0-Prepare/activate-project 不存在）；"
+                "请先运行 01-a-setup.py <项目> 激活项目")
+        if selected == project:
+            return
+    raise LoadError(f"{label} escaped its owning project")
 
 
 def _runtime_key_source(path: Path, project: Path, target: object) -> Path:
@@ -5653,8 +5664,7 @@ def _runtime_key_source(path: Path, project: Path, target: object) -> Path:
         raise LoadError("rollback public key source link is invalid")
     canonical = project.resolve(strict=True)
     lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    if not _selected_through_pointer(canonical, lexical, path.name):
-        raise LoadError("rollback public key source escaped its owning project")
+    _require_through_pointer(canonical, lexical, path.name, "rollback public key source")
     return canonical / path.name
 
 
@@ -5781,8 +5791,8 @@ def _runtime_dhcp_link_source(project: Path, path: Path, target: object) -> Path
     canonical = project.resolve(strict=True)
     source = canonical / "99-output-dhcp" / path.name
     lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    if (not _selected_through_pointer(canonical, lexical, "99-output-dhcp/" + path.name)
-            or source.parent.resolve(strict=True) != source.parent):
+    _require_through_pointer(canonical, lexical, "99-output-dhcp/" + path.name, "rollback DHCP publication")
+    if source.parent.resolve(strict=True) != source.parent:
         raise LoadError("rollback DHCP publication escaped its owning project")
     return source
 
@@ -6593,7 +6603,13 @@ def prepare_active_runtime_rollback_receipt(
     match = re.fullmatch(r"generations/([0-9a-f]{20})", selector_target)
     if match is None:
         raise LoadError("selected A generation target is invalid")
-    active = active_project()
+    try:
+        active = active_project()
+    except LoadError as exc:
+        # As in activate_project: setup re-points DAY0-Prepare/activate-project, so an invalid
+        # pointer is no valid active project here (review 3 S1).
+        warn(f"{exc}；setup 将重建指针")
+        active = None
     if active != canonical_project:
         if active is None:
             info(

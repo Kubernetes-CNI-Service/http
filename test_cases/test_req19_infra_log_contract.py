@@ -15,6 +15,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -1445,6 +1446,36 @@ class WP9bInfraLogPointerTests(unittest.TestCase):
                     else:
                         self.assertEqual((0, expected + "\n"), (result.returncode, result.stdout))
 
+    def test_the_three_shell_pointer_functions_agree_on_every_name(self):
+        # 第三轮审查 A6 (http dev 2026-11-08): infra-setup.sh and infra-teardown.sh take the check_infra probe's
+        # character set, the one check_infra.py parses the probe's project name with ([A-Za-z0-9._-]+).  The three
+        # copies of R-016 §5.2's small function give one answer for every name; each name below is a real
+        # directory, so only the name decides.
+        import subprocess
+        check = load_script("req19_rv3_check_infra", ROOT / "infra/check_infra.py")
+        sources = {relative: (ROOT / relative).read_text(encoding="utf-8") for relative in self.SHELLS}
+        sources["infra/check_infra.py (probe)"] = check.remote_probe_script()
+        functions = {}
+        for label, source in sources.items():
+            function = re.search(r"^active_project_name\(\) \{\n.*?^\}\n", source, re.S | re.M)
+            self.assertIsNotNone(function, label)
+            functions[label] = function.group(0)
+        names = {"site-p": True, "Site_2.b-x": True, "site p": False, "site$p": False, "site*p": False,
+                 "site:p": False, "site@p": False, "site,p": False, "site+p": False}
+        for name, accepted in names.items():
+            (self.day0 / name).mkdir(exist_ok=True)
+            self.point(name)
+            answers = {}
+            for label, function in functions.items():
+                result = subprocess.run(
+                    ["bash", "-c", function + 'active_project_name "$1"', "probe", str(self.day0)],
+                    capture_output=True, text=True, check=False, timeout=30,
+                )
+                answers[label] = (result.returncode == 0, result.stdout)
+            with self.subTest(name=name):
+                self.assertEqual({label: (accepted, name + "\n" if accepted else "") for label in functions},
+                                 answers)
+
     def test_real_probe_reports_the_project_the_pointer_selects(self):
         import subprocess
         from test_cases import test_req19_infra_log_workflow as flow
@@ -1748,6 +1779,63 @@ class UNLUnloadHandsLogDirTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual(["[DRY]   " + " ".join(self.base_command)],
                          [line for line in printed.splitlines() if "infra-teardown.sh" in line])
+
+
+class RV3DeployInfraWithoutActiveProjectTests(unittest.TestCase):
+    """v3.1.1 RV3, 第三轮审查 S2 (http dev 2026-11-08 选 (a)): deploy_infra.py after unsetup.
+
+    Expected values come from the review and http dev's ruling, never from the implementation:
+    - R-016 Q7: unsetup removes DAY0-Prepare/activate-project; setup's link infra/logs keeps its text
+      ../DAY0-Prepare/activate-project/99-output-infra and dangles, meaning "no project is active".
+    - REQ-19 / WP-9b: deploy_infra.py writes its log only into the active project's 99-output-infra, so in that state
+      every action is refused; this rule does not change (no --log-dir, 改法 (a)).
+    - 改法 (a): the refusal is one [ERROR] line naming the state and what to do -- run 01-a-setup.py <项目> to activate
+      the project first, or roll the clients back before unsetup -- exit 1, no Python traceback.  With a pointer the
+      script behaves as before.
+    The script runs as itself (__main__) in a copied minimal tree; the devices are synthetic, nothing connects.
+    """
+
+    REFUSAL = ("[ERROR] 没有激活的项目（DAY0-Prepare/activate-project 不存在），infra 日志无处可写："
+               "请先运行 01-a-setup.py <项目> 激活项目再执行，或在 unsetup 之前回滚客户端")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="req19-rv3-deploy-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.root = self.base / "http"
+        for relative in ("infra/deploy_infra.py", "infra/infra-teardown.sh",
+                         "tools/infra_components.py", "tools/project_contract.py"):
+            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, self.root / relative)
+        self.owned = self.root / "DAY0-Prepare/site-p/99-output-infra"
+        self.owned.mkdir(parents=True)
+        (self.root / "infra/logs").symlink_to(MANAGED_LOG_LINK)   # R-016 Q7: setup's link, no pointer
+        self.devices = self.base / "devices.csv"
+        self.devices.write_text("hostname,type,eth0_ip\nclient-a,server,192.0.2.21\n", encoding="utf-8")
+
+    def deploy(self, *arguments):
+        return subprocess.run(
+            [sys.executable, "-B", os.fspath(self.root / "infra/deploy_infra.py"), *arguments,
+             "--devices-file", os.fspath(self.devices), "--dry-run"],
+            cwd=self.root, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+        )
+
+    def test_after_unsetup_every_action_names_the_order_instead_of_a_traceback(self):
+        for action in (("--teardown",), ()):   # the client rollback, and an ordinary setup run
+            with self.subTest(action=action):
+                result = self.deploy(*action)
+                self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+                self.assertIn(self.REFUSAL, result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertEqual([], sorted(self.owned.iterdir()), "nothing is written anywhere")
+
+    def test_with_a_pointer_the_rollback_runs_as_before(self):
+        (self.root / "DAY0-Prepare/activate-project").symlink_to("site-p")
+        result = self.deploy("--teardown")
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("[DRY] client-a (192.0.2.21)", result.stdout)
+        self.assertNotIn("[ERROR]", result.stdout + result.stderr)
+        self.assertEqual(1, len(list(self.owned.glob("deploy_infra-*.log"))))
 
 
 if __name__ == "__main__":

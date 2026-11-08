@@ -1539,7 +1539,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 预期与证据：
   - 步骤 1：切换前开始的周期，其 `monitor/status/collection-cycles/<project_key>` 与冷却状态都属于 P；
     切换后的周期属于 Q。monitor 在下一轮开始前写一行「activate-project 已指向其他项目：Q；ZTP 监控退出，
-    由下一次 load 重新启动」并以 0 退出，Q 的 `99-output-ztp` 里没有它写的 watch state。unsetup 后
+    由下一次 load 重新启动」并以 0 退出，Q 的 `99-output-ztp` 里没有它写的 watch state，也没有
+    `.ztp-monitor.pid.lock`；P 的 `99-output-ztp/ztp-monitor.pid` 已被它删除（第三轮审查 A2：输出和 PID 用这次
+    运行解析出的项目目录，不经 `ztp/status`）；之后 setup/load 的 `stop_native_ztp_monitors` 不报陈旧 PID。unsetup 后
     worker 状态为 `skipped`、`reason` 为「没有激活的项目」，持续采集保持启用并显示等待；monitor 记
     「没有激活的项目」并退出。
   - 步骤 2：两次 load 后指针原文不变（仍为 P），worker、monitor、cron.sh 读到的项目与管理公钥指纹都是 P 的；

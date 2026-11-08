@@ -70,6 +70,10 @@ class DeployError(RuntimeError):
     pass
 
 
+class NoActiveProjectError(DeployError):
+    """R-016 Q7: unsetup removed DAY0-Prepare/activate-project; infra/logs has no project to write into."""
+
+
 class TeeStream:
     def __init__(self, terminal: object, log_stream: object):
         self.terminal = terminal
@@ -125,7 +129,8 @@ def _bound_log_root():
             if project is None:
                 raise DeployError(f"foreign or invalid infra log link: {log_link}")
             if project.name == "activate-project":  # R-016 Q7: the managed link dangles after unsetup
-                raise DeployError(f"no active project for infra logs (DAY0-Prepare/activate-project): {log_link}")
+                raise NoActiveProjectError(
+                    f"no active project for infra logs (DAY0-Prepare/activate-project): {log_link}")
             physical = project / "99-output-infra"
         elif stat.S_ISDIR(link_stat.st_mode):
             physical = log_link
@@ -1196,4 +1201,10 @@ if __name__ == "__main__":
     # Help is a read-only operation; do not create an execution log for it.
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         raise SystemExit(main())
-    raise SystemExit(run_with_log("deploy_infra", main))
+    try:
+        raise SystemExit(run_with_log("deploy_infra", main))
+    except NoActiveProjectError:
+        # The log is bound before main runs; after unsetup say what to do instead of a traceback (review 3 S2).
+        print("[ERROR] 没有激活的项目（DAY0-Prepare/activate-project 不存在），infra 日志无处可写："
+              "请先运行 01-a-setup.py <项目> 激活项目再执行，或在 unsetup 之前回滚客户端", file=sys.stderr)
+        raise SystemExit(1)

@@ -52,13 +52,13 @@ flock -x 9
 
 log_dir="${runtime_dir}/logs"
 # R-016 §5.2: read DAY0-Prepare/activate-project once, check it names one plain, real project
-# directory, and print that name.
+# directory, and print that name.  Same character set as check_infra.py's probe (review 3 A6).
 active_project_name() {
   local day0="$1" name
   [[ -L "${day0}/activate-project" ]] || return 1
   name=$(readlink -- "${day0}/activate-project") || return 1
   case "$name" in
-    ''|.*|*/*|template|activate-project|tests|test_cases|dumps) return 1 ;;
+    ''|.*|*/*|*[!A-Za-z0-9._-]*|template|activate-project|tests|test_cases|dumps) return 1 ;;
   esac
   [[ -d "${day0}/${name}" && ! -L "${day0}/${name}" ]] || return 1
   printf '%s\n' "$name"

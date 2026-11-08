@@ -259,6 +259,11 @@ def _public_key(project: Path, published: Path, name: str) -> tuple[str, str]:
         selected = active_project_dir(project.parent.parent)
     except ActiveProjectPointerError as exc:
         raise GenerationReportError(f"active project pointer is invalid: {exc}") from exc
+    if selected is None:
+        # Review 3 A3: name the cause; existing callers match the original text, so it follows.
+        raise GenerationReportError(
+            f"no active project (DAY0-Prepare/activate-project is missing); "
+            f"published key targets another project or role: {name}")
     target_path = Path(os.path.normpath(os.path.join(published, target)))
     if (target_path != project.parent.absolute() / "activate-project" / name
             or selected != Path(os.path.realpath(project))):
