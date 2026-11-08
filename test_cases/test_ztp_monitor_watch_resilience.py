@@ -1040,12 +1040,12 @@ raise SystemExit(module.main([]))
             real_writer = MONITOR._write_watch_state_atomic
             writer_calls = 0
 
-            def flaky_writer(path, payload):
+            def flaky_writer(path, payload, **keywords):  # keywords: the v3.1.2 operator hand-over (WP-12)
                 nonlocal writer_calls
                 writer_calls += 1
                 if writer_calls == 1:
                     raise OSError("injected sidecar fsync failure")
-                return real_writer(path, payload)
+                return real_writer(path, payload, **keywords)
 
             cycles = 0
 

@@ -161,6 +161,14 @@ def run_with_log(prefix: str, callback: object) -> int:
             0o600, dir_fd=dir_fd,
         )
         log_path = log_dir / log_name
+        if log_dir != SCRIPT_DIR / "logs" and os.geteuid() == 0:
+            # A project's 99-output-infra (the bound link): root's new log belongs to the operator, the owner of
+            # that project (I-006 scheme item 4; O11 ②).  The tree-local infra/logs stays as it is.  Imported only
+            # here, so a run that is not root keeps the v3.1.1 dependency set.
+            import operator_identity
+            resolution = operator_identity.resolve_operator(log_dir.parent)
+            if resolution.action == "represent":
+                os.fchown(log_fd, resolution.operator.uid, resolution.operator.gid)
     with os.fdopen(log_fd, "a", encoding="utf-8") as log_stream:
         sys.stdout = TeeStream(original_stdout, log_stream)
         sys.stderr = TeeStream(original_stderr, log_stream)
@@ -576,6 +584,12 @@ def ensure_public_key(identity: Path | None) -> tuple[Path, Path | None]:
     public, private = find_public_key(identity)
     if public:
         return public, private
+    if os.geteuid() == 0 and os.environ.get("SUDO_USER"):
+        # I-006 scheme item 3 (owner 2026-10-27): never mint a key for root on the sudo user's behalf.
+        raise DeployError(
+            f"没有找到本地 SSH key；sudo 下不替 root 生成。请不加 sudo 运行本脚本（以 {os.environ['SUDO_USER']} "
+            "身份生成并部署自己的 key），或用 --identity 指定"
+        )
     if not sys.stdin.isatty():
         raise DeployError("没有可部署的本地 SSH 公钥；请先创建密钥或用 --identity 指定")
     default_private = Path.home() / ".ssh/id_ed25519"

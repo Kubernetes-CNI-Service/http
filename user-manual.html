@@ -13440,6 +13440,20 @@ sudo python3 -B tools/collect-ztp-diagnostics.py \
           和 <code>UpdateHostKeys=no</code>。首次 TOFU 仍须在受信管理网或带外核对指纹。host key 改变会在
           askpass/sudo 前停止，显示 independently derived pinned/offered SHA256 指纹，并只给出该精确
           pin 的 <code>rm -- &lt;pin&gt;</code> 修复命令；先带外确认变更，禁止清空整个 pin 目录。</p>
+        <p><strong>操作员身份与默认 key：</strong>操作员是项目目录的属主。load 以 root 起的
+          <code>12-ztp-monitor.py</code> 从本次绑定的项目算一次操作员并打印一行身份说明；root 代表操作员运行且没给
+          <code>--identity</code> 时，用 <code>&lt;操作员家目录&gt;/.ssh/id_ed25519</code> 登录交换机（不加
+          <code>IdentitiesOnly</code>，root 自己的 key 仍可作后备）；其他普通用户手工运行会被拒绝。monitor 在
+          <code>99-output-ztp</code> 新建的快照和状态文件交给操作员，<code>configuration-methods</code>、
+          <code>manual-config-sync</code> 和锁文件仍属 root。<code>collect-ztp-diagnostics.py</code> 的
+          <code>--known-hosts</code>、<code>--identity</code> 默认取操作员家目录下的 <code>.ssh/known_hosts</code>、
+          <code>.ssh/id_ed25519</code>；操作员是 root 时与以前相同（<code>/root/.ssh/known_hosts</code>，不指定私钥）；
+          判定不了操作员（缺 PyYAML 等模块、指针无效、没有项目、身份不一致）时打印一行原因并沿用以前的默认值。
+          <code>99-output-infra</code> 里 root 写的 deploy_infra、infra-setup 日志交给操作员（infra-setup 交给日志目录属主）；
+          sudo 下没有 key 时 <code>deploy_infra.py</code> 不替 root 生成，提示不加 sudo 运行。<code>infra/deps.py</code>
+          拒绝 root 往别人的 HOME 安装时说明：worker 起的 cron.sh 用 root 的 venv，手工运行的 cron.sh、upgrade.py
+          用操作员自己的 venv，各自装进自己的家目录。Docker 部署（容器内 supervisor 后端）的 monitor 和 diagnostics
+          不做这些判定，行为与以前相同。</p>
         <p><strong>成功判据</strong>页面显示 task ID、开始/结束状态和下一次允许时间；Switch info/link 或 YAML backup 写入带 scope 与时间戳的受管目录；手工任务与持续任务串行，等待前一任务及冷却完成后才执行。</p>
         <p><strong>失败处理</strong>冷却或互斥提示不是失败，等待页面给出的时间；认证、host-key、设备身份或采集错误应查看 worker 状态和脱敏 diagnostics。不要手工删除 lock、PID、control/request 文件来强制启动。</p>
         <p><strong>下一步</strong>日常继续在页面查看结果；需要把生产数据带回项目电脑时执行 Runbook 9。</p>

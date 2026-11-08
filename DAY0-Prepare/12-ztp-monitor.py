@@ -50,6 +50,7 @@ from monitor.switch_collection_gate import (
     DEFAULT_STATUS_DIR as SWITCH_COLLECTION_STATUS_DIR,
 )
 from ztp_service_runtime import (  # noqa: E402
+    RUNTIME_BACKEND_ENV,
     RuntimeContractError,
     ServiceRuntimeBackend,
     monitor_pid_lock,
@@ -61,6 +62,7 @@ from project_contract import (resolve_device_config_method, safe_load_global_yam
                               active_project_dir, pointer_link_target)
 from ztp.nvue_normalizer import deep_merge_nvue, normalize_nvue_selectors
 from ztp import config_sync_authority
+import operator_identity  # noqa: E402
 
 
 ZTP_STATUS_DIR = HTTP_ROOT / "ztp" / "status"
@@ -1883,8 +1885,12 @@ def load_collection_attribution(
 
 def persist_collection_attribution(
     path: Path, input_digests: dict[str, str], records: list[dict[str, Any]],
+    *, operator: operator_identity.Operator | None = None,
 ) -> None:
-    """Atomically replace private attribution state under the monitor lock."""
+    """Atomically replace private attribution state under the monitor lock.
+
+    operator: the operator a root run acts for; the new state file is handed to it (O11 ②).
+    """
     validated_digests = _validate_collection_input_digests(input_digests)
     validated_records = [
         validate_collection_attribution_record(record) for record in records
@@ -1909,7 +1915,7 @@ def persist_collection_attribution(
         raise ValueError("collection attribution state is too large")
     path.parent.mkdir(parents=True, exist_ok=True)
     with monitor_pid_lock(path):
-        _replace_bytes_durably(path, content, mode=0o600)
+        _replace_bytes_durably(path, content, mode=0o600, operator=operator)
 
 
 def active_device_by_ip(
@@ -2938,30 +2944,33 @@ def apply_current_initial_method_authority(
         )
 
 
-def _method_release_text(project: Path, relative: Path) -> str:
+def _method_release_text(project: Path, relative: Path, operator_uid: int | None = None) -> str:
     """Bounded held-descriptor read of an owned, immutable release member.
 
     Published inputs may be 0644, unlike private receipts. Ancestors below
     the resolved project must be non-link directories; leaves must be owned,
     single-link regular files. NONBLOCK prevents a substituted FIFO hanging
     the collector. Rebinding or an in-place edit rejects this observation.
+    Owned means owned by the operator a root run acts for (operator_uid; I-006 scheme item 2, v3.1.2 WP-12),
+    else by the running user.
     """
     if relative.is_absolute() or not relative.parts or any(p in {".", ".."} for p in relative.parts):
         raise ValueError("method release path is not canonical")
+    owner = os.getuid() if operator_uid is None else operator_uid
     descriptors, edges = [], []
     identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_nlink, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
     try:
         parent = os.open(project, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         descriptors.append(parent)
         root_before = os.fstat(parent)
-        if root_before.st_uid != os.getuid() or root_before.st_mode & 0o022:
+        if root_before.st_uid != owner or root_before.st_mode & 0o022:
             raise ValueError("method project root is not privately owned")
         root_descriptor = parent
         for part in relative.parts[:-1]:
             child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
             descriptors.append(child)
             before = os.fstat(child)
-            if before.st_uid != os.getuid() or before.st_mode & 0o022:
+            if before.st_uid != owner or before.st_mode & 0o022:
                 raise ValueError("method release ancestor is not privately owned")
             edges.append((parent, part, child, identity(before)))
             parent = child
@@ -2970,7 +2979,7 @@ def _method_release_text(project: Path, relative: Path) -> str:
         descriptors.append(leaf)
         before = os.fstat(leaf)
         if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                or before.st_uid != os.getuid() or before.st_mode & 0o022
+                or before.st_uid != owner or before.st_mode & 0o022
                 or not 0 < before.st_size <= MAX_LIVE_CONFIG_BYTES):
             raise ValueError("method release member is unsafe or outside its byte bound")
         chunks, remaining = [], before.st_size + 1
@@ -2996,7 +3005,8 @@ def _method_release_text(project: Path, relative: Path) -> str:
             os.close(descriptor)
 
 
-def capture_monitor_method_input(project: Path, device: dict[str, Any], release: dict[str, str]) -> dict[str, str]:
+def capture_monitor_method_input(project: Path, device: dict[str, Any], release: dict[str, str],
+                                 operator_uid: int | None = None) -> dict[str, str]:
     """Capture current parent -> child -> own YAML; never trust helper input.
 
     Called before AND after the actual session. A generation can qualify only
@@ -3005,7 +3015,7 @@ def capture_monitor_method_input(project: Path, device: dict[str, Any], release:
     """
     project = project.resolve(strict=True)
     parent_path = Path("99-output-ztp/current-release.json")
-    parent_text = _method_release_text(project, parent_path)
+    parent_text = _method_release_text(project, parent_path, operator_uid)
 
     def unique_object(pairs):
         result = {}
@@ -3019,7 +3029,7 @@ def capture_monitor_method_input(project: Path, device: dict[str, Any], release:
     if load_release_identity(project) != release or parent.get("release_id") != release["release_id"]:
         raise ValueError("method current parent identity changed")
     for key, name in (("global", "01-global.yaml"), ("devices", "02-devices_config.csv")):
-        if hashlib.sha256(_method_release_text(project, Path(name)).encode()).hexdigest() != parent["inputs"].get(key):
+        if hashlib.sha256(_method_release_text(project, Path(name), operator_uid).encode()).hexdigest() != parent["inputs"].get(key):
             raise ValueError("method current project input drift")
     component_name, output_name = (("nvos", "99-output-ib_nvl") if device.get("type") in {"ib", "nvl"}
                                    else ("cumulus", "99-output-eth"))
@@ -3034,8 +3044,8 @@ def capture_monitor_method_input(project: Path, device: dict[str, Any], release:
     target = latest.resolve(strict=True)
     if target != project / relative:
         raise ValueError("method child latest is not the current parent generation")
-    manifest_text = _method_release_text(project, relative / "release-manifest.json")
-    marker = _method_release_text(project, relative / ".published-complete")
+    manifest_text = _method_release_text(project, relative / "release-manifest.json", operator_uid)
+    marker = _method_release_text(project, relative / ".published-complete", operator_uid)
     if (hashlib.sha256(manifest_text.encode()).hexdigest() != component.get("manifest_sha256")
             or hashlib.sha256(marker.encode()).hexdigest() != component.get("published_marker_sha256")):
         raise ValueError("method child manifest/marker drift")
@@ -3061,11 +3071,11 @@ def capture_monitor_method_input(project: Path, device: dict[str, Any], release:
             raise ValueError("method current inventory MAC differs")
     if child.get("config") != filename:
         raise ValueError("method current own YAML path differs")
-    text = _method_release_text(project, relative / filename)
+    text = _method_release_text(project, relative / filename, operator_uid)
     digest = hashlib.sha256(text.encode()).hexdigest()
     if digest != child.get("config_sha256"):
         raise ValueError("method current own YAML hash differs")
-    if latest.resolve(strict=True) != target or _method_release_text(project, parent_path) != parent_text:
+    if latest.resolve(strict=True) != target or _method_release_text(project, parent_path, operator_uid) != parent_text:
         raise ValueError("method release binding changed during capture")
     return {"text": text, "input_sha256": digest, "parent_sha256": hashlib.sha256(parent_text.encode()).hexdigest(),
             "manifest_sha256": component["manifest_sha256"], "release_dir": str(relative)}
@@ -5095,7 +5105,13 @@ def _prune_snapshot_history(output_root: Path, keep: int = SNAPSHOT_RETENTION) -
 
 def write_report(report: dict[str, Any], output_root: Path,
                  switch_results: dict[str, dict[str, Any]],
-                 server_logs: Optional[dict[str, str]] = None) -> Path:
+                 server_logs: Optional[dict[str, str]] = None,
+                 *, operator: operator_identity.Operator | None = None) -> Path:
+    """Write one snapshot directory and publish it as latest.
+
+    operator: the operator a root run acts for; every directory and file of the new snapshot is handed to it
+    before publication (O11 ②, I-006 scheme item 4).  The latest link is left alone (links are never changed).
+    """
     output_root.mkdir(parents=True, exist_ok=True)
     previous_dir = _latest_snapshot_dir(output_root)
     previous_state = _snapshot_state_from_dir(previous_dir)
@@ -5135,6 +5151,18 @@ def write_report(report: dict[str, Any], output_root: Path,
         device_dir.mkdir()
         for key in ("ztp_log", "ifreload_log", "failed_yaml", "stderr"):
             (device_dir / f"{key}.log").write_text(result.get(key, "") + "\n", encoding="utf-8")
+    if operator is not None:
+        # Held descriptors only (fwalk binds every level without following links).
+        for _directory, _subdirectories, files, directory_fd in os.fwalk(run_dir):
+            os.fchown(directory_fd, operator.uid, operator.gid)
+            for name in files:
+                descriptor = os.open(
+                    name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory_fd,
+                )
+                try:
+                    os.fchown(descriptor, operator.uid, operator.gid)
+                finally:
+                    os.close(descriptor)
     latest = output_root / "latest"
     temporary = output_root / ".latest.tmp"
     try:
@@ -5167,6 +5195,10 @@ def write_report(report: dict[str, Any], output_root: Path,
 def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     scope = getattr(args, "scope", "all")
     output_root = args.output_dir or live_output_root(args)
+    # main's one identity step (I-006): the operator this root run acts for, or None.  Files are handed to it
+    # only under the bound live root (O11 ②; review 3 A2), never under an explicit --output-dir.
+    operator = getattr(args, "_project_operator", None)
+    handoff = operator if output_root == live_output_root(args) else None
     offline = bool(getattr(args, "offline", False))
     runtime_backend = None if offline else service_runtime_backend()
     release = load_release_identity(project)
@@ -5357,7 +5389,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             attribution_by_address[record["address"]] = record
         persist_collection_attribution(
             attribution_state_path, attribution_digests,
-            list(attribution_by_address.values()),
+            list(attribution_by_address.values()), operator=handoff,
         )
         initial_reader = None
         initial_error = ""
@@ -5393,7 +5425,9 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
                     method_root, device["hostname"], operation_id, device["hostname"] + ":" + operation_id,
                     "ztp_monitor_cycle",
                 )
-                context["input"] = capture_monitor_method_input(project, device, release)
+                context["input"] = capture_monitor_method_input(
+                    project, device, release, operator.uid if operator else None,
+                )
             except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
                 context["error"] = str(exc)
         # Every eligible device has its local pending boundary before ANY
@@ -5454,7 +5488,9 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
             try:
                 if "error" in context or "input" not in context:
                     raise ValueError(context.get("error") or "method input capture missing")
-                if capture_monitor_method_input(project, device, release) != context["input"]:
+                if capture_monitor_method_input(
+                        project, device, release, operator.uid if operator else None,
+                ) != context["input"]:
                     raise ValueError("method release input changed during collector session")
                 expected_text = context["input"]["text"]
             except (OSError, ValueError, TypeError, KeyError, UnicodeError) as exc:
@@ -5529,7 +5565,7 @@ def monitor_once(args: argparse.Namespace, project: Path) -> Path:
     }
     return write_report(
         report, output_root, switch_results,
-        {"dhcp": dhcp_text, "apache-access": apache_text},
+        {"dhcp": dhcp_text, "apache-access": apache_text}, operator=handoff,
     )
 
 
@@ -5808,8 +5844,12 @@ def load_completion_handoff_signatures(
 def persist_completion_handoff_signatures(
     path: Path, project: Path,
     signatures: dict[str, tuple[tuple[str, str, str], ...]],
+    *, operator: operator_identity.Operator | None = None,
 ) -> None:
-    """Atomically persist all successful collection-group signatures."""
+    """Atomically persist all successful collection-group signatures.
+
+    operator: the operator a root run acts for; the new state file is handed to it (O11 ②).
+    """
     if any(key not in COMPLETION_HANDOFF_KEYS for key in signatures):
         raise ValueError("invalid completion handoff collection key")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -5837,6 +5877,8 @@ def persist_completion_handoff_signatures(
         prefix=".ztp-completion-handoff.", dir=path.parent,
     )
     temporary = Path(temporary_name)
+    if operator is not None:
+        os.fchown(descriptor, operator.uid, operator.gid)
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             json.dump(payload, stream, ensure_ascii=False, indent=2)
@@ -6128,6 +6170,7 @@ def process_ready_completion_handoffs(
     *, monotonic=time.monotonic,
     status_dir: Path = SWITCH_COLLECTION_STATUS_DIR,
     via_worker: bool = False,
+    operator: operator_identity.Operator | None = None,
 ) -> tuple[
     dict[str, tuple[tuple[str, str, str], ...]],
     dict[str, tuple[tuple[str, str, str], ...]],
@@ -6167,6 +6210,7 @@ def process_ready_completion_handoffs(
             try:
                 persist_completion_handoff_signatures(
                     handoff_state_path, project, handed_off_signatures,
+                    operator=operator,
                 )
             except OSError as exc:
                 log(
@@ -6214,6 +6258,7 @@ def _watch_state_bytes(payload: dict[str, Any]) -> bytes:
 
 def _replace_bytes_durably(
     path: Path, content: bytes, *, mode: int = 0o644,
+    operator: operator_identity.Operator | None = None,
 ) -> None:
     descriptor = -1
     temporary: Path | None = None
@@ -6223,6 +6268,8 @@ def _replace_bytes_durably(
         )
         temporary = Path(raw_name)
         os.fchmod(descriptor, mode)
+        if operator is not None:  # O11 ②: root's new project file belongs to the operator
+            os.fchown(descriptor, operator.uid, operator.gid)
         offset = 0
         while offset < len(content):
             offset += os.write(descriptor, content[offset:])
@@ -6241,7 +6288,10 @@ def _replace_bytes_durably(
                 pass
 
 
-def _write_watch_state_atomic(path: Path, payload: dict[str, Any]) -> None:
+def _write_watch_state_atomic(
+    path: Path, payload: dict[str, Any],
+    *, operator: operator_identity.Operator | None = None,
+) -> None:
     """Publish the watch sidecar atomically and roll back failed durability."""
     path.parent.mkdir(parents=True, exist_ok=True)
     previous: bytes | None = None
@@ -6253,7 +6303,7 @@ def _write_watch_state_atomic(path: Path, payload: dict[str, Any]) -> None:
     published = False
     directory_fd = -1
     try:
-        _replace_bytes_durably(path, _watch_state_bytes(payload))
+        _replace_bytes_durably(path, _watch_state_bytes(payload), operator=operator)
         published = True
         directory_fd = os.open(
             path.parent,
@@ -6268,7 +6318,7 @@ def _write_watch_state_atomic(path: Path, payload: dict[str, Any]) -> None:
                 if previous is None:
                     path.unlink(missing_ok=True)
                 else:
-                    _replace_bytes_durably(path, previous)
+                    _replace_bytes_durably(path, previous, operator=operator)
                 if directory_fd < 0:
                     directory_fd = os.open(
                         path.parent,
@@ -6851,9 +6901,12 @@ def _watch_state_payload(
     }
 
 
-def _best_effort_watch_state(path: Path, payload: dict[str, Any]) -> None:
+def _best_effort_watch_state(
+    path: Path, payload: dict[str, Any],
+    *, operator: operator_identity.Operator | None = None,
+) -> None:
     try:
-        _write_watch_state_atomic(path, payload)
+        _write_watch_state_atomic(path, payload, operator=operator)
     except OSError as exc:
         log(
             f"[WARN] watch-state sidecar 写入失败：{_bounded_watch_message(exc)}",
@@ -6902,10 +6955,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     last_failure_at = ""
     consecutive_failures = 0
     limiter = WatchFailureLogLimiter(args.watch or 5)
+    operator = handoff = None
     try:
         project = resolve_project(args.project)
         validate_monitor_mode(args, project)
+        if not args.offline and os.environ.get(RUNTIME_BACKEND_ENV) != "supervisor":
+            # I-006 (owner 2026-10-27: the identity check applies to the monitor too; design §4.3): the operator
+            # owns the project require_active_project bound for this run -- never a second pointer read (review 3
+            # A2).  Offline analysis binds no project and stays as it is.  Docker stays v3.1.1 (owner 11-02, Docker
+            # waits for stage 6): deploy.sh runs the container as root with the supervisor backend, and the
+            # project owner is often missing from the container's passwd.
+            resolution = operator_identity.resolve_operator(live_output_root(args).parent)
+            if resolution.refusal is not None:
+                log(f"[ERROR] {resolution.refusal}", file=sys.stderr)
+                return 2
+            log(f"[INFO] {resolution.banner}")
+            if resolution.action == "represent":
+                operator = args._project_operator = resolution.operator
+                if args.identity is None:
+                    # O12 ①: root logs in with the operator's key; no IdentitiesOnly, root's own keys stay a fallback.
+                    args.identity = Path(operator.home) / ".ssh" / "id_ed25519"
         output_root = args.output_dir or live_output_root(args)
+        handoff = operator if output_root == live_output_root(args) else None
         watch_state_path = output_root / WATCH_STATE_NAME
         handoff_state_path = output_root / HANDOFF_STATE_NAME
         handed_off_signatures = (
@@ -6975,7 +7046,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     next_retry_at=next_retry_at,
                     category=exc.category, message=exc.message,
                 )
-                _best_effort_watch_state(watch_state_path, payload)
+                _best_effort_watch_state(watch_state_path, payload, operator=handoff)
                 _best_effort_failure_html(args)
                 failure_log = limiter.record_failure(
                     exc.category, exc.message, now=time.monotonic(),
@@ -6998,7 +7069,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         next_retry_at="", category="permanent-cycle",
                         message=exc,
                     )
-                    _best_effort_watch_state(watch_state_path, payload)
+                    _best_effort_watch_state(watch_state_path, payload, operator=handoff)
                     _best_effort_failure_html(args)
                 log(f"[ERROR] {_bounded_watch_message(exc)}", file=sys.stderr)
                 return 2
@@ -7015,7 +7086,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     last_failure_at=last_failure_at, next_retry_at="",
                     category="", message="",
                 )
-                _best_effort_watch_state(watch_state_path, payload)
+                _best_effort_watch_state(watch_state_path, payload, operator=handoff)
                 recovery_log = limiter.record_recovery(now=time.monotonic())
                 if recovery_log:
                     log(f"[INFO] {recovery_log}")
@@ -7031,6 +7102,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     project, handoff_state_path, handed_off_signatures,
                     handoff_retry_signatures, handoff_retry_after, args.watch,
                     via_worker=bool(getattr(args, "request_collection_on_complete", False)),
+                    operator=handoff,
                 )
             if not args.watch:
                 return 0
@@ -7058,6 +7130,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     last_failure_at=last_failure_at,
                     next_retry_at="", category="permanent-cycle", message=exc,
                 ),
+                operator=handoff,
             )
             _best_effort_failure_html(args)
         log(f"[ERROR] {_bounded_watch_message(exc)}", file=sys.stderr)

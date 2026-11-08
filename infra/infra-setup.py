@@ -729,6 +729,11 @@ class InfraSetup:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             self.log_file = str(physical / f"infra-setup-{stamp}-{os.getpid()}.log")
             self.log_fd = os.open(self.log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o666)
+            if is_root():
+                # I-006 scheme item 4 (O11 ⑤): root's new log belongs to the owner of the directory it sits in --
+                # in a project's 99-output-infra that is the operator.  Self-contained: no project-tree module.
+                owner = os.stat(physical)
+                os.fchown(self.log_fd, owner.st_uid, owner.st_gid)
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)

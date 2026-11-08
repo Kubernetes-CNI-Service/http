@@ -47,10 +47,12 @@ TOOLS_DIR = ROOT / "tools"
 if str(TOOLS_DIR) not in sys.path:
     sys.path.insert(0, str(TOOLS_DIR))
 from ztp_service_runtime import (  # noqa: E402
+    RUNTIME_BACKEND_ENV,
     RuntimeContractError,
     ServiceRuntimeBackend,
     runtime_backend_from_environment,
 )
+import operator_identity  # noqa: E402  (standard library only at import time)
 DEFAULT_OUTPUT_ROOT = Path("/var/tmp/ztp-diagnostics")
 SCHEMA_VERSION = 1
 MAX_COMMAND_BYTES = 8 * 1024 * 1024
@@ -2128,10 +2130,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--output-dir", help="归档目录；默认 /var/tmp/ztp-diagnostics（必须在 DocumentRoot 外）",
     )
-    parser.add_argument("--identity", help="可选 SSH 私钥路径；只读取，绝不打包")
     parser.add_argument(
-        "--known-hosts", default="/root/.ssh/known_hosts",
-        help="只读 known_hosts；不会接受或删除 host key",
+        "--identity",
+        help=("可选 SSH 私钥路径；只读取，绝不打包（默认：操作员不是 root 时取操作员家目录的 "
+              ".ssh/id_ed25519，否则不指定）"),
+    )
+    parser.add_argument(
+        "--known-hosts",
+        help=("只读 known_hosts；不会接受或删除 host key（默认：操作员家目录的 .ssh/known_hosts；"
+              "无法判定操作员时 /root/.ssh/known_hosts）"),
     )
     args = parser.parse_args(argv)
     if not 1 <= args.since_minutes <= 10080:
@@ -2143,6 +2150,32 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     args.scope = "air" if args.air else "prod" if args.prod else args.scope_type or "all"
     if args.host and args.scope == "all":
         parser.error("指定 --host 时必须明确 --air 或 --prod")
+    # I-006 (owner 2026-10-27 scheme item 1): read the operator's ~/.ssh -- the switches trust the operator's key in
+    # way A.  The operator owns the active project.  Without it (a failed import of project_contract/PyYAML, an
+    # invalid pointer, no project, or an identity the rule refuses) the v3.1.1 defaults stay: this collector is
+    # for broken environments and must still start (http dev 2026-11-08).  Inside the Docker container (the
+    # supervisor backend deploy.sh sets) nothing changes: Docker stays v3.1.1 until stage 6 (owner 11-02).
+    known_hosts, identity = "/root/.ssh/known_hosts", None
+    if os.environ.get(RUNTIME_BACKEND_ENV) != "supervisor":
+        try:
+            resolution = operator_identity.resolve_operator(operator_identity.active_project(ROOT))
+        except ImportError as exc:
+            print(f"[WARN] 无法判定操作员（模块缺失：{exc}）；--known-hosts、--identity 用原默认值", file=sys.stderr)
+        except ValueError as exc:  # project_contract.ActiveProjectPointerError
+            print(f"[WARN] 无法判定操作员（{exc}）；--known-hosts、--identity 用原默认值", file=sys.stderr)
+        else:
+            if resolution.refusal is not None:
+                print(f"[WARN] {resolution.refusal}；--known-hosts、--identity 用原默认值", file=sys.stderr)
+            else:
+                print(f"[INFO] {resolution.banner}")
+                if resolution.operator is not None:
+                    ssh = Path(resolution.operator.home) / ".ssh"
+                    known_hosts = str(ssh / "known_hosts")
+                    identity = None if resolution.operator.uid == 0 else str(ssh / "id_ed25519")
+    if args.known_hosts is None:
+        args.known_hosts = known_hosts
+    if args.identity is None:
+        args.identity = identity
     return args
 
 

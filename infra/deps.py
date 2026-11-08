@@ -882,9 +882,12 @@ def root_home_problem() -> object:
     root_home = pwd.getpwuid(os.geteuid()).pw_dir
     if home and os.path.realpath(home) == os.path.realpath(root_home):
         return None
+    # v3.1.2 WP-12 (I-006): load runs under sudo now, so the venv owner is named by who runs cron.sh/upgrade.py.
     return (f"running as root with HOME={home or '(unset)'}: root installs only into its own home {root_home}. "
-            f"Run it as the user who runs 11-load.py (for venv-cabletracker) or upgrade.py (for "
-            f"venv-ibsw-upgrade); if that user is root, run it with HOME={root_home} (plain sudo, not sudo -E)")
+            f"Each account installs into its own home: cron.sh started by the collection worker runs as root and "
+            f"uses root's venv-cabletracker (install it as root with HOME={root_home}: a root login or plain sudo, "
+            f"not sudo -E); cron.sh or upgrade.py run by hand use the operator's own venv-cabletracker or "
+            f"venv-ibsw-upgrade (the operator installs it without sudo)")
 
 
 def half_built(venv: Path, target_name: str, problem: str) -> int:
