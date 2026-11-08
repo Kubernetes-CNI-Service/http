@@ -2666,6 +2666,20 @@ def run_collection_slots(
                 cron_lock_fd = os.open(
                     cwd / "cron.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600
                 )
+                if os.geteuid() == 0 and os.environ.get(
+                    "HTTP_ZTP_RUNTIME_BACKEND", "systemd"
+                ) == "systemd":
+                    # I-029: a native root worker hands the lock it opened (new, or one root left
+                    # behind) to the project's operator, so the operator's own cron.sh can take it;
+                    # root still opens it later.  Only the owner changes.  No project: nobody to hand
+                    # it to.  K4 (the worker as the tree owner) never enters this branch.  Docker is
+                    # frozen (开发计划 :112): a container (compose.yaml / deploy.sh set
+                    # HTTP_ZTP_RUNTIME_BACKEND=supervisor for every process in it) keeps v3.1.1.
+                    from operator_identity import resolve_operator
+
+                    operator = resolve_operator(active_project_dir(HTTP_ROOT), euid=0).operator
+                    if operator is not None:
+                        os.fchown(cron_lock_fd, operator.uid, operator.gid)
                 lock_deadline = time.monotonic() + lock_wait
                 while True:
                     try:
