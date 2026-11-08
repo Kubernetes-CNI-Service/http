@@ -99,6 +99,29 @@ setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续�
 0 * * * * bash /var/www/html/ethernet/monitor/cron.sh >> /var/www/html/ethernet/monitor/cronjob.log 2>&1
 ```
 
+### 运行身份（v3.1.2 起，K4 之前）
+
+有当前项目（`DAY0-Prepare/activate-project`）时，`cron.sh` 先认操作员：操作员是项目目录的属主（规则在
+`tools/operator_identity.py`），然后按谁在运行处理：
+
+| 谁在运行 | 怎么处理 |
+|---|---|
+| 操作员本人（不加 sudo） | 照常采集，但**只采集**：代码树属于 root，`monitor.html` 的刷新（含 Ethernet 的 `post-collect.py`，它分析之后刷新页面）留给 root 侧的 worker 和 `12-ztp-monitor` |
+| 其他普通用户 | 拒绝，提示项目属于谁、当前是谁 |
+| root 在终端里直接运行；`sudo bash cron.sh` | 建临时文件和加锁之前，用 `runuser -u <操作员>` 以操作员身份重新执行（环境只保留 `PATH`、`LANG`、`LC_ALL`、`TERM`，`HOME` 取操作员的家目录），之后同第一行 |
+| switch-collection worker、`12-ztp-monitor` 起的（load 以 root 启动它们，它们设置「由 root 父进程启动」标记 `HTTP_ZTP_ROOT_PARENT`）；root 的 crontab（没有 `SUDO_USER`、标准输入不是终端） | 仍以 root 运行；登录交换机时先用操作员的 `~/.ssh/id_ed25519`，root 自己的 key 作后备 |
+
+- 每次运行在 stderr 打印一行 `[IDENTITY] 操作员：…；当前：…`。
+- 没有当前项目时不认操作员，照原样运行。Docker 容器里（`HTTP_ZTP_RUNTIME_BACKEND=supervisor` 或设了
+  `HTTP_ZTP_ASKPASS_TMPDIR`）也不做身份处理，与 v3.1.1 相同：以 root 运行、用 `/root/.ssh`，项目属主的 uid
+  不在容器的 passwd 里也照常采集。
+- 操作员模块载入失败（例如 PyYAML 坏了）时打印一行 `[IDENTITY] WARN`，本次不核对身份、不降权，照原方式采集；
+  指针存在但无效时报错退出。
+- 采集锁 `cron.lock` 在代码树里，由 load 预先建好并交给操作员；打不开时提示「无法打开采集锁 <路径>：<原因>」，
+  不再说「上一轮采集仍在运行」。
+- 代码树里的 `cron.sh-<时间>.log` 写不了时只输出到终端。
+- 上面的 crontab 示例放进操作员自己的 crontab 时只采集；放进 root 的 crontab 时以 root 运行，并刷新页面。
+
 ### load 之后的自动链路（owner 2026-10-23）
 
 `DAY0-Prepare/11-load.py` 成功后，ZTP 后台监控（`12-ztp-monitor.py`）每轮刷新 `monitor.html`。

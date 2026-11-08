@@ -57,6 +57,7 @@ LOCK_WAIT=0
 WORKER_CONTEXT_FD=""
 EMIT_TARGET_PLAN_FD=""
 PREHELD_LOCK_FD=""
+CRON_ARGS=("$@")   # a re-run as the operator gets the same arguments (v3.1.2 WP-11)
 set_type_filter() {
     local value="$1" option="$2"
     if [[ -n "$TYPE_FILTER" && "$TYPE_FILTER" != "$value" ]]; then
@@ -148,6 +149,70 @@ done
 
 # ── Config ────────────────────────────────────────────────────────────────────
 BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# ── Operator identity before K4 (I-006; v3.1.2 WP-11) ─────────────────────────
+# The operator owns the project DAY0-Prepare/activate-project selects.  tools/operator_identity.py holds
+# the rule; this block only applies its answer, before any temporary file or the lock is made:
+#   - another ordinary user: refused;
+#   - root from a terminal or through sudo, without the root-parent marker HTTP_ZTP_ROOT_PARENT (set by
+#     the switch-collection worker and 12-ztp-monitor): re-run as the operator with runuser (owner
+#     2026-11-07 已定 2; O13);
+#   - root kept (the marker, or a root crontab: no SUDO_USER and stdin not a terminal): log in with the
+#     operator's key first, root's own keys stay the fallback (O12 ①);
+#   - not root: collect only; the page in the root-owned code tree stays with the root side (O14).
+# No pointer: no operator, nothing is checked.  The container (HTTP_ZTP_RUNTIME_BACKEND=supervisor or
+# HTTP_ZTP_ASKPASS_TMPDIR, the signals create_ssh_askpass_helper uses) keeps v3.1.1's behaviour: root
+# with /root/.ssh, never stopped because the project owner's uid is missing from the container's passwd
+# (Docker frozen; owner 2026-10-27 scheme item 6; http dev 2026-11-09).  A module that cannot be imported
+# (e.g. a broken PyYAML) leaves the run as before, with one WARN line (http dev 2026-11-08, item W11-1).
+CRON_EUID=$(id -u)
+CRON_COLLECT_ONLY=0
+CRON_OPERATOR_KEY=""
+if [[ -L "${BASE}/../../DAY0-Prepare/activate-project" || -e "${BASE}/../../DAY0-Prepare/activate-project" ]] \
+        && [[ -z "${HTTP_ZTP_ASKPASS_TMPDIR:-}" && "${HTTP_ZTP_RUNTIME_BACKEND:-}" != supervisor ]]; then
+    cron_interactive=0
+    [[ -n "${SUDO_USER:-}" || -t 0 ]] && cron_interactive=1
+    cron_identity=$(python3 - "${BASE}/../.." "$CRON_EUID" "$cron_interactive" "${BASH_SOURCE[0]}" <<'IDENTITY_PY'
+import os
+import sys
+
+root, euid, interactive, script = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1", sys.argv[4]
+sys.path.insert(0, os.path.join(root, "tools"))
+try:
+    import operator_identity
+    project = operator_identity.active_project(root)
+except ImportError as exc:
+    print(f"[IDENTITY] WARN: 无法载入操作员模块（{exc}）；本次不核对身份、不降权，照原方式采集", file=sys.stderr)
+    raise SystemExit(3)
+except ValueError as exc:  # project_contract.ActiveProjectPointerError: an invalid pointer is an error
+    raise SystemExit(f"[IDENTITY] ERROR: {exc}")
+resolution = operator_identity.resolve_operator(project, euid=euid)
+print(f"[IDENTITY] {resolution.banner}", file=sys.stderr)
+if resolution.refusal:
+    raise SystemExit(f"[IDENTITY] ERROR: {resolution.refusal}")
+if interactive and operator_identity.needs_reexec(resolution):
+    command = operator_identity.reexec_command(resolution.operator, script, [], interpreter=("bash",))
+    print("\n".join(["reexec", *command]))
+elif resolution.action == "represent":
+    print("key\n" + os.path.join(resolution.operator.home, ".ssh", "id_ed25519"))
+elif resolution.action == "self":
+    print("run")
+IDENTITY_PY
+    )
+    case $? in
+        0) ;;
+        3) cron_identity="" ;;
+        *) exit 1 ;;
+    esac
+    case "${cron_identity%%$'\n'*}" in
+        reexec)
+            cron_reexec=()
+            while IFS= read -r cron_word; do cron_reexec+=("$cron_word"); done <<< "${cron_identity#*$'\n'}"
+            exec "${cron_reexec[@]}" "${CRON_ARGS[@]}"
+            ;;
+        key) CRON_OPERATOR_KEY=${cron_identity#*$'\n'} ;;
+        run) (( CRON_EUID == 0 )) || CRON_COLLECT_ONLY=1 ;;
+    esac
+fi
 ETH=$(mktemp)   # eth/eth_spx/spx (sw-info.sh)
 SPX=$(mktemp)   # eth_spx/spx only (sw-link.sh)
 IB=$(mktemp)    # populated from ib.csv: type=ib
@@ -196,7 +261,12 @@ PY
         exit 1
     fi
 else
-    exec 200>"$LOCK_FILE"
+    if ! { exec 200>"$LOCK_FILE"; } 2>/dev/null; then
+        # v3.1.2 WP-11 (plan: M6 cron.sh): a lock that cannot be opened is not a round still running
+        lock_reason=$( { exec 200>"$LOCK_FILE"; } 2>&1 )
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 无法打开采集锁 ${LOCK_FILE}：${lock_reason##*: }" >&2
+        exit 1
+    fi
     if (( LOCK_WAIT > 0 )); then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 等待采集锁（最多 ${LOCK_WAIT}s）：$LOCK_FILE"
         lock_args=(-w "$LOCK_WAIT")
@@ -318,9 +388,17 @@ SSH_OPTS="-C -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogL
 # while, and without keepalives an scp would wait for TCP retransmits (owner 2026-10-22). Host keys are
 # never pinned (UserKnownHostsFile=/dev/null), so the VIP changing hands does not stop a login.
 UFM_ALIVE_OPTS="-o ServerAliveInterval=10 -o ServerAliveCountMax=3"
+# O12 ① (v3.1.2 WP-11): root kept for the operator offers the operator's key first; no IdentitiesOnly.
+if [[ -n "$CRON_OPERATOR_KEY" ]]; then
+    SSH_OPTS+=" -i ${CRON_OPERATOR_KEY}"
+fi
 SSH_PASSWORD_OPTS="-C -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 -o ConnectionAttempts=2 -o BatchMode=no -o NumberOfPasswordPrompts=1 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=yes -o PreferredAuthentications=publickey,keyboard-interactive,password"
 
 LOG=${BASE}/$(basename "${BASH_SOURCE[0]}")-$(date '+%Y%m%d-%H%M').log
+# O14 (v3.1.2 WP-11): a code-tree log the runner cannot write is skipped; the terminal keeps every line.
+if [[ -e "$LOG" && ! -w "$LOG" ]] || [[ ! -e "$LOG" && ! -w "$BASE" ]]; then
+    LOG=/dev/null
+fi
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 # If stdout is already redirected (e.g. cron >> file), write only to stdout.
@@ -2697,7 +2775,10 @@ if hosts_file_has_entries "$NV"; then collect_nv_link || collection_failed=1; fi
 # Never discover "latest" here: AIR and Production archives can coexist and
 # another collector may publish a newer file while this process is running.
 if [[ -n "$ETH_ARCHIVE" ]]; then
-    if [[ ! -f "$POST_COLLECT" ]]; then
+    if (( CRON_COLLECT_ONLY )); then
+        # O14: post-collect also refreshes monitor.html, which belongs to the root side before K4
+        log "[ETH-CLOSED-LOOP] 非 root 运行只采集：LLDP 分析和 monitor.html 刷新由 root 侧（worker、12-ztp-monitor）负责"
+    elif [[ ! -f "$POST_COLLECT" ]]; then
         log "[ETH-CLOSED-LOOP] ERROR: missing post-collection script: $POST_COLLECT"
         collection_failed=1
     else
@@ -2751,7 +2832,9 @@ elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then
             UFM_IB_ANALYSIS=ok
         fi
     fi
-    if [[ ! -f "$HTML_GENERATOR" ]]; then
+    if (( CRON_COLLECT_ONLY )); then
+        log "[MONITOR-HTML] 非 root 运行只采集：monitor.html 由 root 侧（worker、12-ztp-monitor）刷新"
+    elif [[ ! -f "$HTML_GENERATOR" ]]; then
         log "[MONITOR-HTML] ERROR: missing generator: $HTML_GENERATOR"
         collection_failed=1
     elif ! python3 "$HTML_GENERATOR" --type "${COLLECTION_ENV:-prod}"; then

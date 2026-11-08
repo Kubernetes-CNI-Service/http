@@ -69,6 +69,7 @@ from project_contract import (
     validate_collection_cycle_identity,
     validate_collection_cycle_result,
 )
+from operator_identity import ROOT_PARENT_MARKER, ROOT_PARENT_MARKER_VALUE
 from tools.log_rotation import rotate as rotate_log_file
 
 
@@ -1344,7 +1345,7 @@ def stop_all_collectors() -> list[int]:
 
 def run_interruptible(
     command: list[str], cwd: Path, timeout: int, *, pass_fds: tuple[int, ...] = (),
-    lane: str = COLLECTION_LANE,
+    lane: str = COLLECTION_LANE, env: dict[str, str] | None = None,
 ) -> tuple[dict, bool]:
     """Run one child while servicing only its lane's stop request."""
     lane = _validate_lane(lane)
@@ -1357,7 +1358,7 @@ def run_interruptible(
             }, True
         process = subprocess.Popen(
             command, cwd=cwd, text=True, stdout=stdout_file, stderr=stderr_file,
-            stdin=subprocess.DEVNULL, start_new_session=True, pass_fds=pass_fds,
+            stdin=subprocess.DEVNULL, start_new_session=True, pass_fds=pass_fds, env=env,
         )
         try:
             _set_active_collector(process, lane)
@@ -2642,6 +2643,8 @@ def run_collection_slots(
     if len(commands) != len(slots):
         raise RuntimeError("collection command count does not match declared slots")
 
+    # 已定 2 (owner 2026-11-07; v3.1.2 WP-11): the cron.sh this root worker starts keeps running as root.
+    collector_env = {**os.environ, ROOT_PARENT_MARKER: ROOT_PARENT_MARKER_VALUE}
     outcomes: list[dict[str, object]] = []
     for slot, command in zip(slots, commands):
         empty_result = {"returncode": 1, "stdout": "", "stderr": ""}
@@ -2716,7 +2719,7 @@ def run_collection_slots(
                     plan_result, plan_cancelled = run_interruptible(
                         planner_command, cwd, timeout,
                         pass_fds=(plan_context.fileno(), plan_file.fileno(), cron_lock_fd),
-                        lane=COLLECTION_LANE,
+                        lane=COLLECTION_LANE, env=collector_env,
                     )
                     if plan_cancelled or plan_result["returncode"] != 0:
                         evidence_result = plan_result
@@ -2749,13 +2752,14 @@ def run_collection_slots(
                     process_result, cancelled = run_interruptible(
                         managed_command, cwd, timeout,
                         pass_fds=(context_file.fileno(), cron_lock_fd), lane=COLLECTION_LANE,
+                        env=collector_env,
                     )
             else:
                 # No input inventory means this cannot be an A4 evidence run.
                 # Preserve the existing operational/legacy collector path so
                 # process supervision remains testable, never v2 qualifying.
                 process_result, cancelled = run_interruptible(
-                    command, cwd, timeout, lane=COLLECTION_LANE
+                    command, cwd, timeout, lane=COLLECTION_LANE, env=collector_env,
                 )
             evidence_result = process_result
             if cancelled:

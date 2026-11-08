@@ -803,7 +803,8 @@ class CurrentRoundGateWorkflowTests(unittest.TestCase):
             state = root / MONITOR.HANDOFF_STATE_NAME
             calls = []
 
-            def external_collector(command, *, timeout):
+            # v3.1.2 WP-11: run_command also takes the env carrying the root-parent marker for cron.sh
+            def external_collector(command, *, timeout, env=None):
                 calls.append((command, timeout))
                 return {"returncode": 0, "stdout": "", "stderr": ""}
 

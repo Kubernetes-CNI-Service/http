@@ -13418,6 +13418,13 @@ sudo python3 tools/deploy-upload-archive.py /tmp/&lt;archive&gt; --runtime nativ
           页面控制端点（CGI、control auth）只在启用 HTTP 时安装；没有 HTTP 时页面不可用，由 root 写请求文件触发一轮：
           <code>echo collect | sudo tee /var/www/html/monitor/status/switch-collection.request &gt;/dev/null</code>。
           Docker 部署不变，worker 仍随 ZTP 监控启动。</p>
+        <p><strong>cron.sh 的运行身份（v3.1.2 起，K4 之前）：</strong>有当前项目时，<code>cron.sh</code>
+          以项目目录的属主为操作员。操作员本人运行时只采集，<code>monitor.html</code> 的刷新留给 root 侧的 worker 和
+          <code>12-ztp-monitor</code>；其他普通用户运行时拒绝；root 在终端里直接运行或用 <code>sudo</code> 运行时，在建临时文件
+          和加锁之前用 <code>runuser</code> 以操作员身份重新执行；worker、<code>12-ztp-monitor</code> 起的（带「由 root 父进程启动」
+          标记 <code>HTTP_ZTP_ROOT_PARENT</code>）和 root 的 crontab 仍以 root 运行，登录交换机时先用操作员的
+          <code>~/.ssh/id_ed25519</code>。没有当前项目或在 Docker 容器里时照原样运行。详见
+          <code>ethernet/monitor/README.md</code>「运行身份」。</p>
         <p><strong>操作命令</strong></p>
         <pre><code># 浏览器：Switch Status → 手工 Collect，或选择最小 10m 的持续收集
 # 浏览器：Yaml Backup，或选择最小 10m 的持续备份

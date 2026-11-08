@@ -79,6 +79,8 @@ print(json.dumps({
         shutil.copy2(
             ROOT / "tools/project_contract.py", root / "tools/project_contract.py",
         )
+        # v3.1.2 WP-11: the worker imports the root-parent marker from the operator rule module
+        shutil.copy2(ROOT / "tools/operator_identity.py", root / "tools/operator_identity.py")
         for name in ("switch-collection-worker.py", "switch_collection_gate.py"):
             shutil.copy2(ROOT / "monitor" / name, root / "monitor" / name)
         return root

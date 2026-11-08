@@ -60,6 +60,7 @@ from ztp_service_runtime import (  # noqa: E402
 from project_contract import (resolve_device_config_method, safe_load_global_yaml,
                               MacStringSafeLoader, GlobalSafeLoader,
                               active_project_dir, pointer_link_target)
+from operator_identity import ROOT_PARENT_MARKER, ROOT_PARENT_MARKER_VALUE
 from ztp.nvue_normalizer import deep_merge_nvue, normalize_nvue_selectors
 from ztp import config_sync_authority
 import operator_identity  # noqa: E402
@@ -614,11 +615,12 @@ def read_devices(
     return devices
 
 
-def run_command(command: list[str], timeout: int = 20) -> dict[str, Any]:
+def run_command(command: list[str], timeout: int = 20,
+                env: Optional[dict[str, str]] = None) -> dict[str, Any]:
     try:
         completed = subprocess.run(
             command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=timeout, check=False,
+            timeout=timeout, check=False, env=env,
         )
         return {"returncode": completed.returncode, "stdout": completed.stdout,
                 "stderr": completed.stderr}
@@ -6027,7 +6029,9 @@ def run_completion_handoff(
             log(f"[WARN] 采集脚本不存在: {script}", file=sys.stderr)
             return False
         log("[RUN] " + shlex.join(command))
-        result = run_command(command, timeout=collector_timeout)
+        # 已定 2 (owner 2026-11-07; v3.1.2 WP-11): the cron.sh this root monitor starts keeps running as root.
+        result = run_command(command, timeout=collector_timeout,
+                             env={**os.environ, ROOT_PARENT_MARKER: ROOT_PARENT_MARKER_VALUE})
         append_collector_log(script, command, result)
         for line in result["stdout"].splitlines():
             log(f"[COLLECT][stdout] {line}")

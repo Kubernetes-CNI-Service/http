@@ -7935,6 +7935,8 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
             )
             # the worker rotates its own log through this module
             shutil.copy2(ROOT / "tools/log_rotation.py", tools / "log_rotation.py")
+            # v3.1.2 WP-11: the worker imports the root-parent marker from the operator rule module
+            shutil.copy2(ROOT / "tools/operator_identity.py", tools / "operator_identity.py")
             inventory = project / "02-devices_config.csv"
             inventory.write_text("hostname,type\n", encoding="utf-8")
             (monitor / "02-devices_config.csv").symlink_to(pointer_link_target(
