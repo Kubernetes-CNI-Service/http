@@ -10333,8 +10333,14 @@ def _start_supervisor_program(
 def start_switch_collection_worker(
     scope: str, *, dry_run: bool = False,
     runtime_backend: ServiceRuntimeBackend | None = None,
+    control_endpoint: bool = True,
 ) -> None:
-    """Start the Switch Status collector with resources separate from ZTP control."""
+    """Start the Switch Status collector with resources separate from ZTP control.
+
+    I-028: the worker itself needs no HTTP.  ``control_endpoint`` (HTTP available) alone decides
+    the control auth, the Apache boundary, the CGI and the Apache reload; the request file is
+    written ``idle`` either way so a manual ``collect`` can still trigger a cycle.
+    """
     status_dir = HTTP_ROOT / "monitor/status"
     request_file = status_dir / "switch-collection.request"
     pid_file = status_dir / "switch-collection.pid"
@@ -10344,13 +10350,15 @@ def start_switch_collection_worker(
     ]
     display = " ".join(shlex_quote(item) for item in command)
     backend = runtime_backend or service_runtime_backend()
-    verify_control_auth(runtime_backend=backend, dry_run=dry_run)
-    verify_apache_publication_boundary(dry_run=dry_run)
+    if control_endpoint:
+        verify_control_auth(runtime_backend=backend, dry_run=dry_run)
+        verify_apache_publication_boundary(dry_run=dry_run)
     if dry_run:
-        print(
-            f"[DRY] 安装 Switch 收集控制端点：{SWITCH_COLLECTION_CONTROL_SOURCE} -> "
-            f"{SWITCH_COLLECTION_CONTROL_DEST}"
-        )
+        if control_endpoint:
+            print(
+                f"[DRY] 安装 Switch 收集控制端点：{SWITCH_COLLECTION_CONTROL_SOURCE} -> "
+                f"{SWITCH_COLLECTION_CONTROL_DEST}"
+            )
         print(f"[DRY] 后台启动独立 Switch 收集 worker：{display}")
         print(f"[DRY] PID: {pid_file}；日志: {log_file}；请求: {request_file}")
         return
@@ -10361,11 +10369,12 @@ def start_switch_collection_worker(
         if not source.is_file():
             raise LoadError(f"{label}不存在：{source}")
     status_dir.mkdir(parents=True, exist_ok=True)
-    run(sudo_command("install", "-d", "-m", "0755", str(SWITCH_COLLECTION_CONTROL_DEST.parent)))
-    run(sudo_command(
-        "install", "-m", "0755", str(SWITCH_COLLECTION_CONTROL_SOURCE),
-        str(SWITCH_COLLECTION_CONTROL_DEST),
-    ))
+    if control_endpoint:
+        run(sudo_command("install", "-d", "-m", "0755", str(SWITCH_COLLECTION_CONTROL_DEST.parent)))
+        run(sudo_command(
+            "install", "-m", "0755", str(SWITCH_COLLECTION_CONTROL_SOURCE),
+            str(SWITCH_COLLECTION_CONTROL_DEST),
+        ))
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as request_source:
         request_source.write("idle\n")
         request_source.flush()
@@ -10373,7 +10382,8 @@ def start_switch_collection_worker(
             "install", "-m", "0664", "-o", "root", "-g", "www-data",
             request_source.name, str(request_file),
         ))
-    _reload_apache_if_active(backend)
+    if control_endpoint:
+        _reload_apache_if_active(backend)
     if _start_supervisor_program(
         "switch-collection", scope, runtime_backend=backend,
     ):
@@ -12682,6 +12692,7 @@ def main(
     allow_management_key_generation=False
     should_monitor = False
     monitor_scope: str | None = None
+    collection_scope: str | None = None
     failure_phase = "启动前参数检查"
     primary_failure = False
     completed_successfully = False
@@ -12912,6 +12923,33 @@ def main(
             )
             if should_monitor:
                 monitor_scope = resolve_ztp_monitor_scope(
+                    project, args.ztp_monitor_scope,
+                    deployment_scope=deployment_scope,
+                )
+        # I-028 (owner 2026-11-03): the Switch collection worker needs no ZTP, DHCP or HTTP
+        # service, only the environment it can reach.  It shares the monitor's answer; otherwise
+        # the deployment scope or an explicit --ztp-monitor-scope decides, and "all" asks once on
+        # a terminal even when the monitor was declined (O4).  Native only: Docker is frozen.
+        if should_monitor:
+            collection_scope = monitor_scope
+        elif local_services_supported and runtime_backend_instance.name == "systemd":
+            failure_phase = "Switch 收集 worker 范围预检"
+            if (
+                deployment_scope == "all" and args.ztp_monitor_scope == "auto"
+                and (args.dry_run or not sys.stdin.isatty())
+            ):
+                if args.dry_run:
+                    info(
+                        "dry-run：部署范围为 all 且未指定 --ztp-monitor-scope；实际 load 在交互终端"
+                        "询问一次 Switch 收集 worker 的范围，非交互时不启动"
+                    )
+                else:
+                    warn(
+                        "部署范围为 all 且未指定范围，非交互终端无法询问：不启动 Switch 收集 worker；"
+                        "请加 --prod、--air 或 --ztp-monitor-scope air|prod 重新执行 load"
+                    )
+            else:
+                collection_scope = resolve_ztp_monitor_scope(
                     project, args.ztp_monitor_scope,
                     deployment_scope=deployment_scope,
                 )
@@ -13297,32 +13335,37 @@ def main(
             reset_completion_handoff_state(dry_run=args.dry_run)
             if not (http_service_available and dhcp_service_available):
                 warn("当前 runtime plan 不同时具备 HTTP endpoint 与 DHCP listener，不启动 ZTP 后台监控")
+            elif should_monitor:
+                if monitor_scope is None:
+                    raise LoadError("ZTP 后台监控范围未在事务开始前完成预检")
+                failure_phase = "启动 ZTP 后台监控与控制 worker"
+                start_ztp_monitor(
+                    project, interval=args.ztp_monitor_interval,
+                    scope=monitor_scope,
+                    service_ips=inputs.settings.service_ips,
+                    http_port=inputs.settings.http_port,
+                    dry_run=args.dry_run,
+                    runtime_backend=runtime_backend_instance,
+                )
             else:
-                if should_monitor:
-                    if monitor_scope is None:
-                        raise LoadError("ZTP 后台监控范围未在事务开始前完成预检")
-                    failure_phase = "启动 ZTP 后台监控与控制 worker"
-                    start_ztp_monitor(
-                        project, interval=args.ztp_monitor_interval,
-                        scope=monitor_scope,
-                        service_ips=inputs.settings.service_ips,
-                        http_port=inputs.settings.http_port,
-                        dry_run=args.dry_run,
-                        runtime_backend=runtime_backend_instance,
-                    )
-                    start_switch_collection_worker(
-                        monitor_scope, dry_run=args.dry_run,
-                        runtime_backend=runtime_backend_instance,
-                    )
-                    start_manual_ztp_worker(
-                        monitor_scope, dry_run=args.dry_run,
-                        runtime_backend=runtime_backend_instance,
-                    )
-                else:
-                    info(
-                        "ZTP 后台监控未启动。可重新执行并加 --start-ztp-monitor，"
-                        f"或手工运行 {ZTP_MONITOR_SCRIPT.name}。"
-                    )
+                info(
+                    "ZTP 后台监控未启动。可重新执行并加 --start-ztp-monitor，"
+                    f"或手工运行 {ZTP_MONITOR_SCRIPT.name}。"
+                )
+            # I-028: monitor -> switch -> manual order kept; the page endpoint only with HTTP.
+            if collection_scope is not None:
+                failure_phase = "启动 Switch 收集 worker"
+                start_switch_collection_worker(
+                    collection_scope, dry_run=args.dry_run,
+                    runtime_backend=runtime_backend_instance,
+                    control_endpoint=http_service_available,
+                )
+            if should_monitor and http_service_available and dhcp_service_available:
+                failure_phase = "启动手工 ZTP worker"
+                start_manual_ztp_worker(
+                    monitor_scope, dry_run=args.dry_run,
+                    runtime_backend=runtime_backend_instance,
+                )
         elif args.start_ztp_monitor:
             warn(f"{host_os} 不运行 ZTP 后台监控，已忽略 --start-ztp-monitor")
         if args.dry_run:

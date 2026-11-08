@@ -828,9 +828,82 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - monitor：单一范围使用 `--ztp-monitor-scope auto`，保存 worker argv/状态证明继承同一范围；
   显式冲突必须在部署锁、setup、配置生成和服务变更前失败。默认双环境非交互启动 monitor 时
   未明确 `--ztp-monitor-scope air|prod` 也必须失败关闭。
+- 不启动 monitor 时的 worker 范围（v3.1.2 M3，I-028，O4）：Native 管理服务器上无论 HTTP、DHCP、ZTP 是否启用都起
+  switch-collection worker。`--prod`/`--air`（含 `--mini`）时 worker 的 `--scope` 继承部署范围；默认 all 时有
+  `--ztp-monitor-scope air|prod` 就用它；都没有时交互终端问一次（拒绝 monitor 也问，同意时与 monitor 共用同一次
+  回答），非交互不起 worker，打印含 `--prod`、`--air`、`--ztp-monitor-scope` 的 WARN，load 仍返回 0。保存每种情形的
+  worker argv（恰好一个 `--scope`，值为 air 或 prod）。
 - release/恢复：保存 DHCP/Cumulus/NVOS/parent manifest 的 `deployment_scope`、设备集合、文件 hash
   和 latest target。把任一 child 换成另一 scope 必须拒绝 parent commit；失败后旧 release 和服务
   保持一致。完成后恢复原项目、latest 和服务状态。
+
+## TC-REAL-LOAD-COLLECTION-WORKER-001 — 非 ZTP 项目 load 起采集 worker
+
+### 基本信息
+
+- Case ID：`TC-REAL-LOAD-COLLECTION-WORKER-001`。
+- 名称：Native 管理服务器上，load 不依赖 ZTP、DHCP、HTTP 起 switch-collection worker；页面控制端点只在有 HTTP 时安装。
+- 类型：real-environment / scenario。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：问题文档 I-028（owner 2026-11-03「采集worker的启动应该不依赖ztp/dhcp/http服务……所以我觉得不需要设置任何条件。」）；
+  v3.1.2 详细工作指导 WP-3 与 O4、O5、O6（owner 2026-11-07「同意你在v3.1.2里的默认建议」，http dev 转述）。
+- 自动化文件与测试方法（mock 掉重步骤、合成目录，未在 root、systemd、Apache 下运行）：
+  `test_cases.test_load_collection_worker_contract.LoadCollectionWorkerStartTests`（范围映射、只问一次、
+  非交互 WARN、dry-run、workstation、范围失败先于 quiesce、Supervisor 不变、无端点的启动函数）；
+  `test_cases.test_load_collection_worker_workflow.LoadCollectionWorkerWorkflowTests.test_real_worker_starts_idle_with_deployment_scope_and_unload_stops_it`
+  （真实启动函数 → 真实 worker idle → 真实 unload 按 PID 停止；macOS 上 unload 的 argv 改由 `ps` 读取）。
+- 适用平台：management-server（AIR 管理服务器，Ubuntu 22.04 Native）/ AIR；prod 只读观察。
+
+### 风险与目标
+
+- 要防止的故障：非 ZTP 项目（HTTP-only、HTTP 与 DHCP 都禁用）load 之后没有 worker，页面「信息收集」「持续收集」「配置备份」
+  不可用；没有 HTTP 时 load 因 control auth 或 Apache 边界缺失而失败；worker 拿到 `--scope all`；load 之后自动采集。
+- 涉及的模块和状态边界：`DAY0-Prepare/11-load.py`（`main` 的范围预检与启动段、`start_switch_collection_worker`）；
+  `monitor/switch-collection-worker.py`；`DAY0-Prepare/13-unload.py::stop_monitor_workers`。
+- 成功标准：两份副本 load 都返回 0；worker 恰好一个 `--scope`，值等于部署范围；`switch-collection.status.json` 是
+  `idle`；有 HTTP 时 CGI 已安装、页面点一次「信息收集」能完成一轮；没有 HTTP 时 `/usr/lib/cgi-bin` 没有新装的文件，写
+  请求文件能触发一轮；不采集时不会自己去采集。
+- 自动化不能证明的：root 下 `install -o root -g www-data` 的实际属主（没有 Apache 的服务器上 `www-data` 组是否存在，
+  推断：Ubuntu 的 base-passwd 自带）；systemd 主机上 worker 被 load 重启时的真实耗时；真实设备上的采集结果。
+
+### 前置条件与输入
+
+- Fixture / 项目输入：owner 授权、可快照回滚的 AIR 管理服务器；同一项目的两份可写隔离副本：「HTTP-only」（HTTP 启用，
+  DHCP、ZTP 禁用）与「都禁用」（HTTP、DHCP、ZTP 都禁用）。global 写明 `common.mgmt.{http,dhcp-server,ztp}.status`。
+- 外部依赖：v3.1.2 候选源码的正式 full proof。
+- 所需权限：Runbook 5 的 load 权限（sudo）。
+- 初始状态（只读保存）：`pgrep -af switch-collection-worker`、`monitor/status/switch-collection.*` 的清单与内容、
+  `ls -l /usr/lib/cgi-bin`、`crontab -l`、Apache 与 DHCP 服务状态。
+
+### 步骤
+
+1. 快照。对「HTTP-only」副本执行 `sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/<项目> --air --start-services`，
+   保存输出与退出码。
+2. 保存 worker 的 argv（`pgrep -af switch-collection-worker`）、PID 文件、`switch-collection.status.json`、
+   `switch-collection.request`；`ls -l /usr/lib/cgi-bin/switch-collection-control`。在页面点一次「信息收集」，保存状态 JSON
+   的变化与 `monitor/status/switch-collection.log` 的摘要。
+3. 对「都禁用」副本执行同样的 load，保存同样的证据；确认 `/usr/lib/cgi-bin` 与第 1 步之后相比没有新文件；
+   执行 `echo collect | sudo tee /var/www/html/monitor/status/switch-collection.request >/dev/null`，保存状态 JSON 的变化与日志摘要。
+4. 范围规则（O4）：对任一副本不带 `--air`/`--prod` 各跑一次：交互终端（应问一次 air 或 prod）、非交互
+   （`</dev/null`，应打印含 `--prod`、`--air`、`--ztp-monitor-scope` 的 WARN、不起 worker、返回 0）、
+   `--ztp-monitor-scope air`（不问）。ZTP 项目拒绝 ZTP 监控时 worker 仍起；同意时 monitor、worker、manual-ztp 三个进程的
+   `--scope` 一致。
+5. 执行 Runbook 10 的 unload 或恢复快照。
+
+### 预期结果
+
+- 正向结果：每次 load 返回 0；worker 恰好一个 `--scope air|prod`，状态 JSON 为 `idle`、scope 相同；第 2、3 步的触发各完成
+  一轮。
+- 拒绝/失败结果：非交互、部署范围 all、没给范围时不起 worker，只有一条 WARN。
+- 不允许发生的副作用：`--scope all`；没有 HTTP 时安装 CGI、校验 control auth 或重载 Apache；load 之后不经触发就开始采集；
+  非 ZTP 项目起 12-ztp-monitor 或 manual-ztp worker。
+- 需要保存的证据：脱敏的 argv、状态 JSON、`switch-collection.log` 摘要、`ls -l` 输出、load 输出中的 WARN 原文。
+
+### 故障注入与清理
+
+- 并发：load 重启 worker 时会结束正在运行的、argv 带绝对路径 cron.sh 的进程，持续模式也会被关掉（已登记的新发现，
+  未修）；第 2 步之后不要让持续收集在跑时重跑 load，除非专门观察这一点。
+- 清理/回滚验证：unload 之后 `pgrep -af switch-collection-worker` 为空、PID 文件删除；或恢复快照。
+- 风险：AIR 上可写，prod 只读、只观察（不在 prod 上执行本卡的 load）。
 
 ## TC-REAL-LOAD-SWITCH-001 — Native 单平台选择性 release
 
@@ -1996,8 +2069,9 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 正向矩阵：分别运行没有 ZTP endpoint 的 `common.mgmt.http.address` HTTP-only 项目，以及 HTTP
   地址与 ZTP endpoint 相等和不等的项目。Native 与 Docker 均须只生成显式 HTTP 地址对应的
   单条 `Listen <IP>:<port>`，即使 ZTP endpoint 不同也不得为其另开 HTTP listener；DHCP
-  地址来源与 HTTP listener 身份仍各自独立。HTTP-only 只启动 Apache，不产生 DHCP/ZTP worker、DORA 或
-  bootstrap 发布身份。两种后端的实际 listener、服务集、precommit/committed marker、健康检查
+  地址来源与 HTTP listener 身份仍各自独立。HTTP-only 只启动 Apache，不产生 DHCP、ZTP monitor、manual-ztp
+  worker、DORA 或 bootstrap 发布身份；Native 的 switch-collection worker 按 I-028 启动（`--scope` 取部署范围），
+  Docker 仍不启动它。两种后端的实际 listener、服务集、precommit/committed marker、健康检查
   与 HTTP 回读必须一致；默认端口仍为 80，8080 不得回退 80 或 wildcard。
 - 归属与拒绝矩阵：记录指定 HTTP 地址的**全部**观测接口及其 ifindex、up/down/可监听资格、
   不合格原因和配置的接口 allowlist。无 allowlist 时至少一个可监听 owner 方可通过；配置
@@ -2007,7 +2081,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   loopback/link-local/multicast/unspecified/all-ones、错误端口及接口顺序变化均验证确定性的
   fail-closed 或等价结果。ZTP endpoint 的原有全局唯一规则不因 HTTP 重复归属而放宽。
 - 故障注入与证据：分别在解析后、服务启动前、Apache bind、健康检查及接口漂移时注入失败，
-  核对没有错误 listener、过期 marker、部分启动的 DHCP/ZTP worker 或未回滚服务。保留脱敏
+  核对没有错误 listener、过期 marker、部分启动的 DHCP、ZTP monitor 或 manual-ztp worker，或未回滚服务；
+  Native switch-collection worker 只在 release 提交之后按 I-028 启动。保留脱敏
   命令/退出码、完整 owner 类别/ifindex、配置和制品 SHA-256、实际监听及 HTTP 请求计数、
   前后服务状态与回滚时间线；不保存客户地址、原始设备输出或凭据。任何真实绑定、owner 上限、
   健康或清理证据缺失即保持 OPEN/BLOCKED，不能以本机 mock PASS 代替。
@@ -2041,7 +2116,8 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   后两项必须保持服务安全停止或回滚，不得退回另一模式、放松 HTTP/worker/source 证明，
   也不得改写已有 DHCP 文件来制造通过证据。
 - 证据与清理：保存脱敏命令、退出码、时间线、模式字段、release/输入/五制品摘要及 mtime、
-  Apache/DHCP 服务 PID/argv、监听端口、HTTP 可达性与拒绝点；不保存客户数据或原始租约。
+  Apache/DHCP 服务 PID/argv、switch-collection worker 的 argv（I-028：禁用 DHCP 时 Native 仍启动，`--scope`
+  取部署范围）、监听端口、HTTP 可达性与拒绝点；不保存客户数据或原始租约。
   恢复项目、服务、接口、文件及隔离 VM 快照，逐项核对前像。任一服务实测、故障拒绝、
   证据或清理缺失均保持 OPEN/BLOCKED，不得以本机测试 GREEN 代替现场验收。
 

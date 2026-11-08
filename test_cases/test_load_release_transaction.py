@@ -11971,6 +11971,9 @@ class LatestRetirementRecoveryTests(unittest.TestCase):
             patch("validate_management_host", return_value=True)
             patch("plan_local_dhcp_runtime", return_value=SimpleNamespace())
             patch("confirm_ztp_monitor_start", return_value=False)
+            # v3.1.2 I-028 (O4): deployment scope all asks the worker scope on a terminal; this
+            # fixture stays the non-interactive run it always was, also under a terminal.
+            stack.enter_context(mock.patch.object(LOAD.sys, "stdin", io.StringIO()))
             patch("quiesce_services", side_effect=quiesce)
             patch("require_http_project_source_access")
             patch("activate_project", side_effect=setup)

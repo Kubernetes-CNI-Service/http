@@ -115,6 +115,13 @@ setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续�
 - 交接失败（采集出错、worker 正忙、超时）只重试该类型；Docker 下未被处理的请求保留在请求文件中。
 - IB 链路校验需要 load 生成的 CVT（`99-output-p2p/` 下与当前 `p2p.xlsx` 同名的 `<名>-cvt.xlsx`，非 air 且含 `ib` 设备时生成）和
   `servers.ufm.vip`；缺少时采集照常，分析记为 UFM 警告。
+- 采集 worker（v3.1.2，I-028）：Native 管理服务器上，非 `--dry-run` 的 load 总会启动 switch-collection worker，
+  不要求项目启用 ZTP、DHCP 或 HTTP。worker 的 `--scope` 取部署范围：`--prod`/`--air`（含 `--mini`）直接使用；
+  默认双环境时用 `--ztp-monitor-scope air|prod`，没有给出时在交互终端问一次（同时启动 ZTP 监控时共用这次回答），
+  非交互终端不启动 worker 并打印 WARN，加 `--prod`、`--air` 或 `--ztp-monitor-scope` 重新 load 即可。worker 起来时
+  请求是 `idle`，load 之后不会自动采集。页面控制端点（CGI、control auth）只在启用 HTTP 时安装；没有 HTTP 时页面
+  不可用，由 root 写请求文件触发一轮：`echo collect | sudo tee /var/www/html/monitor/status/switch-collection.request >/dev/null`
+  （即下表「页面按钮等价操作」）。Docker 部署不变，worker 仍随 ZTP 监控启动。
 
 ### 单独运行每一步
 
