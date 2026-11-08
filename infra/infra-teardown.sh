@@ -5,12 +5,17 @@ set -euo pipefail
 non_interactive=false
 teardown_confirmed=false
 prompt_timeout=15
+requested_log_dir=""
 
 usage() {
   cat <<'EOF'
 Usage: infra-teardown.sh [options]
   --non-interactive  Do not prompt; requires --yes
   --yes              Confirm the overall teardown operation
+  --log-dir DIR      Only after unsetup removed DAY0-Prepare/activate-project while
+                     infra/logs is still setup's link: write this run's log into
+                     DIR = DAY0-Prepare/<project>/99-output-infra
+                     (13-unload.py passes it when it rolls back infra)
   -h, --help         Show this help
 EOF
 }
@@ -19,6 +24,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --non-interactive) non_interactive=true ;;
     --yes) teardown_confirmed=true ;;
+    --log-dir)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "ERROR: --log-dir requires a directory" >&2; usage >&2; exit 2
+      fi
+      requested_log_dir="$2"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "ERROR: Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -71,7 +81,43 @@ for pending in "${runtime_dir}"/.logs-migration.*; do
     exit 1
   fi
 done
-if [[ -L "$log_dir" ]]; then
+activate_pointer="${runtime_dir}/../DAY0-Prepare/activate-project"
+if [[ -L "$log_dir" && "$(readlink -- "$log_dir")" == "../DAY0-Prepare/activate-project/99-output-infra" &&
+      ! -L "$activate_pointer" && ! -e "$activate_pointer" ]]; then
+  # R-016 Q7: unsetup removed the pointer and setup's link dangles, so no project is active.  The
+  # caller names this run's log directory (13-unload.py: the project it resolved before unsetup);
+  # as spelled and as resolved it must be <runtime>/../DAY0-Prepare/<name>/99-output-infra.
+  if [[ -z "${requested_log_dir:-}" ]]; then
+    echo "ERROR: no active project: DAY0-Prepare/activate-project does not exist (unsetup removed it); to roll back infra after unsetup, pass --log-dir DAY0-Prepare/<project>/99-output-infra" >&2
+    exit 1
+  fi
+  projects_root="${runtime_dir}/../DAY0-Prepare"
+  requested_project=$(dirname -- "$requested_log_dir")
+  requested_day0=$(dirname -- "$requested_project")
+  log_project=$(basename -- "$requested_project")
+  case "$log_project" in
+    ''|.*|*/*|template|activate-project|tests|test_cases|dumps) log_project="" ;;
+  esac
+  physical_log_dir="${projects_root}/${log_project}/99-output-infra"
+  if [[ -z "$log_project" || "$(basename -- "$requested_log_dir")" != "99-output-infra" ||
+        "$(basename -- "$requested_day0")" != "DAY0-Prepare" ||
+        -L "$requested_day0" || -L "$requested_project" || -L "$requested_log_dir" ||
+        ! -d "$requested_log_dir" ||
+        -L "$projects_root" || -L "${projects_root}/${log_project}" ||
+        -L "$physical_log_dir" || ! -d "$physical_log_dir" ]]; then
+    echo "ERROR: --log-dir is not a real DAY0-Prepare/<project>/99-output-infra: $requested_log_dir" >&2
+    exit 1
+  fi
+  requested_root=$(cd -P -- "$requested_log_dir" && pwd -P) || exit 1
+  bound_root=$(cd -P -- "$physical_log_dir" && pwd -P) || exit 1
+  if [[ "$requested_root" != "$bound_root" ]]; then
+    echo "ERROR: --log-dir is not this runtime's DAY0-Prepare/<project>/99-output-infra: $requested_log_dir" >&2
+    exit 1
+  fi
+elif [[ -n "${requested_log_dir:-}" ]]; then
+  echo "ERROR: --log-dir is accepted only while infra/logs is setup's project link and DAY0-Prepare/activate-project does not exist; otherwise the pointer or infra/logs selects the log directory" >&2
+  exit 1
+elif [[ -L "$log_dir" ]]; then
   log_target=$(readlink -- "$log_dir") || exit 1
   if [[ "$log_target" != "../DAY0-Prepare/activate-project/99-output-infra" ]]; then
     echo "ERROR: infra/logs is not a managed project link" >&2

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stdout
 import hashlib
 import errno
 import io
@@ -11,8 +11,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
+import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -1462,6 +1464,290 @@ class WP9bInfraLogPointerTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError) as refused:
             flow.hermetic_probe(self.infra, self.base)
         self.assertIn("not a managed project link", refused.exception.stderr)
+
+
+TEARDOWN = ROOT / "infra/infra-teardown.sh"
+MANAGED_LOG_LINK = "../DAY0-Prepare/activate-project/99-output-infra"
+UNLOAD = load_script("req19_unl_unload", ROOT / "DAY0-Prepare/13-unload.py")
+
+
+def fake_flock_bin(directory: Path) -> Path:
+    """A flock(1) stand-in with the same -x/-u descriptor semantics (macOS has none), as the req19 workflow uses."""
+    fake_bin = directory / "unl-fake-bin"
+    fake_bin.mkdir(exist_ok=True)
+    flock = fake_bin / "flock"
+    flock.write_text(
+        "#!/usr/bin/env python3\n"
+        "import fcntl, sys\n"
+        "fcntl.flock(int(sys.argv[2]), fcntl.LOCK_EX if sys.argv[1] == '-x' else fcntl.LOCK_UN)\n",
+        encoding="utf-8",
+    )
+    flock.chmod(0o700)
+    return fake_bin
+
+
+def teardown_log_binding(script: Path, infra: Path, fake_bin: Path, *arguments: str, cwd: Path | None = None):
+    """Run the given infra-teardown.sh's own option parsing and log binding with `arguments`, nothing after it.
+
+    The root check and the host lock under /run/lock sit between the two parts and are left out; runtime_dir is
+    `infra`, the directory the script derives from its own location.  On success the bound log file receives
+    UNL-BOUND and its path is the last stdout line.
+    """
+    source = script.read_text(encoding="utf-8")
+    parse = source[:source.index('source_dir=$(dirname -- "${BASH_SOURCE[0]}")')]
+    start = source.index('log_dir="${runtime_dir}/logs"')
+    end = source.index('echo "[$(date', start)
+    shell = "\n".join((
+        parse, f"runtime_dir={shlex.quote(os.fspath(infra))}", source[start:end],
+        "printf '%s\\n' UNL-BOUND >&3", 'printf \'%s\\n\' "$log_file"',
+    ))
+    environment = dict(os.environ, PATH=f"{fake_bin}:{os.environ.get('PATH', '')}")
+    return subprocess.run(
+        ["bash", "-c", shell, "infra-teardown.sh", *arguments], cwd=cwd or infra, env=environment,
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+
+
+class UNLTeardownLogDirTests(unittest.TestCase):
+    """v3.1.1 UNL (owner option A, http dev 2026-11-08): infra-teardown.sh --log-dir after unsetup.
+
+    Expected values come from the work order and R-016, never from the implementation:
+    - R-016 Q7: unsetup removes DAY0-Prepare/activate-project; setup's fixed link infra/logs keeps its text
+      ../DAY0-Prepare/activate-project/99-output-infra and dangles, meaning "no project is active".
+    - Option A: in exactly that state teardown accepts --log-dir DIR with DIR = <runtime>/../DAY0-Prepare/<name>/
+      99-output-infra: <name> is a plain project name (non-empty, no leading ".", no "/", not template /
+      activate-project / tests / test_cases / dumps); DAY0-Prepare, the project and 99-output-infra are real
+      directories, none a symlink; the run's log goes into that directory.
+    - While the pointer exists it decides the log directory: --log-dir is refused.
+    - In the Q7 state without --log-dir teardown refuses and tells how to pass it.
+    - Any other infra/logs state (real directory, absent, another text) refuses --log-dir; without the option
+      the existing behaviour is unchanged.
+    """
+
+    OPTIONS = ("--non-interactive", "--yes")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="req19-unl-teardown-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.root = self.base / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        for name in ("site-p", "site-q"):
+            (self.day0 / name / "99-output-infra").mkdir(parents=True)
+        self.pointer = self.day0 / "activate-project"
+        self.infra = self.root / "infra"
+        self.infra.mkdir()
+        self.logs = self.infra / "logs"
+        self.logs.symlink_to(MANAGED_LOG_LINK)  # R-016 Q7: setup's link, the pointer already gone
+        self.fake_bin = fake_flock_bin(self.base)
+        self.owned = self.day0 / "site-q/99-output-infra"
+
+    def bind(self, *arguments, cwd=None):
+        return teardown_log_binding(TEARDOWN, self.infra, self.fake_bin, *self.OPTIONS, *arguments, cwd=cwd)
+
+    def written(self):
+        return sorted(os.path.relpath(path, self.base) for path in self.base.rglob("infra-teardown-*.log"))
+
+    def assert_refused(self, result, label):
+        self.assertNotEqual(0, result.returncode, f"{label}: {result.stdout}")
+        self.assertIn("ERROR", result.stderr, label)
+        self.assertNotIn("Unknown option", result.stderr, f"{label}: refused for the state, not the option")
+        self.assertNotIn("UNL-BOUND", result.stdout, label)
+        self.assertEqual([], self.written(), label)
+
+    def test_without_a_pointer_log_dir_binds_this_run_to_that_project(self):
+        alias = self.base / "alias"
+        alias.symlink_to("http")  # 13-unload hands a resolved path; teardown spells the runtime lexically
+        for spelled, cwd in ((os.fspath(self.owned), None), ("DAY0-Prepare/site-q/99-output-infra", self.root),
+                             (os.fspath(alias / "DAY0-Prepare/site-q/99-output-infra"), None)):
+            with self.subTest(log_dir=spelled):
+                result = self.bind("--log-dir", spelled, cwd=cwd)
+                self.assertEqual(0, result.returncode, result.stderr)
+                log = Path(result.stdout.splitlines()[-1])
+                self.assertEqual(self.owned.resolve(), log.parent.resolve())
+                self.assertIn(b"UNL-BOUND", log.read_bytes())
+                log.unlink()
+        self.assertEqual([], self.written())
+        self.assertEqual([], list((self.day0 / "site-p/99-output-infra").iterdir()))
+        self.assertFalse(os.path.lexists(self.pointer), "teardown never recreates the pointer")
+        self.assertEqual(MANAGED_LOG_LINK, os.readlink(self.logs))
+
+    def test_without_a_pointer_and_without_log_dir_teardown_refuses_and_names_the_option(self):
+        result = self.bind()
+        self.assert_refused(result, "Q7 without --log-dir")
+        self.assertEqual(1, result.returncode)
+        self.assertIn("no active project", result.stderr)
+        self.assertIn("--log-dir DAY0-Prepare/<project>/99-output-infra", result.stderr)
+
+    def test_log_dir_is_refused_while_the_pointer_exists(self):
+        (self.day0 / "template/99-output-infra").mkdir(parents=True)
+        for target in ("site-p", "site-q", "missing", "template"):
+            with self.subTest(pointer=target):
+                self.pointer.symlink_to(target)
+                try:
+                    refused = self.bind("--log-dir", os.fspath(self.owned))
+                    self.assert_refused(refused, f"pointer -> {target}")
+                    self.assertIn("DAY0-Prepare/activate-project", refused.stderr)
+                finally:
+                    self.pointer.unlink()
+        self.pointer.mkdir()
+        try:
+            refused = self.bind("--log-dir", os.fspath(self.owned))
+            self.assert_refused(refused, "pointer is a directory")
+            self.assertIn("DAY0-Prepare/activate-project", refused.stderr)
+        finally:
+            self.pointer.rmdir()
+        # Without --log-dir a valid pointer still decides, as before.
+        self.pointer.symlink_to("site-p")
+        result = self.bind()
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual((self.day0 / "site-p/99-output-infra").resolve(),
+                         Path(result.stdout.splitlines()[-1]).parent.resolve())
+
+    def test_log_dir_must_be_a_real_project_output_under_this_day0(self):
+        def directory(relative):
+            path = self.base / relative
+            path.mkdir(parents=True)
+            return path
+
+        def link(relative, target):
+            path = self.base / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.symlink_to(target)
+            return path
+
+        cases = {
+            # the directory itself, the project or DAY0-Prepare spelled as a symlink, even to the right place
+            "log dir is a link": link("mirror-a/DAY0-Prepare/site-q/99-output-infra", self.owned),
+            "project is a link": link("mirror-b/DAY0-Prepare/site-q", self.day0 / "site-q") / "99-output-infra",
+            "DAY0-Prepare is a link": link("mirror-c/DAY0-Prepare", self.day0) / "site-q/99-output-infra",
+            "project under DAY0 is a link": link("http/DAY0-Prepare/site-l", "site-q") / "99-output-infra",
+            "output under DAY0 is a link": link("http/DAY0-Prepare/site-o/99-output-infra",
+                                                "../site-q/99-output-infra"),
+            # not under this runtime's DAY0-Prepare
+            "outside DAY0": directory("outside/site-q/99-output-infra"),
+            "another DAY0 tree": directory("other/DAY0-Prepare/site-q/99-output-infra"),
+            # not a project's 99-output-infra
+            "another output": directory("http/DAY0-Prepare/site-q/99-output-ztp"),
+            "the project itself": self.day0 / "site-q",
+            "DAY0 itself": self.day0,
+            # not a plain project name
+            **{f"name {name}": directory(f"http/DAY0-Prepare/{name}/99-output-infra")
+               for name in ("template", ".hidden", "tests", "test_cases", "dumps")},
+            "name activate-project": self.pointer / "99-output-infra",
+            "nested project": directory("http/DAY0-Prepare/site-q/sub/99-output-infra"),
+            # missing
+            "project missing": self.day0 / "site-z/99-output-infra",
+            "output missing": directory("http/DAY0-Prepare/site-m") / "99-output-infra",
+        }
+        for label, spelled in cases.items():
+            with self.subTest(case=label):
+                self.assert_refused(self.bind("--log-dir", os.fspath(spelled)), label)
+        self.assertFalse(os.path.lexists(self.pointer))
+
+    def test_log_dir_is_refused_unless_infra_logs_is_setups_link(self):
+        outside = self.base / "outside"
+        outside.mkdir()
+        for text in ("../DAY0-Prepare/site-q/99-output-infra", os.path.relpath(outside, self.infra)):
+            with self.subTest(link=text):
+                self.logs.unlink()
+                self.logs.symlink_to(text)
+                self.assert_refused(self.bind("--log-dir", os.fspath(self.owned)), text)
+        self.logs.unlink()
+        self.logs.mkdir()
+        self.assert_refused(self.bind("--log-dir", os.fspath(self.owned)), "real infra/logs")
+        result = self.bind()  # unchanged: a real infra/logs takes the log
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(self.logs, Path(result.stdout.splitlines()[-1]).parent)
+        shutil.rmtree(self.logs)
+        self.assert_refused(self.bind("--log-dir", os.fspath(self.owned)), "absent infra/logs")
+        self.assertFalse(os.path.lexists(self.logs), "a refused --log-dir creates nothing")
+        result = self.bind()  # unchanged: an absent infra/logs is created
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue(self.logs.is_dir() and not self.logs.is_symlink())
+        self.assertEqual(0o700, stat.S_IMODE(self.logs.stat().st_mode))
+
+    def test_log_dir_needs_a_value_and_help_names_it(self):
+        missing = self.bind("--log-dir")
+        self.assertEqual(2, missing.returncode)
+        self.assertIn("--log-dir", missing.stderr)
+        self.assertNotIn("Unknown option", missing.stderr)
+        self.assertEqual([], self.written())
+        shown = subprocess.run(["bash", os.fspath(TEARDOWN), "--help"], capture_output=True, text=True,
+                               timeout=30, check=False)
+        self.assertEqual(0, shown.returncode, shown.stderr)
+        self.assertIn("--log-dir DIR", shown.stdout)
+
+
+class UNLUnloadHandsLogDirTests(unittest.TestCase):
+    """v3.1.1 UNL (option A): 13-unload --teardown-infra hands teardown the project it resolved before unsetup.
+
+    main resolves the project again inside the deployment lock; unsetup then removes the pointer (R-016 Q7), so
+    teardown gets <that project>/99-output-infra as --log-dir, in the real run and in the dry-run listing.  With
+    no project (None) the command stays as before.
+    """
+
+    def run_main(self, argv, resolved):
+        events = []
+
+        @contextmanager
+        def held(_root, *, dry_run=False, finish_transaction_id=None):
+            yield 9
+
+        def record(name):
+            return lambda *_args, **_kwargs: events.append((name,))
+
+        with ExitStack() as stack:
+            def patch(name, **kwargs):
+                stack.enter_context(mock.patch.object(UNLOAD, name, **kwargs))
+
+            patch("resolve_project", side_effect=list(resolved))
+            stack.enter_context(mock.patch.object(UNLOAD.os, "geteuid", return_value=0))
+            patch("confirm", return_value=True)
+            patch("service_runtime_backend", return_value=SimpleNamespace(name="systemd"))
+            patch("deployment_lock", new=held)
+            for name in ("stop_monitor", "stop_monitor_workers", "stop_services", "remove_ztp_prefix_publication"):
+                patch(name, side_effect=record(name))
+            patch("unmanaged_dhcp_runtime_files", return_value=[])
+            patch("remove_dhcp_runtime_files", return_value=[])
+            patch("remove_project_links", side_effect=lambda project, **_kwargs: events.append(("unsetup", project)))
+            patch("run", side_effect=lambda command, **_kwargs: events.append(("run", list(command))))
+            printed = io.StringIO()
+            with redirect_stdout(printed):
+                code = UNLOAD.main(argv)
+        return code, events, printed.getvalue()
+
+    def setUp(self):
+        self.first = ROOT / "DAY0-Prepare/unl-site-p"
+        self.second = ROOT / "DAY0-Prepare/unl-site-q"
+        self.base_command = ["bash", os.fspath(UNLOAD.INFRA_TEARDOWN), "--non-interactive", "--yes"]
+
+    def test_teardown_gets_the_log_dir_of_the_project_resolved_inside_the_lock(self):
+        code, events, _printed = self.run_main(["-y", "--teardown-infra"], [self.first, self.second])
+        self.assertEqual(0, code)
+        runs = [event for event in events if event[0] == "run"]
+        self.assertEqual(
+            [("run", [*self.base_command, "--log-dir", os.fspath(self.second / "99-output-infra")])], runs)
+        self.assertLess(events.index(("unsetup", self.second)), events.index(runs[0]),
+                        "the project is named before unsetup removes the pointer; teardown runs after it")
+
+    def test_without_a_project_teardown_gets_no_log_dir(self):
+        code, events, _printed = self.run_main(["-y", "--teardown-infra"], [None, None])
+        self.assertEqual(0, code)
+        self.assertEqual([("run", self.base_command)], [event for event in events if event[0] == "run"])
+
+    def test_dry_run_lists_the_same_log_dir(self):
+        code, events, printed = self.run_main(["--dry-run", "--teardown-infra"], [self.second])
+        self.assertEqual(0, code)
+        self.assertEqual([], [event for event in events if event[0] == "run"])
+        lines = [line for line in printed.splitlines() if "infra-teardown.sh" in line]
+        self.assertEqual(
+            ["[DRY]   " + " ".join([*self.base_command, "--log-dir", os.fspath(self.second / "99-output-infra")])],
+            lines)
+        code, _events, printed = self.run_main(["--dry-run", "--teardown-infra"], [None])
+        self.assertEqual(0, code)
+        self.assertEqual(["[DRY]   " + " ".join(self.base_command)],
+                         [line for line in printed.splitlines() if "infra-teardown.sh" in line])
 
 
 if __name__ == "__main__":

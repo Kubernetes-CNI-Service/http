@@ -475,13 +475,17 @@ def clear_ztp_status(project: Path | None, *, dry_run: bool) -> None:
         ok(f"已清空 ZTP 状态历史：{status_dir}")
 
 
-def teardown_infra(*, dry_run: bool) -> None:
+def teardown_infra(*, dry_run: bool, log_dir: Path | None = None) -> None:
+    command = ["bash", str(INFRA_TEARDOWN), "--non-interactive", "--yes"]
+    if log_dir is not None:
+        # unsetup has removed the pointer by now (R-016 Q7): name the project's log directory.
+        command += ["--log-dir", str(log_dir)]
     if dry_run:
-        print(f"[DRY]   bash {INFRA_TEARDOWN} --non-interactive --yes")
+        print("[DRY]   " + " ".join(command))
         return
     if not INFRA_TEARDOWN.is_file():
         raise UnloadError(f"infra teardown 脚本不存在：{INFRA_TEARDOWN}")
-    run(["bash", str(INFRA_TEARDOWN), "--non-interactive", "--yes"])
+    run(command)
 
 
 def confirm(args: argparse.Namespace, project: Path | None) -> bool:
@@ -606,7 +610,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.clear_ztp_status:
                     clear_ztp_status(project, dry_run=args.dry_run)
                 if args.teardown_infra:
-                    teardown_infra(dry_run=args.dry_run)
+                    teardown_infra(
+                        dry_run=args.dry_run,
+                        log_dir=None if project is None else project / "99-output-infra",
+                    )
                     # infra teardown may restart a retained pre-existing Apache.
                     stop_services(
                         dry_run=args.dry_run,

@@ -2371,6 +2371,11 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   4）`check_infra.py` 判定；apply 后再不加 `--apply` 检查一次应退出 0：管理服务器上离线缓存只读核对
   `apps/ubuntu-<ver>/<arch>/Packages.gz` 的必需顶层包（打印“离线缓存完整”，不核对依赖闭包），
   删除其中一个必需包的 .deb 后再检查应退出 3 并列出包名；5）`sudo bash infra/infra-teardown.sh --non-interactive --yes` 回滚并比对原状；
+  5′）（v3.1.1 UNL，另一轮快照替代第 5 步）`01-a-setup.py` 激活项目后执行
+  `sudo python3 -B DAY0-Prepare/13-unload.py DAY0-Prepare/<project> --teardown-infra --yes`：unsetup 删除指针
+  （`infra/logs` 悬空，R-016 Q7）之后 teardown 收到 `--log-dir <project>/99-output-infra`，回滚成功、
+  `infra-teardown-*.log` 落在该项目的 `99-output-infra`；同一状态下不带 `--log-dir` 手工运行 teardown 应以 1
+  退出并提示 `--log-dir`，且不写日志、不改动任何安装状态；
   6）`sudo ./infra/infra-setup.py --recover-monitor-authority --apply` 走 Native 恢复矩阵（亦见 root warden）。
 - 预期：setup exit 0、teardown 回到原状；任一失败都写 `status=failed` 且 policy-rc.d 已恢复；不得留下
   `/run/http-ztp-monitor-decision.*`。

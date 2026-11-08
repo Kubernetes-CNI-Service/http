@@ -24,6 +24,7 @@ from __future__ import annotations
 import glob
 import os
 from pathlib import Path
+import shlex
 import sys
 import tempfile
 import unittest
@@ -93,6 +94,69 @@ class ActivateProjectUnsetupWorkflowTests(unittest.TestCase):
                 self.assertTrue((http / name).exists(), "WP-6: setup again restores the project")
         self.assertEqual(keys, self.key_links(http))
         self.assertTrue((http / "ztp/.setup_manifest").is_file())
+
+
+
+class UNLUnloadTeardownAfterUnsetupWorkflowTests(unittest.TestCase):
+    """v3.1.1 UNL (owner option A, http dev 2026-11-08), real scripts on a copied workspace:
+    01-a-setup.py activates the project; 13-unload.py --dry-run --teardown-infra lists the teardown command (it
+    resolves the project before its unsetup step); 02-unsetup.py -y removes the pointer (R-016 Q7: infra/logs
+    stays setup's link and dangles); infra/infra-teardown.sh, run through its option parsing and log binding only,
+    then takes exactly the arguments 13-unload listed and writes its log into the project's 99-output-infra.
+    Without --log-dir in that state it refuses and names the option.  Expected values come from the work order
+    and R-016 Q7, not from the scripts.
+    """
+
+    MANAGED_LOG_LINK = "../DAY0-Prepare/activate-project/99-output-infra"
+
+    def test_unload_hands_teardown_the_project_log_dir_that_survives_real_unsetup(self):
+        from test_cases.test_req19_infra_log_contract import fake_flock_bin, teardown_log_binding
+
+        directory = tempfile.TemporaryDirectory(prefix="activate-project-unl-")
+        self.addCleanup(directory.cleanup)
+        sandbox = LINKED.LinkedProjectSandbox(Path(directory.name).resolve())
+        (sandbox.project / "02-devices_config.csv").write_bytes(sandbox.devices)
+        LINKED.workbook(sandbox.project / "Site P2P_v1.0.xlsx", "selected")
+        http = sandbox.http
+        pointer = http / "DAY0-Prepare/activate-project"
+        owned = sandbox.project / "99-output-infra"
+
+        setup = sandbox.setup()
+        self.assertEqual(0, setup.returncode, setup.stdout)
+        self.assertTrue(pointer.is_symlink(), "fixture: setup activated the project")
+        self.assertEqual(self.MANAGED_LOG_LINK, os.readlink(http / "infra/logs"))
+        self.assertTrue(owned.is_dir() and not owned.is_symlink(), "fixture: the project's real infra output")
+
+        planned = sandbox.run([sys.executable, "-B", os.fspath(http / "DAY0-Prepare/13-unload.py"),
+                               "--dry-run", "--teardown-infra"])
+        self.assertEqual(0, planned.returncode, planned.stdout)
+        self.assertTrue(pointer.is_symlink(), "a dry-run unload removes nothing")
+        listed = [line for line in planned.stdout.splitlines()
+                  if line.startswith("[DRY]") and "infra-teardown.sh" in line]
+        self.assertEqual(1, len(listed), planned.stdout)
+        command = shlex.split(listed[0][len("[DRY]"):])
+        teardown = http / "infra/infra-teardown.sh"
+        self.assertEqual(["bash", os.fspath(teardown), "--non-interactive", "--yes",
+                          "--log-dir", os.fspath(sandbox.project.resolve() / "99-output-infra")], command)
+
+        unsetup = sandbox.run([sys.executable, "-B", os.fspath(http / "DAY0-Prepare/02-unsetup.py"), "-y"])
+        self.assertEqual(0, unsetup.returncode, unsetup.stdout)
+        self.assertFalse(os.path.lexists(pointer), "R-016 §4.4: unsetup removed the pointer")
+        self.assertEqual(self.MANAGED_LOG_LINK, os.readlink(http / "infra/logs"), "Q7: the fixed link stays")
+
+        fake_bin = fake_flock_bin(sandbox.base)
+        refused = teardown_log_binding(teardown, http / "infra", fake_bin, "--non-interactive", "--yes")
+        self.assertEqual(1, refused.returncode, refused.stdout)
+        self.assertIn("--log-dir DAY0-Prepare/<project>/99-output-infra", refused.stderr)
+        self.assertEqual([], sorted(owned.glob("infra-teardown-*.log")))
+
+        bound = teardown_log_binding(teardown, http / "infra", fake_bin, *command[2:])
+        self.assertEqual(0, bound.returncode, bound.stderr)
+        written = sorted(owned.glob("infra-teardown-*.log"))
+        self.assertEqual(1, len(written))
+        self.assertEqual(written[0].resolve(), Path(bound.stdout.splitlines()[-1]).resolve())
+        self.assertIn(b"UNL-BOUND", written[0].read_bytes())
+        self.assertFalse(os.path.lexists(pointer), "teardown never reactivates a project")
 
 
 if __name__ == "__main__":
