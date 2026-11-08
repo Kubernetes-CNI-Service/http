@@ -85,8 +85,42 @@ def _legacy_inner_fd_contract(backup):
     return namespace["command_kwargs"]({"env": {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}})
 
 
+def _warm_up_fixture_exec(fixture):
+    """Execute a freshly written fixture executable once, untimed, before a short-deadline call.
+
+    On the macOS host only the first exec of a new executable file is slow (endpoint scanning;
+    problem doc D-1): about 0.4-0.6 s median and over 3 s at times, later execs about 0.02 s, while
+    reading a fresh file costs nothing (FLK probe 2026-11-08). The deadline cases give the fake
+    0.1-5 s, so that one-time cost must stay outside the timed window. The fixture exits at once
+    when HTTP_TEST_HELPER_WARMUP is set, before it runs any fake behaviour; every deadline and
+    assertion is unchanged, and the timed calls, whose environment comes from os.environ, never
+    carry the variable. posix_spawn + waitpid keep this child out of the Popen/os.pipe
+    observation of _LegacyBoundedFixture.
+    """
+    if "HTTP_TEST_HELPER_WARMUP" in os.environ:
+        raise AssertionError("HTTP_TEST_HELPER_WARMUP is set: every fixture would exit at once")
+    environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HTTP_TEST_HELPER_WARMUP": "1"}
+    pid = os.posix_spawn(str(fixture), [str(fixture)], environment)
+    deadline = time.monotonic() + 30
+    while True:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        if time.monotonic() > deadline:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            raise AssertionError(f"fixture warm-up did not finish in 30 s: {fixture}")
+        time.sleep(0.01)
+    if os.waitstatus_to_exitcode(status) != 0:
+        raise AssertionError(f"fixture warm-up failed with status {status}: {fixture}")
+
+
 def _legacy_fixed_exec(fixture, interpreter):
-    """Keep the original body/arguments, select only its test-owned runtime."""
+    """Keep the original body/arguments, select only its test-owned runtime.
+
+    The new wrapper is warmed once before the caller's timed call (_warm_up_fixture_exec); with
+    HTTP_TEST_HELPER_WARMUP set it exits before it execs the body.
+    """
     fixture = Path(fixture)
     body = fixture.with_name(fixture.name + ".owned-body")
     original = fixture.read_bytes()
@@ -96,10 +130,13 @@ def _legacy_fixed_exec(fixture, interpreter):
     fixed = os.path.realpath(interpreter)
     flags = " -I -B" if fixed == os.path.realpath(sys.executable) else ""
     fixture.write_text(
-        "#!/bin/sh\nexec " + shlex.quote(fixed) + flags + " "
+        "#!/bin/sh\n"
+        'if [ -n "${HTTP_TEST_HELPER_WARMUP:-}" ]; then exit 0; fi\n'
+        "exec " + shlex.quote(fixed) + flags + " "
         + shlex.quote(str(body)) + ' "$@"\n', encoding="utf-8",
     )
     fixture.chmod(0o700)
+    _warm_up_fixture_exec(fixture)
     return body
 
 
@@ -4038,6 +4075,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             helper.write_text(
                 "#!/usr/bin/env python3\n"
                 "import os, sys\n"
+                "if os.environ.get('HTTP_TEST_HELPER_WARMUP'): raise SystemExit(0)\n"
                 "with open(os.environ['KHC_CALLS'], 'a') as stream:\n"
                 " stream.write(' '.join(sys.argv[1:]) + '\\n')\n"
                 "mode = os.environ.get('KHC_MODE', 'match')\n"
@@ -4046,6 +4084,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 encoding="utf-8",
             )
             helper.chmod(0o700)
+            _warm_up_fixture_exec(helper)  # its first exec happens inside a 5 s ssh call
             calls = root / "known-hosts-calls"
             daemon_log = (
                 root / "sshd.stderr" if active_loopback is None

@@ -5,10 +5,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -90,7 +92,16 @@ if tool == "ssh":
     after = state.get("failover", {}).get("after")
     trigger = after and after in command and vip_address in state.get("failover", {}).get("vip", {})
     command = command.replace("/root", home(ip) + "/root").replace("/sys/class/net", home(ip) + "/sys/class/net")
-    rc = subprocess.call(["bash", "-c", command], env=env, cwd=home(ip) + "/root")
+    sessions = os.environ.get("FAKE_UFM_SESSIONS")
+    if sessions:
+        # Like on a real UFM, the remote command (and what it leaves running with nohup) is not in the
+        # caller's process group; its session is recorded so the test can stop it before removing the sandbox.
+        remote = subprocess.Popen(["bash", "-c", command], env=env, cwd=home(ip) + "/root", start_new_session=True)
+        with open(sessions, "a") as record:
+            record.write(f"{remote.pid}\n")
+        rc = remote.wait()
+    else:
+        rc = subprocess.call(["bash", "-c", command], env=env, cwd=home(ip) + "/root")
     if trigger:
         open(FAILOVER, "w").close()
     sys.exit(rc)
@@ -210,7 +221,35 @@ class UfmCronCase(unittest.TestCase):
                       "down": []}
 
     def tearDown(self):
+        self.stop_remote_sessions()
         self.tmp.cleanup()
+
+    def stop_remote_sessions(self):
+        """cron.sh starts the collectors on a UFM with nohup and need not wait for them: on a VIP holder that is
+        then rejected, ufm-ibdiagnet.sh and `ufm-info.sh --ha` are never fetched and may still run when cron.sh
+        returns; ufm-ibdiagnet.sh was seen writing into the sandbox while it was being removed ("Directory not
+        empty"). Stop every recorded remote session (SIGTERM, then SIGKILL after 10 s) before the sandbox goes;
+        this runs only after the test's own checks."""
+        record = self.root / "remote-sessions"
+        groups = {int(pid) for pid in record.read_text().split()} if record.exists() else set()
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            for group in sorted(groups):
+                try:
+                    os.killpg(group, signum)
+                except ProcessLookupError:
+                    groups.discard(group)
+            deadline = time.monotonic() + 10
+            while groups and time.monotonic() < deadline:
+                for group in sorted(groups):
+                    try:
+                        os.killpg(group, 0)
+                    except ProcessLookupError:
+                        groups.discard(group)
+                if groups:
+                    time.sleep(0.05)
+            if not groups:
+                return
+        self.fail(f"remote sessions still running after SIGKILL: {sorted(groups)}")
 
     def mkdir(self, relative):
         path = self.root / relative
@@ -230,7 +269,8 @@ class UfmCronCase(unittest.TestCase):
         env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", LC_ALL="C", COPYFILE_DISABLE="1",
                    FAKE_UFM_STATE=str(state_path), FAKE_UFM_CALLS=str(self.calls),
                    FAKE_UFM_HOSTS=str(self.mkdir("hosts")), FAKE_UFM_BIN=str(self.ufm_bin),
-                   FAKE_UFM_SYSFS=str(self.sysfs), **extra_env)
+                   FAKE_UFM_SYSFS=str(self.sysfs), FAKE_UFM_SESSIONS=str(self.root / "remote-sessions"),
+                   **extra_env)
         return subprocess.run(["bash", str(self.root / "infiniband/monitor/cron.sh"), *args], cwd=self.root, env=env,
                               capture_output=True, text=True, timeout=240, pass_fds=pass_fds)
 
