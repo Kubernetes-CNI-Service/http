@@ -194,5 +194,47 @@ class ActivateProjectStatusWorkflowTests(unittest.TestCase):
         self.assertEqual(0, template.returncode, template.stdout)
 
 
+# ── v3.1.1 RV2: 第二轮审查 S2（http dev 2026-11-08，改法 (a)） ──
+# R-014 第 3 条 / Q1: 02-devices_config.csv may be the user's link to a file outside the project (the replacement
+# for the retired --csv-dir).  The real setup activates such a project; the real --list-projects then lists it with
+# [ACTIVE], and setup's step 6 and --status count its 99-output-* capacity instead of warning that they cannot.
+RV2_CAPACITY_WARNING = "无法安全统计 99-output-* 容量"
+
+
+class RV2UserLinkedDevicesStatusWorkflowTests(unittest.TestCase):
+    def test_user_linked_02_project_through_setup_list_projects_and_status(self):
+        directory = tempfile.TemporaryDirectory(prefix="activate-project-status-rv2-")
+        self.addCleanup(directory.cleanup)
+        base = Path(directory.name).resolve()
+        sandbox = UfmProjectSandbox(base)
+        devices = sandbox.project / "02-devices_config.csv"
+        outside = base / "Work/devices.csv"
+        outside.parent.mkdir()
+        os.replace(devices, outside)
+        text = os.path.relpath(outside, devices.parent)
+        devices.symlink_to(text)
+        payload = outside.read_bytes()
+
+        setup = sandbox.setup("-y", "--host-role=workstation", "--no-upgrade", PROJECT)
+        self.assertEqual(0, setup.returncode, setup.stdout)
+        self.assertEqual(PROJECT, os.readlink(sandbox.http / "DAY0-Prepare/activate-project"))
+        self.assertNotIn(RV2_CAPACITY_WARNING, setup.stdout, "setup step 6 counts the activated project")
+        self.assertIn(f"{PROJECT} 的 99-output-*", setup.stdout)
+
+        before = tree_state(sandbox.http)
+        listed = sandbox.setup("--list-projects")
+        status = sandbox.setup("--status")
+        self.assertEqual(before, tree_state(sandbox.http), "--list-projects and --status write nothing")
+        self.assertEqual(0, listed.returncode, listed.stdout)
+        self.assertIn(f"{PROJECT} [ACTIVE]", listed.stdout.splitlines())
+        self.assertEqual(0, status.returncode, status.stdout)
+        self.assertNotIn(RV2_CAPACITY_WARNING, status.stdout, "--status counts the active project")
+        self.assertIn(f"{PROJECT} 的 99-output-*", status.stdout)
+        self.assertNotIn("[ERROR]", status.stdout)
+        # R-014 第 2 条: the user's link and its file are never written through or replaced.
+        self.assertEqual(text, os.readlink(devices))
+        self.assertEqual(payload, outside.read_bytes())
+
+
 if __name__ == "__main__":
     unittest.main()

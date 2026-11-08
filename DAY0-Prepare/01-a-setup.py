@@ -4210,10 +4210,19 @@ def _require_project_contract(project):
         or canonical.name == "template"
     ):
         raise ValueError(f"项目必须是 DAY0-Prepare 的直接真实子目录：{candidate}")
+    # R-014 第 3 条 (第二轮审查 S2): an input of PROJECT_MATERIALIZED_INPUTS -- of the three, 02-devices_config.csv
+    # -- may be the user's link; it is judged as setup's step 1 judges it, by read_project_input_links.  The R22
+    # inputs stay in-project single-link regular files.
+    try:
+        linked = {item.name for item in read_project_input_links(canonical)}
+    except OSError as exc:
+        raise ValueError(f"项目合同无效：{candidate}: {exc}") from exc
     for name in (
         "01-global.yaml", "02-devices_config.csv",
         "02-dhcp-subnet_config.csv",
     ):
+        if name in linked:
+            continue
         path = canonical / name
         try:
             metadata = path.lstat()

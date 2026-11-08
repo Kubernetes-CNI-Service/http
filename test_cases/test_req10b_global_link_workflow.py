@@ -190,7 +190,8 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
 
     def test_real_setup_mapping_then_unsetup_fallback_preserves_project_data(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            # Resolved: unsetup withdraws the authorities of the real project path under its real HERE.
+            root = Path(directory).resolve()
             project = root / "DAY0-Prepare/site-a"
             project.mkdir(parents=True)
             project_global = project / "01-global.yaml"
@@ -202,6 +203,10 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
             # A real checkout has an infra/ directory for the independent
             # log-root lock; keep that safety gate active in this fixture.
             (root / "infra").mkdir()
+            # 第二轮审查 A3: site-a is the active project, so unsetup has a pointer to remove (R-016 §4.4); without
+            # it unsetup has nothing to do and every assertion below would also hold for a no-op unsetup.
+            pointer = root / "DAY0-Prepare/activate-project"
+            pointer.symlink_to(project.name)
             rows = [row for row in SETUP.SETUP_LINK_SPECS if row.path == GLOBAL_MAPPING[0]]
             with mock.patch.multiple(
                 SETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
@@ -216,6 +221,7 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 )
             self.assertTrue(managed.is_symlink())
             text = os.readlink(managed)
+            self.assertEqual(GLOBAL_BYTES, managed.read_bytes(), "fixture: the link reaches site-a through the pointer")
             with mock.patch.multiple(
                 UNSETUP, HTTP_BASE=str(root), HERE=str(root / "DAY0-Prepare"),
                 ZTP=str(root / "ztp"),
@@ -225,7 +231,9 @@ class Req10BGlobalLinkWorkflowTests(unittest.TestCase):
                 result = UNSETUP._main_locked(SimpleNamespace(project=None))
             # Contract changed by Q7 (R-016 §13, owner 2026-11-03 「好的」) and O14 (owner 2026-11-07
             # 「同意你的建议。」 via http dev): the managed global link is a fixed link unsetup keeps.
+            self.assertFalse(os.path.lexists(pointer), "R-016 §4.4: unsetup removes the pointer")
             self.assertEqual(text, os.readlink(managed))
+            self.assertFalse(managed.exists(), "Q7: the kept link dangles: no project is active")
             self.assertEqual(0, result)
             self.assertEqual(GLOBAL_BYTES, project_global.read_bytes())
             self.assertEqual(b"do not remove\n", retained.read_bytes())

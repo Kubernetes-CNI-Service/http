@@ -1604,5 +1604,101 @@ class WP9bReaderDirectTests(unittest.TestCase):
                     project, dhcp, os.path.relpath(project / "99-output-dhcp/dhcpd.conf", dhcp.parent))
 
 
+# ── v3.1.1 RV2: 第二轮审查 S2（http dev 2026-11-08，改法 (a)） ──
+# Expected values come from the requirements, never from 01-a-setup.py:
+# - R-014 第 3 条: a project input may be the user's link to a file outside the project; Q1 (owner 2026-11-03
+#   「好的」) retired --csv-dir and names 「02-devices_config.csv → 外部文件」 as its replacement.  setup's step 1
+#   accepts such a link when its target is a non-empty regular file and stops (exit 2) when it is not.
+# - The project list (--list-projects) and the 99-output-* capacity count (setup step 6, --status) judge a project
+#   by that same rule (改法 (a)): the project setup has just activated is listed with [ACTIVE] and its capacity is
+#   counted, never the WARN 「无法安全统计 99-output-* 容量」.
+# - R22 inputs keep their contract: 01-global.yaml and 02-dhcp-subnet_config.csv must be in-project regular files.
+
+RV2_CAPACITY_WARNING = "无法安全统计 99-output-* 容量"
+
+
+class RV2UserLinkedDevicesProjectTests(unittest.TestCase):
+    """第二轮审查 S2: --list-projects and the capacity count accept a user-linked 02-devices_config.csv."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-rv2-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.box = Sandbox(self.base)
+        self.outside = self.base / "Work"
+        self.outside.mkdir()
+
+    def link_out(self, project: str, name: str) -> Path:
+        """Move <project>/<name> outside the tree and leave the user's relative link in its place."""
+        inside = self.box.day0 / project / name
+        target = self.outside / f"{project}-{name}"
+        os.replace(inside, target)
+        inside.symlink_to(os.path.relpath(target, inside.parent))
+        return target
+
+    def run_setup(self, name: str) -> tuple[int, str]:
+        output = io.StringIO()
+        code = 0
+        with self.box.patches(), redirect_stdout(output):
+            try:
+                SETUP.setup(str(self.box.day0 / name))
+            except SystemExit as stop:
+                code = exit_code(stop)
+        return code, output.getvalue()
+
+    def run_main(self, *argv: str) -> tuple[int, str]:
+        output = io.StringIO()
+        with self.box.patches(), mock.patch.object(
+            SETUP, "deployment_lock", side_effect=AssertionError("R-016 §4.5: read-only actions take no lock"),
+        ), redirect_stdout(output), redirect_stderr(io.StringIO()):
+            try:
+                code = SETUP.main(list(argv))
+            except SystemExit as stop:
+                code = exit_code(stop)
+        return code, output.getvalue()
+
+    def listed(self) -> list[tuple[str, bool]]:
+        with self.box.patches():
+            return [(item["name"], item["active"]) for item in SETUP.discover_projects()]
+
+    def test_active_project_with_a_user_linked_02_is_listed_active_and_its_capacity_is_counted(self):
+        devices = self.link_out(PROJECT, "02-devices_config.csv")
+        payload = devices.read_bytes()
+        code, printed = self.run_setup(PROJECT)
+        self.assertEqual(0, code, printed)
+        self.assertEqual(PROJECT, self.box.pointer(), printed)
+        self.assertNotIn(RV2_CAPACITY_WARNING, printed, "setup step 6 counts the activated project")
+        self.assertIn(f"{PROJECT} 的 99-output-*", printed)
+
+        self.assertEqual([(PROJECT, True), (OTHER, False)], self.listed())
+        code, printed = self.run_main("--list-projects")
+        self.assertEqual(0, code, printed)
+        self.assertIn(f"{PROJECT} [ACTIVE]", printed.splitlines())
+        self.assertIn(OTHER, printed.splitlines())
+
+        code, printed = self.run_main("--status")
+        self.assertNotIn(RV2_CAPACITY_WARNING, printed, "--status counts the active project")
+        self.assertIn(f"{PROJECT} 的 99-output-*", printed)
+        # R-014 第 2 条: nothing writes through or replaces the user's link.
+        link = self.box.day0 / PROJECT / "02-devices_config.csv"
+        self.assertEqual(os.path.relpath(devices, link.parent), os.readlink(link))
+        self.assertEqual(payload, devices.read_bytes())
+
+    def test_r22_inputs_as_links_and_a_dangling_02_link_still_fail_the_project_contract(self):
+        cases = (("site-r", "01-global.yaml", False), ("site-s", "02-dhcp-subnet_config.csv", False),
+                 ("site-t", "02-devices_config.csv", True))
+        for seed, (name, member, dangling) in enumerate(cases, start=31):
+            self.box.make_project(name, seed)
+            target = self.link_out(name, member)
+            if dangling:
+                target.unlink()  # R-014 第 3 条: a link whose target is missing stops setup's step 1
+        self.assertEqual([(PROJECT, False), (OTHER, False)], self.listed())
+        for name, member, _dangling in cases:
+            with self.subTest(project=name, member=member), self.box.patches():
+                with self.assertRaises(ValueError) as caught:
+                    SETUP.measure_output_usage(self.box.day0 / name)
+                self.assertIn(member, str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

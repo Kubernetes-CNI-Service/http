@@ -1188,6 +1188,7 @@ class ImpactManifestTests(unittest.TestCase):
                 "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
                 "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
                 "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
+                # 2026-11-08 (v3.1.1 WP-12, R-016 AP-c, dfe69a3): the template's default ib.csv link.
                 "DAY0-Prepare/template/ib.csv",
             ],
             manifest["tracked_support"],

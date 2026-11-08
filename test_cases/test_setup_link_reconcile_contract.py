@@ -539,7 +539,7 @@ class TemplateCompletionTest(unittest.TestCase):
             self.assertIn("required.txt", output)
             self.assertIn("nested", output)
 
-    def test_setup_and_load_entries_complete_a_project_byte_for_byte_alike(self):
+    def test_setup_and_load_entries_complete_a_project_byte_for_byte_alike_but_for_the_empty_laptop_placeholder(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             projects = (root / "by-setup" / PROJECT, root / "by-load" / PROJECT)

@@ -1183,7 +1183,7 @@ class SetupUnloadAndTransportTests(unittest.TestCase):
                 with redirect_stdout(io.StringIO()):
                     self.assertEqual(1, SETUP.main(["--status"]))
 
-    def test_native_status_rejects_linked_or_oversized_identity_manifest(self):
+    def test_native_status_rejects_a_forged_activate_project_pointer(self):
         # v3.1.1 WP-4 (R-016 §4.5, Q5): the identity is the pointer; ztp/.setup_manifest is only a record and
         # never names the active project.  A forged pointer -- a regular file, a link to a linked directory, a
         # multi-level text, a FIFO -- is refused without blocking.
