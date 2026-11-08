@@ -32,6 +32,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import site
 import subprocess
 import sys
@@ -319,6 +320,51 @@ class ReadersAfterRealSetupWorkflowTests(unittest.TestCase):
             download = sandbox.download_archive(archive)
             self.assertEqual(0, download.returncode, download.stdout)
             self.assertEqual({selected}, archive_projects(archive))
+
+
+# ── v3.1.1 RV4: 第五轮增量审查 A1（http dev 2026-11-08） ──
+# Expected values come from the review and setup's documented refusal, never from 11-load.py: setup's step 4 refuses
+# to switch a DAY0-Prepare/activate-project that is a real directory or file (「是实际文件/目录，不能切换」), so load
+# (here its --dry-run preview) stops on that state before anything else, names the place, says it is a real
+# file/directory to be moved away first, never claims 「setup 将重建指针」, and leaves the pointer as it was.
+
+
+class RV4NonLinkPointerWorkflowTests(unittest.TestCase):
+    """第五轮审查 A1 across the real scripts: load stops where setup would refuse."""
+
+    def test_load_stops_on_a_pointer_setup_cannot_switch_and_leaves_it_alone(self):
+        directory = tempfile.TemporaryDirectory(prefix="activate-readers-rv4-")
+        self.addCleanup(directory.cleanup)
+        sandbox = ReaderSandbox(Path(directory.name).resolve())
+        target = sandbox.day0 / "site-p"
+        for kind in ("directory", "file"):
+            with self.subTest(pointer=kind):
+                if sandbox.pointer.is_dir() and not sandbox.pointer.is_symlink():
+                    shutil.rmtree(sandbox.pointer)
+                elif os.path.lexists(sandbox.pointer):
+                    sandbox.pointer.unlink()
+                if kind == "directory":
+                    shutil.copytree(target, sandbox.pointer, symlinks=True)   # a project copied with cp -r
+                    witness = sorted(str(path.relative_to(sandbox.pointer)) for path in sandbox.pointer.rglob("*"))
+                else:
+                    sandbox.pointer.write_text("site-p\n", encoding="utf-8")
+                    witness = sandbox.pointer.read_text(encoding="utf-8")
+                setup = sandbox.script("DAY0-Prepare/01-a-setup.py", "--dry-run", "-y", "--host-role=workstation",
+                                       "--no-upgrade", os.fspath(target))
+                self.assertNotEqual(0, setup.returncode, setup.stdout)
+                self.assertIn("是实际文件/目录，不能切换", setup.stdout, "the premise: setup cannot repair it")
+                load = sandbox.load_dry_run("site-p")
+                self.assertNotEqual(0, load.returncode, load.stdout)
+                self.assertIn(os.fspath(sandbox.pointer), load.stdout, "the error names the place")
+                self.assertIn("实际文件/目录", load.stdout)
+                self.assertIn("挪走", load.stdout)
+                self.assertNotIn("setup 将重建指针", load.stdout)
+                self.assertNotIn("01-a-setup.py -y", load.stdout, "setup is never invoked")
+                if kind == "directory":
+                    self.assertEqual(witness, sorted(str(path.relative_to(sandbox.pointer))
+                                                     for path in sandbox.pointer.rglob("*")))
+                else:
+                    self.assertEqual(witness, sandbox.pointer.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

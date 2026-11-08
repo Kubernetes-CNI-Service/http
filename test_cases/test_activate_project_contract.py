@@ -1899,5 +1899,217 @@ class RV3LoadPointerStateTests(unittest.TestCase):
                                       "rollback DHCP publication escaped its owning project"], refusals(texts))
 
 
+# ── v3.1.1 RV4: 第五轮增量审查 A1（http dev 2026-11-08） ──
+# Expected values come from the review and setup's documented refusal, never from 11-load.py:
+# - 01-a-setup.py step 4 (R-016 §4.2) refuses to switch a DAY0-Prepare/activate-project that exists and is not a link
+#   (「是实际文件/目录，不能切换」); every other invalid pointer it re-points, since load always passes -y
+#   --confirm-project-switch.  So 「setup 将重建指针」 is false for that one state.
+# - 第五轮审查 A1: on that state load stops before any write -- the freeze of the previous release, the native monitor
+#   stop, the template backfill, the service stop and setup -- with an error naming the place, saying it is a real
+#   file/directory and that the operator must move it away first.  Whether or not the target has a receipt step.
+# - The other invalid pointers keep 第三轮审查 S1: the reason is printed, no receipt, load goes on (to the backfill).
+
+
+class RV4LoadNonLinkPointerTests(unittest.TestCase):
+    """第五轮审查 A1: a non-dry-run management-server load meets a pointer setup cannot switch."""
+
+    STEPS = ("initialize_from_template", "quiesce_services", "stop_native_ztp_monitors",
+             "ensure_previous_generation_frozen", "activate_project")
+    BACKFILL_REACHED = "RV4 fixture: the template backfill was reached"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.load = load_script("activate_project_contract_rv4_load", ROOT / "DAY0-Prepare/11-load.py")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-rv4-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve() / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        self.project = self.day0 / "site-b"
+        (self.project / "99-output-ztp/generations" / RV3_GENERATION).mkdir(parents=True)
+        (self.project / "99-output-ztp/current").symlink_to("generations/" + RV3_GENERATION)
+        (self.project / "01-global.yaml").write_text("common: {}\n", encoding="utf-8")
+        self.pointer = self.day0 / "activate-project"
+
+    def clear_pointer(self):
+        if self.pointer.is_dir() and not self.pointer.is_symlink():
+            shutil.rmtree(self.pointer)
+        elif os.path.lexists(self.pointer):
+            self.pointer.unlink()
+
+    def load_main(self, frozen):
+        """main() on a Linux systemd management server, real flow up to the template backfill.
+
+        frozen: what the freeze of the target's previous release returns -- its selector (the receipt step runs) or
+        None (no receipt step; the pointer is next read by activate_project).
+        """
+        load = self.load
+        steps = {name: mock.Mock(name=name) for name in self.STEPS}
+        steps["ensure_previous_generation_frozen"].return_value = frozen
+        steps["initialize_from_template"].side_effect = load.LoadError(self.BACKFILL_REACHED)
+        printed = io.StringIO()
+        with ExitStack() as stack:
+            for name, value in (
+                    ("HTTP_ROOT", self.root),
+                    ("runtime_os", mock.Mock(return_value="Linux")),
+                    ("service_runtime_backend", mock.Mock(return_value=SimpleNamespace(name="systemd"))),
+                    ("validate_runtime_options", mock.Mock()),
+                    ("acquire_deployment_lock", mock.Mock(return_value=91)),
+                    ("release_deployment_lock", mock.Mock()),
+                    ("require_no_pending_dhcp_transaction", mock.Mock()),
+                    ("resolve_project", mock.Mock(return_value=self.project)),
+                    ("load_global", mock.Mock(return_value=SimpleNamespace(http_enabled=False))),
+                    ("prepare_runtime_rollback_receipt",
+                     mock.Mock(side_effect=AssertionError("no same-project receipt without a valid pointer"))),
+                    *steps.items()):
+                stack.enter_context(mock.patch.object(load, name, value))
+            stack.enter_context(redirect_stdout(printed))
+            stack.enter_context(redirect_stderr(printed))
+            code = load.main([str(self.project), "--host-role=management-server", "--no-upgrade"])
+        return code, printed.getvalue(), steps
+
+    def test_a_real_directory_or_file_pointer_stops_load_before_any_write(self):
+        for kind in ("directory", "file"):
+            for frozen in ("generations/" + RV3_GENERATION, None):
+                with self.subTest(pointer=kind, receipt_step=frozen is not None):
+                    self.clear_pointer()
+                    if kind == "directory":
+                        # e.g. a project copied to this name with cp -r
+                        shutil.copytree(self.project, self.pointer, symlinks=True)
+                    else:
+                        self.pointer.write_text("site-b\n", encoding="utf-8")
+                    before = tree_state(self.root)
+                    code, output, steps = self.load_main(frozen)
+                    for name in self.STEPS:
+                        steps[name].assert_not_called()
+                    self.assertNotEqual(0, code, output)
+                    self.assertIn(str(self.pointer), output, "the error names the place")
+                    self.assertIn("实际文件/目录", output)
+                    self.assertIn("挪走", output, "the operator is told to move it away first")
+                    self.assertNotIn("setup 将重建指针", output)
+                    self.assertNotIn(self.BACKFILL_REACHED, output)
+                    self.assertEqual(before, tree_state(self.root), "nothing written, the pointer left as it was")
+
+    def test_the_other_invalid_pointers_still_go_on_as_in_s1(self):
+        for target in ("site-a", "template"):    # dangling; never a project name (R-016 §2)
+            with self.subTest(pointer=target):
+                self.clear_pointer()
+                self.pointer.symlink_to(target)
+                code, output, steps = self.load_main("generations/" + RV3_GENERATION)
+                steps["initialize_from_template"].assert_called_once()
+                self.assertIn(self.BACKFILL_REACHED, output, "load went on past the receipt step")
+                self.assertEqual(1, code, output)
+                self.assertIn(f"activate-project -> {target}", output, "the reason is printed")
+                self.assertNotIn("实际文件/目录", output)
+                self.assertFalse(os.path.lexists(self.project / "99-output-ztp/rollback-receipts"))
+
+
+# ── v3.1.1 RV4: 第五轮增量审查 A4（http dev 2026-11-08） ──
+# Expected values come from the review and the dispatch, never from 11-load.py.  The pointer selects this project in
+# every case.  A refused receipt-related link names its cause by where its text came from:
+# - a receipt record whose text is the direct form and whose directory really is in this project: 「可能是 v3.1.0 留下的
+#   A 回执」 (handling in the release notes 「v3.1.0 的 A 回执」);
+# - a live link in the direct form (no receipt involved): 「链接是 v3.1.1 之前的直连写法，请先运行 01-a-setup.py <项目>
+#   迁移」, never the v3.1.0 receipt;
+# - a real escape (the project's 99-output-dhcp is a link to a directory outside it): 「escaped its owning project」
+#   whatever the link text and wherever it came from.
+RV4_V310_RECEIPT = "可能是 v3.1.0 留下的 A 回执"
+RV4_LIVE_DIRECT = "链接是 v3.1.1 之前的直连写法，请先运行 01-a-setup.py <项目> 迁移"
+RV4_DHCP_ESCAPED = "rollback DHCP publication escaped its owning project"
+
+
+class RV4ReceiptLinkCauseTests(unittest.TestCase):
+    """第五轮审查 A4: receipt record vs live link vs real escape."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.load = load_script("activate_project_contract_rv4_links", ROOT / "DAY0-Prepare/11-load.py")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-rv4-links-")
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name).resolve()
+        self.root = base / "http"
+        self.day0 = self.root / "DAY0-Prepare"
+        self.project = self.day0 / "site-b"
+        (self.project / "99-output-ztp").mkdir(parents=True)
+        (self.project / "laptop.pub").write_text("ssh-ed25519 AAAAsynthetic laptop\n", encoding="ascii")
+        self.outside = base / "outside-dhcp"
+        self.outside.mkdir()
+        (self.outside / "dhcpd.conf").write_text("# synthetic\n", encoding="ascii")
+        key_dir = self.root / "ztp/config/publickey"
+        dhcp_dir = self.root / "ztp/config/isc-dhcp-server"
+        key_dir.mkdir(parents=True)
+        dhcp_dir.mkdir(parents=True)
+        self.key, self.dhcp = key_dir / "laptop.pub", dhcp_dir / "dhcpd.conf"
+        self.direct = (os.path.relpath(self.project / "laptop.pub", key_dir),
+                       os.path.relpath(self.project / "99-output-dhcp/dhcpd.conf", dhcp_dir))
+        self.through = ("../../../DAY0-Prepare/activate-project/laptop.pub",           # R-016 §2
+                        "../../../DAY0-Prepare/activate-project/99-output-dhcp/dhcpd.conf")
+        (self.day0 / "activate-project").symlink_to("site-b")
+        patcher = mock.patch.multiple(self.load, HTTP_ROOT=self.root, ZTP_DIR=self.root / "ztp")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def in_project_dhcp(self):
+        (self.project / "99-output-dhcp").mkdir()
+        (self.project / "99-output-dhcp/dhcpd.conf").write_text("# synthetic\n", encoding="ascii")
+
+    @staticmethod
+    def dhcp_record(target):
+        """A receipt's DHCP link record; only its text matters before the source is read."""
+        return {"state": "link", "sha256": "0" * 64, "target": target, "identity": [], "source_identity": [],
+                "parent_identity": {}, "source_parent_identity": {}}
+
+    def refused(self, check):
+        with self.assertRaises(self.load.LoadError) as caught:
+            check()
+        return str(caught.exception)
+
+    def test_a_receipt_record_in_the_direct_text_may_be_a_v310_receipt(self):
+        self.in_project_dhcp()
+        load = self.load
+        for message in (
+                self.refused(lambda: load._validate_runtime_key_binding(
+                    self.key, self.project, {"target": self.direct[0]})),
+                self.refused(lambda: load._validate_receipt_dhcp_authority(
+                    self.project, "dhcpd.conf", self.dhcp_record(self.direct[1])))):
+            self.assertIn(RV4_V310_RECEIPT, message)
+            self.assertNotIn("escaped its owning project", message)
+
+    def test_a_live_link_in_the_direct_text_is_left_to_setup_not_called_a_receipt(self):
+        self.in_project_dhcp()
+        self.key.symlink_to(self.direct[0])
+        self.dhcp.symlink_to(self.direct[1])
+        load = self.load
+        for message in (self.refused(lambda: load._read_runtime_publickey(self.key, self.project)),
+                        self.refused(lambda: load._receipt_dhcp_authority(self.project, self.dhcp))):
+            self.assertIn(RV4_LIVE_DIRECT, message)
+            self.assertNotIn("v3.1.0", message)
+            self.assertNotIn("escaped its owning project", message)
+
+    def test_a_real_escape_keeps_its_text_whatever_the_link_says(self):
+        (self.project / "99-output-dhcp").symlink_to(self.outside)
+        load = self.load
+        for pointer in ("site-b", None):
+            for text in (self.direct[1], self.through[1]):
+                with self.subTest(pointer=pointer, text=text):
+                    if os.path.lexists(self.day0 / "activate-project"):
+                        os.unlink(self.day0 / "activate-project")
+                    if pointer is not None:
+                        (self.day0 / "activate-project").symlink_to(pointer)
+                    self.assertEqual(RV4_DHCP_ESCAPED, self.refused(
+                        lambda: load._validate_receipt_dhcp_authority(
+                            self.project, "dhcpd.conf", self.dhcp_record(text))))
+                    if os.path.lexists(self.dhcp):
+                        self.dhcp.unlink()
+                    self.dhcp.symlink_to(text)
+                    live = self.refused(lambda: load._receipt_dhcp_authority(self.project, self.dhcp))
+                    self.assertIn(RV4_DHCP_ESCAPED, live)
+                    self.assertNotIn("直连写法", live)
+                    self.assertNotIn("没有激活的项目", live)
+
+
 if __name__ == "__main__":
     unittest.main()

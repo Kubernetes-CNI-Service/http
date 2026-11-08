@@ -3857,6 +3857,7 @@ def activate_project(
         current = active_project()
     except LoadError as exc:
         # setup re-points DAY0-Prepare/activate-project; an invalid one is repaired, not fatal here.
+        # main already refused the non-link one setup cannot switch (review 5 A1).
         warn(f"{exc}；setup 将重建指针")
         current = None
     if current == project:
@@ -5635,11 +5636,17 @@ def _runtime_key_identity(metadata: os.stat_result) -> dict[str, int]:
     return {field: getattr(metadata, field) for field in _RUNTIME_KEY_IDENTITY_FIELDS}
 
 
-def _require_through_pointer(project: Path, lexical: Path, relative: str, label: str) -> None:
+def _require_through_pointer(
+    project: Path, lexical: Path, relative: str, label: str, *, live: bool = False,
+) -> None:
     """Admit a SETUP link only when its lexical target is DAY0-Prepare/activate-project/<relative> beside
     this canonical project and that pointer selects it (R-016 §2: the text names the pointer, the pointer
-    names the project).  A refusal names its cause; only a real escape says "escaped" (review 3 A3)."""
+    names the project).  A refusal names its cause; only a real escape says "escaped" (review 3 A3).
+    The direct text may be a v3.1.0 A receipt only in a receipt record; a live link in it is setup's to
+    migrate (review 5 A4)."""
     if lexical == project / relative:
+        if live:
+            raise LoadError(f"{label}：链接是 v3.1.1 之前的直连写法，请先运行 01-a-setup.py <项目> 迁移")
         raise LoadError(
             f"{label}：链接原文是 activate-project 之前（v3.1.0）的直连写法，不是经指针的写法，"
             "可能是 v3.1.0 留下的 A 回执；不能复用，HOLD，处理见发布说明「v3.1.0 的 A 回执」")
@@ -5657,14 +5664,14 @@ def _require_through_pointer(project: Path, lexical: Path, relative: str, label:
     raise LoadError(f"{label} escaped its owning project")
 
 
-def _runtime_key_source(path: Path, project: Path, target: object) -> Path:
+def _runtime_key_source(path: Path, project: Path, target: object, *, live: bool = False) -> Path:
     """Admit only SETUP's relative publication of this project's same-name key."""
     if (not isinstance(target, str) or not target or os.path.isabs(target)
             or os.path.normpath(target) != target or not path.name.endswith(".pub")):
         raise LoadError("rollback public key source link is invalid")
     canonical = project.resolve(strict=True)
     lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    _require_through_pointer(canonical, lexical, path.name, "rollback public key source")
+    _require_through_pointer(canonical, lexical, path.name, "rollback public key source", live=live)
     return canonical / path.name
 
 
@@ -5703,7 +5710,7 @@ def _read_runtime_publickey(
         target = os.readlink(path)
         if before.st_nlink != 1:
             raise LoadError("rollback public key publication is not a single link")
-        source = _runtime_key_source(path, project, target)
+        source = _runtime_key_source(path, project, target, live=True)
         payload, mode, identity = _read_runtime_key_source(source)
         if (_runtime_key_identity(before) != _runtime_key_identity(path.lstat())
                 or os.readlink(path) != target
@@ -5781,7 +5788,7 @@ _RUNTIME_DHCP_NAMES = frozenset({
 })
 
 
-def _runtime_dhcp_link_source(project: Path, path: Path, target: object) -> Path:
+def _runtime_dhcp_link_source(project: Path, path: Path, target: object, *, live: bool = False) -> Path:
     """Only SETUP's same-name, project-local DHCP publication is admissible."""
     if (path.parent != ZTP_DIR / "config/isc-dhcp-server"
             or path.name not in _RUNTIME_DHCP_NAMES
@@ -5790,10 +5797,12 @@ def _runtime_dhcp_link_source(project: Path, path: Path, target: object) -> Path
         raise LoadError("rollback DHCP publication link is invalid")
     canonical = project.resolve(strict=True)
     source = canonical / "99-output-dhcp" / path.name
-    lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
-    _require_through_pointer(canonical, lexical, "99-output-dhcp/" + path.name, "rollback DHCP publication")
-    if source.parent.resolve(strict=True) != source.parent:
+    # A real escape says so whatever the text or where it came from, so it is judged first (review 5 A4).
+    if source.parent.resolve() != source.parent:
         raise LoadError("rollback DHCP publication escaped its owning project")
+    lexical = Path(os.path.normpath(str(path.parent.resolve(strict=True) / target)))
+    _require_through_pointer(canonical, lexical, "99-output-dhcp/" + path.name, "rollback DHCP publication",
+                             live=live)
     return source
 
 
@@ -5807,7 +5816,7 @@ def _receipt_dhcp_authority(project: Path, path: Path) -> dict[str, object]:
             raise LoadError("rollback DHCP publication is not a single link")
         parent = _setup_switch_link_parent_identity(path)
         target = os.readlink(path)
-        source = _runtime_dhcp_link_source(project, path, target)
+        source = _runtime_dhcp_link_source(project, path, target, live=True)
         source_parent = _setup_switch_link_parent_identity(source)
         source_before = source.lstat()
         opened = _read_rollback_regular(source)
@@ -6607,7 +6616,8 @@ def prepare_active_runtime_rollback_receipt(
         active = active_project()
     except LoadError as exc:
         # As in activate_project: setup re-points DAY0-Prepare/activate-project, so an invalid
-        # pointer is no valid active project here (review 3 S1).
+        # pointer is no valid active project here (review 3 S1).  main already refused the non-link
+        # one setup cannot switch (review 5 A1).
         warn(f"{exc}；setup 将重建指针")
         active = None
     if active != canonical_project:
@@ -12690,6 +12700,15 @@ def main(
                 f"检测到代码/项目同步尚未完成：{sync_marker}\n"
                 "请等待 sync-code.py 打印 [OK] 同步完成后再执行 load；"
                 "若同步进程已异常退出，请先重新完成一次 sync-code.py"
+            )
+        # setup's step 4 refuses to switch a pointer that exists and is not a link (01-a-setup.py
+        # _switch_active_project, same test), the one invalid pointer setup cannot repair: stop before any
+        # write, in every mode, instead of leaving it to setup (review 5 A1).
+        activate_pointer = HTTP_ROOT / "DAY0-Prepare/activate-project"
+        if os.path.lexists(activate_pointer) and not os.path.islink(activate_pointer):
+            raise LoadError(
+                f"活动项目指针 {activate_pointer} 是实际文件/目录，不是链接，setup 不能切换；"
+                "请先把它挪走（移出 DAY0-Prepare），再重跑 load"
             )
         # No monitor stop, A freeze, template/password/key mutation or shared
         # image publication may precede the initial public-source access gate.
