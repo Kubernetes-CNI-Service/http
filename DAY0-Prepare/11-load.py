@@ -138,6 +138,7 @@ from _package_common import (
     p2p_source_relative,
     project_p2p_candidates,
     read_p2p_receipt,
+    read_project_input_links,
     select_project_p2p_source,
     select_upload_p2p,
 )
@@ -2913,7 +2914,25 @@ def ensure_management_key(
 def _prepare_pubkeys_without_management_injection(
     project: Path, *, dry_run: bool,
 ) -> tuple[Path, ...]:
-    """Preserve the configuration-only behavior on platforms without services."""
+    """Preserve the configuration-only behavior on platforms without services.
+
+    R-014 第 3 条: a project key may be the operator's own link (laptop.pub -> their key).  The project's
+    input links are resolved and read once here (read_project_input_links), and a linked key's identity
+    comes from those bytes; the no-follow identity reader stays as it is for regular keys.
+    """
+    try:
+        linked = {item.name: item.payload for item in read_project_input_links(project)}
+    except ValueError as exc:
+        raise LoadError(str(exc)) from exc
+
+    def identity(item: Path) -> tuple[bytes, bytes]:
+        if item.name not in linked:
+            return _public_key_identity(item)
+        try:
+            return ssh_keys.public_key_identity_bytes(linked[item.name])
+        except ssh_keys.SshKeyPreparationError as exc:
+            raise LoadError(f"项目公钥身份无效：{item.name}：{exc}") from exc
+
     pubs = sorted(project.glob("*.pub"))
     marker = project / MANAGEMENT_PUBKEY_MARKER
     managed_names = {
@@ -2944,8 +2963,8 @@ def _prepare_pubkeys_without_management_injection(
     preserved = sorted(item for item in planned_management if item.stat().st_size > 0)
     for item in preserved:
         validate_pubkey(item)
-    static_identities = {_public_key_identity(item) for item in static}
-    if any(_public_key_identity(item) in static_identities for item in preserved):
+    static_identities = {identity(item) for item in static}
+    if any(identity(item) in static_identities for item in preserved):
         raise LoadError("项目中的管理服务器公钥与项目电脑公钥相同")
     if preserved:
         print(

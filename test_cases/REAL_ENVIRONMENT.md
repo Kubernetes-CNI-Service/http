@@ -2719,6 +2719,27 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 不允许：项目目录里的用户文件或用户链接被改写、删除；工作区出现指向项目外的写入；服务器上只跑 setup 切换（R16-16）。
 - 证据：每一步的命令输出、退出码、上述清单与 SHA-256 前后对比。
 - 清理与风险：本机用 `-y` 切回原项目并核对清单；服务器恢复快照。未执行前为 NOT RUN，不得写 PASS。
+- 补充段（WP-11，R-014 第 3 条；v3.1.1 LP 补齐 `laptop.pub` 一条）：**P2P 放在 `p2p/` 链接目录的项目，上传到 AIR 后能正常 load**。
+  自动化部分：`test_cases.test_project_link_inputs_workflow`（`ProjectLinkInputsWorkflowTests` 四例，合起来覆盖 setup、load
+  `--dry-run`、打包、写前守卫落盘与 sync；`LPLaptopKeyLinkLoadWorkflowTests`：`laptop.pub` 链到项目外时 setup → load `--dry-run`
+  → load 计划的 setup 子命令）与 `test_cases.test_ssh_key_preparation_contract.LPLinkedLaptopKeyConfigOnlyPreflightContract`
+  （本机 load 的公钥预检）。自动化不能证明：真实 AIR 管理服务器上的受控部署与服务器 load、本机正式 load（临时副本里
+  会被 load 自身的测试门禁拦下，只验证了 `--dry-run`）、真实外部资料目录。
+  - 前置：本机项目 `p2p -> <外部资料目录>`、`p2p.xlsx -> p2p/<工作簿>.xlsx`；`02-devices_config.csv` 与 `laptop.pub`
+    都是指向项目外的链接（`laptop.pub -> <操作员自己的公钥>`）；本机 setup、load `--dry-run`、本机正式 load 均通过；
+    `test_cases.test_project_link_inputs_workflow` 绿。开始前保存：各链接的原文与 realpath、链接目标的 sha256、
+    外部资料目录的文件清单（只记文件名与 sha256，不拷贝内容）。
+  - 步骤：本机正式 load → `tar-for-upload.py` 打包 → 上传到 AIR 管理服务器并受控部署 → 服务器 load。之后改一次外部 02，
+    `sync-code.py` 同步，再跑服务器 load。
+  - 预期与证据：
+    - 本机正式 load 走完：输出「输入检查通过：…keys=laptop.pub,mgmt-server.pub」，没有「项目公钥身份无效」；load 之后
+      `laptop.pub` 仍是原链接、外部公钥字节不变，`~/.ssh` 里的 key 没有被换进项目（WP-11 D1，v3.1.1 LP 修复）。
+    - 包内 `03-linked-inputs.json` 列出每个链接、真实路径和 sha256；服务器项目目录里这些名字都是普通文件，字节与回执
+      sha256 一致；没有 `p2p`、`p2p.xlsx` 悬空链接；服务器 load 用 `03-selected-p2p.json` 选中根目录工作簿并成功生成；
+      外部资料目录的其它工作簿没有被上传。
+    - sync 之后：服务器上 02 仍是普通文件、内容更新，服务器 load 成功；`laptop.pub` 仍是普通文件，字节等于外部公钥。
+  - 清理：按 unload 卡；本机外部目录与操作员的公钥不受影响。
+  - 风险：服务器 load 会停、起服务（同第 7 步）；外部资料目录里是现场资料，证据只记文件名与 sha256。
 
 ## TC-REAL-IB-CSV-001 — 混合场景（ETH 走 ZTP、IB 走 bringup）下的独立 ib.csv
 
@@ -2892,4 +2913,140 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复后通过（集成头 `0ef1f7f` 加本包：除依赖 WP-9b 的一例外全部通过；叠加 WP-9b 的生产改动后全部通过）。
 - [x] 已纳入全量 discovery（模块已在 suite `deployment-runtime` 和 workflow `activate_project_pointer_lifecycle` 的 tests 里；
   分片车道在集成时按 `lane_for_new_modules.py` 定，WP-3 建议 w0）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。未执行前不得写 PASS。
+
+## TC-REAL-ACTIVATE-PROJECT-004 — unsetup 之后读者和页面的表现（服务器单项目；再 load 恢复）
+
+### 基本信息
+
+- Case ID：`TC-REAL-ACTIVATE-PROJECT-004`。
+- 名称：管理服务器上 `02-unsetup.py` 删除指针以后，树里的固定链接保留并悬空，表示没有激活的项目；各读者、常驻服务和
+  监控页按「没有激活的项目」跳过、等待或报错，不读到任何项目、不往任何项目写；对同一项目再 load 一次就恢复。
+- 类型：real-environment / scenario / failure-injection。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：R-016 详细设计 v1.1 §4.4、§4.5、§5.1、§6、Q3 与 Q7（owner 2026-11-03「好的」）、§11「真机」一行的
+  unsetup；v3.1.1 详细工作指导 WP-3「REAL_ENV」、WP-6（O14，owner 2026-11-07「同意你的建议。」）、5.3 表；WP-9a、WP-9b
+  与 UNL 的落地（worker、monitor、读者、infra 日志、`13-unload --teardown-infra`）。
+- 自动化文件与测试方法（合成目录、进程替身，未在 systemd/Supervisor、Apache、浏览器或 root 下运行）：
+  - `test_cases.test_activate_project_unsetup_workflow`：`ActivateProjectUnsetupWorkflowTests.test_unsetup_leaves_dangling_fixed_links_and_setup_restores_them`、
+    `UNLUnloadTeardownAfterUnsetupWorkflowTests.test_unload_hands_teardown_the_project_log_dir_that_survives_real_unsetup`；
+  - `test_cases.test_activate_project_contract`：`WP6UnsetupTests`、`WP4StatusTests.test_no_pointer_is_reported_and_exits_1`、
+    `WP9aServiceReaderTests`；
+  - `test_cases.test_activate_project_services_workflow.ActivateProjectServicesWorkflowTests`：`test_worker_skips_a_cycle_without_a_pointer_and_resumes_after_setup`、
+    `test_monitor_exits_when_the_pointer_names_another_project_or_is_gone`、
+    `test_every_reader_names_the_pointer_project_not_where_a_linked_input_resolves`；
+  - `test_cases.test_activate_project_readers_workflow.PointerReadersWorkflowTests.test_unload_and_infra_readers_follow_the_pointer_across_a_switch`；
+  - `test_cases.test_req19_infra_log_contract`：`test_python_writer_and_collector_refuse_when_no_project_is_active`、`UNLTeardownLogDirTests`。
+- 适用平台：management-server（AIR 管理服务器或一次性 Ubuntu 22.04 Native 管理 VM，单项目，R-016 的前提）/ AIR。
+
+### 风险与目标
+
+- 要防止的故障：unsetup 之后某个读者经一条仍能解析的链接或旧缓存读到原项目；把「没有激活的项目」当成别的错误
+  （崩溃、`failed` 并关掉持续采集、monitor 被反复拉起）；monitor 或 worker 往原项目写状态；经悬空链接在
+  `DAY0-Prepare/activate-project` 位置建出东西；再 load 不能恢复。
+- 涉及的模块和状态边界：`DAY0-Prepare/02-unsetup.py`；`DAY0-Prepare/01-a-setup.py`（`--status`、再激活）；
+  `DAY0-Prepare/12-ztp-monitor.py`；`monitor/switch-collection-worker.py` 与 `monitor/switch_collection_gate.py`；
+  `monitor/manual-ztp-worker.py`、`ztp/manual-ztp.py`；`monitor/issue-tracker/issue-tracker-sync.py`、
+  `monitor/issue-tracker/switch-status.py`；`ethernet/monitor/cron.sh`；`infra/deploy_infra.py`、`infra/check_infra.py`、
+  `infra/infra-teardown.sh`；`DAY0-Prepare/13-unload.py`；`monitor/generate-monitor-html.py`（页面）；
+  `DAY0-Prepare/11-load.py`（恢复）。
+- 成功标准：第 2 步 unsetup 返回 0；第 3～8 步每个读者都给出下面写明的「没有激活的项目」表现，没有任何读者读到或写入
+  原项目；第 9 步 load 返回 0，链接、服务和页面恢复到第 1 步的状态。
+- 自动化不能证明的：服务后端（systemd 或 Supervisor）下仍在运行的 worker、monitor 对删指针的真实反应；Apache 对悬空
+  链接的响应；浏览器里页面的显示；crontab 触发的 cron.sh；root 运行的 unsetup；AIR 上再 load 后全部服务恢复。
+
+### 前置条件与输入
+
+- Fixture / 项目输入：owner 授权、可快照回滚的 AIR 管理服务器或一次性 Ubuntu 22.04 Native 管理 VM，不服务真实交换机；
+  只有一个项目 `<项目>`，已按手册 Runbook 5 正式 load，Apache、DHCP、12-ztp-monitor、采集 worker、manual-ztp worker 在运行。
+- 外部依赖：v3.1.1 候选源码的正式 full proof；AIR 仿真可选（monitor 跑一轮需要 ZTP 设备）。
+- 所需权限：Runbook 5 的 load 权限（sudo）。
+- 初始状态（开始前只读保存，不记录任何秘密）：`ls -l DAY0-Prepare/activate-project`；
+  `find . -path ./DAY0-Prepare -prune -o -type l -printf '%p -> %l\n' | sort`；4 个公钥目录的 `ls -la`；
+  `ztp/.setup_manifest`；`monitor/status/*.json`；worker、monitor 的 PID/starttime/argv；`crontab -l`；
+  `monitor/monitor.html` 的 mtime 与 SHA-256；项目输入（`01-global.yaml`、`02-*.csv`、`*.pub`、`p2p.xlsx` 选中的工作簿）
+  与 `99-output-*` 的文件清单和 SHA-256；公钥只记指纹。
+
+### 步骤
+
+1. 快照，保存上面的初始状态。在监控页开启持续收集（10 分钟）和持续备份（如本项目启用），等它们各完成一个周期。
+2. 不停服务，执行 `sudo python3 -B DAY0-Prepare/02-unsetup.py -y`，保存输出和退出码。
+3. 只读核对树（与第 1 步对比）：指针、manifest、规格表各行、4 个公钥目录、`ztp/optimize/*-sample/*`、项目文件。
+4. `python3 -B DAY0-Prepare/01-a-setup.py --status`，保存输出和退出码。
+5. 常驻服务：在监控页手工点一次「信息收集」和「配置备份」；等持续收集、持续备份各到下一个周期；等 monitor 的下一轮。
+   保存 `monitor/status/*.json`、worker 与 monitor 的日志片段、进程列表。
+6. 页面：浏览器刷新监控页，记录 ZTP 监控、信息收集、配置备份、持续收集、持续备份几处的文字；对页面引用的、经固定链接的
+   资源（例如 `monitor/ztp-status/` 下的文件、`monitor/99-output-p2p/` 下的拓扑图）各取一次 HTTP 状态码。
+7. 命令行读者（各一次，不带项目参数）：`monitor/issue-tracker/issue-tracker-sync.py`、`monitor/issue-tracker/switch-status.py`、
+   `ztp/manual-ztp.py`（不带 `-p`）、三个类型目录下的 `monitor/cron.sh`、`infra/check_infra.py`。
+8. 再执行一次 `sudo python3 -B DAY0-Prepare/02-unsetup.py -y`，以及 `sudo python3 -B DAY0-Prepare/02-unsetup.py <项目> -y`。
+9. 恢复：按 Runbook 5 的命令对 `<项目>` 再跑一次 `11-load.py`。之后重复第 3～6 步的核对。
+10. 可选（另一轮快照，会回滚 infra 安装的软件，只在一次性 VM 上做）：`sudo python3 -B DAY0-Prepare/13-unload.py <项目> --teardown-infra --yes`；
+    再在同一状态下不带 `--log-dir` 手工运行 `sudo bash infra/infra-teardown.sh --non-interactive --yes`。详细核对项在
+    `TC-REAL-INFRA-SETUP-PY-001` 第 5′ 步，本卡只核对 unload 之后第 3～7 步的表现与第 2 步之后相同。
+
+### 预期结果
+
+- 正向结果（编号供报告逐条给出处）：
+  1. 第 2 步 unsetup 以 0 退出；输出「当前激活的项目：<项目的真实路径>」，列出要删除的指针、逐把公钥链接和 setup 清单，并写明
+     「树里的固定链接保留：删除指针后它们悬空，表示没有激活的项目；再 setup 一次就恢复。」
+  2. 第 3 步：`DAY0-Prepare/activate-project` 和 `ztp/.setup_manifest` 不在；规格表每一行的链接原文与第 1 步逐行相同，指向项目的
+     各行悬空；指向 `http/image` 的共享链接原文不变且仍能解析；4 个公钥目录仍是真实目录，里面的逐把公钥链接都被删除，目录里的
+     普通文件还在；`ztp/optimize/*-sample/*` 的链接被删除，sample 目录里的普通文件还在；项目输入文件的清单与 SHA-256 不变。
+  3. 第 3 步：原项目 `99-output-ztp` 下 `manual-config-sync` 与 `configuration-methods` 的配置权威已撤销（例如 configuration-methods
+     的当前记录变为 `failed`；unsetup 按指针所指的项目撤销，R16-20）；其余 `99-output-*` 不变（推断：unsetup 不写别的项目输出）。
+  4. 第 4 步 `--status` 以 1 退出，指针一行是「DAY0-Prepare/activate-project：没有（没有激活的项目）」；规格表各行仍按原文判为
+     「正确」（没有指针时只看原文；自动化只断言了退出码和指针一行）。
+  5. 第 5 步手工信息收集：`monitor/status/switch-collection.status.json` 的 `state` 为 `skipped`、`reason` 为「没有激活的项目」，
+     没有连任何交换机；手工配置备份：`yaml-backup.status.json` 同样是 `skipped`、「没有激活的项目」。
+  6. 第 5 步持续收集与持续备份：状态为 `waiting`，`enabled` 仍为 true，`wait_reason` 为「没有激活的项目」，`remaining_seconds`
+     等于一个间隔；不是 `failed`，也没有被关掉。
+  7. 第 5 步 monitor：下一轮开始前写一行含「没有激活的项目（DAY0-Prepare/activate-project 不存在）」的日志并以 0 退出，不再跑新的
+     一轮，不写 watch state；服务后端不把它拉起（推断：退出码 0，Q3「由下一次 load 重新启动」）。
+  8. 第 6 步页面（推断，依据 `generate-monitor-html.py` 的页面脚本；没有自动化在浏览器里跑过）：
+     - unsetup 之后没有任何在运行的路径重新生成 `monitor/monitor.html`（monitor 已退出，worker 跳过周期，cron.sh 在公钥预检处
+       停止），所以页面停在第 2 步之前最后一次生成的内容，mtime 与 SHA-256 与第 2 步前相同；
+     - ZTP 监控一处显示「监控未运行」「需按当前后端恢复」；手工收集、配置备份的状态是 `skipped`，页面落到默认文字「可手工采集」
+       「YAML：可手工备份」（冷却期内则显示冷却）；持续收集、持续备份显示「等待收集冷却结束（约 10 分钟）」「等待备份冷却结束
+       （约 10 分钟）」。页面上不出现「没有激活的项目」的字样（见报告待决点）；
+     - 经悬空固定链接的资源取不到（Apache 对悬空链接返回 404 或 403，以实测为准），页面本身仍能打开。
+  9. 第 7 步：switch-status 以 2 退出、issue-tracker-sync 以非 0 退出（推断），错误都含
+     「no active project (DAY0-Prepare/activate-project is missing)」；`ztp/manual-ztp.py` 不带 `-p` 时报「没有激活的项目
+     （DAY0-Prepare/activate-project 不存在）；请先运行 setup 或使用 -p/--project」；manual-ztp worker 认不出项目（`active_project()`
+     为 None），手工 ZTP 请求不写进任何项目（推断）；三个 `cron.sh` 都以 1 退出，报
+     「[ERROR] active project mgmt-server.pub is missing or empty: …/<类型>/publickey/mgmt-server.pub」，没有连任何设备；
+     `check_infra.py` 的本机采集报「no active project」。
+  10. 第 8 步：两次 unsetup 都以 0 退出、不改动任何东西；带项目参数的一次输出「没有激活的项目（DAY0-Prepare/activate-project 不存在），
+      <项目> 未激活；无需操作」。
+  11. 第 9 步 load 以 0 退出，输出「当前没有有效活动项目；将激活 <项目>」；之后指针 → `<项目>`，规格表各行原文与第 1 步相同且都能
+      解析，逐把公钥链接与 manifest 重建，`--status` 以 0 退出；monitor 由 load 重新启动；worker 下一个周期用的是 `<项目>`（不再
+      `skipped`）；持续收集不用重新开启就恢复（推断：第 6 条里 `enabled` 一直是 true）；页面由 load 重新生成。
+  12. 第 10 步：unload 把 `--log-dir <项目>/99-output-infra` 交给 teardown，回滚成功，`infra-teardown-*.log` 落在该项目的
+      `99-output-infra`；不带 `--log-dir` 的手工 teardown 以 1 退出，报
+      「ERROR: no active project: … pass --log-dir DAY0-Prepare/<project>/99-output-infra」，不写日志、不改安装状态。
+- 拒绝/失败结果：第 4 步 `--status` 的 1、第 7 步各读者的非 0 退出、第 10 步不带 `--log-dir` 的 teardown 都是预期的拒绝，
+  报错文字要能看出原因是「没有激活的项目」，而不是崩溃栈或泛泛的「failed」。
+- 不允许发生的副作用：第 2 步到第 9 步之间 `DAY0-Prepare/activate-project` 始终不存在（没有任何读者或写者经悬空链接把它建出来）；
+  原项目的输入文件和 `99-output-*`（除第 3 条的配置权威）不被改写；worker 没有因为没有项目而关掉持续收集或备份；monitor 没有被
+  反复拉起；公钥目录变成链接；规格表的固定链接被删或原文被改；任何手工改链接、删锁、删凭据来「修好」。
+- 需要保存的证据：每一步的完整命令、输出和退出码；第 1、3、9 步的链接清单与 diff；公钥目录、manifest 的前后内容；
+  `monitor/status/*.json` 前后内容；worker 与 monitor 的日志片段和进程列表；页面截图与各资源的 HTTP 状态码；
+  `monitor/monitor.html` 的 mtime 与 SHA-256；项目文件清单与 SHA-256 前后对比。不记录任何秘密，公钥只记指纹。
+
+### 故障注入与清理
+
+- 并发、超时、异常、重启或输入篡改：第 5 步在 worker 一个周期进行中执行 unsetup 的情形由 `TC-REAL-ACTIVATE-PROJECT-003` 第 1 步
+  覆盖，本卡不重复；不在真实客户源文件上做篡改。
+- 清理/回滚验证：第 9 步的 load 就是恢复；第 10 步做过的话恢复快照。结束时核对服务、链接清单与第 1 步一致；不手工改指针或删除
+  锁、PID、request 文件。
+- 重复执行与幂等性：第 8 步重复 unsetup 不改动任何东西；第 9 步之后再跑一次同一条 load，链接清单与第 9 步相同。
+- 风险：unsetup 不停服务，第 2～9 步之间 ZTP、采集、页面都处于「没有激活的项目」状态，只能在不服务真实交换机的一次性 VM 或
+  AIR 上执行；第 9、10 步会停、起服务；第 10 步会回滚 infra 安装的软件。失败时服务保持停止，按 DEV 规则修正后重跑 load。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/`（见「自动化文件与测试方法」，分属 WP-6、WP-4、WP-9a、WP-9b、UNL）。
+- [x] 修复前能够稳定失败（各包报告里的先红记录）。
+- [x] 修复后通过（集成头 `a8f7468` 上，上面列出的用例全绿：v3.1.1 LP 改前运行的 146 个模块）。
+- [x] 已纳入全量 discovery（各模块都已在 manifest 登记：`activate_project_*` 在 workflow `activate_project_pointer_lifecycle`
+  或 rule `day0_release_operations`，`test_req19_infra_log_contract` 在 rule `infra_lifecycle` 与 `day0_release_operations`）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。未执行前不得写 PASS。

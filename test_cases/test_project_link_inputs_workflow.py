@@ -452,5 +452,65 @@ class ProjectLinkInputsWorkflowTests(unittest.TestCase):
         self.assertFalse(os.path.lexists(target))
 
 
+class LPLaptopKeyLinkLoadWorkflowTests(unittest.TestCase):
+    """laptop.pub as the operator's own link passes real setup → load --dry-run → load's setup child.
+
+    Expectations: 需求文档 R-014 第 3 条 lists ``laptop.pub → 自己的公钥`` as a supported user link and
+    requires "setup、load 读取时跟随链接，按真实文件校验"; the workstation load is the step before
+    upload/sync (手册 Runbook 2), so its key preflight must not stop such a project
+    (agentWP11.report.md §6 第 5 条, §7 D1, option (a) assigned 2026-11-08).  R-014 第 2 条: nothing is
+    written through the link.  A target that later disappears is still refused by load.
+    """
+
+    def test_laptop_key_link_passes_setup_load_dry_run_and_the_planned_setup_child(self):
+        directory = tempfile.TemporaryDirectory(prefix="lp-laptop-link-load-")
+        self.addCleanup(directory.cleanup)
+        sandbox = LinkedProjectSandbox(Path(directory.name).resolve())
+        (sandbox.project / "02-devices_config.csv").write_bytes(sandbox.devices)
+        workbook(sandbox.project / "Site P2P_v1.0.xlsx", "selected")
+        key = public_key(43, "operator@desk").encode("ascii")
+        external = sandbox.work / "operator.pub"
+        external.write_bytes(key)
+        link = sandbox.project / "laptop.pub"
+        link.symlink_to(external)
+        link_text = os.readlink(link)
+        home_key = (sandbox.home / ".ssh/id_ed25519.pub").read_bytes()
+
+        setup = sandbox.setup()
+        self.assertEqual(0, setup.returncode, setup.stdout)
+
+        load = sandbox.load_dry_run()
+        self.assertNotIn("项目公钥身份无效", load.stdout)
+        self.assertEqual(0, load.returncode, load.stdout)
+        # The key preflight accepted the linked key as the project's laptop key.
+        self.assertRegex(load.stdout, r"输入检查通过：.*keys=laptop\.pub,mgmt-server\.pub")
+        planned = [
+            line for line in load.stdout.splitlines()
+            if line.startswith("[DRY] (") and "01-a-setup.py" in line
+        ]
+        self.assertEqual(1, len(planned), load.stdout)
+        child = sandbox.run(shlex.split(re.sub(r"^\[DRY\] \(.*?\) ", "", planned[0])))
+        self.assertEqual(0, child.returncode, child.stdout)
+        # The key the real load publishes (R-016 §3.2: a per-key link through the pointer) is the linked key.
+        published = sandbox.http / "ztp/config/publickey/laptop.pub"
+        self.assertTrue(published.is_symlink())
+        self.assertEqual(key, published.read_bytes())
+
+        # R-014 第 2、3 条：the link, its target and the operator's HOME key are untouched.
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(link_text, os.readlink(link))
+        self.assertEqual(key, external.read_bytes())
+        self.assertEqual(["operator.pub"], sorted(item.name for item in sandbox.work.iterdir()))
+        self.assertEqual(home_key, (sandbox.home / ".ssh/id_ed25519.pub").read_bytes())
+
+        # The target moves away (for example Work/ is reorganised): load refuses it, writes nothing.
+        external.rename(sandbox.base / "moved-operator.pub")
+        moved = sandbox.load_dry_run()
+        self.assertNotEqual(0, moved.returncode, moved.stdout)
+        self.assertIn("laptop.pub", moved.stdout)
+        self.assertEqual(link_text, os.readlink(link))
+        self.assertEqual([], sorted(sandbox.work.iterdir()))
+
+
 if __name__ == "__main__":
     unittest.main()

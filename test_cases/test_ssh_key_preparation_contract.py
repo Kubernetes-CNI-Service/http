@@ -1288,5 +1288,154 @@ class DelegatedSetupPublicKeyContract(unittest.TestCase):
             self.assertEqual(local_key, (project / "laptop.pub").read_bytes())
 
 
+class LPLinkedLaptopKeyConfigOnlyPreflightContract(unittest.TestCase):
+    """The workstation load key preflight accepts the operator's own laptop.pub link.
+
+    Expectations (independent of the implementation):
+    - 需求文档 R-014 第 3 条 (owner 2026-11-02): users may make ``laptop.pub`` a link to their own
+      key; "setup、load 读取时跟随链接，按真实文件校验（普通文件、非空、格式正确）"; setup and load
+      only read, never write through it (第 2 条).
+    - agentWP11.report.md §7 D1 option (a), assigned by http dev on 2026-11-08: the entry of
+      ``11-load.py::_prepare_pubkeys_without_management_injection`` resolves the project's input
+      links once with ``tools/_package_common.py::read_project_input_links`` and the key identity
+      is computed from the bytes read there; downstream no-follow readers are not relaxed.
+    - The existing preflight rule "项目中的管理服务器公钥与项目电脑公钥相同" is refused (load
+      ``LoadError``); a dangling, non-regular or oversized link target is still refused.
+    """
+
+    MARKED_MANAGEMENT = b"mgmt-server.pub\n"
+
+    def fixture(self, root: Path, *, management: bytes = b"") -> tuple[Path, Path, Path]:
+        ssh = root / "laptop-home/.ssh"
+        ssh.mkdir(parents=True, mode=0o700)
+        project = root / "project"
+        project.mkdir(mode=0o700)
+        (project / "mgmt-server.pub").write_bytes(management)
+        (project / ".management-pubkeys").write_bytes(self.MARKED_MANAGEMENT)
+        work = root / "Work"
+        work.mkdir()
+        return ssh, project, work
+
+    def preflight(self, loader, project: Path, ssh: Path, *, dry_run: bool = True):
+        """Return (selected keys, None) or (None, LoadError text); never lets the error escape."""
+        try:
+            with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                selected = loader.prepare_pubkeys(
+                    project, ssh_dir=ssh, dry_run=dry_run,
+                    inject_management_key=False,
+                    allow_management_key_generation=False,
+                )
+        except loader.LoadError as exc:
+            return None, str(exc)
+        return selected, None
+
+    @staticmethod
+    def snapshot(*paths: Path) -> dict[Path, tuple]:
+        return {
+            path: (os.readlink(path) if path.is_symlink() else None,
+                   path.read_bytes() if path.is_file() else None)
+            for path in paths
+        }
+
+    def test_link_outside_the_project_passes_and_nothing_is_written(self):
+        loader = load_module("lp_linked_laptop_key_passes")
+        with tempfile.TemporaryDirectory(prefix="lp-linked-laptop-") as temporary:
+            root = Path(temporary).resolve()
+            ssh, project, work = self.fixture(root)
+            key = public_line("ssh-ed25519", 121, "operator@desk")
+            external = work / "operator.pub"
+            external.write_bytes(key)
+            laptop = project / "laptop.pub"
+            laptop.symlink_to(external)
+            before = self.snapshot(laptop, external, project / "mgmt-server.pub")
+
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    selected, error = self.preflight(loader, project, ssh, dry_run=dry_run)
+                    self.assertIsNone(error)
+                    self.assertEqual((laptop, project / "mgmt-server.pub"), selected)
+                    self.assertEqual(before, self.snapshot(
+                        laptop, external, project / "mgmt-server.pub",
+                    ))
+            self.assertEqual([], sorted(ssh.iterdir()))
+            self.assertEqual(["operator.pub"], sorted(item.name for item in work.iterdir()))
+
+    def test_identity_is_computed_from_the_bytes_read_once_at_the_entry(self):
+        """The duplicate-key rule sees the key read at the entry, not a later re-read."""
+        laptop_key = public_line("ssh-ed25519", 122, "operator@desk")
+        management_key = public_line("ssh-ed25519", 123, "root@management-server")
+        # The same management identity under another comment (identity ignores the comment).
+        management_alias = public_line("ssh-ed25519", 123, "renamed")
+        cases = (
+            # (bytes at the entry read, bytes after it, expected LoadError pattern or None)
+            ("distinct-at-entry", laptop_key, management_alias, None),
+            ("duplicate-at-entry", management_alias, laptop_key, "相同"),
+        )
+        for label, at_entry, afterwards, expected in cases:
+            with self.subTest(case=label), \
+                 tempfile.TemporaryDirectory(prefix="lp-linked-identity-") as temporary:
+                loader = load_module(f"lp_linked_identity_{label.replace('-', '_')}")
+                package_common = sys.modules["_package_common"]
+                real_reader = package_common.read_project_input_links
+                root = Path(temporary).resolve()
+                ssh, project, work = self.fixture(root, management=management_key)
+                external = work / "operator.pub"
+                external.write_bytes(at_entry)
+                (project / "laptop.pub").symlink_to(external)
+                calls = []
+
+                def read_then_rewrite_target(project_dir, **options):
+                    result = real_reader(project_dir, **options)
+                    calls.append({item.name: item.payload for item in result})
+                    external.write_bytes(afterwards)
+                    return result
+
+                with mock.patch.object(
+                    loader, "read_project_input_links", read_then_rewrite_target, create=True,
+                ):
+                    selected, error = self.preflight(loader, project, ssh)
+                self.assertEqual([{"laptop.pub": at_entry}], calls)
+                if expected is None:
+                    self.assertIsNone(error)
+                    self.assertIn(project / "laptop.pub", selected)
+                else:
+                    self.assertIsNotNone(error)
+                    self.assertRegex(error, expected)
+                self.assertEqual(management_key, (project / "mgmt-server.pub").read_bytes())
+
+    def test_dangling_non_regular_and_oversized_targets_are_still_refused(self):
+        oversized = public_line("ssh-ed25519", 124, "operator@desk") + b"# padding\n" * 7000
+        self.assertGreater(len(oversized), 64 * 1024)
+        cases = ("dangling", "directory", "fifo", "empty", "oversized")
+        for label in cases:
+            with self.subTest(target=label), \
+                 tempfile.TemporaryDirectory(prefix="lp-linked-refused-") as temporary:
+                loader = load_module(f"lp_linked_refused_{label}")
+                root = Path(temporary).resolve()
+                ssh, project, work = self.fixture(root)
+                target = work / "operator.pub"
+                if label == "directory":
+                    target.mkdir()
+                elif label == "fifo":
+                    os.mkfifo(target)
+                elif label == "empty":
+                    target.write_bytes(b"")
+                elif label == "oversized":
+                    target.write_bytes(oversized)
+                laptop = project / "laptop.pub"
+                laptop.symlink_to(target)
+                before = self.snapshot(laptop, project / "mgmt-server.pub")
+                work_before = sorted(item.name for item in work.iterdir())
+
+                selected, error = self.preflight(loader, project, ssh)
+                self.assertIsNone(selected)
+                self.assertIsNotNone(error)
+                self.assertEqual(before, self.snapshot(laptop, project / "mgmt-server.pub"))
+                self.assertEqual(work_before, sorted(item.name for item in work.iterdir()))
+                if label == "oversized":
+                    self.assertEqual(oversized, target.read_bytes())
+                self.assertEqual([], sorted(ssh.iterdir()))
+
+
 if __name__ == "__main__":
     unittest.main()
