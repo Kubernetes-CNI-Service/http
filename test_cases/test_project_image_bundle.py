@@ -253,8 +253,14 @@ def write_bundled_payload(
 
 
 # 2026-10-23 owner load->collection: the guard's monitor flag allow-list gained --request-collection-on-complete (guard was 46af60b5b4ed…, bootstrap cd1802da5725…).
-OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256 = '79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d'
-OWNED_NATIVE_GUARD_SOURCE_SHA256 = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
+# 2026-11-08 (v3.1.1 WP-17, O8, owner 2026-11-07): WP-7 (e4ae780) made the guard refuse archive members
+# DAY0-Prepare/activate-project and DAY0-Prepare/.activate-project.*.tmp (R-016 7).  Guard was
+# 0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33,
+# bootstrap 79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d
+# (the bootstrap literal changes only in its GUARD_SHA256 value); same values re-pinned in
+# project_image_owned_guard_outer.py and test_project_image_owned_guard.py.
+OWNED_NATIVE_GUARD_BOOTSTRAP_SHA256 = '2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0'
+OWNED_NATIVE_GUARD_SOURCE_SHA256 = '4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd'
 OWNED_NATIVE_GUARD_BOOTSTRAP_SOURCE = r'''# SOURCE-ONLY TEST BOOTSTRAP. NOT INSTALLED, IMPORTED OR EXECUTED.
 # The parent test supplies a separately frozen literal bootstrap SHA.
 import builtins
@@ -272,7 +278,7 @@ import sys
 import tempfile
 import threading
 
-GUARD_SHA256 = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
+GUARD_SHA256 = '4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd'
 MODULE_NAME = '_test_owned_complete_verified_guard'
 FILE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
                'st_size', 'st_mtime_ns', 'st_ctime_ns')

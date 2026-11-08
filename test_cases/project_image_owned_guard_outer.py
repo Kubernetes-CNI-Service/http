@@ -32,8 +32,11 @@ def _exact_launch(argv, env, archive_fd, archive_key):
     if (type(python) is not str or not posixpath.isabs(python)
             or posixpath.normpath(python) != python or '\0' in python):
         raise GuardOuterHold('original runtime interpreter identity required')
-    bootstrap_sha = '79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d'
-    guard_sha = '0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33'
+    # 2026-11-08 v3.1.1 WP-17 (O8): guard and bootstrap re-pinned with test_project_image_bundle.py; were
+    # bootstrap 79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d,
+    # guard 0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33.
+    bootstrap_sha = '2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0'
+    guard_sha = '4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd'
     if (len(argv) != 18 or any(type(s) is not str for s in argv)
             or argv[:5] != [python, '-I', '-S', '-B', '-c']
             or hashlib.sha256(argv[5].encode()).hexdigest() != bootstrap_sha

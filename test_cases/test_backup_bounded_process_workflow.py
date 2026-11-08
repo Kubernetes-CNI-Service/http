@@ -62,7 +62,11 @@ PINS = {
     # 2026-10-23: re-pinned after the owner-approved server_mgmt/server_ufm device types (2026-10-19..22)
     # added _NON_SWITCH_TYPES to load_devices_csv (+4/-1 lines; was 066db88e… at 7c44779). The bounded
     # process helpers below are unchanged.
-    SOURCE: "2f8185ae5f7fdfdbce299b554caab57a39d2b77330924c78975bb5c1fcebb86e",
+    # 2026-11-08 v3.1.1 WP-17: re-pinned after WP-9c (9a33094) made the two AIR functions read the active
+    # project's p2p-air.json through DAY0-Prepare/activate-project (R-016 5.1, I-031); project_contract is
+    # imported only on that AIR path.  Was
+    # 2f8185ae5f7fdfdbce299b554caab57a39d2b77330924c78975bb5c1fcebb86e.  The bounded process helpers below are unchanged.
+    SOURCE: "908eb5fa0907a155c5f2a7c7b79b13bba5e0a63bc8740a4ec2abf6f8c752560d",
     PARENT_SOURCE: "3ec254c596423a0fc93ef895f6226c62584672ec37a878c068524b30f30d221e",
     LAUNCHER_SOURCE: "2ef142cf049d1496d8d5321015529592576d6a724c4b9c6b5b50c5c551a8c1fa",
     FIXTURE: "bac0c68a18a313b60297c720d64d416a5d405c80c089b411b8a8fc6dbc1b64b9",

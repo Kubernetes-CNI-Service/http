@@ -36,13 +36,28 @@ COPY_FILES = BASE_FILES + EXTRA_FILES
 # An independent review found every hunk verbatim from ee9dd8f (= f384f73), none on the native OS/BIOS/CPLD
 # image path (it imports only _source_identity and _package_project_identity), and no check weakened.
 # Compared whole only; no inverse layer.
+# 2026-11-08 (v3.1.1 WP-17, O7 (b), owner 2026-11-07): the three rows below re-pinned to the v3.1.1
+# integration bytes (base 610e348) after an independent review of every changing commit (agentWP17 report).
+# tools/_package_common.py was b210563aee0de0c8835c8de625595157a03c9e123cdb9080bf869cef2c8e63b3:
+#   G12 link table, I-034 analyzer subtrees, WP-11 user input links, WP-6 retired link, WP-12 ib.csv,
+#   WP-9b active_project() through the pointer.
+# tools/project_contract.py was dbf501dd7997f0450a069e73dca4738cb0a4f43021b1035f9ed5ea9b9311bf78:
+#   G12 SETUP_LINK_SPECS (BRINGUP_OUTPUT_SPECS now derived, same value), I-034, WP-7 pointer exclusion,
+#   WP-8, WP-3 active_project_dir, WP-6, RV1 venv names, WP-12, WP-9a/WP-9b readers through the pointer.
+# tools/ibsw_upgrade_inputs.py was 75c700e576b9fb6bd8ce5a117aa2f0c0f6e7ea96f9a1a12bc973ef814a13cbae:
+#   WP-9b binds the managed and standalone IB inputs through DAY0-Prepare/activate-project (R-016 5.1);
+#   FROZEN_SHA256 keeps that original through its literal inverse (O7 (a)).
+# _source_identity and _package_project_identity (the only _package_common names the IB runtime imports)
+# are unchanged; of the project_contract names it imported at f741269 only BRINGUP_OUTPUT_SPECS (now derived,
+# same value) and runtime_link_specs (no longer imported) changed, and WP-9b adds active_project_dir,
+# pointer_link_specs and pointer_link_target to ibsw_upgrade_inputs.py.  Compared whole only; no inverse layer.
 PRODUCTION_PINS = {
-    'tools/_package_common.py': 'b210563aee0de0c8835c8de625595157a03c9e123cdb9080bf869cef2c8e63b3',
-    'tools/project_contract.py': 'dbf501dd7997f0450a069e73dca4738cb0a4f43021b1035f9ed5ea9b9311bf78',
+    'tools/_package_common.py': '78ac5f337b1cb4c14a99ed7ccdbca69449ac8e8ac81725d222dd46897ad6bc56',
+    'tools/project_contract.py': '100c0b0f19b70d46ac89b1be2f82411f894421062c49b7926e7d2efb35b3cefd',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
     'tools/ibsw_upgrade_contract.py': 'e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',
-    'tools/ibsw_upgrade_inputs.py': '75c700e576b9fb6bd8ce5a117aa2f0c0f6e7ea96f9a1a12bc973ef814a13cbae',
+    'tools/ibsw_upgrade_inputs.py': '6c83d4eca42e04b5916a1f3a3405305d81a7c4f05cf9ea29c301fbc6a8954de1',
     'tools/ibsw_upgrade_driver.py': '887a3faf2808cfd2107849825cea2a14fe041f9468987249c5bba07c39030f01',
     'tools/ibsw_upgrade_schedule.py': '547f957b99e7df2c8d1dfe682e501a37c31cf03e601f86564135d9bc3a287fb2',
     'tools/ibsw_upgrade_component.py': '1ab3b4b6bb75f11a01816f35ef788b701df2e16489e4c8054709502fd8f2f2d1',

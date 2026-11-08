@@ -963,9 +963,11 @@ def _source_bound_load_report_path(
         # 2026-11-07 M1a: 11-load.py changed again after afed871 (314b799 DEV subnet CSV wording, 58821f9 DEV template p2p/ and --p2p-file help) (was 456ba794ef10deb1b12065774749e3d26f13b79a260492e01e2d002df9e22d1e); the structural path was checked on the current files before re-pinning.
         # 2026-11-07 M1a: 11-load.py changed for the owner's option A on legacy flat parents (2026-11-07: a DEV-era parent that can no longer be frozen is warned and skipped) (was d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e); the structural path was checked on the current files before re-pinning.
         # 2026-11-07 M1a: 11-load.py changed for option A, third revision (2026-11-07: every way a DEV-era flat parent cannot be frozen is warned and skipped) (was 3ca01436f207b28039cd27ded192010af3bbfc70f17d739fe6154b076a1b014e); the structural path was checked on the current files before re-pinning.
+        # 2026-11-08 v3.1.1 WP-17 (written by m1a/repin_quiesce_load.py): 11-load.py changed with v3.1.1 (M5 6ba644f I-022 interrupted latest retirement restore, WP-11 c0086c7 p2p/ user link, WP-2 67e6739 setup's template completion, RV1 7170eae laptop.pub placeholder, WP-9b 610e348 active_project() through the pointer) (was d144036d0d79e68f39479109bffeaa289f70ae38f19aa5213bc46c37aad1797e); the structural path was checked on the current files before re-pinning.
         (load_tree, "38d44058cd7f4f7c9ad986f0fa800d253ce1862438817d86ed383223ffba4539"),
         # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05); the structural path was checked on the current files before re-pinning.
-        (report_tree, "bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585"),
+        # 2026-11-08 v3.1.1 WP-17: tools/generation_report.py changed with WP-9b (610e348: _public_key accepts a published key only through DAY0-Prepare/activate-project, R-016 3.2) (was bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585); the structural path was checked on the current files before re-pinning.
+        (report_tree, "0e1a49f0a3cc0f784ac4d2eaee2362bef572d18ed9a87b8c91cc061f6fea9819"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
@@ -1193,7 +1195,8 @@ def _source_bound_feedback_recovery_path(
 ) -> dict[str, ast.AST]:
     """Accept this bounded path only in both exactly reviewed source ASTs."""
     reviewed = (
-        (feedback_tree, "7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216"),
+        # 2026-11-08 v3.1.1 WP-17: ztp/optimize/feedback.py changed with WP-9c (9a33094: discover_sample_inputs without inputs takes active_project_dir, R-016 5.1; WP-9c P1) (was 7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216); the structural path was checked on the current files before re-pinning.
+        (feedback_tree, "9e0159e57b6beead3009ed39a08fcdae5dd87d0d47fe64b93e742ddf29359df2"),
         # 2026-10-23 owner load->collection handoff: ztp_service_runtime.py changed (was 0d11ab1cf740…); its structural path still holds.
         # 2026-11-07 M1a: tools/ztp_service_runtime.py became TEST f384f73 base + DEV replay (batch P1 9968948) (was f40fa82b425085c5859e9dc8d3b47230d958a3781744d048f79fabda6db8a3eb); the structural path was checked on the current files before re-pinning.
         (runtime_tree, "6daae46cd55ac6fb6f85705be2d4b1bf455ef068ef7631365514af1d1959cde5"),
