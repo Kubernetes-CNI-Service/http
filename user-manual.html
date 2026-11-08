@@ -13634,8 +13634,8 @@ sudo python3 -B DAY0-Prepare/13-unload.py DAY0-Prepare/&lt;project&gt; --yes
 
 # 若之后确认要删除 setup 管理的项目链接，仍应先 dry-run：
 sudo python3 -B DAY0-Prepare/02-unsetup.py DAY0-Prepare/&lt;project&gt; --dry-run</code></pre>
-          <p><strong>成功判据</strong>unload 只停止并回收当前项目拥有的 Apache/DHCP/monitor/runtime publication；保留范围与 dry-run 一致；项目数据、download archive 和共享大制品仍存在，最终 status 不再声称项目处于 active 服务状态。</p>
-          <p><strong>失败处理</strong>项目、DHCP、URL prefix、软链接或 receipt 身份不匹配时立即停止，不使用 <code>--force-dhcp</code> 越过不明配置。备份未验证时不继续。基础设施和软件包清理由操作员另行审阅 unsetup/teardown 提示。客户端 infra 回滚（<code>deploy_infra.py --teardown</code>）要在 <code>13-unload.py</code> 和 <code>02-unsetup.py</code> 之前做：unsetup 删掉指针 <code>DAY0-Prepare/activate-project</code> 后 <code>infra/logs</code> 悬空，deploy_infra.py 没有日志目录可写，会拒绝运行。</p>
+          <p><strong>成功判据</strong>unload 只停止并回收当前项目拥有的 Apache/DHCP/monitor/runtime publication；保留范围与 dry-run 一致；项目数据、download archive 和共享大制品仍存在，最终 status 不再声称项目处于 active 服务状态。13-unload 和 02-unsetup 开头各打印一行身份说明（操作员是项目目录的属主）；以 sudo 或 root 运行而项目属于普通用户时，02-unsetup 清理的是该操作员 crontab 里 initial-setup 的 auto 任务（<code>crontab -u &lt;操作员&gt;</code>），不是 root 的 crontab。</p>
+          <p><strong>失败处理</strong>项目、DHCP、URL prefix、软链接或 receipt 身份不匹配时立即停止，不使用 <code>--force-dhcp</code> 越过不明配置。备份未验证时不继续。基础设施和软件包清理由操作员另行审阅 unsetup/teardown 提示。客户端 infra 回滚（<code>deploy_infra.py --teardown</code>）要在 <code>13-unload.py</code> 和 <code>02-unsetup.py</code> 之前做：unsetup 删掉指针 <code>DAY0-Prepare/activate-project</code> 后 <code>infra/logs</code> 悬空，deploy_infra.py 没有日志目录可写，会拒绝运行。身份核对不通过时（例如 sudo 的发起人不是项目属主，或项目属主在 passwd 里查不到），02-unsetup 不碰任何 crontab：项目里有 initial-setup 的 auto 状态要清理时以 1 退出，指针和链接也不动，这时 13-unload 已停止服务、删除 DHCP 副本，同样以 1 退出，按提示切换到项目属主或 chown 项目目录后重新运行 13-unload；没有这类状态时只打一条 WARN，其余照常。</p>
           <p><strong>下一步</strong>保留服务器上的数据直到客户确认；需要重新部署时从 Runbook 5 完整 load，而不是手工恢复单个链接或服务。</p>
         </div>
         <!-- end runbook -->

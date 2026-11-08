@@ -43,6 +43,7 @@ from ztp_service_runtime import (  # noqa: E402
     runtime_backend_from_environment,
     stop_native_ztp_monitors,
 )
+import operator_identity  # noqa: E402
 
 UNSETUP_SCRIPT = HERE / "02-unsetup.py"
 INFRA_TEARDOWN = HTTP_ROOT / "infra/infra-teardown.sh"
@@ -564,6 +565,10 @@ def main(argv: list[str] | None = None) -> int:
         project = resolve_project(args.project)
         if not args.dry_run and os.geteuid() != 0:
             raise UnloadError("实际 unload 必须使用 root/sudo 执行；--dry-run 不要求 root")
+        # I-006 (v3.1.2 WP-8): the identity line only (it names the owner and the current user, and says when
+        # they do not fit); the flow is unchanged.  02-unsetup works out the operator itself for its crontab
+        # cleanup and refuses there.
+        print(operator_identity.resolve_operator(project).banner)
         if not confirm(args, project):
             info("已取消，没有修改任何内容")
             return 0

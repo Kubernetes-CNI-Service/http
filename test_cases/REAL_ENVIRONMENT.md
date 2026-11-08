@@ -3050,8 +3050,9 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `monitor/monitor.html` 的 mtime 与 SHA-256；项目输入（`01-global.yaml`、`02-*.csv`、`*.pub`、`p2p.xlsx` 选中的工作簿）
   与 `99-output-*` 的文件清单和 SHA-256；公钥只记指纹。另记两项：服务后端（`HTTP_ZTP_RUNTIME_BACKEND`，未设置即 `systemd`，
   下文称 Native；`supervisor` 是容器部署）；`<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs` 是否存在，存在时记录它的
-  属主、权限和文件清单（unsetup 的 REQ10C 清理在这里加锁，要求它属于执行 unsetup 的有效用户、组和其他用户不可写，否则 unsetup
-  以 1 退出，见 `DAY0-Prepare/02-unsetup.py::_req10c_crontab_lock`）。
+  属主、权限和文件清单（unsetup 的 REQ10C 清理在这里加锁，要求它属于操作员（项目目录的属主；v3.1.2 WP-8 起，以 root 运行而
+  项目属于普通用户时就是那个用户，清理的也是他的 crontab，其余情况是执行 unsetup 的有效用户）、组和其他用户不可写，否则
+  unsetup 以 1 退出，见 `DAY0-Prepare/02-unsetup.py::_req10c_crontab_lock`）。
 
 ### 步骤
 
