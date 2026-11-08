@@ -1968,7 +1968,8 @@
         "test_cases.test_ibsw225_input_isolation",
         "test_cases.test_ibsw225_known_hosts",
         "test_cases.test_ibsw225_access_recovery",
-        "test_cases.test_ibsw3_native_probe_target_query_stop"
+        "test_cases.test_ibsw3_native_probe_target_query_stop",
+        "test_cases.test_activate_project_contract"
       ]
     },
     {
