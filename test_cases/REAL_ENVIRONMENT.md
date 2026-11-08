@@ -2943,7 +2943,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 风险与目标
 
 - 要防止的故障：unsetup 之后某个读者经一条仍能解析的链接或旧缓存读到原项目；把「没有激活的项目」当成别的错误
-  （崩溃、`failed` 并关掉持续采集、monitor 被反复拉起）；monitor 或 worker 往原项目写状态；经悬空链接在
+  （崩溃、`failed` 并关掉持续采集、Native 上 monitor 被反复拉起）；monitor 或 worker 往原项目写状态；经悬空链接在
   `DAY0-Prepare/activate-project` 位置建出东西；再 load 不能恢复。
 - 涉及的模块和状态边界：`DAY0-Prepare/02-unsetup.py`；`DAY0-Prepare/01-a-setup.py`（`--status`、再激活）；
   `DAY0-Prepare/12-ztp-monitor.py`；`monitor/switch-collection-worker.py` 与 `monitor/switch_collection_gate.py`；
@@ -2952,7 +2952,9 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `infra/infra-teardown.sh`；`DAY0-Prepare/13-unload.py`；`monitor/generate-monitor-html.py`（页面）；
   `DAY0-Prepare/11-load.py`（恢复）。
 - 成功标准：第 2 步 unsetup 返回 0；第 3～8 步每个读者都给出下面写明的「没有激活的项目」表现，没有任何读者读到或写入
-  原项目；第 9 步 load 返回 0，链接、服务和页面恢复到第 1 步的状态。
+  原项目；第 9 步 load 返回 0，指针、链接和 manifest 恢复到第 1 步的状态，monitor、采集 worker、manual-ztp worker 重新运行；
+  load 重启采集 worker 会清掉持续模式，所以 load 之后持续收集、持续备份是「未启用」，按第 9 步在页面上重新开启（这是预期，
+  不是 load 回归）；页面由 load 启动的 monitor 在第一轮之后重新生成。
 - 自动化不能证明的：服务后端（systemd 或 Supervisor）下仍在运行的 worker、monitor 对删指针的真实反应；Apache 对悬空
   链接的响应；浏览器里页面的显示；crontab 触发的 cron.sh；root 运行的 unsetup；AIR 上再 load 后全部服务恢复。
 
@@ -2966,22 +2968,36 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `find . -path ./DAY0-Prepare -prune -o -type l -printf '%p -> %l\n' | sort`；4 个公钥目录的 `ls -la`；
   `ztp/.setup_manifest`；`monitor/status/*.json`；worker、monitor 的 PID/starttime/argv；`crontab -l`；
   `monitor/monitor.html` 的 mtime 与 SHA-256；项目输入（`01-global.yaml`、`02-*.csv`、`*.pub`、`p2p.xlsx` 选中的工作簿）
-  与 `99-output-*` 的文件清单和 SHA-256；公钥只记指纹。
+  与 `99-output-*` 的文件清单和 SHA-256；公钥只记指纹。另记两项：服务后端（`HTTP_ZTP_RUNTIME_BACKEND`，未设置即 `systemd`，
+  下文称 Native；`supervisor` 是容器部署）；`<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs` 是否存在，存在时记录它的
+  属主、权限和文件清单（unsetup 的 REQ10C 清理在这里加锁，要求它属于执行 unsetup 的有效用户、组和其他用户不可写，否则 unsetup
+  以 1 退出，见 `DAY0-Prepare/02-unsetup.py::_req10c_crontab_lock`）。
 
 ### 步骤
 
-1. 快照，保存上面的初始状态。在监控页开启持续收集（10 分钟）和持续备份（如本项目启用），等它们各完成一个周期。
-2. 不停服务，执行 `sudo python3 -B DAY0-Prepare/02-unsetup.py -y`，保存输出和退出码。
+1. 快照，保存上面的初始状态。在监控页开启持续收集（间隔 10 分钟，允许的最小值）和持续备份（如本项目启用；间隔 60 分钟，
+   允许的最小值；按页面要求输入密码，不记录），等它们各完成一个周期。
+2. 不事先停任何服务，执行 `sudo python3 -B DAY0-Prepare/02-unsetup.py -y`，保存输出和退出码；随后保存进程列表。
 3. 只读核对树（与第 1 步对比）：指针、manifest、规格表各行、4 个公钥目录、`ztp/optimize/*-sample/*`、项目文件。
 4. `python3 -B DAY0-Prepare/01-a-setup.py --status`，保存输出和退出码。
-5. 常驻服务：在监控页手工点一次「信息收集」和「配置备份」；等持续收集、持续备份各到下一个周期；等 monitor 的下一轮。
-   保存 `monitor/status/*.json`、worker 与 monitor 的日志片段、进程列表。
+5. 常驻服务，按 5a、5b、5c 的顺序做。持续模式开着时，手工收集和手工备份在页面按钮、CGI、worker 三层都被禁止，所以手工
+   核对放在关掉持续模式之后：
+   - 5a：不动页面，等持续收集、持续备份各到下一个周期（持续备份要等一个备份间隔，不少于 60 分钟）。保存
+     `monitor/status/*.json`、worker 与 monitor 的日志片段、进程列表；记录监控页上持续收集、持续备份两处的文字，以及
+     「信息收集」「配置备份」两个按钮能否点击。
+   - 5b：在监控页点「停止后续持续收集」「停止后续持续备份」，等两处都显示「未启用」；保存两份 `continuous-*.status.json`。
+   - 5c：手工点一次「信息收集」和「配置备份」（配置备份按页面要求输入密码，不记录；页面仍显示冷却时等冷却结束再点）。
+     保存 `monitor/status/*.json` 和 worker 日志片段。
 6. 页面：浏览器刷新监控页，记录 ZTP 监控、信息收集、配置备份、持续收集、持续备份几处的文字；对页面引用的、经固定链接的
    资源（例如 `monitor/ztp-status/` 下的文件、`monitor/99-output-p2p/` 下的拓扑图）各取一次 HTTP 状态码。
-7. 命令行读者（各一次，不带项目参数）：`monitor/issue-tracker/issue-tracker-sync.py`、`monitor/issue-tracker/switch-status.py`、
-   `ztp/manual-ztp.py`（不带 `-p`）、三个类型目录下的 `monitor/cron.sh`、`infra/check_infra.py`。
+7. 命令行读者（各一次，不带项目参数）：`python3 -B monitor/issue-tracker/issue-tracker-sync.py`、
+   `python3 -B monitor/issue-tracker/switch-status.py`、`python3 -B ztp/manual-ztp.py <设备> --dry-run`（不带 `-p`；按 `--help`，
+   设备名或通配符是必需的位置参数，`<设备>` 取 02 里的一台；`main` 先调 `resolve_project` 再进 dry-run 分支，加 `--dry-run`
+   只为防止误触发）、`bash <类型>/monitor/cron.sh`（`<类型>` 依次为 `ethernet`、`infiniband`、`nvlink`）、
+   `python3 -B infra/check_infra.py`。
 8. 再执行一次 `sudo python3 -B DAY0-Prepare/02-unsetup.py -y`，以及 `sudo python3 -B DAY0-Prepare/02-unsetup.py <项目> -y`。
-9. 恢复：按 Runbook 5 的命令对 `<项目>` 再跑一次 `11-load.py`。之后重复第 3～6 步的核对。
+9. 恢复：按 Runbook 5 的命令对 `<项目>` 再跑一次 `11-load.py`。之后重复第 3、4、6 步的核对；再在监控页重新开启持续收集和
+   持续备份（与第 1 步同样的间隔，持续备份重新输入密码），等它们各完成一个周期，保存 `monitor/status/*.json`。
 10. 可选（另一轮快照，会回滚 infra 安装的软件，只在一次性 VM 上做）：`sudo python3 -B DAY0-Prepare/13-unload.py <项目> --teardown-infra --yes`；
     再在同一状态下不带 `--log-dir` 手工运行 `sudo bash infra/infra-teardown.sh --non-interactive --yes`。详细核对项在
     `TC-REAL-INFRA-SETUP-PY-001` 第 5′ 步，本卡只核对 unload 之后第 3～7 步的表现与第 2 步之后相同。
@@ -2995,60 +3011,91 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
      各行悬空；指向 `http/image` 的共享链接原文不变且仍能解析；4 个公钥目录仍是真实目录，里面的逐把公钥链接都被删除，目录里的
      普通文件还在；`ztp/optimize/*-sample/*` 的链接被删除，sample 目录里的普通文件还在；项目输入文件的清单与 SHA-256 不变。
   3. 第 3 步：原项目 `99-output-ztp` 下 `manual-config-sync` 与 `configuration-methods` 的配置权威已撤销（例如 configuration-methods
-     的当前记录变为 `failed`；unsetup 按指针所指的项目撤销，R16-20）；其余 `99-output-*` 不变（推断：unsetup 不写别的项目输出）。
+     的当前记录变为 `failed`；unsetup 按指针所指的项目撤销，R16-20）。比对项目输出的 SHA-256 时按下面三条处理：
+     - Native 上 `99-output-ztp/ztp-monitor.pid` 被删除（停 monitor 之后，见预期 7）；
+     - `99-output-ib_nvl/bringup/xdr-initial-setup-logs` 存在时，unsetup 以 `O_CREAT` 打开其中的 `auto-crontab.lock`（REQ10C 与
+       initial-setup 共用的锁；原来没有就新建一个 0600 的空文件）。那里若还有 REQ10C 自动监视的 `auto.env`、`auto-watch.state`、
+       `auto-terminal.json`，unsetup 会删除它们并去掉 crontab 里对应的行；开始前应当没有，有就在初始状态里记录；
+     - 其余 `99-output-*` 的清单与 SHA-256 不变（推断：unsetup 不写别的项目输出）。
   4. 第 4 步 `--status` 以 1 退出，指针一行是「DAY0-Prepare/activate-project：没有（没有激活的项目）」；规格表各行仍按原文判为
      「正确」（没有指针时只看原文；自动化只断言了退出码和指针一行）。
-  5. 第 5 步手工信息收集：`monitor/status/switch-collection.status.json` 的 `state` 为 `skipped`、`reason` 为「没有激活的项目」，
+  5. 第 5c 步手工信息收集：`monitor/status/switch-collection.status.json` 的 `state` 为 `skipped`、`reason` 为「没有激活的项目」，
      没有连任何交换机；手工配置备份：`yaml-backup.status.json` 同样是 `skipped`、「没有激活的项目」。
-  6. 第 5 步持续收集与持续备份：状态为 `waiting`，`enabled` 仍为 true，`wait_reason` 为「没有激活的项目」，`remaining_seconds`
-     等于一个间隔；不是 `failed`，也没有被关掉。
-  7. 第 5 步 monitor：下一轮开始前写一行含「没有激活的项目（DAY0-Prepare/activate-project 不存在）」的日志并以 0 退出，不再跑新的
-     一轮，不写 watch state；服务后端不把它拉起（推断：退出码 0，Q3「由下一次 load 重新启动」）。
+  6. 第 5a 步持续收集与持续备份：两份 `continuous-*.status.json` 的状态为 `waiting`，`enabled` 仍为 true，`wait_reason` 为
+     「没有激活的项目」，`remaining_seconds` 等于一个间隔（秒）；不是 `failed`，也没有被关掉。页面上两处分别显示
+     「持续收集：等待收集冷却结束（约 <收集间隔> 分钟）」
+     「持续备份：等待备份冷却结束（约 <备份间隔> 分钟）」，
+     备份间隔不少于 60 分钟（第 1 步用 10、60 时即约 10、约 60 分钟）。「信息收集」「配置备份」两个按钮不可点：持续模式开着时
+     手工操作被禁止，页面禁用按钮，直接 POST 时 CGI 返回 409（`manual collection is disabled during continuous collection`、
+     `manual backup is disabled during continuous backup`），这是设计行为，不是故障。第 5b 步之后两份状态为 `stopped`、
+     `enabled` false、`reason` 为 `operator`，页面显示「持续收集：未启用」「持续备份：未启用」。
+  7. monitor（按服务后端分开）：
+     - Native（monitor 是 load 直接起的后台进程，没有后端管它）：第 2 步 unsetup 在打印任何内容、删除指针之前，先向 monitor
+       发 SIGTERM 并确认它退出；它的 PID 文件 `<项目>/99-output-ztp/ztp-monitor.pid` 由 monitor 退出时自己删，unsetup 确认退出后
+       也会清理；这一步不打印，monitor 收到 SIGTERM 也不写「没有激活的项目」那行日志。第 2 步之后 monitor
+       进程已经不在：第 5 步不会再有它的新日志（它在下一轮之前因没有激活的项目自行退出的那条路径到不了），也没有任何东西把它
+       拉起，直到第 9 步 load 重新启动它。停不下来时 unsetup 报「[ERROR] 部署/Monitor 写前保护失败：…」并以 1 退出、
+       不删任何东西（按预期 1 判失败）。
+     - Supervisor（容器部署，`[program:ztp-monitor]` 是 `autorestart=true`；推断，没有在容器里执行过）：monitor 不论是被第 2 步
+       的 unsetup 停掉，还是在下一轮开始前自己记下面这行日志并以 0 退出，都会被 Supervisor 重新拉起：
+       「[INFO] 没有激活的项目（DAY0-Prepare/activate-project 不存在）；ZTP 监控退出，由下一次 load 重新启动」。
+       重新拉起的进程在启动检查处因没有激活的项目报错退出，不跑新的一轮，之后 Supervisor 重试或进入 FATAL。按
+       `supervisorctl status ztp-monitor` 和 Supervisor 日志如实记录，不判为 unsetup 的故障。
   8. 第 6 步页面（推断，依据 `generate-monitor-html.py` 的页面脚本；没有自动化在浏览器里跑过）：
-     - unsetup 之后没有任何在运行的路径重新生成 `monitor/monitor.html`（monitor 已退出，worker 跳过周期，cron.sh 在公钥预检处
-       停止），所以页面停在第 2 步之前最后一次生成的内容，mtime 与 SHA-256 与第 2 步前相同；
-     - ZTP 监控一处显示「监控未运行」「需按当前后端恢复」；手工收集、配置备份的状态是 `skipped`，页面落到默认文字「可手工采集」
-       「YAML：可手工备份」（冷却期内则显示冷却）；持续收集、持续备份显示「等待收集冷却结束（约 10 分钟）」「等待备份冷却结束
-       （约 10 分钟）」。页面上不出现「没有激活的项目」的字样（见报告待决点）；
+     - unsetup 之后没有任何在运行的路径重新生成 `monitor/monitor.html`（Native 的 monitor 第 2 步已被停掉，worker 跳过收集，
+       cron.sh 在公钥预检处停止），所以页面文件停在第 2 步之前最后一次生成的内容，mtime 与 SHA-256 与第 2 步前相同；页面上
+       各控制处的文字由页面脚本实时向 CGI 取状态；
+     - ZTP 监控一处（Native）显示「监控未运行」「需按当前后端恢复」；第 5c 步之后手工收集、配置备份的状态是 `skipped`，
+       页面落到默认文字「可手工采集」「YAML：可手工备份」（冷却期内则显示冷却）；持续收集、持续备份在第 5b 步之后显示
+       「持续收集：未启用」「持续备份：未启用」（第 5a 步等待时的文字见预期 6）。页面上不出现「没有激活的项目」的字样
+       （见报告待决点）；
      - 经悬空固定链接的资源取不到（Apache 对悬空链接返回 404 或 403，以实测为准），页面本身仍能打开。
   9. 第 7 步：switch-status 以 2 退出、issue-tracker-sync 以非 0 退出（推断），错误都含
-     「no active project (DAY0-Prepare/activate-project is missing)」；`ztp/manual-ztp.py` 不带 `-p` 时报「没有激活的项目
-     （DAY0-Prepare/activate-project 不存在）；请先运行 setup 或使用 -p/--project」；manual-ztp worker 认不出项目（`active_project()`
-     为 None），手工 ZTP 请求不写进任何项目（推断）；三个 `cron.sh` 都以 1 退出，报
+     「no active project (DAY0-Prepare/activate-project is missing)」；`ztp/manual-ztp.py` 不带 `-p` 时以 2 退出，报
+     「[ERROR] 没有激活的项目（DAY0-Prepare/activate-project 不存在）；请先运行 setup 或使用 -p/--project」，
+     没有连任何设备；manual-ztp worker 认不出项目（`active_project()` 为 None），手工 ZTP 请求不写进任何项目（推断）；
+     三个 `cron.sh` 都以 1 退出，报
      「[ERROR] active project mgmt-server.pub is missing or empty: …/<类型>/publickey/mgmt-server.pub」，没有连任何设备；
-     `check_infra.py` 的本机采集报「no active project」。
-  10. 第 8 步：两次 unsetup 都以 0 退出、不改动任何东西；带项目参数的一次输出「没有激活的项目（DAY0-Prepare/activate-project 不存在），
-      <项目> 未激活；无需操作」。
+     `check_infra.py` 以 1 退出，报一行 `[ERROR]`，提示先运行 `01-a-setup.py <项目>` 激活项目，没有崩溃栈（随 RV5）。
+  10. 第 8 步：两次 unsetup 都以 0 退出、不改动任何东西；带项目参数的一次输出
+      「没有激活的项目（DAY0-Prepare/activate-project 不存在），<项目> 未激活；无需操作」。
   11. 第 9 步 load 以 0 退出，输出「当前没有有效活动项目；将激活 <项目>」；之后指针 → `<项目>`，规格表各行原文与第 1 步相同且都能
-      解析，逐把公钥链接与 manifest 重建，`--status` 以 0 退出；monitor 由 load 重新启动；worker 下一个周期用的是 `<项目>`（不再
-      `skipped`）；持续收集不用重新开启就恢复（推断：第 6 条里 `enabled` 一直是 true）；页面由 load 重新生成。
+      解析，逐把公钥链接与 manifest 重建，`--status` 以 0 退出；monitor 由 load 重新启动。load 在同一处无条件重启采集 worker，
+      旧 worker 退出时、新 worker 启动时都把持续模式清掉（持续模式和持续备份的密码只存在 worker 内存里），所以 load 之后两份
+      `continuous-*.status.json` 是 `stopped`、`enabled` false、`reason` 为 `worker started`，页面显示「持续收集：未启用」
+      「持续备份：未启用」，持续收集不会自己恢复，要按第 9 步在页面上重新开启；重新开启后各自的下一个周期用的是 `<项目>`
+      （不再 `waiting` 或 `skipped`）。`monitor/monitor.html` 不是 load 生成的（load 只检查生成脚本存在），由 load 启动的
+      monitor 每轮之后重新生成，第一轮之后 mtime 更新。
   12. 第 10 步：unload 把 `--log-dir <项目>/99-output-infra` 交给 teardown，回滚成功，`infra-teardown-*.log` 落在该项目的
       `99-output-infra`；不带 `--log-dir` 的手工 teardown 以 1 退出，报
       「ERROR: no active project: … pass --log-dir DAY0-Prepare/<project>/99-output-infra」，不写日志、不改安装状态。
 - 拒绝/失败结果：第 4 步 `--status` 的 1、第 7 步各读者的非 0 退出、第 10 步不带 `--log-dir` 的 teardown 都是预期的拒绝，
   报错文字要能看出原因是「没有激活的项目」，而不是崩溃栈或泛泛的「failed」。
 - 不允许发生的副作用：第 2 步到第 9 步之间 `DAY0-Prepare/activate-project` 始终不存在（没有任何读者或写者经悬空链接把它建出来）；
-  原项目的输入文件和 `99-output-*`（除第 3 条的配置权威）不被改写；worker 没有因为没有项目而关掉持续收集或备份；monitor 没有被
-  反复拉起；公钥目录变成链接；规格表的固定链接被删或原文被改；任何手工改链接、删锁、删凭据来「修好」。
+  原项目的输入文件被改写；原项目的 `99-output-*` 出现预期 3 所列（配置权威撤销、Native monitor 的 PID 文件被删、REQ10C 锁
+  文件）以外的改动；第 5b 步之前 worker 因为没有项目而关掉持续收集或备份；Native 上 monitor 在第 2～8 步之间被任何东西重新
+  拉起；公钥目录变成链接；规格表的固定链接被删或原文被改；任何手工改链接、删锁、删凭据来「修好」。
 - 需要保存的证据：每一步的完整命令、输出和退出码；第 1、3、9 步的链接清单与 diff；公钥目录、manifest 的前后内容；
-  `monitor/status/*.json` 前后内容；worker 与 monitor 的日志片段和进程列表；页面截图与各资源的 HTTP 状态码；
-  `monitor/monitor.html` 的 mtime 与 SHA-256；项目文件清单与 SHA-256 前后对比。不记录任何秘密，公钥只记指纹。
+  `monitor/status/*.json` 在第 1、5a、5b、5c、9 步的内容；worker 与 monitor 的日志片段和进程列表（Supervisor 部署另存
+  `supervisorctl status`）；页面截图与各资源的 HTTP 状态码；`monitor/monitor.html` 的 mtime 与 SHA-256；项目文件清单与
+  SHA-256 前后对比。不记录任何秘密（含配置备份密码），公钥只记指纹。
 
 ### 故障注入与清理
 
 - 并发、超时、异常、重启或输入篡改：第 5 步在 worker 一个周期进行中执行 unsetup 的情形由 `TC-REAL-ACTIVATE-PROJECT-003` 第 1 步
   覆盖，本卡不重复；不在真实客户源文件上做篡改。
-- 清理/回滚验证：第 9 步的 load 就是恢复；第 10 步做过的话恢复快照。结束时核对服务、链接清单与第 1 步一致；不手工改指针或删除
-  锁、PID、request 文件。
+- 清理/回滚验证：第 9 步的 load 就是恢复；第 10 步做过的话恢复快照。结束时核对服务、链接清单与第 1 步一致（持续收集、
+  持续备份按第 9 步重新开启之后再比）；不手工改指针或删除锁、PID、request 文件。
 - 重复执行与幂等性：第 8 步重复 unsetup 不改动任何东西；第 9 步之后再跑一次同一条 load，链接清单与第 9 步相同。
-- 风险：unsetup 不停服务，第 2～9 步之间 ZTP、采集、页面都处于「没有激活的项目」状态，只能在不服务真实交换机的一次性 VM 或
-  AIR 上执行；第 9、10 步会停、起服务；第 10 步会回滚 infra 安装的软件。失败时服务保持停止，按 DEV 规则修正后重跑 load。
+- 风险：unsetup 只停 Native 的 ZTP monitor，不停 Apache、DHCP、采集 worker 和 manual-ztp worker；第 2～9 步之间 ZTP、采集、
+  页面都处于「没有激活的项目」状态，只能在不服务真实交换机的一次性 VM 或 AIR 上执行；第 9、10 步会停、起服务；第 10 步会回滚
+  infra 安装的软件。失败时服务保持停止，按 DEV 规则修正后重跑 load。
 
 ### 自动化状态
 
 - [x] 已加入 `test_cases/`（见「自动化文件与测试方法」，分属 WP-6、WP-4、WP-9a、WP-9b、UNL）。
 - [x] 修复前能够稳定失败（各包报告里的先红记录）。
-- [x] 修复后通过（集成头 `a8f7468` 上，上面列出的用例全绿：v3.1.1 LP 改前运行的 146 个模块）。
+- [x] 修复后通过（集成头 `12bcc56` 上（rebase 前为 `a8f7468`，树相同），上面列出的用例全绿：v3.1.1 LP 改前运行的 146 个模块）。
 - [x] 已纳入全量 discovery（各模块都已在 manifest 登记：`activate_project_*` 在 workflow `activate_project_pointer_lifecycle`
   或 rule `day0_release_operations`，`test_req19_infra_log_contract` 在 rule `infra_lifecycle` 与 `day0_release_operations`）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。未执行前不得写 PASS。
