@@ -3389,7 +3389,8 @@
         "tools/password-update.py",
         "ztp/optimize/feedback.py",
         "tools/deployment_prewrite_guard.py",
-        "tools/import-from-download.py"
+        "tools/import-from-download.py",
+        "tools/generation_report.py"
       ],
       "tests": [
         "test_cases.test_monitor_writer_quiesce_workflow",
