@@ -622,6 +622,55 @@ class RV5FormalLoadWithUserLinksWorkflowTests(unittest.TestCase):
         self.assertEqual(payload, selected.read_bytes())
         self.assertEqual([selected.name], sorted(item.name for item in material.iterdir()))
 
+    def test_formal_load_commits_a_schema2_project_with_both_user_links(self):
+        """v3.1.1 RV6 (RV5 待决 1, http dev 默认 (a)): the template's schema 2, both R-014 links at once.
+
+        Setup checks the linked 02 with the project's own schema-2 global (R-014 第 3 条), so real setup passes
+        and the real formal load commits with both pins equal to their link targets' bytes.  The project
+        inputs are test_generation_input_binding_workflow._private_real_chain's schema-2 MLAG pair, which the
+        real P2P/DHCP/Cumulus generators accept.
+        """
+        from test_cases.test_generation_input_binding_workflow import _private_real_chain
+
+        sandbox = self.sandbox()
+        legal, _private_ztp = _private_real_chain(sandbox.base / "legal", "192.0.2.53")
+        shutil.rmtree(sandbox.project)
+        sandbox.project.mkdir()
+        for name in ("01-global.yaml", "02-dhcp-subnet_config.csv", "operator.pub",
+                     ".management-pubkeys", "mgmt-server.pub"):
+            shutil.copy2(legal / name, sandbox.project / name)
+        self.assertEqual(2, yaml.safe_load(
+            (sandbox.project / "01-global.yaml").read_text(encoding="utf-8"))["schema_version"])
+        devices = (legal / "02-devices_config.csv").read_bytes()
+        external = sandbox.work / "devices.csv"
+        external.write_bytes(devices)
+        link = sandbox.project / "02-devices_config.csv"
+        link.symlink_to(external)
+        material = sandbox.work / "site-material"
+        material.mkdir()
+        selected = material / "Site P2P_v2.0.xlsx"
+        shutil.copy2(legal / "selected-p2p.xlsx", selected)
+        workbook_bytes = selected.read_bytes()
+        (sandbox.project / "p2p").symlink_to(material)
+        canonical = sandbox.project / "p2p.xlsx"
+        canonical.symlink_to("p2p/Site P2P_v2.0.xlsx")
+
+        setup = sandbox.setup()
+        self.assertNotIn("schema 1 devices_config.csv 固定列顺序无效", setup.stdout)
+        self.assertEqual(0, setup.returncode, setup.stdout)
+        result, printed = sandbox.formal_load("rv6_formal_load_schema2_links")
+        self.assertEqual(0, result, printed)
+        self.assert_committed_pin(sandbox, "devices", devices)
+        self.assert_committed_pin(sandbox, "p2p", workbook_bytes)
+        # R-014 第 2、3 条：the user's links stay, nothing is written outside the project.
+        self.assertEqual(os.fspath(external), os.readlink(link))
+        self.assertEqual("p2p/Site P2P_v2.0.xlsx", os.readlink(canonical))
+        self.assertEqual(devices, external.read_bytes())
+        self.assertEqual(workbook_bytes, selected.read_bytes())
+        self.assertEqual(["devices.csv", "site-material"],
+                         sorted(item.name for item in sandbox.work.iterdir()))
+        self.assertEqual([selected.name], sorted(item.name for item in material.iterdir()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8674,12 +8674,23 @@ def _project_inventory_authority(
     project: Path, devices_file: Path,
 ) -> tuple[str, dict[str, object]]:
     """Bind one safe inventory file to its canonical project-relative path."""
+    read_path = devices_file
     try:
         project_root = project.resolve(strict=True)
         if not project_root.is_dir():
             raise LoadError(f"splitter inventory project 不是目录：{project}")
         resolved = devices_file.resolve(strict=True)
-        relative = resolved.relative_to(project_root)
+        try:
+            relative = resolved.relative_to(project_root)
+        except ValueError:
+            # R-014 第 3 条: the project's own 02-devices_config.csv may be the user's link to a file outside the
+            # project (RV5 pending 3); it keeps that project name and is bound by its target's bytes.
+            if (devices_file.name != "02-devices_config.csv"
+                    or devices_file.parent.resolve(strict=True) != project_root
+                    or _user_linked_input_target(
+                        project_root, "devices", devices_file.name) != resolved):
+                raise
+            relative, read_path = Path(devices_file.name), resolved
     except LoadError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
@@ -8689,7 +8700,7 @@ def _project_inventory_authority(
     if not relative.parts or any(part in {"", ".", ".."} for part in relative.parts):
         raise LoadError(f"splitter inventory project-relative path 无效：{relative}")
     identity = _stable_regular_identity(
-        devices_file, "splitter inventory", maximum_size=64 * 1024 * 1024,
+        read_path, "splitter inventory", maximum_size=64 * 1024 * 1024,
         # The customer-authored project-root CSV historically permits normal
         # collaborative 0664 permissions. Only load's private derived file is
         # a generated trust anchor and must reject group/world write bits.

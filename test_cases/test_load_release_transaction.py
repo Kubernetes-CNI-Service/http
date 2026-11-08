@@ -13536,5 +13536,63 @@ class RV5UserLinkedInputBFreezeTests(unittest.TestCase):
         self.assertTrue(os.path.lexists(generation))
 
 
+# ── v3.1.1 RV6: RV5 待决 3（http dev 2026-11-08 按默认 (a) 派出） ──
+class RV6SplitterInventoryUserLinkTests(unittest.TestCase):
+    """The splitter inventory authority binds the user's own 02 link by its target's bytes.
+
+    Expected values come from the requirement and the dispatch, never from 11-load.py:
+    - 需求文档 R-014 第 3 条：02-devices_config.csv 可以是用户指向项目外文件的链接，load 跟随链接、按真实文件校验。
+    - RV5 待决 3 / http dev 默认 (a)：发布的 YAML 有 breakout 时，splitter provenance 也只为这一种形态放行，
+      记的是项目里的名字 ``02-devices_config.csv`` 和链接目标字节的 sha256、大小；其余形态（别的名字、
+      不在项目根目录的同名文件、悬空链接）照旧报 ``splitter inventory 必须位于当前 project 内``。
+    """
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.project = self.root / "DAY0-Prepare/site"
+        self.project.mkdir(parents=True)
+        self.work = self.root / "Work"
+        self.work.mkdir()
+        self.payload = b"hostname,type\nleaf01,eth\n"
+        self.expected = {"sha256": hashlib.sha256(self.payload).hexdigest(),
+                         "size": len(self.payload)}
+
+    def test_a_devices_csv_linked_outside_is_bound_by_its_target_bytes(self):
+        target = self.work / "devices.csv"
+        target.write_bytes(self.payload)
+        link = self.project / "02-devices_config.csv"
+        link.symlink_to(target)
+        self.assertEqual(("02-devices_config.csv", self.expected),
+                         LOAD._project_inventory_authority(self.project, link))
+        self.assertEqual(os.fspath(target), os.readlink(link))
+        self.assertEqual(self.payload, target.read_bytes())
+
+    def test_other_links_keep_the_project_local_splitter_inventory_contract(self):
+        target = self.work / "devices.csv"
+        target.write_bytes(self.payload)
+        derived = self.project / ".load-inventory-fixture"
+        derived.mkdir()
+        cases = (
+            ("another project name linked outside", self.project / "devices-v2.csv", target),
+            ("a non-root 02 linked outside", derived / "02-devices_config.csv", target),
+            ("a dangling 02 link", self.project / "02-devices_config.csv", self.work / "missing.csv"),
+        )
+        for kind, path, destination in cases:
+            with self.subTest(kind=kind):
+                path.symlink_to(destination)
+                try:
+                    with self.assertRaisesRegex(LOAD.LoadError, "splitter inventory 必须位于当前 project 内"):
+                        LOAD._project_inventory_authority(self.project, path)
+                finally:
+                    path.unlink()
+        # Control: the project's regular 02 keeps its binding.
+        regular = self.project / "02-devices_config.csv"
+        regular.write_bytes(self.payload)
+        self.assertEqual(("02-devices_config.csv", self.expected),
+                         LOAD._project_inventory_authority(self.project, regular))
+
+
 if __name__ == "__main__":
     unittest.main()

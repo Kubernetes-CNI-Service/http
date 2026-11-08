@@ -9,6 +9,7 @@ import csv
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import io
+import os
 from pathlib import Path
 import re
 import shutil
@@ -2200,6 +2201,82 @@ class V2FeedbackTests(unittest.TestCase):
             "mac-address"
         ] = VRR_VLAN_100_MAC[:-2] + "65"
         self.assertNotEqual(signature, FEEDBACK._vrr_runtime_signature(drift))
+
+
+# ── v3.1.1 RV6: RV5 待决 1（http dev 2026-11-08 按默认 (a) 派出） ──
+class RV6SetupLinkedDevicesSchemaTests(unittest.TestCase):
+    """setup checks a user-linked 02-devices_config.csv with the schema its project's 01-global.yaml declares.
+
+    Expected values, never derived from 01-a-setup.py:
+    - 需求文档 R-014 第 3 条：02-devices_config.csv 可以是用户指向项目外文件的链接；setup 跟随链接、按真实文件
+      校验。schema 由项目自己的 01-global.yaml 声明（模板 ``schema_version: 2``）。
+    - http dev 派工：从项目目录取 global；别的调用路径语义不变——单独校验一个普通 CSV 文件时，仍按它旁边的
+      01-global.yaml 判，旁边没有就是旧版 schema 1（_validate_eth_csv 注释里写明的合同）。
+    The project is the schema-2 template with one eth row, as in
+    test_template_project_with_one_eth_and_no_mlag_pair_passes_setup_validation.
+    """
+
+    def _template_project(self, directory: str) -> tuple[Path, Path]:
+        project = Path(directory) / "DAY0-Prepare" / "site-a"
+        shutil.copytree(ROOT / "DAY0-Prepare/template", project, symlinks=True)
+        devices = project / "02-devices_config.csv"
+        with devices.open(newline="", encoding="utf-8-sig") as stream:
+            header = next(csv.reader(stream))
+        row = [
+            "leaf01", "eth", "oob-leaf", "192.0.2.11", "24", "192.0.2.254",
+            "02:00:00:00:00:11",
+        ]
+        row += [""] * (len(header) - len(row))
+        with devices.open("w", newline="", encoding="utf-8") as stream:
+            csv.writer(stream).writerows([header, row])
+        return project, devices
+
+    def _validate_project(self, directory: str, project: Path) -> tuple[bool, str]:
+        output = io.StringIO()
+        with mock.patch.multiple(
+            SETUP, _SWITCH_SCOPE=None, _P2P_SOURCE=None, _FORCE=False,
+            _AUTO_YES=False, _DRY_RUN=True, _STRICT=False,
+            IMAGE_DIR=str(Path(directory) / "no-shared-images"),
+        ), redirect_stdout(output):
+            passed = SETUP._validate_project(str(project))
+        return passed, output.getvalue()
+
+    def test_schema2_project_whose_devices_csv_links_outside_passes_setup_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, devices = self._template_project(directory)
+            self.assertEqual(2, yaml.safe_load(
+                (project / "01-global.yaml").read_text(encoding="utf-8"))["schema_version"])
+            # Control: the same project with a regular 02 passes.
+            passed, report = self._validate_project(directory, project)
+            self.assertTrue(passed, report)
+
+            outside = Path(directory) / "Work" / "devices.csv"
+            outside.parent.mkdir()
+            devices.rename(outside)
+            devices.symlink_to(outside)
+            payload = outside.read_bytes()
+            passed, report = self._validate_project(directory, project)
+            self.assertNotIn("schema 1 devices_config.csv 固定列顺序无效", report)
+            self.assertTrue(passed, report)
+            # R-014 第 2 条：the link and its target are untouched.
+            self.assertTrue(devices.is_symlink())
+            self.assertEqual(os.fspath(outside), os.readlink(devices))
+            self.assertEqual(payload, outside.read_bytes())
+            self.assertEqual(["devices.csv"], sorted(item.name for item in outside.parent.iterdir()))
+
+    def test_a_standalone_devices_csv_keeps_the_global_beside_its_real_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project, devices = self._template_project(directory)
+            standalone = Path(directory) / "Work" / "devices.csv"
+            standalone.parent.mkdir()
+            shutil.copy2(devices, standalone)
+            # No 01-global.yaml beside it: the legacy schema-1 contract.
+            errors, _warnings = SETUP._validate_eth_csv(str(standalone))
+            self.assertIn("  schema 1 devices_config.csv 固定列顺序无效", errors)
+            # A schema-2 global beside its real file is the one it is checked with.
+            shutil.copy2(project / "01-global.yaml", standalone.parent / "01-global.yaml")
+            errors, _warnings = SETUP._validate_eth_csv(str(standalone))
+            self.assertEqual([], errors)
 
 
 if __name__ == "__main__":

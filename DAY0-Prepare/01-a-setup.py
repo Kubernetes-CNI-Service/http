@@ -2055,12 +2055,17 @@ def _switch_families(csv_path):
 
 
 def _validate_eth_csv(path):
-    """逐行校验统一设备 CSV；server/air 仅校验各自消费流程所需字段。"""
+    """逐行校验统一设备 CSV；server/air 仅校验各自消费流程所需字段。
+
+    schema 取 CSV 所在目录（按给出的路径，不跟随最后一级链接）的 01-global.yaml：项目检查传入的是
+    <项目>/02-devices_config.csv，它可以是指向项目外文件的用户链接（R-014 第 3 条），schema 由项目声明。
+    """
     errors, warnings = [], []
 
     schema_version = 1
     v2_vrr_gateway_mode = None
-    global_path = os.path.join(os.path.dirname(os.path.realpath(path)), "01-global.yaml")
+    global_path = os.path.join(
+        os.path.realpath(os.path.dirname(os.path.abspath(path))), "01-global.yaml")
     try:
         import yaml
     except ImportError as exc:

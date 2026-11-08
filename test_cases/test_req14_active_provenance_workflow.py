@@ -13,6 +13,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -522,6 +523,67 @@ class Req14ActiveProvenanceWorkflow(unittest.TestCase):
                         self.assertFalse(candidate.destination.exists())
                     finally:
                         LOAD.discard_prepared_release(candidate)
+
+    def test_rv6_user_linked_devices_csv_binds_breakout_provenance_by_its_target(self):
+        """v3.1.1 RV6 (RV5 待决 3, http dev 默认 (a)): breakouts published, 02 the user's link outside the project.
+
+        R-014 第 3 条 lets 02-devices_config.csv link to a file outside the project.  With the real producer's
+        sidecar and the real c2/publisher's 8x breakouts, the parent binds the splitter provenance to the
+        project name 02-devices_config.csv and the target's bytes, refuses the commit while the target differs
+        from what was validated, and commits once it is back.  Digests are hashlib over the bytes written here.
+        """
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            paths = self._fixture(root)
+            project, template, devices_file, inputs = self._private_parent_inputs(root, paths)
+            production = template / "99-output/20260915_120000"
+            self._run_three_scripts(root, paths, legacy=True, output=production)
+            context = PUBLISHER._cumulus_dir_context(str(production))
+            with mock.patch.object(PUBLISHER, "_AUTO_YES", True), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(PUBLISHER._publish_production_cumulus(
+                    context, PUBLISHER.load_csv(devices_file), switch_scope="eth",
+                ))
+            release = (root / "ztp/config/cumulus/latest_yaml").resolve(strict=True)
+            self._assert_published_breakouts(release)
+            payload = devices_file.read_bytes()
+            digest = hashlib.sha256(payload).hexdigest()
+            outside = root / "Work"
+            outside.mkdir()
+            target = outside / "devices.csv"
+            devices_file.rename(target)
+            devices_file.symlink_to(target)
+
+            with mock.patch.object(LOAD, "ZTP_DIR", root / "ztp"), \
+                    mock.patch.object(LOAD, "run", side_effect=AssertionError(
+                        "parent must not dispatch subprocesses"
+                    )):
+                parent = LOAD.validate_and_publish_release(project, inputs, publish=False)
+                provenance = parent["components"]["cumulus"]["splitter_provenance"]
+                self.assertEqual("02-devices_config.csv", provenance["devices_path"])
+                self.assertEqual(digest, provenance["devices_sha256"])
+                self.assertEqual(digest, parent["inputs"]["devices"])
+                candidate = LOAD.prepare_current_release(project, parent)
+                try:
+                    with target.open("ab") as stream:
+                        stream.write(b"\n")
+                    with self.assertRaises(LOAD.LoadError):
+                        LOAD.commit_prepared_release(candidate)
+                    self.assertFalse(candidate.committed)
+                    self.assertFalse(candidate.destination.exists())
+                    target.write_bytes(payload)
+                    LOAD.commit_prepared_release(candidate)
+                finally:
+                    LOAD.discard_prepared_release(candidate)
+            receipt = json.loads((project / "99-output-ztp/current-release.json")
+                                 .read_text(encoding="utf-8"))
+            self.assertEqual(parent["release_id"], receipt["release_id"])
+            self.assertEqual(
+                digest, receipt["components"]["cumulus"]["splitter_provenance"]["devices_sha256"])
+            # R-014 第 2 条：the link and its target are untouched.
+            self.assertEqual(os.fspath(target), os.readlink(devices_file))
+            self.assertEqual(payload, target.read_bytes())
+            self.assertEqual(["devices.csv"], sorted(item.name for item in outside.iterdir()))
 
     def test_explicit_legacy_flag_reaches_bound_sidecar_and_four_real_renderers(self):
         with tempfile.TemporaryDirectory() as name:
