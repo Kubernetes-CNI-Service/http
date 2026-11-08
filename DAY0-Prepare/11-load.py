@@ -137,6 +137,7 @@ from _package_common import (
     p2p_source_snapshot,
     p2p_source_relative,
     project_p2p_candidates,
+    project_p2p_user_link,
     read_p2p_receipt,
     read_project_input_links,
     select_project_p2p_source,
@@ -5065,6 +5066,26 @@ class PinnedSourceChangedWhileReading(LoadError):
     """A pinned source changed identity during its read: a concurrent writer."""
 
 
+def _user_linked_input_target(project: Path, key: str, relative: str) -> Path | None:
+    """The real file behind a release input that is one of R-014 第 3 条's two user-link shapes, else None.
+
+    ``02-devices_config.csv`` as the user's own link (read_project_input_links), or ``p2p/<workbook>`` reached
+    through the user's ``p2p.xlsx -> p2p/<workbook>`` link where ``p2p/`` may link outside the project
+    (project_p2p_user_link).  Both readers are the ones setup, packaging and sync use; every other input keeps
+    the project-local regular-file contract (review 4 B1).
+    """
+    try:
+        if key == "devices" and relative == "02-devices_config.csv":
+            return next((item.real_path for item in read_project_input_links(project)
+                         if item.name == relative), None)
+        if (key == "p2p" and relative.startswith("p2p/")
+                and project_p2p_user_link(project) == project / relative):
+            return (project / relative).resolve(strict=True)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise LoadError(f"pinned input {key} user link is invalid: {exc}") from exc
+    return None
+
+
 def _pinned_generation_payloads(
     project: Path, parent_file: Path, dhcp_source_dir: Path | None,
 ) -> tuple[str, dict[str, bytes]]:
@@ -5214,20 +5235,28 @@ def _pinned_generation_payloads(
                 # file was deleted): A can no longer be rebuilt from current files.
                 findings.append((_UNFREEZABLE_ABSENT, label, f"pinned input {key} is missing"))
                 continue
+        linked_target = None
         if (not stat.S_ISREG(source.lstat().st_mode)
                 or source.lstat().st_nlink != 1
                 or source.resolve(strict=True) != source):
-            if not flat_parent:
-                raise LoadError(f"pinned input {key} is not an owned regular file")
-            # E.g. `p2p/` linked to a directory outside the project (R-014 item 3).
-            findings.append((_UNFREEZABLE_NOT_OWNED, label,
-                             f"pinned input {key} is not an owned regular file"))
-            continue
-        before = source.stat()
-        content = source.read_bytes()
-        after = source.stat()
+            if not snapshot_directory and not flat_parent:
+                # Candidate B of a formal load: R-014 第 3 条's two user links are frozen by their target's
+                # bytes (review 4 B1); the frozen generation keeps a copy, never the link.
+                linked_target = _user_linked_input_target(canonical_project, key, relative_text)
+            if linked_target is None:
+                if not flat_parent:
+                    raise LoadError(f"pinned input {key} is not an owned regular file")
+                # E.g. `p2p/` linked to a directory outside the project (R-014 item 3).
+                findings.append((_UNFREEZABLE_NOT_OWNED, label,
+                                 f"pinned input {key} is not an owned regular file"))
+                continue
+        read_path = source if linked_target is None else linked_target
+        before = read_path.stat()
+        content = read_path.read_bytes()
+        after = read_path.stat()
         identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(before, field) != getattr(after, field) for field in identity):
+        if (any(getattr(before, field) != getattr(after, field) for field in identity)
+                or linked_target is not None and source.resolve(strict=True) != linked_target):
             raise PinnedSourceChangedWhileReading(
                 f"pinned input {key} changed or differs from parent")
         if hashlib.sha256(content).hexdigest() != expected:
@@ -9150,6 +9179,17 @@ def validate_and_publish_release(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()[:20]
+    input_paths = {}
+    for name, path in input_files.items():
+        try:
+            input_paths[name] = (
+                (path.parent.resolve() / path.name).relative_to(project.resolve()).as_posix())
+        except ValueError:
+            # R-014 第 3 条: the user's p2p/<workbook> link may lead outside the project (review 4 B1);
+            # p2p_release_source_binding above bound this input to that link's workbook.
+            if name != "p2p" or _user_linked_input_target(project, name, p2p_source["path"]) is None:
+                raise
+            input_paths[name] = p2p_source["path"]
     parent = {
         "schema_version": 2,
         "release_id": release_id,
@@ -9158,10 +9198,7 @@ def validate_and_publish_release(
         **release_basis,
         # Transaction metadata, not a change to the established release-ID basis.
         # Preserve the selected alias itself so retargeting is rechecked too.
-        "input_paths": {
-            name: (path.parent.resolve() / path.name).relative_to(project.resolve()).as_posix()
-            for name, path in input_files.items()
-        },
+        "input_paths": input_paths,
     }
     if publish:
         publish_current_release(project, parent)
@@ -9355,7 +9392,13 @@ def commit_prepared_release(candidate: PreparedParentRelease) -> Path:
                     or path.as_posix() != relative):
                 raise ValueError("unsafe input path")
             source = project.joinpath(*path.parts)
-            source.resolve(strict=True).relative_to(project.resolve())
+            try:
+                source.resolve(strict=True).relative_to(project.resolve())
+            except ValueError:
+                # R-014 第 3 条's two user links resolve outside the project; their target's bytes are
+                # rechecked below like any input (review 4 B1).
+                if _user_linked_input_target(project, name, relative) is None:
+                    raise
             if _sha256_path(source) != expected:
                 raise ValueError("content changed")
             if name == "p2p":

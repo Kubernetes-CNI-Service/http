@@ -22,6 +22,7 @@ from deploy_infra import (
     DEFAULT_DEVICES,
     DEFAULT_NEUTRAL,
     DeployError,
+    NoActiveProjectError,
     _identity_args,
     _ssh_options,
     _validate_username,
@@ -768,4 +769,10 @@ if __name__ == "__main__":
     # Help is a read-only operation; do not create an execution log for it.
     if any(arg in {"-h", "--help"} for arg in sys.argv[1:]):
         raise SystemExit(main())
-    raise SystemExit(run_with_log("check_infra", main))
+    try:
+        raise SystemExit(run_with_log("check_infra", main))
+    except NoActiveProjectError:
+        # The log is bound before main runs; after unsetup say what to do instead of a traceback (review 4 S5).
+        print("[ERROR] 没有激活的项目（DAY0-Prepare/activate-project 不存在），infra 日志无处可写："
+              "请先运行 01-a-setup.py <项目> 激活项目；只读检查本机时可在激活后再跑", file=sys.stderr)
+        raise SystemExit(1)

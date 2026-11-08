@@ -13325,5 +13325,216 @@ class FixtureScandirTransferContractTests(unittest.TestCase):
         entries.close.assert_called_once_with()
 
 
+# ── v3.1.1 RV5: 第 4 轮增量审查 B1（http dev 2026-11-08 派出） ──
+class RV5UserLinkedInputBFreezeTests(unittest.TestCase):
+    """A formal load freezes its candidate B (``99-output-ztp/.current-release.*.tmp``) with R-014 user links.
+
+    Expected values come from the requirement and the review, never from 11-load.py:
+    - 需求文档 R-014 第 3 条（owner 2026-11-02）：用户可以把项目输入建成链接（``02-devices_config.csv``
+      → 项目外文件；``p2p.xlsx → p2p/<工作簿>``，``p2p/`` → 项目外的资料目录）；setup、load 读取时跟随链接、
+      按真实文件校验。第 2 条：不往指向项目外的链接里写。
+    - review-wave4 B1 / http dev 派工：只为这两种形态放行，按链接目标的字节 pin；sha256 与「读取前后
+      稳定」照旧；其余形态（01-global.yaml 是链接、链接指向项目内另一个名字、根目录工作簿本身是链接、
+      硬链接）照旧拒绝，报错原文 ``pinned input <key> is not an owned regular file`` 不变。
+    The bytes and digests below are the bytes this test wrote, hashed here with hashlib.
+    """
+
+    DHCP_NAMES = ("dhcpd.conf", "dhcpd_eth.hosts", "dhcpd_ib.hosts",
+                  "dhcpd_nvl.hosts", "dhcp-release-manifest.json")
+
+    def setUp(self) -> None:
+        self.fx = ReleaseTransactionTests(
+            methodName="test_writes_parent_release_after_all_components_match")
+        self.fx.setUp()
+        self.addCleanup(self.fx.tearDown)
+        self.work = self.fx.root / "Work"
+        self.work.mkdir()
+        self.output = self.fx.project / "99-output-ztp"
+
+    def _prepare_b(self, inputs):
+        """The main() order: private DHCP candidate → validate (no publish) → prepare B → (stage)."""
+        flat = self.fx.ztp / "config/isc-dhcp-server"
+        private = self.fx.project / "99-output-dhcp/.load-dhcp-candidate-0123456789abcdef"
+        private.mkdir(parents=True, mode=0o700)
+        for name in self.DHCP_NAMES:
+            (private / name).write_bytes((flat / name).read_bytes())
+        parent = LOAD.validate_and_publish_release(
+            self.fx.project, inputs, publish=False, dhcp_candidate_dir=private,
+        )
+        prepared = LOAD.prepare_current_release(
+            self.fx.project, parent, dhcp_candidate_dir=private,
+        )
+        self.addCleanup(LOAD.discard_prepared_release, prepared)
+        self.assertRegex(prepared.temporary.name, r"^\.current-release\..+\.tmp$")
+        return parent, prepared, private
+
+    def _link_devices_outside(self) -> tuple[Path, bytes, str]:
+        payload = self.fx.devices_file.read_bytes()
+        target = self.work / "devices.csv"
+        self.fx.devices_file.rename(target)
+        self.fx.devices_file.symlink_to(os.path.relpath(target, self.fx.project))
+        return target, payload, os.readlink(self.fx.devices_file)
+
+    def _link_p2p_directory_outside(self):
+        materials = self.work / "materials"
+        materials.mkdir()
+        name = self.fx.p2p_source.name
+        payload = self.fx.p2p_source.read_bytes()
+        self.fx.p2p_source.rename(materials / name)
+        (self.fx.project / "p2p").symlink_to(os.path.relpath(materials, self.fx.project))
+        self.fx.p2p_file.unlink()
+        self.fx.p2p_file.symlink_to(f"p2p/{name}")
+        inputs = LOAD.replace(self.fx.inputs, p2p_file=self.fx.project / "p2p" / name)
+        return materials / name, payload, inputs
+
+    def _assert_frozen_and_committed(self, parent, prepared, private, key, payload):
+        expected = hashlib.sha256(payload).hexdigest()
+        self.assertEqual(expected, parent["inputs"][key])
+        generation = LOAD.stage_pinned_generation(self.fx.project, prepared.temporary, private)
+        frozen = generation / "inputs" / key
+        self.assertFalse(frozen.is_symlink())
+        self.assertEqual(payload, frozen.read_bytes(), "the pin must be the link target's bytes")
+        LOAD.commit_prepared_release(prepared)
+        LOAD.commit_pinned_generation(self.fx.project, generation, expected_current=None)
+        committed = json.loads((self.output / "current-release.json").read_text(encoding="utf-8"))
+        self.assertEqual(expected, committed["inputs"][key])
+        self.assertEqual(f"generations/{parent['release_id']}", os.readlink(self.output / "current"))
+
+    def test_b_candidate_pins_a_devices_csv_linked_outside_the_project_by_its_target_bytes(self):
+        target, payload, link_text = self._link_devices_outside()
+        parent, prepared, private = self._prepare_b(self.fx.inputs)
+        self._assert_frozen_and_committed(parent, prepared, private, "devices", payload)
+        # R-014 第 2 条：the link and its target are untouched.
+        self.assertEqual(link_text, os.readlink(self.fx.devices_file))
+        self.assertEqual(payload, target.read_bytes())
+        self.assertEqual(["devices.csv"], sorted(item.name for item in self.work.iterdir()))
+
+    def test_b_candidate_pins_a_p2p_workbook_behind_an_outside_p2p_directory_link(self):
+        workbook, payload, inputs = self._link_p2p_directory_outside()
+        parent, prepared, private = self._prepare_b(inputs)
+        self._assert_frozen_and_committed(parent, prepared, private, "p2p", payload)
+        self.assertEqual(f"p2p/{workbook.name}", os.readlink(self.fx.p2p_file))
+        self.assertTrue((self.fx.project / "p2p").is_symlink())
+        self.assertEqual(payload, workbook.read_bytes())
+        self.assertEqual([workbook.name], sorted(item.name for item in workbook.parent.iterdir()))
+
+    def _assert_link_target_drift_refused(self, key, target, prepare):
+        original = target.read_bytes()
+        parent, prepared, private = prepare()
+        generation = self.output / "generations" / parent["release_id"]
+        with self.subTest(key=key, drift="edited after validation, before the freeze"):
+            target.write_bytes(original + b"\n")
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError,
+                                            f"pinned input {key} changed or differs from parent"):
+                    LOAD.stage_pinned_generation(self.fx.project, prepared.temporary, private)
+                self.assertFalse(os.path.lexists(generation))
+            finally:
+                target.write_bytes(original)
+        with self.subTest(key=key, drift="edited while the freeze reads it"):
+            real_read_bytes = Path.read_bytes
+            rewrites = []
+
+            def rewrite_while_reading(path):
+                content = real_read_bytes(path)
+                if path.name == target.name and not rewrites:
+                    # The read bytes are returned; only the file moves on.
+                    with open(path, "ab") as stream:
+                        stream.write(b"\n")
+                    rewrites.append(path)
+                return content
+
+            try:
+                with mock.patch.object(Path, "read_bytes", rewrite_while_reading):
+                    with self.assertRaisesRegex(LOAD.LoadError, f"pinned input {key} changed"):
+                        LOAD.stage_pinned_generation(self.fx.project, prepared.temporary, private)
+                self.assertEqual(1, len(rewrites), f"fault missed the {target.name} read")
+                self.assertFalse(os.path.lexists(generation))
+            finally:
+                target.write_bytes(original)
+        with self.subTest(key=key, drift="edited after the freeze, before the parent commit"):
+            staged = LOAD.stage_pinned_generation(self.fx.project, prepared.temporary, private)
+            self.assertEqual(original, (staged / "inputs" / key).read_bytes())
+            target.write_bytes(original + b"\n")
+            try:
+                with self.assertRaisesRegex(LOAD.LoadError,
+                                            f"input authority {key} changed before parent commit"):
+                    LOAD.commit_prepared_release(prepared)
+                self.assertFalse(prepared.committed)
+                self.assertFalse(os.path.lexists(self.output / "current-release.json"))
+                self.assertFalse(os.path.lexists(self.output / "current"))
+            finally:
+                target.write_bytes(original)
+
+    def test_b_candidate_still_refuses_a_linked_devices_target_that_changes(self):
+        target, _payload, _link_text = self._link_devices_outside()
+        self._assert_link_target_drift_refused(
+            "devices", target, lambda: self._prepare_b(self.fx.inputs))
+
+    def test_b_candidate_still_refuses_a_linked_p2p_target_that_changes(self):
+        workbook, _payload, inputs = self._link_p2p_directory_outside()
+        self._assert_link_target_drift_refused("p2p", workbook, lambda: self._prepare_b(inputs))
+
+    def test_b_candidate_still_refuses_links_that_are_not_the_two_r014_shapes(self):
+        parent, prepared, private = self._prepare_b(self.fx.inputs)
+        generation = self.output / "generations" / parent["release_id"]
+        project = self.fx.project
+
+        def same_bytes_link(path: Path, target: Path):
+            """Replace ``path`` by a link to a same-byte copy: only the shape differs."""
+            payload = path.read_bytes()
+            target.write_bytes(payload)
+            path.unlink()
+            path.symlink_to(os.path.relpath(target, path.parent))
+
+            def restore():
+                path.unlink()
+                path.write_bytes(payload)
+                target.unlink()
+            return restore
+
+        def hard_link(path: Path, alias: Path):
+            os.link(path, alias)
+            return alias.unlink
+
+        cases = (
+            ("global", "01-global.yaml linked outside",
+             lambda: same_bytes_link(self.fx.global_file, self.work / "global.yaml")),
+            ("global", "01-global.yaml linked to another project name",
+             lambda: same_bytes_link(self.fx.global_file, project / "global-copy.yaml")),
+            ("subnet", "subnet linked to another project name",
+             lambda: same_bytes_link(self.fx.subnet_file, project / "subnet-copy.csv")),
+            # setup's own p2p.xlsx -> <root workbook> link is no user link; the workbook stays owned.
+            ("p2p", "root workbook itself linked outside",
+             lambda: same_bytes_link(self.fx.p2p_source, self.work / self.fx.p2p_source.name)),
+            ("devices", "devices csv with a second hard link",
+             lambda: hard_link(self.fx.devices_file, project / "devices-alias.csv")),
+        )
+        for key, kind, make in cases:
+            with self.subTest(kind=kind):
+                restore = make()
+                try:
+                    with self.assertRaisesRegex(
+                            LOAD.LoadError, f"^pinned input {key} is not an owned regular file$"):
+                        LOAD.stage_pinned_generation(project, prepared.temporary, private)
+                    self.assertFalse(os.path.lexists(generation))
+                finally:
+                    restore()
+        # The parent commit keeps refusing an input that resolves outside the project unless it is one
+        # of the two user-link shapes.
+        restore = same_bytes_link(self.fx.global_file, self.work / "global.yaml")
+        try:
+            with self.assertRaisesRegex(LOAD.LoadError,
+                                        "input authority global changed before parent commit"):
+                LOAD.commit_prepared_release(prepared)
+            self.assertFalse(prepared.committed)
+        finally:
+            restore()
+        # Control: the same candidate with the regular files back is frozen.
+        staged = LOAD.stage_pinned_generation(project, prepared.temporary, private)
+        self.assertEqual(parent["release_id"], staged.name)
+        self.assertTrue(os.path.lexists(generation))
+
+
 if __name__ == "__main__":
     unittest.main()

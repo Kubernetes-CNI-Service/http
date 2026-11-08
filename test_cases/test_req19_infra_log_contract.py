@@ -1838,5 +1838,62 @@ class RV3DeployInfraWithoutActiveProjectTests(unittest.TestCase):
         self.assertEqual(1, len(list(self.owned.glob("deploy_infra-*.log"))))
 
 
+class RV5CheckInfraWithoutActiveProjectTests(unittest.TestCase):
+    """v3.1.1 RV5, 第 4 轮审查 S5 的代码部分 (http dev 2026-11-08): check_infra.py after unsetup.
+
+    Expected values come from the review and the dispatch, never from the implementation:
+    - R-016 Q7: after unsetup DAY0-Prepare/activate-project is gone and setup's link infra/logs
+      (../DAY0-Prepare/activate-project/99-output-infra) dangles; the log binding refuses that state, and that
+      rule does not change (presentation only).
+    - Dispatch, as RV3 did for deploy_infra.py: the refusal is one [ERROR] line with what to do -- first run
+      01-a-setup.py <项目> to activate the project; a read-only check of this host can run after activation --
+      exit 1, no Python traceback.  With a pointer the script behaves as before.
+    The script runs as itself (__main__) in a copied minimal tree; the CSV has no server rows, nothing connects.
+    """
+
+    REFUSAL = ("[ERROR] 没有激活的项目（DAY0-Prepare/activate-project 不存在），infra 日志无处可写："
+               "请先运行 01-a-setup.py <项目> 激活项目；只读检查本机时可在激活后再跑")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="req19-rv5-check-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.root = self.base / "http"
+        for relative in ("infra/check_infra.py", "infra/deploy_infra.py",
+                         "tools/infra_components.py", "tools/project_contract.py"):
+            (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ROOT / relative, self.root / relative)
+        self.owned = self.root / "DAY0-Prepare/site-p/99-output-infra"
+        self.owned.mkdir(parents=True)
+        (self.root / "infra/logs").symlink_to(MANAGED_LOG_LINK)   # R-016 Q7: setup's link, no pointer
+        self.devices = self.base / "devices.csv"
+        self.devices.write_text("hostname,type,eth0_ip\nleaf-a,eth,192.0.2.21\n", encoding="utf-8")
+        self.reports = self.base / "check-output"
+
+    def check(self):
+        return subprocess.run(
+            [sys.executable, "-B", os.fspath(self.root / "infra/check_infra.py"), "--clients-only",
+             "--devices-file", os.fspath(self.devices), "--output-dir", os.fspath(self.reports)],
+            cwd=self.root, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+        )
+
+    def test_after_unsetup_check_infra_names_the_order_instead_of_a_traceback(self):
+        result = self.check()
+        self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+        self.assertIn(self.REFUSAL, result.stderr)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertEqual([], sorted(self.owned.iterdir()), "nothing is written anywhere")
+        self.assertFalse(os.path.lexists(self.reports))
+        self.assertEqual(MANAGED_LOG_LINK, os.readlink(self.root / "infra/logs"))
+
+    def test_with_a_pointer_check_infra_runs_as_before(self):
+        (self.root / "DAY0-Prepare/activate-project").symlink_to("site-p")
+        result = self.check()
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("[WARN] devices CSV 中没有可检查的 type=server/server_mgmt 设备", result.stdout)
+        self.assertNotIn("[ERROR]", result.stdout + result.stderr)
+        self.assertEqual(1, len(list(self.owned.glob("check_infra-*.log"))))
+
+
 if __name__ == "__main__":
     unittest.main()

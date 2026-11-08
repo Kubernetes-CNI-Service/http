@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -68,6 +68,30 @@ def workbook(path: Path, text: str) -> Path:
 
     book = openpyxl.Workbook()
     book.active["A1"] = text
+    book.save(path)
+    return path
+
+
+def oob_workbook(path: Path) -> Path:
+    """A P2P workbook the real P2P parser accepts: one OOB link of the example's Cumulus leaf.
+
+    Same header layout as test_generation_input_binding_workflow._private_real_chain (row 1 section
+    labels, row 2 column names); the leaf matches ``*OOB-*Leaf*`` and the peer ``*x86*`` in the
+    checked-in P2P inventory.
+    """
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "OOB Server-LF"
+    sheet.cell(1, 5, "Source")
+    sheet.cell(1, 11, "Dest")
+    for column, value in ((7, "name"), (8, "HCA/port"), (13, "name"), (14, "port")):
+        sheet.cell(2, column, value)
+    sheet.cell(3, 7, "EXAMPLE-x86-01")
+    sheet.cell(3, 8, "mgmt")
+    sheet.cell(3, 13, "EXAMPLE-OOB-Leaf01")
+    sheet.cell(3, 14, "1")
     book.save(path)
     return path
 
@@ -160,6 +184,22 @@ class LinkedProjectSandbox:
             sys.executable, "-B", os.fspath(self.http / "DAY0-Prepare/11-load.py"),
             PROJECT, "--dry-run", "--host-role=workstation", "--no-upgrade",
         ])
+
+    def formal_load(self, module_name: str) -> tuple[int, str]:
+        """This copy's real 11-load main(), not --dry-run, as the workstation runs it.
+
+        main() is called in-process because cli() puts the workstation's full-test gate in front of a
+        formal load; nothing else is replaced.  The load's own setup and generator children run for real
+        under the same synthetic HOME.
+        """
+        load = load_script(module_name, self.http / "DAY0-Prepare/11-load.py")
+        printed = io.StringIO()
+        with mock.patch.dict(os.environ, self.env(), clear=True), \
+                redirect_stdout(printed), redirect_stderr(printed):
+            result = load.main([
+                PROJECT, "--host-role=workstation", "--no-upgrade", "--prod", "--switch", "eth",
+            ])
+        return result, printed.getvalue()
 
     def package(self, output: Path) -> str:
         args = argparse.Namespace(
@@ -510,6 +550,77 @@ class LPLaptopKeyLinkLoadWorkflowTests(unittest.TestCase):
         self.assertIn("laptop.pub", moved.stdout)
         self.assertEqual(link_text, os.readlink(link))
         self.assertEqual([], sorted(sandbox.work.iterdir()))
+
+
+class RV5FormalLoadWithUserLinksWorkflowTests(unittest.TestCase):
+    """v3.1.1 RV5（第 4 轮增量审查 B1）：用户链接的项目走真实 setup → 真实正式 load（非 dry-run）到提交。
+
+    Expectations, never derived from 11-load.py:
+    - 需求文档 R-014 第 3 条：``02-devices_config.csv`` → 项目外文件、``p2p.xlsx → p2p/<工作簿>`` 且 ``p2p/``
+      → 项目外资料目录，都是允许的用户链接；setup、load 跟随链接、按真实文件校验。第 2 条：不往指向项目外的
+      链接里写。
+    - test_cases/REAL_ENVIRONMENT.md 卡 001 的 WP-11 补充段：用户链接的项目「本机正式 load 走完」；本机正式
+      load 是打包和 sync 的前置（AGENTS.md）。
+    - review-wave4 B1 / http dev 派工：load 成功，``current-release.json`` 里该输入的 pin 等于链接目标字节的
+      sha256，所选代次里冻结的是链接目标的字节。
+    The project is the public example (schema 1) with a one-link P2P workbook (``oob_workbook``); digests are
+    hashlib over the bytes this test wrote.
+    """
+
+    def sandbox(self) -> LinkedProjectSandbox:
+        directory = tempfile.TemporaryDirectory(prefix="rv5-formal-load-")
+        self.addCleanup(directory.cleanup)
+        return LinkedProjectSandbox(Path(directory.name).resolve())
+
+    def assert_committed_pin(self, sandbox: LinkedProjectSandbox, key: str, payload: bytes) -> None:
+        output = sandbox.project / "99-output-ztp"
+        current = json.loads((output / "current-release.json").read_text(encoding="utf-8"))
+        self.assertEqual(sha256_bytes(payload), current["inputs"][key])
+        self.assertEqual(f"generations/{current['release_id']}", os.readlink(output / "current"))
+        frozen = output / "current" / "inputs" / key
+        self.assertFalse(frozen.is_symlink())
+        self.assertEqual(payload, frozen.read_bytes())
+
+    def test_formal_load_commits_a_project_whose_devices_csv_links_outside(self):
+        sandbox = self.sandbox()
+        external = sandbox.work / "devices.csv"
+        external.write_bytes(sandbox.devices)
+        link = sandbox.project / "02-devices_config.csv"
+        link.symlink_to(external)
+        link_text = os.readlink(link)
+        oob_workbook(sandbox.project / "Site P2P_v1.0.xlsx")
+
+        setup = sandbox.setup()
+        self.assertEqual(0, setup.returncode, setup.stdout)
+        result, printed = sandbox.formal_load("rv5_formal_load_devices_link")
+        self.assertEqual(0, result, printed)
+        self.assert_committed_pin(sandbox, "devices", sandbox.devices)
+        # R-014 第 2、3 条：the link, its target and the outside directory are untouched.
+        self.assertEqual(link_text, os.readlink(link))
+        self.assertEqual(sandbox.devices, external.read_bytes())
+        self.assertEqual(["devices.csv"], sorted(item.name for item in sandbox.work.iterdir()))
+
+    def test_formal_load_commits_a_project_whose_p2p_directory_links_outside(self):
+        sandbox = self.sandbox()
+        (sandbox.project / "02-devices_config.csv").write_bytes(sandbox.devices)
+        material = sandbox.work / "site-material"
+        material.mkdir()
+        selected = oob_workbook(material / "Site P2P_v2.0.xlsx")
+        payload = selected.read_bytes()
+        (sandbox.project / "p2p").symlink_to(material)
+        canonical = sandbox.project / "p2p.xlsx"
+        canonical.symlink_to("p2p/Site P2P_v2.0.xlsx")
+
+        setup = sandbox.setup()
+        self.assertEqual(0, setup.returncode, setup.stdout)
+        result, printed = sandbox.formal_load("rv5_formal_load_p2p_link")
+        self.assertEqual(0, result, printed)
+        self.assert_committed_pin(sandbox, "p2p", payload)
+        # R-014 第 2、3 条：the user's links stay, nothing is written into the outside directory.
+        self.assertEqual("p2p/Site P2P_v2.0.xlsx", os.readlink(canonical))
+        self.assertTrue((sandbox.project / "p2p").is_symlink())
+        self.assertEqual(payload, selected.read_bytes())
+        self.assertEqual([selected.name], sorted(item.name for item in material.iterdir()))
 
 
 if __name__ == "__main__":
