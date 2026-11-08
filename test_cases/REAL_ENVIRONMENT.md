@@ -3179,3 +3179,96 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 已纳入全量 discovery（各模块都已在 manifest 登记：`activate_project_*` 在 workflow `activate_project_pointer_lifecycle`
   或 rule `day0_release_operations`，`test_req19_infra_log_contract` 在 rule `infra_lifecycle` 与 `day0_release_operations`）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。未执行前不得写 PASS。
+
+## TC-REAL-I006-OPERATOR-REEXEC-001 — 被 root 运行的 upgrade.py、upgrade2.py（以及 cron.sh）降权为项目属主重新执行
+
+### 基本信息
+
+- Case ID：`TC-REAL-I006-OPERATOR-REEXEC-001`。
+- 名称：管理服务器上以「普通用户 + sudo」（方式 A）、「root 直接登录」（方式 B）和两者混用运行 `upgrade.py`、
+  `upgrade2.py`，root 的运行以项目属主（操作员）身份重新执行一次；其他用户的运行被拒绝。
+- 类型：real-environment / scenario（真实 uid 切换、PAM、终端）。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：问题文档 I-006（owner 2026-10-27 同意的方案第 1、7 条，:290-306；身份一致 :351）；设计
+  `设计/I-006与R-005实现计划.md` §4.2、§4.3（:97）；v3.1.2 详细工作指导 WP-4、WP-10、WP-11，第 3 节已定 2、O13、O15 (a)。
+- 自动化文件与测试方法：`test_cases/test_upgrade_operator_reexec.py`（`UpgradeReexecEntryTests`、
+  `InlineReexecParityTests`）、`test_cases/test_upgrade_operator_reexec_workflow.py`（`UpgradeReexecWorkflowTests`）、
+  `test_cases/test_operator_identity.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、passwd），
+  `runuser` 用记录替身。
+- 覆盖范围：
+  - `infiniband/bringup/xdr-upgrade/upgrade.py`、`upgrade2.py`：本卡第 1～6 步（WP-10）。
+  - `ethernet/monitor/cron.sh`：交互登录的 root 运行（降权）、sudo 运行（降权）、root crontab（不降权）、worker 跑的
+    （root，用操作员的 key），以及操作员直接运行，由 WP-11 在本卡补入步骤（WP-11 落地前本节为空）。
+  - `initial-setup`：随 D1（v3.1.3），本卡不做。
+- 适用平台：
+
+| 平台 | 怎么跑 |
+|---|---|
+| 22.04（AIR 管理服务器） | 方式 A、方式 B、混用全做（AIR 可写） |
+| 24.04（prod） | 由现场人员执行，验证 AI 只核对输出：`upgrade.py --inspect-only` 会访问设备并写本地报告（`infiniband/bringup/xdr-upgrade/README.md` 的 `--inspect-only` 说明），不带 `--project` 的 `upgrade2.py` 会写代码树里的 `xdr-upgrade-v2-logs`。方式 B 只在 owner 允许 root 登录时做 |
+| 26.04 | pending（M7）：原版 sudo 与 sudo-rs 的 `SUDO_USER`、`runuser` 行为留给 M7。prod 正好是 26.04 时，下面的输出只作机会性证据，**不作为通过条件** |
+
+### 风险与目标
+
+- 要防止的故障：root 运行时读 root 的 `~/.ssh` 和 venv、往项目里写 root 属主的文件；身份切换发生在运行锁、
+  venv 切换或密码提示之后（父进程拿着运行锁时子进程会 `ALREADY_RUNNING`）；切换后丢了交互终端或继承的 fd；
+  切换循环；其他用户在别人的项目上运行。
+- 涉及的模块和状态边界：`upgrade.py` 的 `_reexec_as_operator` 与 `_resolve_operator`（`tools/operator_identity.py`
+  的内联副本，O15 (a)）；`upgrade2.py` 的 `main` 与 `tools/operator_identity.py`；共用运行锁
+  `/tmp/http-ib-bringup.runtime.lock`；`runuser`、PAM、sudo 的环境变量。
+- 成功标准：root 的运行只切换一次，切换后进程的 uid、gid、附加组、`HOME`、`USER`、`LOGNAME` 都是操作员的；
+  只有白名单变量（`PATH`、`LANG`、`LC_ALL`、`TERM`）被带过去；密码提示出现在原终端；退出码与操作员那次运行一致；
+  项目里新出现的文件属于操作员。
+
+### 前置条件与输入
+
+- owner 授权的 AIR 管理服务器（22.04）。项目目录（经 `DAY0-Prepare/activate-project` 选中）属于操作员 `U`，
+  另有一个普通用户 `V`。`U` 的 `~/.ssh` 有管理 key 对和交换机的 known_hosts，`~/.venvs/http/ibsw-upgrade` 已装好。
+- 当前源码的正式 full proof。
+- 所需权限：`U` 可以 sudo；方式 B 需要 root 登录（prod 上要 owner 允许）。
+- 初始状态：记录 `id U`、`id V`、`stat -c '%U:%G %a' <项目>`、`ls -l /tmp/http-ib-bringup.runtime.lock`、项目
+  `99-output-ib_nvl/bringup/` 下现有的文件清单。
+
+### 步骤
+
+1. 方式 A：`U` 登录，`sudo python3 -B infiniband/bringup/xdr-upgrade/upgrade.py --inspect-only --devices <一台>`。
+   在另一个终端用 `ps -o user,group,supgrp,args -p <pid>` 看切换后的进程；需要密码时看提示出现在哪个终端。
+2. 方式 B：root 直接登录，在操作员能进的目录里执行同一条命令。
+3. 混用：`U` 不加 sudo 跑一次，再用方式 A、方式 B 各跑一次，确认三次的身份说明行里操作员都是 `U`。
+4. `upgrade2.py --project <项目> --plan` 重复第 1～3 步。
+5. 拒绝：`V` 直接运行、`V` 经 sudo 运行（`U` 的项目），各一次；把指针临时改成普通文件后 root 运行一次（只在隔离副本上做），
+   然后恢复指针。
+6. 带标记：root 执行 `HTTP_ZTP_ROOT_PARENT=1 python3 -B …/upgrade.py --inspect-only …`，确认不切换（以 root 运行）。
+7. 补充推断（指导第 7 节第 3 条）：`sudo python3 -c 'from pathlib import Path; print(Path.home())'`；
+   `runuser -u U -- env -i PATH="$PATH" HOME=/home/U python3 -c 'import os; print(os.listdir("/proc/self/fd"))' 3</dev/null`
+   看 fd 3 是否还在；以 root 运行 OpenSSH 时默认身份文件取哪个家目录。
+8. cron.sh：由 WP-11 补入。
+
+### 预期结果
+
+- 正向结果：第 1、2、4 步 root 的那次运行只出现一次 `runuser`；工作进程打印一行身份说明，含「以 U 执行」；
+  进程属主是 `U`，附加组是 `U` 的；只有白名单环境变量；`SSH_AUTH_SOCK` 不在（用 ssh-agent 的操作员会失去 agent，
+  已知限制）；交互密码提示出现在原终端；运行锁由 `U` 的进程持有；退出码与 `U` 直接运行同一命令时相同；
+  项目里新文件属主是 `U`。第 3 步三次的操作员都是 `U`。第 6 步不切换。
+- 拒绝/失败结果：第 5 步退出码 2，提示写明项目属于 `U`、当前是 `V`（或 `root 经 sudo（发起人 V）`）和可行的办法；
+  指针无效时提示含 `activate-project`，什么都不做。
+- 不允许发生的副作用：切换前读 key、问密码、拿运行锁或切换 venv；切换两次；root 属主的新文件出现在项目里。
+- 需要保存的证据：每次运行记录 `id`、`SUDO_USER`、子进程的 uid/gid/附加组、`HOME`/`USER`/`LOGNAME`、环境变量名单
+  （只记名字，不记值）、继承 fd 清单、交互密码提示是否在原终端、退出码、项目里新文件的属主；终端全文。不记录任何秘密。
+
+### 故障注入与清理
+
+- 故障注入：在 root 不可进入给 `U` 的目录（例如 `/root`）里运行，记录相对路径参数是否失效（推断会失效，README 已写
+  先 `cd`）；等待方式（D1 起才有生产调用方）的 Ctrl-C：终端的 SIGINT 会同时到达父子进程，父进程再转发一次，子进程
+  可能收到两次（推断），由 D1 在 AIR 上验证并写回本卡。
+- 清理/回滚验证：删掉测试加的 crontab 行；恢复临时改动的指针；不碰 `/etc/hosts`；不删除运行锁文件。
+- 重复执行与幂等性：同一命令重复运行，切换次数和身份说明行不变。
+- 风险：`runuser` 的 PAM 设置可能改 `HOME`、`USER`、`LOGNAME` 或资源限制；fd 是否穿过 `runuser`；方式 B 下子进程能否
+  打开 `/dev/tty`；「由 root 父进程启动」标记会被所有后代继承，带标记的 root 后代去跑 upgrade 时不会降权（推断，概率低）。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_upgrade_operator_reexec.py` 与 `test_cases/test_upgrade_operator_reexec_workflow.py`。
+- [x] 修复前能够稳定失败（实现前红在预期断言上）。
+- [x] 修复后通过。
+- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。

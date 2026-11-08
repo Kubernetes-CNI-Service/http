@@ -372,6 +372,27 @@ def threading_main():
 
 
 def main():
+    import operator_identity
+    argv = sys.argv[1:]
+    # I-006 (v3.1.2 WP-10): before the runtime guard or any prompt, root re-runs as the operator (the owner of
+    # the project directory); another account's run is refused.  No project (no --project, no pointer): unchanged.
+    if not operator_identity.skips_identity(argv):
+        project = parser().parse_args(argv).project
+        if project is None:
+            from project_contract import ActiveProjectPointerError
+            try:
+                project = operator_identity.active_project(REPOSITORY)
+            except ActiveProjectPointerError as error:
+                print(f"ERROR: {error}", file=sys.stderr)
+                return EXIT_BAD_INPUT
+        if project is not None:
+            identity = operator_identity.resolve_operator(project)
+            if identity.refusal is not None:
+                print("ERROR: " + identity.refusal, file=sys.stderr)
+                return EXIT_BAD_INPUT
+            if operator_identity.needs_reexec(identity):
+                operator_identity.exec_as_operator(identity.operator, ENTRY, argv)
+            print(identity.banner, file=sys.stderr)
     if tuple(sys.argv[1:]) in (("--version",), ("--help",), ("-h",)):
         return run()
     guard = importlib.import_module("ib_bringup_runtime_guard")

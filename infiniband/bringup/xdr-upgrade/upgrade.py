@@ -2489,9 +2489,131 @@ def main(argv=None,*,_password_attempt=1,_password_history=(),_handoff=None):
         return 2
 
 
+# I-006 (v3.1.2 WP-10): root re-runs this entry as the operator, the owner of the project directory, before the
+# venv switch, the runtime guard or any prompt.  O15 (a): the flat bundle has no tools/operator_identity.py, so
+# its rule is copied here; test_cases/test_upgrade_operator_reexec.py keeps the two equal.  Change both together.
+_ROOT_PARENT_MARKER = 'HTTP_ZTP_ROOT_PARENT'
+_REEXEC_ENV_WHITELIST = ('PATH', 'LANG', 'LC_ALL', 'TERM')
+
+
+def _resolve_operator(project_dir, *, euid=None, environ=None, getpwuid=None, getpwnam=None, stat=None):
+    """operator_identity.resolve_operator as a plain tuple: (action, (name, uid, gid, home) or None, banner, refusal)."""
+    import pwd
+    euid = os.geteuid() if euid is None else euid
+    environ = os.environ if environ is None else environ
+    getpwuid = pwd.getpwuid if getpwuid is None else getpwuid
+    getpwnam = pwd.getpwnam if getpwnam is None else getpwnam
+    stat = os.stat if stat is None else stat
+    invoker = problem = None
+    if euid != 0:
+        try:
+            current = getpwuid(euid).pw_name
+        except KeyError:
+            current = f"uid {euid}"
+    elif "SUDO_USER" not in environ:
+        current = "root（由 root 父进程启动）" if _ROOT_PARENT_MARKER in environ else "root 直接运行"
+    else:
+        sudo_user, sudo_uid = environ["SUDO_USER"], environ.get("SUDO_UID")
+        current = f"root 经 sudo（发起人 {sudo_user}）"
+        try:
+            entry = getpwnam(sudo_user)
+        except KeyError:
+            problem = f"SUDO_USER={sudo_user} 在 passwd 里查不到"
+        else:
+            if entry.pw_uid == 0:
+                problem = f"SUDO_USER={sudo_user} 是 root"
+            elif sudo_uid != str(entry.pw_uid):
+                problem = f"SUDO_UID={sudo_uid} 与 passwd 里 {sudo_user} 的 uid {entry.pw_uid} 不一致"
+            else:
+                invoker = (entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir)
+    arrow = "→" if current.endswith("）") else " →"
+    if project_dir is None:
+        return ("plain", None, f"操作员：未判定（没有当前项目）；当前：{current}{arrow} 原样运行", None)
+    try:
+        owner_uid = stat(project_dir).st_uid
+    except FileNotFoundError:
+        owner_uid = None
+    source = "项目目录属主" if owner_uid is not None else "新项目，取当前用户"
+    if owner_uid is None and invoker is not None:
+        owner_uid, source = invoker[1], "新项目，取 sudo 发起人"
+    elif owner_uid is None:
+        owner_uid = euid
+    try:
+        entry = getpwuid(owner_uid)
+    except KeyError:
+        operator, owner = None, f"uid {owner_uid}（passwd 里查不到）"
+    else:
+        operator = (entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir)
+        owner = operator[0]
+
+    def refuse(reason, remedy):
+        return ("refuse", operator, f"操作员：{owner}（{source}）；当前：{current}{arrow} 拒绝",
+                f"{reason}：项目 {project_dir} 属于 {owner}；当前：{current}。{remedy}")
+
+    if problem is not None:
+        return refuse(f"sudo 发起人无效（{problem}）", "请检查 sudo 的环境变量 SUDO_USER、SUDO_UID，或由 root 直接登录运行。")
+    if operator is None:
+        return refuse("项目属主没有账户", f"请把项目目录交给操作员：sudo chown <操作员>:<操作员主组> {project_dir}")
+    if euid != 0 and operator[1] == 0:
+        return refuse("项目属于 root", "请用 sudo 或以 root 运行。")
+    if euid != 0 and operator[1] != euid:
+        return refuse("当前用户不是项目属主", f"请以 {owner} 运行，或由 root 直接登录运行（会代表 {owner} 执行）。")
+    if invoker is not None and operator[1] not in (0, invoker[1]):
+        return refuse("sudo 发起人不是项目属主", f"请切换到 {owner} 运行（需要 root 的步骤由 {owner} 加 sudo），"
+                                               f"或由 root 直接登录运行（会代表 {owner} 执行）。")
+    if euid == 0 and operator[1] != 0:
+        return ("represent", operator, f"操作员：{owner}（{source}）；当前：{current}{arrow} 项目侧以 {owner} 执行", None)
+    return ("self", operator, f"操作员：{owner}（{source}）；当前：{current}{arrow} 以 {owner} 执行", None)
+
+
+def _reexec_as_operator(argv=None):
+    """Re-run once as the operator when root runs this entry for another account's project (v3.1.2 WP-10).
+
+    -h/--help/--version and an argument error (main() reports it) skip the step.  The project is --project, else
+    the one DAY0-Prepare/activate-project selects; no project (flat bundle, clean clone, no pointer) runs
+    unchanged.  An invalid pointer or a refused identity exits 2 before anything runs.  Root acting for another
+    operator execs `runuser -u <op> -- env -i <PATH LANG LC_ALL TERM> HOME= USER= LOGNAME= <python> <entry>
+    <same arguments>`, unless HTTP_ZTP_ROOT_PARENT is set.  Otherwise returns the identity line to print.
+    """
+    args = tuple(sys.argv[1:] if argv is None else argv)
+    if any(arg in ('-h', '--help', '--version') for arg in args):
+        return None
+    try:
+        project = _parse_cli(args).project
+    except Exception:
+        return None  # main() reports the argument error unchanged; nothing runs
+    # No pointer: no project_contract (PyYAML) import before the venv switch.
+    if project is None and os.path.lexists(_REPOSITORY_ROOT / 'DAY0-Prepare' / 'activate-project'):
+        from project_contract import ActiveProjectPointerError, active_project_dir
+        try:
+            project = active_project_dir(_REPOSITORY_ROOT)
+        except ActiveProjectPointerError as error:
+            sys.stderr.write('HOLD [ACTIVE_PROJECT]: ' + str(error) + '\n')
+            raise SystemExit(2) from None
+    if project is None:
+        return None
+    action, operator, banner, refusal = _resolve_operator(project)
+    if refusal is not None:
+        sys.stderr.write('HOLD [OPERATOR_IDENTITY]: ' + refusal + '\n')
+        raise SystemExit(2)
+    if action == 'represent' and _ROOT_PARENT_MARKER not in os.environ:
+        name, home = operator[0], operator[3]
+        assignments = {key: os.environ[key] for key in _REEXEC_ENV_WHITELIST if key in os.environ}
+        assignments.update(HOME=home, USER=name, LOGNAME=name)
+        command = ['runuser', '-u', name, '--', 'env', '-i', *(key + '=' + value for key, value in assignments.items()),
+                   sys.executable, os.path.abspath(__file__), *args]
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execvp(command[0], command)
+    return banner
+
+
 if __name__ == "__main__":
     try:
+        _identity = _reexec_as_operator()
         _reexec_in_runtime_venv()
+        if _identity is not None:
+            sys.stderr.write(_identity + '\n')
         raise SystemExit(_guarded_main())
     except KeyboardInterrupt:
         sys.stderr.write("HOLD: inspection interrupted\n")

@@ -44,6 +44,7 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
 - **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
 - **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开。
 - **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD）或密码 3 次都被拒，75 另一个升级或初始化正在运行，130 中止。
+- **root 运行时切到项目属主**（v3.1.2，I-006）：规则与 `upgrade.py` 相同，见下文「root 运行时切换到项目属主」；`upgrade2.py` 直接用 `tools/operator_identity.py`，切换在运行锁之前。
 - **模块分层**（以后 nvl-sw 的配置和升级可以直接复用）：
   - 通用部分：`tools/fleet_engine.py`（主进程、worker 池、证据、进度）、`fleet_probe.py`、`fleet_distribution.py`、
     `fleet_link.py`、`fleet_ssh.py`、`fleet_fetch_helper.py`（交换机上的取包助手）；
@@ -140,6 +141,30 @@ python3 -m venv ~/.venvs/http/ibsw-upgrade
 
 Ubuntu 需要 `python3-venv`；pip 需要可达的包源，离线包方案待项目依赖表确定。
 `--help`、`--version`、`--scripts-only`、`--diagnose-inputs` 及参数错误不切换。
+
+### root 运行时切换到项目属主（v3.1.2，I-006）
+
+操作员是项目目录的属主：项目取 `--project`，没给时取 `DAY0-Prepare/activate-project` 指向的项目。
+`upgrade.py`、`upgrade2.py` 一开始先判定身份，在 venv 切换、运行锁、传输方式菜单和任何密码提示之前：
+
+1. 带 `-h`、`--help`、`--version` 时不判定。参数有错时也不判定，照旧报参数错误。
+2. 没有项目（flat 包、干净克隆、没有指针）时不判定，原样运行。指针存在但无效时报错退出（退出码 2），什么都不做。
+3. 当前用户就是项目属主时照常运行；root 运行 root 的项目时以 root 运行。
+4. root（直接登录或经 `sudo`）运行别人的项目时，用 `runuser -u <操作员> -- env -i …` 以操作员身份重新执行一次，
+   参数不变。环境只带 `PATH`、`LANG`、`LC_ALL`、`TERM`；`HOME`、`USER`、`LOGNAME` 设成操作员的（取自 passwd，
+   不看当前的 `HOME`）。所以读的是操作员 `~/.ssh` 下的 key 和 known_hosts，用的是操作员的
+   `~/.venvs/http/ibsw-upgrade`（venv 切换在身份切换之后）。`SSH_AUTH_SOCK` 等其他变量不会带过去。
+5. 其他普通用户运行别人的项目，或者别的用户经 `sudo` 运行操作员的项目，都拒绝（退出码 2），提示项目属于谁、
+   当前是谁、可行的办法。`SUDO_USER` 在 passwd 里查不到、是 root，或与 `SUDO_UID` 不一致时也拒绝。
+6. 环境里有 `HTTP_ZTP_ROOT_PARENT=1`（「由 root 父进程启动」）时不重新执行。
+7. 真正干活的那个进程在 stderr 打印一行身份说明，例如
+   `操作员：opuser（项目目录属主）；当前：opuser → 以 opuser 执行`。
+
+- `upgrade.py` 的这段规则是 `tools/operator_identity.py` 的内联副本：flat 包里没有这个模块，成员表也不变。
+  `test_cases/test_upgrade_operator_reexec.py` 逐项比较两份的判定、runuser 参数和环境；`upgrade2.py` 直接用
+  `tools/operator_identity.py`。
+- 重新执行沿用当前目录。root 在操作员进不去的目录（例如 `/root`）里运行时，先 `cd` 到操作员能进的目录。
+- 真实的 uid 切换只在服务器上验证：`test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-I006-OPERATOR-REEXEC-001`（NOT RUN）。
 
 ### 打开文件数（FD）软限制
 

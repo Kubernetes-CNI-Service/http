@@ -13462,6 +13462,7 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
           <li><code>venv-cabletracker</code>：CableTracker 引擎（REQ7 在线同步），位置 <code>~/.venvs/http/cabletracker</code>。由执行 11-load.py 的用户安装：<code>cron.sh</code> 由 load 启动的 switch-collection worker 运行，setup 和 load 都不安装 crontab。</li>
           <li><code>venv-ibsw-upgrade</code>：<code>upgrade.py</code> 的 SSH 依赖，F01 工具复用，位置 <code>~/.venvs/http/ibsw-upgrade</code>。由运行 <code>upgrade.py</code> 的用户安装。</li>
         </ul>
+        <p>root（直接登录或经 <code>sudo</code>）运行 <code>upgrade.py</code>、<code>upgrade2.py</code> 处理别人的项目时，入口在运行锁、venv 切换和任何密码提示之前，先用 <code>runuser</code> 以项目目录属主（操作员）身份重新执行一次，<code>HOME</code> 取自 passwd；所以用的是操作员家目录下的这个 venv 和 <code>~/.ssh</code>。其他普通用户运行别人的项目会被拒绝。规则见 <code>infiniband/bringup/xdr-upgrade/README.md</code>「root 运行时切换到项目属主」。</p>
         <pre><code>cd /var/www/html
 python3 infra/deps.py check
 python3 infra/deps.py install --target venv-cabletracker   # 执行 11-load.py 的同一个用户
