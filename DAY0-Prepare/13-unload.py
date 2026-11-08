@@ -522,7 +522,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description=__doc__,
         epilog="完整、受支持的操作流程见仓库根目录 USER_MANUAL.md。",
     )
-    parser.add_argument("project", nargs="?", help="活动项目名/目录；默认读取 setup manifest")
+    parser.add_argument("project", nargs="?", help="活动项目名/目录；默认取 DAY0-Prepare/activate-project 指向的项目")
     parser.add_argument("-y", "--yes", action="store_true", help="不询问，直接执行")
     parser.add_argument("--dry-run", action="store_true", help="只显示将执行的动作")
     parser.add_argument(
