@@ -3767,6 +3767,10 @@ def _bind_infra_logs(proj_dir):
     path = os.path.join(HTTP_BASE, INFRA_LOG_REL)
     target = os.path.join(proj_dir, "99-output-infra")
     relative = pointer_link_target(INFRA_LOG_REL, "99-output-infra")
+    if _DRY_RUN and not os.path.lexists(target):
+        # A fresh project: step 2 only printed its mkdir (R-016 §4.1, --dry-run only prints; 第二轮审查 A5).
+        print(_c(CYAN, f"  [DRY] {INFRA_LOG_REL} → {relative}"))
+        return "dry"
     if (not stat.S_ISDIR(os.lstat(proj_dir).st_mode)
             or not stat.S_ISDIR(os.lstat(target).st_mode)):
         raise ValueError("项目及其 99-output-infra 必须是真实目录")

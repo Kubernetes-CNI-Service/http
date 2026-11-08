@@ -1700,5 +1700,36 @@ class RV2UserLinkedDevicesProjectTests(unittest.TestCase):
                 self.assertIn(member, str(caught.exception))
 
 
+# ── v3.1.1 RV2: 第二轮审查 A5（owner 项 A5，默认 A：本版修） ──
+# R-016 §4.1: --dry-run 「只打印要做的事」.  A project setup has never prepared has no 99-output-infra yet; step 2
+# only prints its mkdir, so the dry run must go on printing (infra/logs included) and write nothing, exit 0.
+
+import traceback
+
+
+class RV2FreshProjectDryRunTests(unittest.TestCase):
+    """第二轮审查 A5: setup --dry-run on a fresh project."""
+
+    def test_dry_run_on_a_fresh_project_exits_0_and_writes_nothing(self):
+        temporary = tempfile.TemporaryDirectory(prefix="activate-project-rv2-dry-")
+        self.addCleanup(temporary.cleanup)
+        box = Sandbox(Path(temporary.name).resolve())
+        project = box.day0 / PROJECT
+        self.assertFalse(os.path.lexists(project / "99-output-infra"), "fixture: a project setup never prepared")
+        before = tree_state(box.root)
+        output = io.StringIO()
+        with box.patches(), redirect_stdout(output), redirect_stderr(io.StringIO()):
+            try:
+                code = SETUP.main(["--dry-run", "--host-role=workstation", "--no-upgrade", PROJECT])
+            except SystemExit as stop:
+                code = exit_code(stop)
+            except Exception:  # what escapes main() is the command's traceback and exit 1
+                code = 1
+                output.write(traceback.format_exc())
+        self.assertEqual(0, code, output.getvalue())
+        self.assertEqual(before, tree_state(box.root), "--dry-run writes nothing, in the tree or the project")
+        self.assertIsNone(box.pointer())
+
+
 if __name__ == "__main__":
     unittest.main()
