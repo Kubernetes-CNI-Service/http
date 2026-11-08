@@ -257,7 +257,10 @@ direct 覆盖漂移、冲突、期望中途修改、密钥替换和不安全文�
 不能靠脚本 `__file__` 指向项目来隐式取得输入。管理 CLI 可用 `--tool-inputs <project-dir>`
 显式选择项目内的其他 global/publickey 布局（包括 `99-output-ib_nvl/bringup/xdr-initial-setup`）；
 该目录必须已存在且受当前 UID 所有、不可组/全局写入，外部目录或外链在 leaf 输出前拒绝。
-该目录还必须自带 `infra-neutral.conf`，它是受管运行唯一的中性服务来源（不回退到项目 `infra/`）：
+tool 根还必须有 `infra-neutral.conf`，它是受管运行唯一的中性服务来源（不回退到项目 `infra/`）。缺省 tool 根
+（`<项目>/infiniband/bringup/xdr-initial-setup`）的这份由 setup 在准备步骤从 `infra/infra-neutral.conf` 生成，
+内容不同就原子替换（v3.1.2 D-3，`test_infra_neutral_producer.py` direct、`test_infra_neutral_producer_workflow.py`
+真实 setup → 受管消费方）；`--tool-inputs` 指定的目录仍须自带。它必须是
 regular、非符号链接、单链接、当前 UID 所有、不可组/全局写入、有大小上限，内容满足 initial-setup
 自身的 DNS/NTP/TIMEZONE 语法；准入在任何输出前检查，start、每次 complete 与缓存复用时都重新核对
 同一身份，缺失或不合格即拒绝。

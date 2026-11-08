@@ -891,31 +891,15 @@ class InfraSetup:
         if not os.access(neutral, os.R_OK):
             print(f"ERROR: governed neutral defaults are missing: {neutral}", file=sys.stderr)
             raise SetupExit(1)
-        text = neutral.read_text(encoding="utf-8", errors="replace")
-        # `while read` drops a final line without a newline; keep that behaviour.
-        lines = text.split("\n")[:-1]
-        values = {}
-        for number, line in enumerate(lines, 1):
-            key, _, value = line.partition("=")
-            if (key not in ("DNS", "NTP", "TIMEZONE")
-                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", value)):
-                print(f"ERROR: invalid neutral defaults line {number}", file=sys.stderr)
-                raise SetupExit(1)
-            if (key, number) not in (("DNS", 1), ("NTP", 2), ("TIMEZONE", 3)):
-                print("ERROR: neutral defaults must be ordered DNS/NTP/TIMEZONE", file=sys.stderr)
-                raise SetupExit(1)
-            values[key] = value
-        dns = values.get("DNS", "")
-        dns_valid = bool(re.fullmatch(r"([0-9]{1,3}\.){3}[0-9]{1,3}", dns)) and all(
-            not (octet != "0" and octet.startswith("0")) and int(octet) <= 255 for octet in dns.split("."))
-        if (len(lines) != 3 or not dns_valid
-                or not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?", values.get("NTP", ""))
-                or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_+.-]*(/[A-Za-z0-9][A-Za-z0-9_+.-]*)*",
-                                    values.get("TIMEZONE", ""))):
-            print("ERROR: neutral defaults are incomplete or invalid", file=sys.stderr)
-            raise SetupExit(1)
-        self.neutral = ([dns], [values["NTP"]], values["TIMEZONE"])
-        self.dns_servers, self.ntp_servers, self.time_zone = [dns], [values["NTP"]], values["TIMEZONE"]
+        # One strict reader shared with deploy_infra.py (v3.1.2 WP-2, O2): no CRLF, no last line without its
+        # newline; a byte that is not UTF-8 becomes U+FFFD and fails as an invalid line.
+        try:
+            dns, ntp, zone = host.parse_neutral_defaults(neutral.read_bytes().decode("utf-8", errors="replace"))
+        except host.HostConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            raise SetupExit(1) from exc
+        self.neutral = ([dns], [ntp], zone)
+        self.dns_servers, self.ntp_servers, self.time_zone = [dns], [ntp], zone
 
     def load_runtime_config(self) -> dict:
         """Parse deploy_infra.py's managed block without executing it."""

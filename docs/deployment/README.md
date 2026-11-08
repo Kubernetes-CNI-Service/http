@@ -18,7 +18,12 @@ Docker/Supervisor 的完整命令和限制见 [`infra/docker/README.md`](../../i
 
 Native infra 的 DNS、NTP 与 timezone 中性值只有一个权威：
 [`infra/infra-neutral.conf`](../../infra/infra-neutral.conf)。该文件是严格的惰性 `KEY=VALUE`
-数据，不可执行也不可 `source`。`infra-setup.py`（`infra-setup.sh` 保留，当前入口为 infra-setup.py）不加 `--apply` 时只检查并列出 `WOULD APPLY`，加 `--apply` 后在第一次改动前确认一次（`--yes` 跳过）；退出码 0 = 已是期望状态，3 = 检查发现需改动，1 = 失败或未授权，2 = 用法错误。`--mgmt`（非 `--offline`）检查时只读核对 `apps/ubuntu-<ver>/<arch>/Packages.gz`：仓库缺失或不可读、或缺少任一必需顶层包才算待改动（只核对顶层包名，不核对依赖闭包）；`--apply` 仍每次刷新离线缓存。它默认只读取脚本自身目录：存在 `01-global.yaml`
+数据，不可执行也不可 `source`：恰好三行，依次是 `DNS=`、`NTP=`、`TIMEZONE=`，每行以 LF 结尾——末行也必须有
+换行，不接受 CRLF、注释或空行；DNS 是单个 IPv4 地址（不带前导零），NTP 是单个主机名，TIMEZONE 是安全的 IANA
+名称。`deploy_infra.py` 与 `infra-setup.py` 共用 `infra/ubuntu24_host.py` 的同一个解析，不合格时前者报
+`DeployError`、后者以 1 退出（v3.1.2 起；此前 `deploy_infra.py` 接受末行无换行和 CRLF，`infra-setup.py`
+接受 CRLF）。setup 的准备步骤把这份文件写成项目里受管 initial-setup 的缺省 tool 根
+`infiniband/bringup/xdr-initial-setup/infra-neutral.conf`（内容不同就原子替换）。`infra-setup.py`（`infra-setup.sh` 保留，当前入口为 infra-setup.py）不加 `--apply` 时只检查并列出 `WOULD APPLY`，加 `--apply` 后在第一次改动前确认一次（`--yes` 跳过）；退出码 0 = 已是期望状态，3 = 检查发现需改动，1 = 失败或未授权，2 = 用法错误。`--mgmt`（非 `--offline`）检查时只读核对 `apps/ubuntu-<ver>/<arch>/Packages.gz`：仓库缺失或不可读、或缺少任一必需顶层包才算待改动（只核对顶层包名，不核对依赖闭包）；`--apply` 仍每次刷新离线缓存。它默认只读取脚本自身目录：存在 `01-global.yaml`
 （setup 建立的项目链接）时以其 `common.switch.system` 为准，缺席的键回退到中性值；没有 global 时
 使用 `deploy_infra.py` 写入的 `infra-runtime.conf` 管理块（只解析、不执行），二者都没有时使用
 `8.8.8.8`、`ntp.ubuntu.com`、`Etc/UTC`；`deploy_infra.py` 读取同一文件，并只在 global

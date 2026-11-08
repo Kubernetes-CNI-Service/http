@@ -193,32 +193,26 @@ def _required_list(value: object, label: str) -> list[str]:
 def load_neutral_defaults(
     neutral_file: Path = DEFAULT_NEUTRAL,
 ) -> tuple[list[str], list[str], str]:
+    """The neutral DNS/NTP/timezone through ubuntu24_host's one strict reader (v3.1.2 WP-2, O2).
+
+    The reader lives in infra-setup.py's sibling host module, imported here where it is used: --teardown and the
+    checks that never read the neutral file keep their v3.1.1 dependencies.  As in infra-setup.py, root leaves no
+    bytecode beside the sources.
+    """
+    sys.dont_write_bytecode = True
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    import ubuntu24_host
+
     try:
-        lines = neutral_file.read_text(encoding="utf-8").splitlines()
+        raw = neutral_file.read_bytes()
     except FileNotFoundError as exc:
         raise DeployError(f"中性默认值权威文件不存在：{neutral_file}") from exc
-    expected_keys = ("DNS", "NTP", "TIMEZONE")
-    if len(lines) != len(expected_keys):
-        raise DeployError("中性默认值权威文件必须恰好包含 DNS/NTP/TIMEZONE 三行")
-    values: dict[str, str] = {}
-    for expected_key, line in zip(expected_keys, lines):
-        match = re.fullmatch(r"([A-Z]+)=([A-Za-z0-9][A-Za-z0-9._:/+-]*)", line)
-        if match is None or match.group(1) != expected_key:
-            raise DeployError(f"中性默认值权威文件行无效：{line!r}")
-        values[expected_key] = match.group(2)
     try:
-        if ipaddress.ip_address(values["DNS"]).version != 4:
-            raise ValueError
-    except ValueError as exc:
-        raise DeployError("中性 DNS 必须是单个 IPv4 地址") from exc
-    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", values["NTP"]):
-        raise DeployError("中性 NTP 必须是单个安全主机名")
-    if not re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_+.-]*(?:/[A-Za-z0-9][A-Za-z0-9_+.-]*)*",
-        values["TIMEZONE"],
-    ):
-        raise DeployError("中性 timezone 必须是安全 IANA 名称")
-    return [values["DNS"]], [values["NTP"]], values["TIMEZONE"]
+        dns, ntp, zone = ubuntu24_host.parse_neutral_defaults(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ubuntu24_host.HostConfigError) as exc:
+        raise DeployError(f"中性默认值权威文件无效：{neutral_file}：{exc}") from exc
+    return [dns], [ntp], zone
 
 
 def _load_common_with_http_port(

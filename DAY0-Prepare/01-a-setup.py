@@ -19,7 +19,8 @@ ethernet/eth.csv → ../DAY0-Prepare/activate-project/02-devices_config.csv；�
 
 激活分 6 步，每一步都能重复执行（R-016 §4.2）；不回滚、不加切换标记，出了问题就再跑一次 setup：
   1. 校验目标项目，什么都不写；不通过以 2 退出。
-  2. 准备目标项目（模板补齐、公钥、P2P 选择、输出目录），只写这个项目；出错以 1 退出，不切换。
+  2. 准备目标项目（模板补齐、公钥、P2P 选择、输出目录、受管 initial-setup 的 infra-neutral.conf），
+     只写这个项目；出错以 1 退出，不切换。
   3. 核对链接规格表（project_contract.SETUP_LINK_SPECS），错误只计数。
   4. 切换 activate-project：已指向目标就跳过；原来指向另一个项目时询问一次（-y/--yes 跳过）。
      随后按目标项目刷新 4 个公钥目录里逐把公钥的链接、latest_yaml、共享镜像、optimize sample、
@@ -113,6 +114,8 @@ import ssh_key_preparation as ssh_keys
 ZTP          = os.path.normpath(os.path.join(HERE, "..", "ztp"))
 TEMPLATE_DIR = os.path.join(HERE, "template")                # DAY0-Prepare/template/
 IMAGE_DIR    = os.path.join(HTTP_BASE, "image")               # 项目无关的共享系统镜像
+# D-3（v3.1.2 WP-1）：准备步骤把代码树里这一份中性 DNS/NTP/TIMEZONE 写进受管 initial-setup 的缺省 tool 根。
+INFRA_NEUTRAL_SOURCE = os.path.join(HTTP_BASE, "infra", "infra-neutral.conf")
 
 # ── 固定映射：(ztp相对路径, 项目相对路径, 类型) ──────────────────────────────
 # 类型：
@@ -3974,6 +3977,43 @@ def _setup_impl(proj_dir, *, server_delegated=False):
             else:
                 open(target, "a").close()
                 print(f"  [TOUCH] {row.target}")
+    # D-3 (v3.1.2 WP-1, O1 ①): the default managed initial-setup tool root's only neutral-service source
+    # (ztp/config_sync_authority.py::ManagedInitialMethodCycle._neutral_image) is the tree's infra/infra-neutral.conf:
+    # equal bytes are left alone, other bytes are replaced atomically by a 0644 file.  Never through a link out of the
+    # project; a directory or other non-file there is an error, kept.  --tool-inputs roots stay the operator's.
+    tool_root = os.path.join(proj_dir, "infiniband", "bringup", "xdr-initial-setup")
+    neutral = os.path.join(tool_root, "infra-neutral.conf")
+    shown = os.path.relpath(neutral, proj_dir)
+    if not os.path.isfile(INFRA_NEUTRAL_SOURCE) or os.path.islink(INFRA_NEUTRAL_SOURCE):
+        print(_c(RED, f"  [ERROR] 中性默认值来源不是普通文件：{INFRA_NEUTRAL_SOURCE}"))
+        _LINK_ERRORS += 1
+    elif _safe_target_path(proj_dir, neutral) is not None:
+        with open(INFRA_NEUTRAL_SOURCE, "rb") as handle:
+            wanted = handle.read()
+        current = os.lstat(neutral) if os.path.lexists(neutral) else None
+        if current is not None and not (stat.S_ISREG(current.st_mode) or stat.S_ISLNK(current.st_mode)):
+            print(_c(RED, f"  [ERROR] {shown} 是目录或特殊文件，跳过（请手动处理）"))
+            _LINK_ERRORS += 1
+        elif current is not None and stat.S_ISREG(current.st_mode) and Path(neutral).read_bytes() == wanted:
+            print(f"  [OK]    {shown}")
+        elif _DRY_RUN:
+            print(_c(CYAN, f"  [DRY] 写入 {shown} ← infra/infra-neutral.conf"))
+        else:
+            # The consumer refuses a group- or world-writable tool root: its mode does not follow the umask.
+            os.makedirs(tool_root, mode=0o755, exist_ok=True)
+            descriptor, temporary = tempfile.mkstemp(prefix=".infra-neutral.conf.", dir=tool_root)
+            with os.fdopen(descriptor, "wb") as handle:
+                os.fchmod(handle.fileno(), 0o644)
+                handle.write(wanted)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, neutral)
+            directory = os.open(tool_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+            print(_c(GREEN, f"  [WRITE] {shown} ← infra/infra-neutral.conf"))
     if _LINK_ERRORS:
         print(_c(RED, f"准备目标项目有 {_LINK_ERRORS} 个错误：没有切换，处理后重跑 setup"))
         sys.exit(1)

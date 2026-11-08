@@ -100,6 +100,37 @@ def infra_settings(document: object) -> tuple:
     return dns, ntp, timezone, errors, warnings
 
 
+NEUTRAL_KEYS = ("DNS", "NTP", "TIMEZONE")
+
+
+def parse_neutral_defaults(text: str) -> tuple:
+    """(dns, ntp, timezone) from infra-neutral.conf text: the one reader of deploy_infra.py and infra-setup.py.
+
+    Strict, inert KEY=VALUE (docs/deployment/README.md; v3.1.2 O2): exactly the lines DNS=, NTP=, TIMEZONE= in this
+    order, each ending in LF -- no CRLF, no comment or blank line, no last line without its newline.  DNS is one
+    dotted-quad IPv4 address without leading zeros, NTP one host name, TIMEZONE a safe IANA name.  The messages are
+    the kept infra-setup.sh's; infra-setup.py prints them after "ERROR: ".
+    """
+    if not text.endswith("\n"):
+        raise HostConfigError("neutral defaults are incomplete or invalid")
+    lines = text[:-1].split("\n")
+    values = {}
+    for number, line in enumerate(lines, 1):
+        key, _, value = line.partition("=")
+        if key not in NEUTRAL_KEYS or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/+-]*", value):
+            raise HostConfigError(f"invalid neutral defaults line {number}")
+        if number > len(NEUTRAL_KEYS) or key != NEUTRAL_KEYS[number - 1]:
+            raise HostConfigError("neutral defaults must be ordered DNS/NTP/TIMEZONE")
+        values[key] = value
+    octet = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+    if (len(lines) != len(NEUTRAL_KEYS)
+            or not re.fullmatch(rf"{octet}(?:\.{octet}){{3}}", values["DNS"])
+            or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", values["NTP"])
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_+.-]*(?:/[A-Za-z0-9][A-Za-z0-9_+.-]*)*", values["TIMEZONE"])):
+        raise HostConfigError("neutral defaults are incomplete or invalid")
+    return values["DNS"], values["NTP"], values["TIMEZONE"]
+
+
 def read_public_keys(key_dir: Path) -> tuple:
     """(file names, key lines, errors, warnings); plain keys only, no options or forced commands."""
     names, lines, errors, warnings = [], [], [], []

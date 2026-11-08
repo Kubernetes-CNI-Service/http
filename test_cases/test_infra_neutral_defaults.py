@@ -85,11 +85,20 @@ class InfraNeutralDefaultsTests(unittest.TestCase):
                     DEPLOY.load_neutral_defaults(malformed)
 
         setup_source = (ROOT / "infra/infra-setup.py").read_text(encoding="utf-8")
+        host_source = (ROOT / "infra/ubuntu24_host.py").read_text(encoding="utf-8")
         # The setup entry reads the same sibling authority as inert lines; it never executes it.
+        # v3.1.2 O3 (owner 2026-11-07「同意你在v3.1.2里的默认建议」, http dev 转述): WP-2 moved the line split into the
+        # shared host module, so the second literal -- until v3.1.1 'key, _, value = line.partition("=")' in
+        # infra-setup.py -- is pinned where it now lives, and infra-setup.py must call that reader.  The intent (read
+        # as inert lines, never executed) is unchanged; the host module is held to it too ('"source"' is left out
+        # there: it is an IPMI LAN field name in that module).
         self.assertIn('neutral = self.source_dir / "infra-neutral.conf"', setup_source)
-        self.assertIn('key, _, value = line.partition("=")', setup_source)
+        self.assertIn("host.parse_neutral_defaults(", setup_source)
+        self.assertIn('key, _, value = line.partition("=")', host_source)
         for executor in ("exec(", "eval(", '"source"', "runpy"):
             self.assertNotIn(executor, setup_source)
+        for executor in ("exec(", "eval(", "runpy"):
+            self.assertNotIn(executor, host_source)
         # The kept infra-setup.sh keeps the same inert-read contract.
         shell_source = (ROOT / "infra/infra-setup.sh").read_text(encoding="utf-8")
         self.assertIn('neutral_config="${source_dir}/infra-neutral.conf"', shell_source)
