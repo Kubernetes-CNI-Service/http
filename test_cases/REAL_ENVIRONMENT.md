@@ -3359,8 +3359,19 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
    - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
    - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，项目目录和其余要改的条目逐项打印
-     `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；再跑一次 load 没有逐项的 `[PERM]` 行，
-     汇总写改正 0 项（幂等）；
+     `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；
+   - 紧接着再跑一次 load（两次之间不在页面触发采集：root 的 worker 起的 cron.sh 往项目里写的文件，下一次闸门前那次会交给 `U`，
+     那属于预期，不在本条判读）。一次实际 load 有三处改正，各打一行汇总 `[PERM] 权限检查完成：改正 N 项（…）`，按出现顺序是闸门前、
+     release 交接（启动 ZTP 监控之前）、load 结束时（`11-load.py::main` 里 `repair_project_permissions` 的三个调用点）：
+     - 闸门前那次没有逐项的 `[PERM]` 行，汇总写改正 0 项（幂等，设计 §4.6）；
+     - release 交接那次会逐项列出这次 load 由 root 新提交的 release 成员（例如 `99-output-ztp/current-release.json`、
+       `99-output-<网络>/<release>/` 下的清单和配置、提交后的 DHCP 发布文件，`0:0 <模式> -> U:<U 主组> <模式>`），属于预期：
+       发布提交由 root 建文件、不在提交时 fchown，交接那次才把它们交给 `U`（推断，读码）；
+     - load 结束时那次只列 release 交接之后 root 新写进项目的文件（例如重启 ZTP 监控时 load 重写的 `99-output-ztp/ztp-monitor.pid`，
+       推断），没有别的逐项行；
+     - 证伪条件：闸门前那次在第二次 load 仍有逐项行，或结束时那次列出 release 交接之前就存在的条目，说明改正不幂等或交接漏改，是缺陷，
+       记录证据后停下；release 交接那次在第二次 load 没有任何逐项行，说明「release 成员每次由 root 新建」这条推断不成立，
+       按实测改本卡；
    - `sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 不列；
    - 在隔离副本里放一个属于 `V` 的文件再跑：load 列出全部第三方属主条目（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，
      `stat` 前后不变；恢复后继续（agentW6 报告第 9 节 ④）；
@@ -3405,8 +3416,10 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 预期结果
 
-- 正向结果：见各步。方式 A 结束时，除第 5 步列出的 root 私有状态外，项目里的条目都属于 `U`；第 2 步的第二次 load 没有改动。
-- 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步属主查不到时拒绝并给出 chown 提示；第 8 步按所列退出码和提示。
+- 正向结果：见各步。方式 A 结束时，除第 5 步列出的 root 私有状态外，项目里的条目都属于 `U`；第 2 步的第二次 load 在闸门前那次
+  改正没有改动，release 交接和结束时那两次的逐项行按第 2 步判读。
+- 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步属主查不到时拒绝并给出 chown 提示；第 2 步遇到第三方（`V`）属主时列出全部
+  第三方属主条目后停下，什么都不改；第 8 步按所列退出码和提示。
 - 不允许发生的副作用：替 root 生成 key；改动 root 私有状态的属主或模式；跟随项目里的链接改到项目外；
   动 `V` 或 root 的 crontab；碰 `/etc/hosts`；改 eth_jump。
 - 需要保存的证据：脱敏的命令输出（身份说明行、`[PERM]` 汇总、`[OWNER]` 汇总、拒绝提示）、`id`、各步的属主列表
@@ -3414,15 +3427,18 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 故障注入与清理
 
-- 故障注入：第 1 步的两类加锁失败；第 2 步的 0700 目录和缺 key；第 3 步的 `touch ~/.ssh`；第 8 步的 `V`。
-- 清理/回滚验证：按初始快照恢复项目的属主和模式（`chown`、`chmod`，只针对快照里的路径）；删掉测试加的 cron 行；
+- 故障注入：第 1 步的两类加锁失败；第 2 步的 0700 目录、缺 key、属于 `V` 的文件和 `--dry-run`；第 3 步的 `touch ~/.ssh`；
+  第 8 步的 `V`。
+- 清理/回滚验证：按初始快照恢复项目的属主和模式（`chown`、`chmod`，只针对快照里的路径）；删掉第 2 步放的 `V` 属主文件；
+  删掉测试加的 cron 行；
   恢复临时改动的锁文件模式和 key 文件名；不删除运行锁和 `cron.lock`；不碰 `/etc/hosts`，不改 eth_jump。
-- 重复执行与幂等性：第 2 步重复 load 没有逐项的 `[PERM]` 行（汇总为改正 0 项）；重复 unload 不再动 crontab。
+- 重复执行与幂等性：第 2 步重复 load 时，闸门前那次改正没有逐项的 `[PERM]` 行（汇总为改正 0 项），release 交接和结束时那两次的
+  逐项行按第 2 步判读；重复 unload 不再动 crontab。
 - 风险：load 会 chown、chmod 项目（prod 上不由 AI 执行）；unload 会读写 `U` 的整个 crontab，按 `TC-REAL-REQ10C-AUTO-001` 的同 UID
   静默要求执行；迁移期间交换机只认 root 的 key 时，monitor 和采集靠 root 的默认 key 作后备（O12 ①）；`U` 用 ssh-agent 时 sudo
   会丢掉 agent。已知限制（不在本卡验证）：方式 A 下要拿代码树 `.deployment.lock` 的操作员 CLI（`ztp/manual-ztp.py`、
-  `ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py`、单独运行的 c1）必须加 sudo（`docs/operations/README.md` 的示例已带 sudo）；`feedback.py`、
-  `sample_links.py` 在方式 A 下的处理待 owner 决定。
+  `ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py`、单独运行的 c1）必须加 sudo（`docs/operations/README.md` 的示例已带 sudo）；方式 A 下
+  `feedback.py`、`sample_links.py` 用不了，要用就以 root 登录（I-051，已知限制）。
 
 ### 自动化状态
 

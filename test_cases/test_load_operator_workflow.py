@@ -267,9 +267,9 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
         expected = {name for name in new if not (flow.project / name).is_symlink()
                     and name != ROOT_PRIVATE_TEMPLATE_ENTRY
                     and not name.startswith(ROOT_PRIVATE_TEMPLATE_ENTRY + "/")}
-        for name in ("laptop.pub", "mgmt-server.pub", "02-devices_config.csv", "99-output-infra", "99-output-ztp"):
-            self.assertIn(name, expected)
         self.assertLessEqual(set(repaired), load.before)
+        for name in ("laptop.pub", "mgmt-server.pub", "02-devices_config.csv", "99-output-infra", "99-output-ztp"):
+            self.assertIn(name, expected | set(repaired))     # made by this load, or root's and repaired by it
         self.assertEqual(expected | set(repaired), set(handed))
 
     # ---------------------------------------------------------------- upgrade
@@ -614,7 +614,7 @@ class LoadCrossScriptOwnershipWorkflowTests(_OperatorFlow, unittest.TestCase):
         # them against its own euid) and §4.6 (way A ends with a sudo unload, which must go through); agentOP 4.4.
         flow = self.flow()
         operator = (flow.u.pw_uid, flow.u.pw_gid)
-        model, _lines, _repaired = self.migrating_project(flow)   # way A's first sudo load, as in the test above
+        model, _lines, repaired = self.migrating_project(flow)    # way A's first sudo load, as in the test above
         authority = UNSETUP.config_sync_authority
         output = flow.project / "99-output-ztp"
         output.mkdir()
@@ -631,13 +631,15 @@ class LoadCrossScriptOwnershipWorkflowTests(_OperatorFlow, unittest.TestCase):
 
         with self.process_as(flow, euid=0, sudo=flow.u):
             load = self.load(flow, model=model)
-        # 以谁执行 / 文件属于谁 (load): root's repair never touched what is under the two namespaces (no fchown, no
-        # fchmod, still root's), whatever else load went on to do; it handed 99-output-ztp itself to U.
+        # 文件属于谁 (load): root's repair never touched what is under the two namespaces (no fchown, no fchmod,
+        # still root's), whatever else load went on to do.
         self.assertEqual(set(), private & model.changed())
         for root in (manual, methods):
             for path in (root, *root.rglob("*")):
                 self.assertEqual((0, 0), model.owner(path), path)
-        self.assertEqual(0, load.result.rc, load.result.stderr)
+        # 以谁执行 (load) and the rest of 文件属于谁: the same sudo load as way A's (one identity line, no runuser,
+        # U's key directory, new and repaired entries U's), 99-output-ztp itself among the repaired ones.
+        self.assert_sudo_load_acts_for_operator(flow, load, repaired=repaired | {"99-output-ztp"})
         self.assertIn(W6.perm_line(output, (0, 0, output_mode), (*operator, output_mode & ~0o022)),
                       W6.perm_lines(load.result.stdout))
         self.assertEqual(operator, model.owner(output))
