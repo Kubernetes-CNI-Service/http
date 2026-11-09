@@ -605,7 +605,7 @@ class UnsetupOperatorCrontabTests(Fixture):
         # 开发计划 :112 (Docker is frozen), 04 Q-006 result column (owner 2026-11-09 「Q-006 选 (b)」), review d-3; guide
         # 8.1 G4 (b) #3: with HTTP_ZTP_RUNTIME_BACKEND=supervisor 02-unsetup works out no identity (resolve_operator is
         # not called) and prints no identity line and no WARN.  Root in a container whose project owner is missing from
-        # passwd: without REQ10C state the pointer, links and manifest go (exit 0); with a state directory owned by that
+        # passwd. Without REQ10C state the pointer, links and manifest go (exit 0); with a state directory owned by that
         # uid, v3.1.1 stops with 1 at the directory owner check (_req10c_crontab_lock), removing nothing.  13-unload on
         # this backend: UnloadOperatorIdentityTests.test_supervisor_backend_keeps_v311_unload.
         for kind in (None, "idle", "watch"):
