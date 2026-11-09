@@ -698,6 +698,9 @@ class PermissionRepairTests(M3.SystemdLoadMainFixture, unittest.TestCase):
             project = LOAD.HTTP_ROOT / "DAY0-Prepare/demo"
             (project / "99-output-dhcp").mkdir()
             (project / "99-output-dhcp").chmod(0o755)
+            # The receipt root exists whenever load holds an A receipt; v3.1.2 BF-9 keeps its restore-pending
+            # marker there (guide BF-9: the marker path comes from the project and the selector id only).
+            (project / "99-output-ztp/rollback-receipts").mkdir(parents=True)
             for name in bound_names:
                 (project / name).write_bytes(b"published by A\n")
                 (project / name).chmod(0o644)

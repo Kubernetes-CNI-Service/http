@@ -12006,7 +12006,11 @@ class LatestRetirementRecoveryTests(unittest.TestCase):
     def _run_server_main_until_setup(
         self, project: Path, *, quiesce, setup,
     ) -> tuple[int, str]:
-        """Real main() on a Linux management server, stopped by the setup fixture."""
+        """Real main() on a Linux management server, stopped by the setup fixture.
+
+        The freeze returns None here, so the A receipt branch is not taken; InterruptedLoadReceiptRecoveryTests
+        runs that branch (I-048, v3.1.2 BF-9).
+        """
         stderr = io.StringIO()
         with ExitStack() as stack:
             def patch(name: str, **kwargs):
@@ -12394,6 +12398,653 @@ class LatestRetirementRecoveryTests(unittest.TestCase):
             self.assertTrue(os.path.lexists(nvos_entry))
             self.assertFalse(nvos_entry.exists())
             self.assertEqual(published["cumulus"], cumulus_entry.resolve(strict=True))
+
+
+class InterruptedLoadReceiptRecoveryTests(unittest.TestCase):
+    """I-048 (v3.1.2 BF-9): a same-project load interrupted after setup began is restored by the next load.
+
+    Expected behaviour, never taken from the implementation:
+    - 待确认问题 I-022 (:60): when a load is interrupted, the next load restores before it calls setup;
+    - 问题文档 I-048 (:1779): the fix only adds a self-healing branch on top of the A receipt flow, so an
+      unexplained drift still holds (ReleaseTransactionTests.test_existing_receipt_is_not_reused_after_flat_a_drift);
+      owner 2026-11-09「Q-007 选 (a)」(05 P-010, a principle 8 exception);
+    - R-016 design :26 (decision C: the operator reruns load); 需求文档 :934 rule 2 (a foreign entry at a managed
+      name is reported, never replaced or deleted); 开发计划 :112 (Docker frozen: the supervisor keeps v3.1.1);
+    - prepare_runtime_rollback_receipt's docstring: the receipt does not authorize rollback after a new parent
+      has committed.
+    The scene is the field's (guide BF-9 现状): a Linux systemd management server, the project is the active
+    project and has 99-output-ztp/current.  main is real with the real freeze, the real schema4 receipt, the real
+    validate_inputs and HTTP gates, the real permission repair and the real A restore.  Host services, the
+    generators and the release commit are stand-ins; setup is the observed stand-in (guide BF-9 先写的测试).
+    The marker the tests write by hand follows the guide's text: <project>/99-output-ztp/rollback-receipts/
+    <A id>.restore-pending, A's 20-hex release id and a newline, a regular 0600 file (guide BF-9 改什么 1).
+    """
+
+    setUp_release = ReleaseTransactionTests.setUp
+    tearDown = ReleaseTransactionTests.tearDown
+    _activate_pointer = ReleaseTransactionTests._activate_pointer
+    _pointer_publication = ReleaseTransactionTests._pointer_publication
+    _http_main_public_source_fixture = ReleaseTransactionTests._http_main_public_source_fixture
+    _http_linux_public_ancestor_model = ReleaseTransactionTests._http_linux_public_ancestor_model
+
+    A_RUNTIME = {
+        "ztp-bootstrap_oob.sh": b'A oob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
+        "ztp-bootstrap_oobofoob.sh": b'A oobofoob bootstrap\nZTP_UPGRADE_ENABLED="false"\n',
+        "ztp.json": b'{"release":"A"}\n',
+    }
+    B_ZTP_JSON = b'{"release":"interrupted-B"}\n'
+    DHCP_NAMES = ("dhcp-release-manifest.json", "dhcpd.conf", "dhcpd_eth.hosts",
+                  "dhcpd_ib.hosts", "dhcpd_nvl.hosts")
+    A_ETH = "20260830_120000_combine"          # ReleaseTransactionTests.setUp's cumulus release
+    A_NVOS = "20261108_120000-ib"
+    B_ETH = "20261109_090000_combine"
+    STOP = "stop at the observed setup boundary"
+
+    def setUp(self) -> None:
+        self.setUp_release()
+        # tearDown restores both; a failure later in this setUp skips tearDown, so register them as cleanups too.
+        self.addCleanup(setattr, LOAD, "ZTP_DIR", self.old_ztp_dir)
+        self.addCleanup(self.temporary.cleanup)
+        self.root, self.ztp, self.project = (path.resolve() for path in (self.root, self.ztp, self.project))
+        LOAD.ZTP_DIR = self.ztp
+        self.installed = self.root / "private-schema4-installed"
+        for patcher in self._field_patches():
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        global_file = self.project / "01-global.yaml"
+        document = yaml.safe_load(global_file.read_text(encoding="utf-8"))
+        document["common"]["mgmt"]["http"]["http_root"] = str(self.root)
+        document["common"]["mgmt"]["http"]["address"] = "192.0.2.20"
+        global_file.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+        (self.project / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n"
+            "mgmt,192.0.2.0,255.255.255.0,192.0.2.100,192.0.2.120,192.0.2.1,192.0.2.20,oob,no\n",
+            encoding="utf-8",
+        )
+        # The operator's management key pair (load checks it with /usr/bin/ssh-keygen -y) and the project keys
+        # a committed load leaves: the injected management key and one laptop key, all 0644.
+        from test_cases.test_ssh_key_preparation_contract import public_line
+        self.ssh = self.root / "operator-home/.ssh"
+        self.ssh.mkdir(parents=True)
+        self.ssh.chmod(0o700)
+        subprocess.run(["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "fixture@management-server",
+                        "-f", os.fspath(self.ssh / "id_ed25519")], check=True, capture_output=True)
+        (self.ssh / "id_ed25519.pub").chmod(0o644)
+        for name, payload in ((".management-pubkeys", b"mgmt-server.pub\n"),
+                              ("mgmt-server.pub", (self.ssh / "id_ed25519.pub").read_bytes()),
+                              ("laptop.pub", public_line("ssh-ed25519", 31, "laptop.pub"))):
+            (self.project / name).write_bytes(payload)
+            (self.project / name).chmod(0o644)
+        self._publish_nvos_a()
+        self._http_main_public_source_fixture()
+        # A as a committed load leaves it: parent, pinned generation and current (the real producers), the flat
+        # runtime files, setup's public-key and DHCP publication links through the pointer, installed DHCP.
+        inputs = LOAD.ProjectInputs(
+            global_file=global_file, devices_file=self.project / "02-devices_config.csv",
+            subnet_file=self.project / "02-dhcp-subnet_config.csv",
+            p2p_file=self.project / "demo P2P_v1.0.xlsx", device_types=frozenset({"eth"}), pubkeys=(),
+            settings=LOAD.load_global(global_file),
+        )
+        with redirect_stdout(io.StringIO()):
+            LOAD.validate_and_publish_release(self.project, inputs)
+            generation = LOAD.stage_pinned_generation(
+                self.project, self.project / "99-output-ztp/current-release.json",
+                self.ztp / "config/isc-dhcp-server",
+            )
+            LOAD.commit_pinned_generation(self.project, generation, expected_current=None)
+        self.release_id = generation.name
+        self.selector = "generations/" + self.release_id
+        for name, payload in self.A_RUNTIME.items():
+            (self.ztp / name).write_bytes(payload)
+        keys = self.ztp / "config/publickey"
+        keys.mkdir(parents=True, exist_ok=True)
+        for name in ("laptop.pub", "mgmt-server.pub"):
+            (keys / name).symlink_to(self._pointer_publication(keys, name))
+        published = self.ztp / "config/isc-dhcp-server"
+        source = self.project / "99-output-dhcp"
+        source.mkdir()
+        for name in self.DHCP_NAMES:
+            (source / name).write_bytes((published / name).read_bytes())
+            (published / name).unlink()
+            (published / name).symlink_to(self._pointer_publication(published, "99-output-dhcp/" + name))
+        self.installed.mkdir(mode=0o700)
+        for name in self.DHCP_NAMES[1:]:
+            # ReleaseTransactionTests.setUp's literal flat bytes, which A's generation pinned.
+            (self.installed / name).write_bytes((name + "\n").encode("ascii"))
+        self.marker = self.project / "99-output-ztp/rollback-receipts" / (self.release_id + ".restore-pending")
+
+    def _field_patches(self) -> list:
+        """The private HTTP root, lock and installed DHCP of this field (setUp and the killed child process)."""
+        return [mock.patch.object(LOAD, name, value) for name, value in (
+            ("HTTP_ROOT", self.root), ("MANIFEST", self.ztp / ".setup_manifest"),
+            ("DEPLOYMENT_LOCK", self.root / ".deployment.lock"),
+            ("dhcp_file_mappings", mock.Mock(return_value={
+                self.ztp / "config/isc-dhcp-server" / name: self.installed / name
+                for name in self.DHCP_NAMES[1:]})),
+        )]
+
+    def _publish_nvos_a(self) -> None:
+        """A's NVOS release through the real publisher (_publish_single_nvos, _set_latest_yaml)."""
+        output = self.project / "99-output-ib_nvl"
+        output.mkdir()
+        service = self.ztp / "config/nvos"
+        (service / "template").mkdir(parents=True)
+        (service / "template/99-output-ib_nvl").symlink_to(os.path.relpath(output, service / "template"))
+        (service / "template/01-global.yaml").symlink_to(
+            os.path.relpath(self.project / "01-global.yaml", service / "template"))
+        shutil.copy2(ROOT / "ztp/config/nvos/default.yaml", service / "default.yaml")
+        directory = service / "template/99-output-ib_nvl" / self.A_NVOS
+        directory.mkdir()
+        (directory / "IB-one.yaml").write_text(
+            "- set:\n    interface:\n      eth0:\n        ipv4:\n          address:\n"
+            "            192.0.2.31/24: {}\n          gateway:\n            192.0.2.1: {}\n",
+            encoding="utf-8",
+        )
+        devices = {"ib-one": {
+            "hostname": "IB-one", "dev_type": "ib", "eth0_ip_cidr": "192.0.2.31/24", "eth0_gw": "192.0.2.1",
+            "eth0_mac": "02:00:00:00:01:31", "eth1_mac": "", "eth1_ip_cidr": "", "eth1_gw": "",
+            "identity_pending": False,
+        }}
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(PUBLISHER._publish_single_nvos(PUBLISHER._nvos_dir_context(str(directory)), devices))
+        self.assertEqual(self.A_NVOS, os.readlink(output / "latest"))
+
+    def _receipt(self) -> Path:
+        """The A receipt the interrupted load's freeze step left (the real producer, active project = A's)."""
+        with redirect_stdout(io.StringIO()):
+            return LOAD.prepare_active_runtime_rollback_receipt(self.project, self.selector)
+
+    def _interrupt(self, *, marker: bool = True) -> None:
+        """What a load killed after setup began leaves (guide BF-9 先写的测试「被打断后的现场」)."""
+        if marker:
+            self.marker.write_bytes((self.release_id + "\n").encode("ascii"))
+            self.marker.chmod(0o600)
+        nvos = self.project / "99-output-ib_nvl/latest"
+        os.replace(nvos, nvos.parent / ".latest.retired")
+        b_release = self.project / "99-output-eth" / self.B_ETH
+        b_release.mkdir()
+        (b_release / "leaf01.yaml").write_text("- set: {}\n", encoding="utf-8")
+        (b_release / ".published-complete").write_text("complete\n", encoding="utf-8")
+        eth = self.project / "99-output-eth/latest"
+        eth.unlink()
+        eth.symlink_to(self.B_ETH)
+        (self.ztp / "ztp.json").write_bytes(self.B_ZTP_JSON)
+
+    def _scene(self) -> dict[str, object]:
+        def link(path: Path):
+            return os.readlink(path) if path.is_symlink() else None
+
+        return {
+            "eth": link(self.project / "99-output-eth/latest"),
+            "nvos": link(self.project / "99-output-ib_nvl/latest"),
+            "retired": link(self.project / "99-output-ib_nvl/.latest.retired"),
+            "ztp.json": (self.ztp / "ztp.json").read_bytes(),
+            "marker": self.marker.read_bytes() if self.marker.is_file() else None,
+        }
+
+    def _a_scene(self, marker: bytes | None) -> dict[str, object]:
+        return {"eth": self.A_ETH, "nvos": self.A_NVOS, "retired": None,
+                "ztp.json": self.A_RUNTIME["ztp.json"], "marker": marker}
+
+    def _interrupted_scene(self) -> dict[str, object]:
+        return {"eth": self.B_ETH, "nvos": None, "retired": self.A_NVOS, "ztp.json": self.B_ZTP_JSON,
+                "marker": (self.release_id + "\n").encode("ascii")}
+
+    def _tree(self) -> dict[str, tuple]:
+        """Every entry of the project, the ZTP tree and the installed DHCP: kind, mode, bytes or link text."""
+        state: dict[str, tuple] = {}
+        for top in (self.project, self.ztp, self.installed):
+            for directory, names, files in os.walk(top):
+                for name in names + files:
+                    path = Path(directory, name)
+                    metadata = path.lstat()
+                    if stat.S_ISLNK(metadata.st_mode):
+                        state[os.fspath(path)] = ("link", os.readlink(path))
+                    elif stat.S_ISDIR(metadata.st_mode):
+                        state[os.fspath(path)] = ("directory", stat.S_IMODE(metadata.st_mode))
+                    else:
+                        state[os.fspath(path)] = ("file", stat.S_IMODE(metadata.st_mode), path.read_bytes())
+        return state
+
+    def _receipt_tree(self) -> dict[str, tuple]:
+        receipt = self.project / "99-output-ztp/rollback-receipts" / self.release_id
+        return {os.fspath(path.relative_to(receipt)): (path.lstat().st_ino, stat.S_IMODE(path.lstat().st_mode),
+                                                       path.read_bytes() if path.is_file() else None)
+                for path in sorted(receipt.rglob("*"))}
+
+    def _operator(self, project):
+        """Root acting for the project's owner (方式 A), played on injected inputs, never os.geteuid."""
+        me = pwd.getpwuid(os.geteuid())
+        operator = pwd.struct_passwd((me.pw_name, "x", me.pw_uid, me.pw_gid, "fixture",
+                                      str(self.root / "operator-home"), "/bin/sh"))
+
+        def by_uid(uid):
+            if uid != operator.pw_uid:
+                raise KeyError(uid)
+            return operator
+
+        def by_name(name):
+            if name != operator.pw_name:
+                raise KeyError(name)
+            return operator
+
+        return LOAD.operator_identity.resolve_operator(
+            project, euid=0, environ={"SUDO_USER": operator.pw_name, "SUDO_UID": str(operator.pw_uid)},
+            getpwuid=by_uid, getpwnam=by_name,
+        )
+
+    def _run(self, *extra: str, backend: str = "systemd", setup=None, patches=None):
+        """Real main() on a Linux management server; returns (rc, stdout, stderr, events).
+
+        events records ("quiesce", scene) and ("setup", scene) where main called them.  setup None stops the
+        run at the setup stand-in, as an interrupted run's next step would be the setup child.
+        """
+        from test_cases.linux_runtime_lock_model import declared_linux_fdinfo_for_darwin_fixture
+        events: list[tuple] = []
+
+        def quiesce(*_args, **_kwargs):
+            events.append(("quiesce", self._scene()))
+
+        def setup_stand_in(*args, **kwargs):
+            events.append(("setup", self._scene()))
+            if setup is None:
+                raise LOAD.LoadError(self.STOP)
+            return setup(*args, **kwargs)
+
+        candidate = SimpleNamespace(committed=False, directory_synced=True, precommit_check=None)
+
+        def validate_parent(*_args, dry_run=False, **_kwargs):
+            return None if dry_run else {"schema_version": 1, "release_id": "fixture-b"}
+
+        def install_and_commit(dry_run, *, parent_candidate=None, **_kwargs):
+            if not dry_run and parent_candidate is not None:
+                parent_candidate.committed = True
+
+        defaults = {
+            "runtime_os": mock.Mock(return_value="Linux"),
+            "service_runtime_backend": mock.Mock(return_value=SimpleNamespace(name=backend)),
+            "validate_runtime_options": mock.Mock(),
+            "require_no_pending_dhcp_transaction": mock.Mock(),
+            "resolve_project": mock.Mock(return_value=self.project),
+            "sync_marker_present": mock.Mock(return_value=False),
+            "_resolve_load_operator": mock.Mock(side_effect=self._operator),
+            "stop_native_ztp_monitors": mock.Mock(),
+            "initialize_from_template": mock.Mock(),
+            "validate_management_host": mock.Mock(return_value=True),
+            "plan_local_dhcp_runtime": mock.Mock(return_value=SimpleNamespace(
+                listener_names=("eno7",), listener_ifindexes=(17,), endpoint_ips=("192.0.2.20",))),
+            "confirm_ztp_monitor_start": mock.Mock(return_value=False),
+            "quiesce_services": mock.Mock(side_effect=quiesce),
+            "active_managed_services": mock.Mock(return_value=()),
+            "activate_project": mock.Mock(side_effect=setup_stand_in),
+            "render_ztp_runtime": mock.Mock(),
+            "snapshot_ztp_prefix_publication": mock.Mock(
+                return_value=LOAD.ZtpPrefixPublicationSnapshot(marker=None, links={})),
+            "configure_ztp_prefix_publication": mock.Mock(),
+            "restore_ztp_prefix_publication": mock.Mock(),
+            "_device_types_after_dhcp": mock.Mock(return_value=frozenset({"eth"})),
+            "verify_monitor_authority": mock.Mock(),
+            "generate_configs": mock.Mock(return_value=None),
+            "validate_and_publish_release": mock.Mock(side_effect=validate_parent),
+            "prepare_current_release": mock.Mock(return_value=candidate),
+            "mount_and_test_dhcp": mock.Mock(side_effect=install_and_commit),
+            "commit_prepared_release": mock.Mock(),
+            "publish_committed_dhcp_candidate": mock.Mock(),
+            "publish_native_apache_listener_config": mock.Mock(),
+            "preflight_services": mock.Mock(),
+            "confirm_service_start": mock.Mock(return_value=False),
+            "reset_completion_handoff_state": mock.Mock(),
+            "discard_prepared_release": mock.Mock(),
+        }
+        argv = [str(self.project), "--host-role=management-server", "--switch", "eth", "--no-upgrade",
+                "--skip-infra", *extra]
+        if backend == "supervisor":
+            # Docker frozen: the container's fixed /root/.ssh authority; its key helper and input checks are
+            # outside BF-9, so they are stand-ins here.
+            argv.append("--ssh-dir=/root/.ssh")
+            global_file = self.project / "01-global.yaml"
+            inputs = LOAD.ProjectInputs(
+                global_file=global_file, devices_file=self.project / "02-devices_config.csv",
+                subnet_file=self.project / "02-dhcp-subnet_config.csv", p2p_file=self.project / "p2p.xlsx",
+                device_types=frozenset({"eth"}), pubkeys=(), settings=LOAD.load_global(global_file),
+            )
+            defaults.update({
+                "ensure_management_key": mock.Mock(),
+                "prepare_pubkeys": mock.Mock(),
+                "validate_inputs": mock.Mock(return_value=(inputs, {})),
+                "supervisor_service_availability": mock.Mock(return_value=(True, True)),
+            })
+        defaults.update(patches or {})
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with ExitStack() as stack:
+            for name, value in defaults.items():
+                stack.enter_context(mock.patch.object(LOAD, name, value))
+            for name in ("build_report", "prepare_generation_report", "commit_prepared_generation_report",
+                         "discard_prepared_generation_report"):
+                stack.enter_context(mock.patch.object(LOAD.generation_report, name))
+            stack.enter_context(mock.patch.object(LOAD.sys, "stdin", io.StringIO()))
+            stack.enter_context(self._http_linux_public_ancestor_model())
+            stack.enter_context(declared_linux_fdinfo_for_darwin_fixture(LOAD))
+            stack.enter_context(redirect_stdout(stdout))
+            stack.enter_context(redirect_stderr(stderr))
+            result = LOAD.main(argv)
+        return result, stdout.getvalue(), stderr.getvalue(), events
+
+    def test_rerun_after_kill_on_active_project_restores_a_before_setup(self) -> None:
+        self._receipt()
+        self._interrupt()
+        receipt = self._receipt_tree()
+
+        result, stdout, stderr, events = self._run()
+
+        # 待确认问题 I-022 :60: the next load restores before setup.  Quiesce still sees the interrupted scene
+        # (the restore follows the service stop, guide BF-9 改什么 4); setup sees both latest links, the flat
+        # runtime and no retired link back to A (问题文档 I-048 :1779, the self-healing branch).
+        self.assertEqual(
+            [("quiesce", self._interrupted_scene()),
+             ("setup", self._a_scene((self.release_id + "\n").encode("ascii")))],
+            events[:2],
+        )
+        self.assertEqual(1, result, stderr)
+        self.assertIn("[FAILED] load 阶段失败：活动项目 setup 检查/切换", stderr)
+        self.assertIn(self.STOP, stderr)
+        self.assertIn("按 A 回执恢复被打断的 load", stdout)
+        # The immutable receipt is the authority, never rewritten.
+        self.assertEqual(receipt, self._receipt_tree())
+
+    def test_rerun_after_kill_first_repair_leaves_receipt_bound_objects(self) -> None:
+        # Guide BF-9 #1 variant (改什么 5, review low 6): with the marker the first repair keeps away from what the
+        # receipt binds with ctime (the five 99-output-dhcp publications, the top-level *.pub).  Here they carry a
+        # mode the repair would otherwise tighten (group write), as a receipt from v3.1.1 may bind them.
+        bound = [self.project / "99-output-dhcp" / name for name in self.DHCP_NAMES]
+        bound += [self.project / "laptop.pub", self.project / "mgmt-server.pub"]
+        for path in bound[:5]:
+            path.chmod(0o664)
+        self._receipt()
+        self._interrupt()
+        before = {path: (path.lstat().st_ctime_ns, stat.S_IMODE(path.lstat().st_mode)) for path in bound}
+
+        result, stdout, stderr, events = self._run()
+
+        self.assertEqual(["quiesce", "setup"], [event[0] for event in events][:2], stderr)
+        self.assertEqual(self._a_scene((self.release_id + "\n").encode("ascii")), events[1][1])
+        self.assertEqual(before, {path: (path.lstat().st_ctime_ns, stat.S_IMODE(path.lstat().st_mode))
+                                  for path in bound})
+
+    def test_drift_without_restore_marker_still_holds_and_writes_nothing(self) -> None:
+        self._receipt()
+        self._interrupt(marker=False)
+        before = self._tree()
+
+        result, stdout, stderr, events = self._run()
+
+        # 问题文档 I-048 :1779 and test_existing_receipt_is_not_reused_after_flat_a_drift: without the evidence of an
+        # interrupted load the drift is unexplained, so load holds at the freeze step exactly as before.
+        self.assertEqual(1, result)
+        self.assertIn("[FAILED] load 阶段失败：冻结旧版 release 以供显式回退", stderr)
+        self.assertRegex(stderr, r"\[ERROR\] (existing rollback receipt no longer matches A runtime"
+                                 r"|rollback YAML latest does not select A)")
+        self.assertEqual([], events)
+        self.assertNotIn("按 A 回执恢复", stdout)
+        self.assertEqual(before, self._tree())
+
+    def test_restore_marker_brackets_runtime_mutation(self) -> None:
+        # 待确认问题 I-022 :60 (derived: the record must exist before the first runtime mutation) and the
+        # receipt docstring (no rollback after a new parent has committed).
+        failing = mock.Mock(side_effect=LOAD.LoadError("template backfill failed before any runtime mutation"))
+        result, _stdout, stderr, events = self._run(patches={"initialize_from_template": failing})
+        self.assertEqual(1, result)
+        self.assertIn("[FAILED] load 阶段失败：补齐项目模板合同", stderr)
+        self.assertEqual([], events)
+        self.assertFalse(os.path.lexists(self.marker))
+
+        modes = []
+        result, stdout, stderr, events = self._run(
+            setup=lambda *_args, **_kwargs: modes.append(
+                self.marker.lstat().st_mode if os.path.lexists(self.marker) else None))
+        self.assertEqual(0, result, stderr)
+        setup = [scene for name, scene in events if name == "setup"]
+        self.assertEqual([(self.release_id + "\n").encode("ascii")], [scene["marker"] for scene in setup])
+        self.assertEqual([stat.S_IFREG | 0o600], modes)
+        self.assertFalse(os.path.lexists(self.marker))
+        self.assertFalse(os.path.lexists(self.project / "99-output-ib_nvl/.latest.retired"))
+        self.assertIn("load 流程完成", stdout)
+
+    def test_in_process_failure_clears_marker_only_after_a_restore_succeeds(self) -> None:
+        # 待确认问题 I-022 :60 (an in-process failure restores A) and 问题文档 I-048 :1779.
+        def fail_after_setup(*_args, **_kwargs):
+            raise LOAD.LoadError("injected generation failure after setup")
+
+        result, _stdout, stderr, events = self._run(
+            setup=lambda *_args, **_kwargs: None, patches={"generate_configs": mock.Mock(side_effect=fail_after_setup)})
+        self.assertEqual(1, result)
+        self.assertIn("injected generation failure after setup", stderr)
+        self.assertEqual([(self.release_id + "\n").encode("ascii")],
+                         [scene["marker"] for name, scene in events if name == "setup"])
+        self.assertNotIn("A runtime rollback failed", stderr)
+        self.assertFalse(os.path.lexists(self.marker))
+        self.assertEqual(self._a_scene(None), self._scene())
+
+        restore = mock.Mock(side_effect=LOAD.LoadError("injected A restore failure"))
+        result, _stdout, stderr, events = self._run(
+            setup=lambda *_args, **_kwargs: None,
+            patches={"generate_configs": mock.Mock(side_effect=fail_after_setup),
+                     "restore_runtime_rollback_receipt": restore})
+        self.assertEqual(1, result)
+        restore.assert_called_once()
+        self.assertIn("A runtime rollback failed: injected A restore failure", stderr)
+        self.assertEqual((self.release_id + "\n").encode("ascii"), self.marker.read_bytes())
+        self.assertIn("下一次 load 会在停止服务之后按回执重试恢复", stderr)
+
+    def test_marker_after_parent_commit_still_holds(self) -> None:
+        # The receipt docstring: it does not authorize rollback after a new parent has committed.  A load killed
+        # after the parent commit and before the marker is removed leaves the marker beside parent B.
+        self._receipt()
+        self._interrupt()
+        (self.project / "99-output-ztp/current-release.json").write_bytes(b'{"release_id":"independent-B"}\n')
+        before = self._tree()
+
+        result, stdout, stderr, events = self._run()
+
+        self.assertEqual(1, result)
+        self.assertIn("[FAILED] load 阶段失败：冻结旧版 release 以供显式回退", stderr)
+        self.assertIn("[ERROR] parent authority no longer equals A; rollback is blocked", stderr)
+        self.assertEqual([], events)
+        self.assertNotIn("按 A 回执恢复被打断的 load", stdout)
+        self.assertEqual(before, self._tree())
+
+    def test_foreign_restore_marker_is_refused_without_deletion(self) -> None:
+        # 需求文档 :934 rule 2: a foreign entry at the marker's name is reported; nothing is replaced or deleted.
+        self._receipt()
+        self._interrupt(marker=False)
+        held = self.root / "independent-held-marker-text"
+        held.write_bytes((self.release_id + "\n").encode("ascii"))
+        for kind in ("directory", "link", "other id", "extended text"):
+            with self.subTest(kind=kind):
+                if kind == "directory":
+                    self.marker.mkdir()
+                elif kind == "link":
+                    self.marker.symlink_to(held)
+                else:
+                    self.marker.write_bytes(("f" * 20 + "\n").encode("ascii") if kind == "other id"
+                                            else (self.release_id + "\nB\n").encode("ascii"))
+                    self.marker.chmod(0o600)
+                before = self._tree()
+                try:
+                    result, _stdout, stderr, events = self._run()
+
+                    self.assertEqual(1, result)
+                    self.assertIn("[FAILED] load 阶段失败：冻结旧版 release 以供显式回退", stderr)
+                    self.assertIn(str(self.marker), stderr)
+                    self.assertEqual([], events)
+                    self.assertEqual(before, self._tree())
+                finally:   # fixture: the next kind starts without this one
+                    if kind == "directory":
+                        self.marker.rmdir()
+                    else:
+                        self.marker.unlink()
+
+    def test_supervisor_backend_keeps_v311_hold(self) -> None:
+        # 开发计划 :112 (Docker frozen): the supervisor backend never writes or reads the marker.
+        result, _stdout, stderr, events = self._run(backend="supervisor")
+        self.assertEqual(1, result)
+        self.assertEqual([None], [scene["marker"] for name, scene in events if name == "setup"])
+        self.assertFalse(os.path.lexists(self.marker))
+        # The in-process failure after setup restores A exactly as in v3.1.1 (guide BF-9 review M2).
+        self.assertNotIn("A runtime rollback failed", stderr)
+        self.assertNotIn("下一次 load", stderr)
+        self.assertIn("[SAFE] 未提交 release 的发布状态已回滚", stderr)
+
+        self._interrupt()
+        before = self._tree()
+        result, stdout, stderr, events = self._run(backend="supervisor")
+        self.assertEqual(1, result)
+        self.assertIn("[FAILED] load 阶段失败：冻结旧版 release 以供显式回退", stderr)
+        self.assertRegex(stderr, r"\[ERROR\] (existing rollback receipt no longer matches A runtime"
+                                 r"|rollback YAML latest does not select A)")
+        self.assertEqual([], events)
+        self.assertNotIn("按 A 回执恢复", stdout)
+        self.assertEqual(before, self._tree())
+
+    def test_dry_run_with_marker_changes_nothing(self) -> None:
+        # The --dry-run contract (regression protection): no marker is read, nothing is restored or written.
+        self._receipt()
+        self._interrupt()
+        before = self._tree()
+        with_marker = self._run("--dry-run", setup=lambda *_args, **_kwargs: None)
+        self.assertEqual(0, with_marker[0], with_marker[2])
+        self.assertEqual(before, self._tree())
+        self.assertNotIn("按 A 回执恢复", with_marker[1])
+        self.marker.unlink()   # the same dry-run without the marker prints the same
+        without_marker = self._run("--dry-run", setup=lambda *_args, **_kwargs: None)
+        self.assertEqual(without_marker[:3], with_marker[:3])
+
+    @classmethod
+    def _killed_load_child(cls, config_path: str) -> None:
+        """The workflow's second load, run in a child process until the parent kills it after the retirement."""
+        config = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        case = cls("test_workflow_killed_load_on_active_project_recovers_on_rerun")
+        for name in ("root", "ztp", "project", "installed", "marker"):
+            setattr(case, name, Path(config[name]))
+        LOAD.ZTP_DIR = case.ztp
+        mock.patch.object(LOAD, "_require_root_for_load").start()   # plays root as setUp does
+        for patcher in case._field_patches():
+            patcher.start()
+        sentinel = Path(config["sentinel"])
+        real_retire = LOAD.retire_unselected_release_links
+
+        def retire_then_wait(*args, **kwargs):
+            real_retire(*args, **kwargs)
+            sentinel.write_text("retired\n", encoding="utf-8")
+            signal.pause()   # the parent sends SIGKILL to the whole process group here
+
+        def setup_child(*_args, **_kwargs):
+            # setup and the runtime parameter sync rewrite the flat runtime for B.
+            (case.ztp / "ztp.json").write_bytes(case.B_ZTP_JSON)
+
+        def generator(*_args, **_kwargs):
+            # The Cumulus generator publishes B through the real publisher.
+            service = case.ztp / "config/cumulus"
+            release = service / "template/99-output" / case.B_ETH
+            release.mkdir()
+            (release / "leaf01.yaml").write_text("- set: {}\n", encoding="utf-8")
+            (release / ".published-complete").write_text("complete\n", encoding="utf-8")
+            if not PUBLISHER._set_latest_yaml(str(service), str(release)):
+                raise LOAD.LoadError("fixture B publication failed")
+
+        case._run(setup=setup_child, patches={
+            "retire_unselected_release_links": mock.Mock(side_effect=retire_then_wait),
+            "generate_configs": mock.Mock(side_effect=generator),
+        })
+
+    def test_workflow_killed_load_on_active_project_recovers_on_rerun(self) -> None:
+        """The real publisher's latest links, a load killed (SIGKILL) after the retirement, then a real rerun.
+
+        A is the field's (setUp: the real release, generation and receipt producers; both platforms published
+        through the real publisher's _set_latest_yaml).  The second load (--switch eth) runs main in a child
+        process: the real freeze creates the A receipt, the generator stand-in publishes B through the real
+        publisher, the real retirement renames the NVOS latest, then the parent kills the child's process group
+        with SIGKILL, so no except branch or finally runs (guide BF-9 workflow).  The third load is the same
+        command in-process; at the setup entry the real 01-a-setup.py _process_latest_yaml reads the publication
+        (R-016 §3.4: latest_yaml belongs to the publisher).
+        """
+        cumulus = self.ztp / "config/cumulus"
+        (cumulus / "template").mkdir(parents=True)
+        (cumulus / "template/99-output").symlink_to(
+            os.path.relpath(self.project / "99-output-eth", cumulus / "template"))
+        (cumulus / "latest_yaml").unlink()
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(PUBLISHER._set_latest_yaml(str(cumulus), str(cumulus / "template/99-output" / self.A_ETH)))
+        cumulus_entry = cumulus / "latest_yaml"
+        nvos_entry = self.ztp / "config/nvos/latest_yaml"
+        a_cumulus = (self.project / "99-output-eth" / self.A_ETH).resolve()
+        a_nvos = (self.project / "99-output-ib_nvl" / self.A_NVOS).resolve()
+        self.assertEqual((a_cumulus, a_nvos), (cumulus_entry.resolve(strict=True), nvos_entry.resolve(strict=True)))
+
+        # 2. The second load, killed after the retirement.
+        sentinel = self.root / "killed-load.retired"
+        config = self.root / "killed-load.json"
+        config.write_text(json.dumps({
+            "root": str(self.root), "ztp": str(self.ztp), "project": str(self.project),
+            "installed": str(self.installed), "marker": str(self.marker), "sentinel": str(sentinel),
+        }), encoding="utf-8")
+        code = ("import sys\n"
+                "from test_cases.test_load_release_transaction import InterruptedLoadReceiptRecoveryTests\n"
+                "InterruptedLoadReceiptRecoveryTests._killed_load_child(sys.argv[1])\n")
+        log = self.root / "killed-load.log"
+        with log.open("wb") as output:
+            child = subprocess.Popen([sys.executable, "-B", "-c", code, str(config)], cwd=ROOT,
+                                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.STDOUT,
+                                     start_new_session=True)
+            try:
+                waited = threading.Event()
+                for _attempt in range(2400):
+                    if sentinel.exists() or child.poll() is not None:
+                        break
+                    waited.wait(0.05)
+            finally:
+                # One SIGKILL to the whole process group, never a second one: a group whose only member is
+                # already dying answers EPERM on macOS.
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=60)
+        self.assertTrue(sentinel.exists(), log.read_text(encoding="utf-8", errors="replace"))
+        self.assertEqual(-signal.SIGKILL, child.returncode)
+        self.assertEqual(self._interrupted_scene(), self._scene())
+        self.assertEqual(self.B_ETH, os.readlink(self.project / "99-output-eth/latest"))
+        self.assertTrue(os.path.lexists(nvos_entry))
+        self.assertFalse(nvos_entry.exists())
+
+        # 3. The rerun: restored before setup, the same scope retires again, the commit removes both records.
+        seen: dict[str, object] = {}
+
+        def real_setup_latest(*_args, **_kwargs):
+            seen["cumulus"] = cumulus_entry.resolve() if cumulus_entry.exists() else None
+            seen["nvos"] = nvos_entry.resolve() if nvos_entry.exists() else None
+            with mock.patch.object(SETUP, "ZTP", str(self.ztp)), \
+                    mock.patch.object(SETUP, "HTTP_BASE", str(self.root)), \
+                    mock.patch.object(SETUP, "_DRY_RUN", False), \
+                    mock.patch.object(SETUP, "_AUTO_YES", True), \
+                    redirect_stdout(io.StringIO()):
+                SETUP._process_latest_yaml(str(self.project))
+            seen["nvos_after_setup"] = nvos_entry.resolve() if nvos_entry.exists() else None
+
+        result, stdout, stderr, events = self._run(setup=real_setup_latest)
+
+        self.assertEqual(0, result, stderr)
+        self.assertIn("按 A 回执恢复被打断的 load", stdout)
+        self.assertEqual(self._a_scene((self.release_id + "\n").encode("ascii")),
+                         [scene for name, scene in events if name == "setup"][0])
+        self.assertEqual({"cumulus": a_cumulus, "nvos": a_nvos, "nvos_after_setup": a_nvos}, seen)
+        self.assertFalse(os.path.lexists(self.project / "99-output-ib_nvl/latest"))
+        self.assertFalse(os.path.lexists(self.project / "99-output-ib_nvl/.latest.retired"))
+        self.assertFalse(os.path.lexists(self.marker))
+        # R-016 §3.4: the retired platform's publisher entry dangles; the selected one still resolves (setup
+        # itself picks the newest complete Cumulus release there, which the generator replaces afterwards).
+        self.assertTrue(os.path.lexists(nvos_entry))
+        self.assertFalse(nvos_entry.exists())
+        self.assertTrue(cumulus_entry.exists())
 
 
 class InfraNeutralFallbackWorkflowTests(unittest.TestCase):

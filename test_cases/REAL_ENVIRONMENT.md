@@ -918,27 +918,90 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - AIR 不指定 `--switch` 时保存证据证明默认选择 `eth`；显式 `--air --switch ib` 或 `nvl` 必须在
   部署锁、setup、文件写入和服务变化之前失败。完成后执行不带 `--switch` 的正式 load 恢复全平台
   release，并记录三个平台及 DHCP/parent 再次属于同一代。
-- 退役中断恢复补充（v3.1.1 WP-15，I-022；**NOT RUN / REAL_ENV REQUIRED**）：本机先决为
+- 退役中断恢复补充（v3.1.1 WP-15，I-022；v3.1.2 BF-9，I-048；**NOT RUN / REAL_ENV REQUIRED**）：本机先决为
   `test_cases.test_load_release_transaction.LatestRetirementRecoveryTests` 的 7 个 direct 与 1 个
-  真实发布器 → load → setup 读者 workflow GREEN；它们不证明真实进程被杀与断电后的行为。
+  真实发布器 → load → setup 读者 workflow，以及 `InterruptedLoadReceiptRecoveryTests` 的 9 个 direct 与
+  1 个子进程 SIGKILL workflow GREEN；它们不证明真实进程被杀与断电后的行为。
   - 前置条件：AIR 隔离管理服务器；项目已完成一次不带 `--switch` 的正式 load，ETH 与 NVOS 都有带
-    `.published-complete` 的发布目录。保存两条 `99-output-*/latest` 原文、
+    `.published-complete` 的发布目录；这次正式 load 本身就让本项目成为活动项目并有
+    `99-output-ztp/current`（同项目 A 回执的路径，现场常态）。保存两条 `99-output-*/latest` 原文、
     `ztp/config/{cumulus,nvos}/latest_yaml` 的解析结果、`99-output-ztp/current` 是否存在以及服务状态。
   - 步骤：执行 `load --switch eth`，在 `99-output-ib_nvl/.latest.retired` 出现之后、父 release 提交
     之前对 load 进程执行 `kill -9`；记录此时 NVOS `latest` 不存在、`.latest.retired` 原文等于原
     `latest`。然后再执行一次同参数 load。
-  - 期望：第二次 load 在停止服务之后、调用 setup 之前把 NVOS `latest` 恢复成原文并删除
-    `.latest.retired`（日志「已恢复被打断的 latest 退役」早于 setup 段）；随后同一 scope 再次退役，
-    提交后不残留 `.latest.retired`；`ztp/config/nvos/latest_yaml` 悬空属于预期（R-016 §3.4）。
-  - 已知分支（推断，现场须记录）：本项目已有 `99-output-ztp/current` 且就是活动项目时，同项目 A
-    回执在恢复点之前核对 `latest`，第二次 load 预计在那里 HOLD（11-load 批既有的 fail-closed 行为，
-    不属本段失败）；记录 HOLD 原文与当时两条 `latest`，按 HOLD 提示处理后再验证本段。
+  - 期望：第二次 load 在停止服务之后、调用 setup 之前打印「按 A 回执恢复被打断的 load」，两条 `latest`
+    回到 A 的原文，`.latest.retired` 不在（随后一行「latest 已存在，删除被打断留下的退役记录」）；随后同一
+    scope 再次退役，提交后不残留 `.latest.retired` 和 `99-output-ztp/rollback-receipts/*.restore-pending`；
+    `ztp/config/nvos/latest_yaml` 悬空属于预期（R-016 §3.4）。
+  - 已知分支（推断，现场须记录）：工作站、项目第一次 load（没有 `99-output-ztp/current`）或跨项目 load
+    时没有同项目 A 回执，第二次 load 走 WP-15 原来的恢复：日志「已恢复被打断的 latest 退役」早于 setup 段。
   - 负向：把 `.latest.retired` 换成真实文件或目录后再跑 load，必须在 setup 之前报错退出，内容不变、
     不删除。
   - 清理与证据：保存两次 load 的退出码与日志，kill 前后两条 `latest` 与 `.latest.retired` 的
     `ls -l` 原文，`latest_yaml` 解析结果；结束后执行不带 `--switch` 的正式 load 恢复全平台 release。
   - 风险：`kill -9` 只在 AIR 隔离环境执行；「父 release 已提交、`.latest.retired` 尚未删除」的窄窗口
     只记录不处理（编码准则 1），下一次 load 会先恢复再由同 scope 退役或发布器替换。
+
+## TC-REAL-LOAD-INTERRUPT-001 — 同项目 load 被打断后重跑按 A 回执恢复
+
+### 基本信息
+
+- Case ID：`TC-REAL-LOAD-INTERRUPT-001`。
+- 名称：Native 管理服务器上，同项目 load 在 setup 开始之后、父 release 提交之前被整组 `kill -9` 或断开 SSH（SIGHUP），
+  重跑同参数 load 时在停止服务之后、setup 之前按 A 回执恢复，然后正常走完。
+- 类型：real-environment / scenario。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：问题文档 I-048；待确认问题 I-022「被打断时，下一次 load 在调 setup 之前恢复」；owner 2026-11-09
+  「Q-007 选 (a)」（05 P-010）；v3.1.2 详细工作指导 BF-9。
+- 自动化文件与测试方法（synthetic 管理服务器、mock 掉服务与生成器，未在 root、systemd 下运行）：
+  `test_cases.test_load_release_transaction.InterruptedLoadReceiptRecoveryTests`（9 个 direct；
+  `test_workflow_killed_load_on_active_project_recovers_on_rerun` 用子进程跑第二次 load，退役之后对其进程组发 SIGKILL）。
+- 适用平台：management-server（AIR 管理服务器，Ubuntu 22.04 Native）；prod 不执行。
+
+### 风险与目标
+
+- 要防止的故障：同项目、有 `99-output-ztp/current` 时被打断的 load 留下「半个 B」的运行态，重跑在「冻结旧版 release
+  以供显式回退」处 HOLD、服务保持停止。
+- 涉及的模块和状态边界：`DAY0-Prepare/11-load.py::main`（冻结步骤、停服务之后的恢复、setup 之前写标记、提交后清标记）、
+  `99-output-ztp/rollback-receipts/<A 的 id>.restore-pending`、A 回执。
+- 成功标准：重跑打印恢复行，恢复复核通过，然后正常走完；结束后没有 `.restore-pending`。
+- 覆盖范围：setup 开始（写标记）到父 release 提交之间被打断的 load；这之外的窗口不在本卡验证。
+
+### 前置条件与输入
+
+- Fixture / 项目输入：owner 授权、可快照回滚的 AIR 隔离管理服务器；项目已完成一次正式 load（有 `99-output-ztp/current`，
+  是活动项目）。
+- 外部依赖：v3.1.2 候选源码的正式 full proof。
+- 所需权限：Runbook 5 的 load 权限（sudo）。
+- 初始状态（只读保存）：两条 `99-output-*/latest` 原文、`ztp/ztp.json` 与两个 bootstrap
+  （`ztp/ztp-bootstrap_oob.sh`、`ztp/ztp-bootstrap_oobofoob.sh`）的 sha256、`ls -l 99-output-ztp/rollback-receipts/`、服务状态。
+
+### 步骤
+
+1. 快照。不带 `--switch` 执行 Runbook 5 的 load；在 setup 段或配置生成段对 load 所在的整个进程组执行 `kill -9`
+   （例如 `sudo kill -9 -- -<load 的进程组号>`；只杀主进程时 setup 子进程会继续跑并持有部署锁，推断）。保存此时的
+   `ls -l 99-output-ztp/rollback-receipts/`、两条 `latest` 与上面几项的 sha256。
+2. 再执行一次同参数 load，保存输出与退出码。
+3. 恢复快照，重做第 1、2 步，第 1 步改为在同一时点断开执行 load 的 SSH 会话（SIGHUP）。
+4. 负向：恢复快照，重做第 1 步；然后删掉 `<A 的 id>.restore-pending`，手工改一个 bootstrap（保存改前改后的 sha256），
+   再跑一次同参数 load。
+
+### 预期结果
+
+- 正向结果：第 2 步的 load 在停止服务之后、setup 之前打印「按 A 回执恢复被打断的 load」和
+  「[OK] A runtime restore verified: <A 的 id>」（恢复后逐项复核过）；A 回执 `receipt.json` 记录的冻结文件 sha256 与
+  kill 前保存的一致；随后正常走完，返回 0；结束后 `rollback-receipts/` 下没有 `.restore-pending`。第 3 步同样。
+- 拒绝/失败结果：第 4 步在「冻结旧版 release 以供显式回退」处 HOLD（`existing rollback receipt no longer matches A runtime`
+  一类原文），返回 1，文件不变。
+- 不允许发生的副作用：没有标记时自动恢复；恢复覆盖 `99-output-ztp/current-release.json`、生成报告或已安装的 DHCP；
+  正常走完后残留 `.restore-pending`。
+- 需要保存的证据：每轮两次 load 的退出码与日志，kill 前后的 `ls -l` 和 sha256，脱敏后的恢复行原文。
+
+### 故障注入与清理
+
+- 并发、超时、异常、重启或输入篡改：第 1 步 kill 的时点、第 3 步 SIGHUP；第 4 步删标记并改 bootstrap。
+- 清理/回滚验证：每轮之后恢复快照；全部结束后跑一次正式 load。
+- 风险：只在 AIR 执行；prod 不做 kill。现场真发生中断时，由 owner 或授权现场人员重跑 load，验证 AI 只读核对日志里的
+  恢复行和恢复后的 sha256（RV31-21）。
 
 ## TC-REAL-NETWORK-SNAPSHOT-001 — Ubuntu 动态计时字段与拓扑稳定性
 

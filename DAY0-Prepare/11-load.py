@@ -13039,6 +13039,17 @@ def dry_run_next_step(requested_argv: list[str]) -> str:
     )
 
 
+def _restore_pending_marker(project: Path, selector_target: str) -> Path:
+    """The "A restore pending" marker of the A that ``selector_target`` (generations/<id>) names (I-048, BF-9).
+
+    A systemd load writes it before setup and removes it after the parent commit or after a verified in-process
+    A restore, so finding it proves that a load was interrupted in between: the next load then restores A by
+    its receipt after quiesce and before setup (05 P-010).  The receipt root is read by name only and is
+    root-private state (ROOT_PRIVATE_PROJECT_STATE), so the suffixed name is never taken for a receipt.
+    """
+    return project / "99-output-ztp/rollback-receipts" / f"{Path(selector_target).name}.restore-pending"
+
+
 def main(
     argv: list[str] | None = None, *,
     import_started_at: datetime | None = None,
@@ -13072,6 +13083,10 @@ def main(
     services_must_remain_stopped = False
     runtime_restore_safe = False
     runtime_mutation_started = False
+    # I-048 (v3.1.2 BF-9): an interrupted load's marker accepted at the freeze step, and the marker this load
+    # wrote (or kept) before setup.
+    restore_pending = False
+    restore_marker: Path | None = None
     native_monitor_quiesced = False
     allow_management_key_generation=False
     should_monitor = False
@@ -13190,9 +13205,14 @@ def main(
         # the operator before the public-source gate; --dry-run only lists.  The supervisor has no identity.
         if load_identity is not None:
             phase, failure_phase = failure_phase, "项目权限检查与改正"
+            # I-048 (BF-9): an interrupted load's marker means its A receipt still binds the published *.pub
+            # and 99-output-dhcp files by ctime until the restore below; only the marker's presence is checked.
+            selector = project / "99-output-ztp/current"
             repair_project_permissions(
                 project, load_identity, args.ssh_dir, host_os=host_os, host_role=host_role,
                 backend=runtime_backend_instance, dry_run=args.dry_run,
+                receipt_bound=not args.dry_run and selector.is_symlink() and os.path.lexists(
+                    _restore_pending_marker(project, os.readlink(selector))),
             )
             failure_phase = phase
             permission_repair_ready = not args.dry_run
@@ -13266,9 +13286,40 @@ def main(
             if local_services_supported and previous_selector_target:
                 # Capture/revalidate the truly active A before any template,
                 # password, public-key, setup, or project-input mutation.
-                runtime_rollback_receipt = prepare_active_runtime_rollback_receipt(
-                    project, previous_selector_target,
-                )
+                marker = _restore_pending_marker(project, previous_selector_target)
+                if (runtime_backend_instance.name == "systemd" and os.path.lexists(marker)
+                        and active_project() == project.resolve(strict=True)):
+                    # I-048 (BF-9, 05 P-010): a load interrupted between setup and the parent commit left its
+                    # half-B runtime.  Only what such a load never changes is checked here (the unchanged
+                    # parent, report and DHCP authorities, the selected DHCP); the frozen files, keys, latest
+                    # links and prefix are restored from the receipt after quiesce.  No marker: as before.
+                    release_id = Path(previous_selector_target).name
+                    if (not stat.S_ISREG(marker.lstat().st_mode)
+                            or marker.read_bytes() != f"{release_id}\n".encode("ascii")):
+                        raise LoadError(
+                            f"A 恢复待办标记不是本项目 A 的普通文件：{marker}；load 不删除、不替换它，"
+                            "请人工核对后再重跑 load"
+                        )
+                    canonical_project = project.resolve(strict=True)
+                    runtime_rollback_receipt = (
+                        canonical_project / "99-output-ztp/rollback-receipts" / release_id
+                    )
+                    receipt = _load_runtime_rollback_receipt(canonical_project, runtime_rollback_receipt)
+                    if receipt["schema_version"] != 4:
+                        raise LoadError(
+                            "legacy receipt remains recovery-only; new active capture requires schema4; HOLD"
+                        )
+                    _verify_rollback_authorities(canonical_project, receipt)
+                    _verify_active_selected_dhcp(canonical_project, receipt)
+                    restore_pending = True
+                    warn(
+                        f"发现被打断的 load 留下的 A 恢复待办：{marker}；"
+                        "将在停止服务之后、setup 之前按 A 回执恢复"
+                    )
+                else:
+                    runtime_rollback_receipt = prepare_active_runtime_rollback_receipt(
+                        project, previous_selector_target,
+                    )
 
         if (
             local_services_supported
@@ -13414,6 +13465,19 @@ def main(
                 host_role=host_role,
             )
             runtime_restore_safe = True
+        if restore_pending:
+            # I-048 (BF-9): put the interrupted load's runtime back to A, after quiesce and before setup; the
+            # restore checks before its first write and verifies every surface after.  The marker stays: this
+            # load changes the runtime again and removes it after its own commit or A restore.
+            failure_phase = "按 A 回执恢复被打断的 load"
+            restore_runtime_rollback_receipt(
+                project, runtime_rollback_receipt,
+                expected_current=previous_selector_target,
+                deployment_lock_descriptor=deployment_lock_descriptor,
+                services_quiesced=runtime_restore_safe,
+                runtime_backend=runtime_backend_instance,
+            )
+            warn(f"已按 A 回执恢复被打断的 load：{previous_selector_target}")
         if not args.dry_run:
             # I-022: a load killed between retiring the unselected latest and
             # the parent commit left the original link only under
@@ -13441,6 +13505,19 @@ def main(
         # links.  Mark before entry because a child failure may be partial.
         if local_services_supported and inputs.settings.http_enabled and not args.dry_run:
             require_http_project_source_access(project, identity=load_identity)
+        if runtime_rollback_receipt is not None and runtime_backend_instance.name == "systemd":
+            # I-048 (BF-9): record "A restore pending" before the first runtime mutation (a receipt exists only
+            # outside --dry-run); an interrupted load's accepted marker already says so and is kept.
+            marker = _restore_pending_marker(project, previous_selector_target)
+            if not restore_pending:
+                descriptor, temporary = tempfile.mkstemp(dir=marker.parent, prefix=f".{marker.name}.")
+                with os.fdopen(descriptor, "w", encoding="ascii") as stream:
+                    stream.write(f"{Path(previous_selector_target).name}\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, marker)
+                _fsync_parent_directory(marker.parent)
+            restore_marker = marker
         runtime_mutation_started = local_services_supported and not args.dry_run
         activate_project(
             project, inputs.p2p_file,
@@ -13690,6 +13767,10 @@ def main(
                 if retired.is_symlink():
                     retired.unlink()
                     _fsync_parent_directory(latest.parent)
+        if release_committed and restore_marker is not None:
+            # I-048 (BF-9): the receipt does not authorize a rollback past a committed parent.
+            restore_marker.unlink()
+            _fsync_parent_directory(restore_marker.parent)
         if report_candidate is not None:
             # Parent and report are two separate atomic replacements, not one
             # transaction.  A crash between them leaves an absent/stale report;
@@ -13868,8 +13949,16 @@ def main(
                     services_quiesced=runtime_restore_safe,
                     runtime_backend=runtime_backend_instance,
                 )
+                if restore_marker is not None:
+                    # I-048 (BF-9): A is verified again, nothing is left to restore.
+                    restore_marker.unlink()
+                    _fsync_parent_directory(restore_marker.parent)
             except (LoadError, OSError, ValueError) as rollback_exc:
                 cleanup_errors.append(f"A runtime rollback failed: {rollback_exc}")
+                if restore_marker is not None:
+                    cleanup_errors.append(
+                        f"A 恢复待办保留在 {restore_marker}：下一次 load 会在停止服务之后按回执重试恢复"
+                    )
         print(f"[FAILED] load 阶段失败：{failure_phase}", file=sys.stderr)
         if services_must_remain_stopped:
             print(
