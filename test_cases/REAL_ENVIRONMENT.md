@@ -2836,7 +2836,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `test_monitor_imported_configs_parent_release` 是 v3.1.0 补的 DEV 侧 direct）。
 - [x] 修复前能够稳定失败。
 - [x] 修复后通过。
-- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
 
 ## TC-REAL-ACTIVATE-PROJECT-001 — setup 经 activate-project 指针切换项目（本机两个项目；服务器单项目重复 load）
@@ -2967,7 +2967,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 已加入 `test_cases/test_independent_ib_csv_workflow.py`。
 - [x] 修复前能够稳定失败（实现前 20 处红在预期断言上）。
 - [x] 修复后通过。
-- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
 
 ## TC-REAL-ACTIVATE-PROJECT-002 — 从旧部署迁移：v3.1.0 部署的 AIR 管理服务器第一次跑 v3.1.1 的 load，再看 `--status`
@@ -3358,7 +3358,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 已加入 `test_cases/test_upgrade_operator_reexec.py` 与 `test_cases/test_upgrade_operator_reexec_workflow.py`。
 - [x] 修复前能够稳定失败（实现前红在预期断言上）。
 - [x] 修复后通过。
-- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
 
 ## TC-REAL-I006-OPERATOR-LOAD-001 — 两种运行方式下的 load、unload 与操作员身份
@@ -3481,7 +3481,9 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    当前：root 直接运行 → 以 root 执行」；没有 `runuser`；key 从 `/root/.ssh` 读；三把锁属于 root；crontab 是 root 自己的
    （`crontab -l`，不带 `-u`）。混用：方式 A 的 sudo load → root 登录运行 upgrade → `U` 不加 sudo 运行 upgrade → root 登录
    unload，四步的身份说明行里操作员都是 `U`，root 的 unload 清的是 `U` 的 crontab（upgrade 的细节见
-   `TC-REAL-I006-OPERATOR-REEXEC-001`）。
+   `TC-REAL-I006-OPERATOR-REEXEC-001`）。方式 B 的属主检查（owner 2026-11-09 同意，04 Q-017）：在这个 root 的项目副本里把一个文件
+   `chown U`，先以 root 跑 load 加 `--dry-run`：列出这一项（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，什么都不改；
+   不带 `--dry-run` 再跑一次结果相同；按提示 chown 回 root 后重跑通过。
 8. 拒绝（owner 2026-11-09「Q-006 选 (b)」）：`V` 经 sudo 对 `U` 的项目运行 13-unload，有、没有 REQ10C watch 各一次，再直接 `sudo` 运行 02-unsetup：都以 1 退出，`[ERROR]` 点名 `U` 与 `V`；
    monitor、服务、DHCP 文件、`U` 的 crontab、状态文件、指针和链接都不动（运行前后对照服务状态、`/etc/dhcp` 下 load 管理的文件、`sudo crontab -u U -l`、状态目录和指针）。
    `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。
@@ -3521,5 +3523,5 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复后通过。
 - [x] 第二段（WP-6 合入后）：方式 A 用例补「load 的改正指向 U」，加 `test_sudo_unload_after_repair_still_withdraws_config_authorities`；
   逐项的 direct 测试在 `test_cases/test_load_permission_repair_contract.py`。
-- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。

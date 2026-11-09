@@ -981,7 +981,7 @@
         "monitor/issue-tracker/format_precheck.py",
         "ethernet/monitor/cron.sh"
       ],
-      "installed_by": "python3 infra/deps.py install --target venv-cabletracker (each account installs into its own home: cron.sh started by the collection worker runs as root and uses root's venv, installed as root with HOME = root's home - a root login or plain sudo, never sudo -E; cron.sh run by hand uses the operator's own venv, installed by the operator without sudo)",
+      "installed_by": "python3 infra/deps.py install --target venv-cabletracker (as the user who runs 11-load.py - root under sudo: its switch-collection worker runs cron.sh with that user's venv; root installs only with HOME = root's home, a root login or plain sudo, never sudo -E; cron.sh run by hand uses the operator's own venv, installed by the operator without sudo)",
       "kind": "venv",
       "path": "~/.venvs/http/cabletracker",
       "platforms": [
