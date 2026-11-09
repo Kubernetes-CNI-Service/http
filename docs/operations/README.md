@@ -133,8 +133,11 @@ endpoint，或一个真实 endpoint 加一个合法标记；未知字符串、�
 的交换机状态页选择“配置同步”，或在管理服务器交互运行：
 
 ```bash
-python3 ztp/manual-ztp.py <完整主机名> --replace-config --type prod
+sudo python3 ztp/manual-ztp.py <完整主机名> --replace-config --type prod
 ```
+
+这个入口要拿代码树的部署锁 `.deployment.lock`：项目属于普通用户、用 sudo 运行 load 的方式（方式 A，见用户手册「两种运行方式」）
+下必须加 `sudo`；root 直接登录（方式 B）时直接运行。
 
 该入口先只读采集 `nv config show`、核对身份/release/上次完整 replace receipt，并显示规范化差异；
 确认前不会修改设备。`interface.eth0.*`、`system.ssh-server.*`、所有

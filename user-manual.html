@@ -13478,6 +13478,31 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
       </div>
 
       <div class="callout">
+        <h3 id="v2-operator-run-modes" data-nav-title="两种运行方式">两种运行方式：普通用户 + sudo（方式 A）、root 直接登录（方式 B）与混用（v3.1.2，I-006）</h3>
+        <p>操作员就是项目目录的属主。load、unload、upgrade、upgrade2、cron.sh、<code>12-ztp-monitor.py</code> 开头各打印一行身份说明，例如
+          <code>操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行</code>。</p>
+        <ul>
+          <li><strong>方式 A（项目属于普通用户 U）：</strong>U 用 <code>sudo</code> 运行 <code>11-load.py</code>、<code>13-unload.py</code>；
+            <code>upgrade.py</code>、<code>upgrade2.py</code> 和手工运行的 <code>cron.sh</code> 由 U 直接运行，不加 sudo。sudo load 从 U 的
+            passwd 家目录读管理 key（缺 key 时只提示 U 自己执行 <code>ssh-keygen</code>，不替 U 生成），把本次在项目里新建的文件和三个
+            <code>cron.lock</code> 交给 U；sudo unload 清理的是 U 的 crontab（<code>crontab -u U</code>）。</li>
+          <li><strong>方式 B（项目属于 root）：</strong>root 直接登录运行全部脚本，不切换身份，管理 key 用 <code>/root/.ssh</code>，crontab 是
+            root 自己的。</li>
+          <li><strong>混用：</strong>同一个项目有时用 sudo、有时 root 直接登录、有时 U 直接运行都可以，操作员始终是项目目录属主 U，不会来回变：
+            root 运行 <code>upgrade.py</code>、<code>upgrade2.py</code> 或在终端里运行 <code>cron.sh</code> 时，先用 <code>runuser</code>
+            以 U 身份重新执行再做事；root 运行 load、unload 时代表 U（读 U 的 key，项目里新建的文件交给 U，清理 U 的 crontab）。
+            其他普通用户 V 直接运行或经 sudo 运行都会被拒绝，提示写明项目属于谁、当前是谁。</li>
+          <li>v3.1.2 期间 initial-setup 仍须由项目属主直接运行，不加 sudo；root 运行 initial-setup 时的切换随 v3.1.3（D1）提供。</li>
+          <li>方式 A 下，要拿代码树部署锁 <code>.deployment.lock</code> 的操作员命令（例如 <code>ztp/manual-ztp.py</code>、
+            <code>ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py</code>、单独运行的 DHCP 生成）要加 <code>sudo</code>。</li>
+        </ul>
+        <p>改用方式 A 时，要在第一次 sudo load 之前把项目的 <code>mgmt-server.pub</code> 换成 U 的公钥（不换时 load 报
+          <code>management public key mismatch</code> 停下，不会替你换），再用 initial-setup 下发到交换机；交换机换好之前，root 起的采集和
+          监控仍可用 root 的 key 作后备。真机核对见 <code>test_cases/REAL_ENVIRONMENT.md</code> 的
+          <code>TC-REAL-I006-OPERATOR-LOAD-001</code>、<code>TC-REAL-I006-OPERATOR-REEXEC-001</code>。</p>
+      </div>
+
+      <div class="callout">
         <h3 id="v2-native-python-venvs" data-nav-title="Native Python 依赖与 venv">Native 管理服务器的 Python 依赖与两个 venv</h3>
         <p>全部依赖登记在 <code>infra/dependencies.json</code>。系统通用模块（PyYAML、Jinja2、openpyxl、pandas、XlsxWriter）由 <code>infra-setup.py</code> 用 apt 安装；需要精确版本的两套依赖装在用户家目录下的 venv 里，用带哈希的清单安装。</p>
         <ul>

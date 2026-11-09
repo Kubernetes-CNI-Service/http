@@ -3193,12 +3193,13 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `设计/I-006与R-005实现计划.md` §4.2、§4.3（:97）；v3.1.2 详细工作指导 WP-4、WP-10、WP-11，第 3 节已定 2、O13、O15 (a)。
 - 自动化文件与测试方法：`test_cases/test_upgrade_operator_reexec.py`（`UpgradeReexecEntryTests`、
   `InlineReexecParityTests`）、`test_cases/test_upgrade_operator_reexec_workflow.py`（`UpgradeReexecWorkflowTests`）、
-  `test_cases/test_operator_identity.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、passwd），
+  `test_cases/test_operator_identity.py`；cron.sh 的是 `test_cases/test_cron_operator_identity.py`、
+  `test_cases/test_cron_operator_identity_workflow.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、passwd），
   `runuser` 用记录替身。
 - 覆盖范围：
   - `infiniband/bringup/xdr-upgrade/upgrade.py`、`upgrade2.py`：本卡第 1～6 步（WP-10）。
   - `ethernet/monitor/cron.sh`：交互登录的 root 运行（降权）、sudo 运行（降权）、root crontab（不降权）、worker 跑的
-    （root，用操作员的 key），以及操作员直接运行，由 WP-11 在本卡补入步骤（WP-11 落地前本节为空）。
+    （root，用操作员的 key），以及操作员直接运行，见第 8 步（WP-11，agentW11 报告第 6 节）。
   - `initial-setup`：随 D1（v3.1.3），本卡不做。
 - 适用平台：
 
@@ -3242,14 +3243,31 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 7. 补充推断（指导第 7 节第 3 条）：`sudo python3 -c 'from pathlib import Path; print(Path.home())'`；
    `runuser -u U -- env -i PATH="$PATH" HOME=/home/U python3 -c 'import os; print(os.listdir("/proc/self/fd"))' 3</dev/null`
    看 fd 3 是否还在；以 root 运行 OpenSSH 时默认身份文件取哪个家目录。
-8. cron.sh：由 WP-11 补入。
+8. cron.sh（WP-11；agentW11 报告第 6 节的 9 条，本卡第 8.1～8.9 步）：
+   1. 交互 root（方式 A，项目属于 `U`）：root 在终端执行 `bash /var/www/html/infiniband/monitor/cron.sh --type ib`。
+      证据：stderr 有 `[IDENTITY] 操作员：U…；当前：root 直接运行 → …`；`ps -o user,pid,ppid,args` 显示 cron.sh 以 `U` 运行，
+      没有残留的 root 进程；`/proc/<pid>/environ` 里只有白名单里的变量名；出现「非 root 运行只采集」；`monitor.html` 的 mtime 不变。
+   2. sudo：`U` 执行 `sudo bash …/cron.sh`，结果同第 8.1 步；`V` 执行同一命令被拒绝，提示项目属于 `U`、当前是
+      `root 经 sudo（发起人 V）`，退出码非 0，`cron.lock` 不变。
+   3. root crontab：在 root 的 crontab 里临时加一行 `bash …/cron.sh >> …/cronjob.log 2>&1`。证据：以 root 运行；ssh 命令行带
+      `-i /home/U/.ssh/id_ed25519`；页面刷新。清理：删掉这一行。
+   4. worker（页面「采集」）：cron.sh 的 `/proc/<pid>/environ` 里有 `HTTP_ZTP_ROOT_PARENT=1`；`/proc/<pid>/fd` 里能看到 worker
+      交过来的 fd；以 root 运行；用操作员的 key；采集结果 accepted。
+   5. 12-ztp-monitor 交接（native）：cronjob.log 的 `[ZTP-HANDOFF]` 段里，`[IDENTITY]` 行显示 root 父进程或 sudo 发起人。
+   6. 操作员直接运行：只采集。load 预建过 `cron.lock` 时能拿到锁，没预建时报「无法打开采集锁…Permission denied」；
+      终端输出里没有 `tee` 报错。
+   7. 方式 B（项目属于 root）：root 运行不降权，页面照常刷新（本机测不了）。
+   8. 迁移期：交换机只认 root 的 key 时，worker 和 crontab 仍能登录（root 的 key 作后备）；只认 `U` 的 key 时也能登录。
+   9. Docker（现场有的话）：只读核对，没有 `[IDENTITY]` 行，行为与 v3.1.1 一致。
+
+   平台：22.04 AIR 全部做；24.04 prod 由现场人员执行，AI 只读核对；26.04 pending。不碰 `/etc/hosts`，不改 eth_jump。
 
 ### 预期结果
 
 - 正向结果：第 1、2、4 步 root 的那次运行只出现一次 `runuser`；工作进程打印一行身份说明，含「以 U 执行」；
   进程属主是 `U`，附加组是 `U` 的；只有白名单环境变量；`SSH_AUTH_SOCK` 不在（用 ssh-agent 的操作员会失去 agent，
   已知限制）；交互密码提示出现在原终端；运行锁由 `U` 的进程持有；退出码与 `U` 直接运行同一命令时相同；
-  项目里新文件属主是 `U`。第 3 步三次的操作员都是 `U`。第 6 步不切换。
+  项目里新文件属主是 `U`。第 3 步三次的操作员都是 `U`。第 6 步不切换。第 8 步各小项的预期写在各小项里。
 - 拒绝/失败结果：第 5 步退出码 2，提示写明项目属于 `U`、当前是 `V`（或 `root 经 sudo（发起人 V）`）和可行的办法；
   指针无效时提示含 `activate-project`，什么都不做。
 - 不允许发生的副作用：切换前读 key、问密码、拿运行锁或切换 venv；切换两次；root 属主的新文件出现在项目里。
@@ -3271,5 +3289,142 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 已加入 `test_cases/test_upgrade_operator_reexec.py` 与 `test_cases/test_upgrade_operator_reexec_workflow.py`。
 - [x] 修复前能够稳定失败（实现前红在预期断言上）。
 - [x] 修复后通过。
+- [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-I006-OPERATOR-LOAD-001 — 两种运行方式下的 load、unload 与操作员身份
+
+### 基本信息
+
+- Case ID：`TC-REAL-I006-OPERATOR-LOAD-001`。
+- 名称：管理服务器上以「普通用户 + sudo」（方式 A）、「root 直接登录」（方式 B）和两者混用运行 load、upgrade、unload；
+  操作员始终是项目目录的属主，项目文件属于操作员，用操作员的 key，crontab 在操作员名下。
+- 类型：real-environment / scenario（真实 uid 切换、sudo、属主改正）。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：问题文档 I-006（owner 2026-10-27 同意的方案第 1～4、7 条，:290-306；load 开头检查并改正权限 :331、:407；
+  身份一致 :351；混用 :352）、I-014（owner 2026-11-01，:906）、I-029（:1311-1329）；设计 `设计/I-006与R-005实现计划.md`
+  §1、§4.2～§4.6；v3.1.2 详细工作指导 WP-5～WP-9、WP-12、WP-13，第 3 节 O7～O14（owner 2026-11-07「同意你在v3.1.2里的
+  默认建议」，http dev 转述；O8 已定为改合同：闸门之前的改正有 `[PERM]` 行并通过闸门）。
+- 自动化文件与测试方法：`test_cases/test_load_operator_workflow.py`（`OperatorModesWorkflowTests`、
+  `LoadCrossScriptOwnershipWorkflowTests`），以及各包的 direct 测试 `test_load_operator_contract.py`、
+  `test_load_permission_repair_contract.py`（WP-6）、`test_unsetup_operator_crontab.py`、`test_collection_lock_owner.py`、
+  `test_operator_peripheral_contract.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、sudo 环境、passwd、项目属主），
+  `fchown`、`runuser`、`crontab` 都用记录替身；真实的 uid 切换、属主改正和 crontab 只能在本卡验证。
+- 覆盖范围：`DAY0-Prepare/11-load.py`、`01-a-setup.py`（load 进程内的模板补齐）、`13-unload.py`、`02-unsetup.py`、
+  `12-ztp-monitor.py`（load 起的常驻进程）、`infra/deploy_infra.py`、`infra/infra-setup.py`、`tools/collect-ztp-diagnostics.py`、
+  `monitor/switch-collection-worker.py` 与三个 `cron.lock`；upgrade、upgrade2、cron.sh 的降权见
+  `TC-REAL-I006-OPERATOR-REEXEC-001`；initial-setup 随 D1（v3.1.3），本卡不做，v3.1.2 期间 initial-setup 仍由项目属主不加 sudo 运行。
+- 适用平台：
+
+| 平台 | 怎么跑 |
+|---|---|
+| 22.04（AIR 管理服务器） | 第 0～9 步全做（AIR 可写） |
+| 24.04（prod） | 由现场人员执行，验证 AI 只读核对输出；load 会改正项目属主和模式（第 2 步），unload 会改 crontab，prod 上不由 AI 执行。方式 B 只在 owner 允许 root 登录时做 |
+| 26.04 | pending（M7）：原版 sudo 与 sudo-rs 的 `SUDO_USER`、`SUDO_UID` 行为留给 M7；prod 正好是 26.04 时，下面的输出只作机会性证据，**不作为通过条件** |
+
+### 风险与目标
+
+- 要防止的故障：sudo load 读 root 的 `~/.ssh`、替 root 生成 key；往项目里写 root 属主的文件，之后操作员不加 sudo 读写不了；
+  权限改正碰到 root 私有状态，打坏 sudo unload、monitor、c1 或回执；sudo unload 清的是 root 的 crontab 而不是操作员的；
+  load 准备公钥期间别的用户动了 `~/.ssh` 就中止；混用两种方式时操作员来回变。
+- 涉及的模块和状态边界：`tools/operator_identity.py`；11-load 的 root 检查、加锁失败分类、`--ssh-dir` 缺省、属主比较、
+  新建条目交接、权限改正（`[PERM]`）和三个 `cron.lock` 预建；02-unsetup 的 `crontab -u`、`auto-crontab.lock`；项目内 root 私有
+  状态（agentOP 报告 4.4 的 12 类，11-load `ROOT_PRIVATE_PROJECT_STATE`）；`/var/www/html/.deployment.lock`。
+- 成功标准：方式 A 跑完项目除 root 私有状态外都属于 `U`（组是 `U` 的 passwd 主组），key 从 `U` 的家目录读，crontab 在 `U`
+  名下；方式 B 全程 root，没有 `runuser`，key 是 `/root/.ssh` 的；混用时每一步的身份说明行里操作员都是 `U`。
+
+### 前置条件与输入
+
+- owner 授权的 AIR 管理服务器（22.04）；可写、隔离的项目副本 `<项目>`（经 `DAY0-Prepare/activate-project` 选中）。
+  `U` 是普通用户、能 sudo；另有一个普通用户 `V`。`U` 的 `~/.ssh` 有管理 key 对 `id_ed25519`/`id_ed25519.pub`。
+- `<项目>/mgmt-server.pub` 已换成 `U` 的公钥（或是空占位）：否则第 2 步的 load 停在「management public key mismatch」，
+  不替换已有的 key（设计 §4.4 最后一条、§4.5；`11-load.py::prepare_pubkeys`，http dev 2026-11-09 读码核对）。
+- 当前源码的正式 full proof；代码树用 `tools/sync-code.py` 同步到 `/var/www/html`。
+- 所需权限：`U` 可以 sudo；方式 B 需要 root 登录（prod 上要 owner 允许）。
+- 初始状态（只记路径、属主、模式，不记内容）：
+  - `stat -c '%U:%G %a %n' /var/www/html /var/www/html/DAY0-Prepare /var/www/html/DAY0-Prepare/<项目>`，以及
+    `find /var/www/html/DAY0-Prepare/<项目> -printf '%u:%g %m %p\n'` 的快照，用于清理时恢复；
+  - `sudo crontab -u U -l`、`sudo crontab -l`（脱敏）；`ls -ln <项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs`；
+  - `id U`、`id V`。
+
+### 步骤
+
+0. 同步之后（agentOP 报告第 7 节第 9 条）：`stat -c %U /var/www/html /var/www/html/DAY0-Prepare/<项目>`，记录代码树和项目的属主。
+   原生同步用 `rsync -a` 时可能保留开发机映射过来的 uid（推断）；项目属主在 passwd 里查不到时，后面的 load 应拒绝并给出
+   `sudo chown <操作员>:<操作员主组> <项目>` 提示（wave2 http dev 定的第 2 条），按提示改好再继续。
+1. `U` 直接运行 `/usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
+   在加锁之前退出，提示「Linux 管理服务器上 load 需要 root：请用 sudo 运行」并给出完整的 sudo 命令（WP-5）；
+   `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件改成 `U` 打不开时（隔离副本上
+   临时 `chmod 000`）报「无法打开部署锁 …（没有权限）」并带底层原因，做完恢复模式（WP-5，四类中至少这两类）。
+2. 把项目里一个目录 `chmod 0700`，再
+   `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
+   - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
+   - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，那个目录逐项打印 `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，
+     结尾有汇总，然后通过闸门；再跑一次 load 没有 `[PERM]` 行（幂等）；
+   - 跑完：项目除 root 私有状态外都属于 `U`、组是 `U` 的主组；`cre.json`、`auto.env` 一类 0600 文件仍是 0600；
+     本次新建的条目（模板补齐、`laptop.pub` 占位、新项目目录本身）有 `[OWNER]` 汇总行且属于 `U`；
+   - key 从 `U` 的 passwd 家目录读（`/home/U/.ssh`，不是 `/root/.ssh`）；临时把 `U` 的 `id_ed25519` 改名后重跑：load 停下并打印
+     让 `U` 不加 sudo 执行的 `ssh-keygen -t ed25519 …` 命令，什么都不生成；改回后继续；
+   - 在隔离副本上把 `mgmt-server.pub` 临时换回 root 的公钥再跑一次：load 停在「management public key mismatch」，key 不被替换；
+     恢复后继续。
+3. 第 2 步的 load 准备公钥期间，在另一个终端执行 `touch ~U/.ssh` 并在 `~U/.ssh` 里新建一个无关文件：load 不中止（WP-7，I-014）；
+   改 `id_ed25519.pub` 的内容则照旧中止（只在隔离副本上做，做完恢复）。
+4. `stat -c '%U:%G %a %n' /var/www/html/{ethernet,infiniband,nvlink}/monitor/cron.lock`：三把锁都属于 `U`，新建的是 0600，
+   原来就有的保持原模式（WP-9）；`U` 不加 sudo 运行 `bash /var/www/html/ethernet/monitor/cron.sh --air`（或 `--prod`）能拿到锁，
+   不出现「上一轮采集仍在运行」。在页面触发一次采集之后，锁仍属于 `U`（worker 的 fchown）。
+5. 属主核对（`stat -c '%U:%G %a %n'`）：
+   - `99-output-infra` 下 load 期间新写的 `deploy_infra-*.log`、`infra-setup-*.log` 属于 `U:<U 的主组>`（WP-12）；
+   - `99-output-ztp/<时间戳>/`、`.collection-attribution.json`、`.ztp-monitor-watch-state.json`、`.ztp-completion-handoff.json`
+     属于 `U`；
+   - 仍属于 root 的 root 私有状态：`99-output-ztp/manual-config-sync`、`99-output-ztp/configuration-methods`（含 `.authority`）、
+     `99-output-ztp/.ztp-monitor.pid.lock`、`99-output-ztp/..collection-attribution.json.lock`、`99-output-ztp/generations`、
+     `99-output-ztp/rollback-receipts`、`99-output-ztp/ztp-monitor.control`（`root:www-data 0664`）、`99-output-backup`、
+     `99-output-dhcp/.load-dhcp-candidate-*`、项目根下的 `.load-inventory-*` 和 `.99-output-backup.retention*`；
+   - monitor 日志的第一行有身份说明行；`ps -o args` 里 monitor 的命令不带 `-i`（load 不传），它登录交换机用的是
+     `/home/U/.ssh/id_ed25519`（在设备上用 `last` 或 ssh 日志看登录 key 的指纹）；
+   - `sudo python3 tools/collect-ztp-diagnostics.py -p <项目> --prod --host <设备>`：stdout 有身份说明行，默认用 `U` 的
+     key 和 known_hosts 登录；在一个没装 PyYAML 的环境里跑同一命令，stderr 有一行「无法判定操作员（模块缺失：…）」，仍生成诊断包。
+6. `U` 执行 `sudo python3 -B /var/www/html/DAY0-Prepare/13-unload.py DAY0-Prepare/<项目> --yes`（WP-8）：
+   - 13-unload、02-unsetup 各打印一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
+   - 拆除成功；`U` 的 crontab 里带 `# http-v3-req10c-auto` 的行没了、其他行逐字保留；root 的 crontab 前后逐字相同；
+     `auto.env`、`auto-watch.state`、`auto-terminal.json` 删除；`auto-crontab.lock` 存在、属主 `U`、0600；
+   - 在第 2 步改正之后，unload 撤销配置权威仍成功（`manual-config-sync`、`configuration-methods` 未被改正交给 `U`）。
+7. 方式 B（root 直接登录）在一个属于 root 的项目副本上，把第 2、4、6 步各走一遍：身份说明行是「操作员：root（项目目录属主）；
+   当前：root 直接运行 → 以 root 执行」；没有 `runuser`；key 从 `/root/.ssh` 读；三把锁属于 root；crontab 是 root 自己的
+   （`crontab -l`，不带 `-u`）。混用：方式 A 的 sudo load → root 登录运行 upgrade → `U` 不加 sudo 运行 upgrade → root 登录
+   unload，四步的身份说明行里操作员都是 `U`，root 的 unload 清的是 `U` 的 crontab（upgrade 的细节见
+   `TC-REAL-I006-OPERATOR-REEXEC-001`）。
+8. 拒绝：`V` 经 sudo 对 `U` 的项目运行 13-unload（有 REQ10C watch）：02-unsetup 以 1 退出，`[ERROR]` 点名 `U` 与 `V`，`U` 的
+   crontab、状态文件、指针都不动；项目没有 REQ10C 状态时，同样的 `V` 运行打一条 WARN，指针和链接照常删除、以 0 退出。
+   `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。
+9. Docker（现场有的话，只读核对）：容器内的 load、monitor、diagnostics 没有身份说明行，三把锁与 `/root/.ssh` 的用法和文件属主与
+   v3.1.1 相同；容器内 unload 一个属主 uid 不在容器 passwd 里、没有 REQ10C 状态的项目，结果与 v3.1.1 相同（成功），多一行 WARN。
+
+### 预期结果
+
+- 正向结果：见各步。方式 A 结束时，除第 5 步列出的 root 私有状态外，项目里的条目都属于 `U`；第 2 步的第二次 load 没有改动。
+- 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步属主查不到时拒绝并给出 chown 提示；第 8 步按所列退出码和提示。
+- 不允许发生的副作用：替 root 生成 key；改动 root 私有状态的属主或模式；跟随项目里的链接改到项目外；
+  动 `V` 或 root 的 crontab；碰 `/etc/hosts`；改 eth_jump。
+- 需要保存的证据：脱敏的命令输出（身份说明行、`[PERM]` 汇总、`[OWNER]` 汇总、拒绝提示）、`id`、各步的属主列表
+  （`stat -c '%U:%G %a %n'`）、`crontab -u U -l` 与 `crontab -l` 的脱敏结果、monitor 登录用 key 的指纹。不记录任何秘密。
+
+### 故障注入与清理
+
+- 故障注入：第 1 步的两类加锁失败；第 2 步的 0700 目录和缺 key；第 3 步的 `touch ~/.ssh`；第 8 步的 `V`。
+- 清理/回滚验证：按初始快照恢复项目的属主和模式（`chown`、`chmod`，只针对快照里的路径）；删掉测试加的 cron 行；
+  恢复临时改动的锁文件模式和 key 文件名；不删除运行锁和 `cron.lock`；不碰 `/etc/hosts`，不改 eth_jump。
+- 重复执行与幂等性：第 2 步重复 load 没有 `[PERM]` 改动；重复 unload 不再动 crontab。
+- 风险：load 会 chown、chmod 项目（prod 上不由 AI 执行）；unload 会读写 `U` 的整个 crontab，按 `TC-REAL-REQ10C-AUTO-001` 的同 UID
+  静默要求执行；迁移期间交换机只认 root 的 key 时，monitor 和采集靠 root 的默认 key 作后备（O12 ①）；`U` 用 ssh-agent 时 sudo
+  会丢掉 agent。已知限制（不在本卡验证）：方式 A 下要拿代码树 `.deployment.lock` 的操作员 CLI（`ztp/manual-ztp.py`、
+  `ztp/config/cumulus/template/P2P/b-xlsx_to_dot.py`、单独运行的 c1）必须加 sudo（`docs/operations/README.md` 的示例已带 sudo）；`feedback.py`、
+  `sample_links.py` 在方式 A 下的处理待 owner 决定。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_load_operator_workflow.py`（第一段：方式 A、方式 B、混用，monitor 的 key，infra 日志属主）。
+- [x] 修复前能够稳定失败：workflow 针对已合入的实现，用变异对照证明断言有效（去掉某项已合入的实现后对应用例变红）。
+- [x] 修复后通过。
+- [ ] 第二段（WP-6 合入后）：方式 A 用例补「load 的改正指向 U」，加 `test_sudo_unload_after_repair_still_withdraws_config_authorities`。
 - [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
