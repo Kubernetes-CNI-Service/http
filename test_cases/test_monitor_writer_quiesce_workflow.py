@@ -4714,6 +4714,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self._http_management_load_fixture(load, project), \
                  mock.patch.multiple(load, HTTP_ROOT=project.parent.parent, ZTP_DIR=project.parent.parent / "ztp"), \
                  mock.patch.object(load, "preflight_password_update_backend"), \
+                 mock.patch.object(load, "_require_root_for_load"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=93), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \
@@ -4773,6 +4774,7 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self._http_management_load_fixture(load, project), \
                  mock.patch.multiple(load, HTTP_ROOT=project.parent.parent, ZTP_DIR=project.parent.parent / "ztp"), \
                  mock.patch.object(load, "preflight_password_update_backend"), \
+                 mock.patch.object(load, "_require_root_for_load"), \
                  mock.patch.object(load, "acquire_deployment_lock", return_value=94), \
                  mock.patch.object(load, "release_deployment_lock"), \
                  mock.patch.object(load, "runtime_os", return_value="Linux"), \

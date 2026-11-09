@@ -1955,6 +1955,8 @@ class RV4LoadNonLinkPointerTests(unittest.TestCase):
                     ("runtime_os", mock.Mock(return_value="Linux")),
                     ("service_runtime_backend", mock.Mock(return_value=SimpleNamespace(name="systemd"))),
                     ("validate_runtime_options", mock.Mock()),
+                    # v3.1.2 WP-5: plays root by replacing the check, never os.geteuid (guide 2.2 #6).
+                    ("_require_root_for_load", mock.Mock()),
                     ("acquire_deployment_lock", mock.Mock(return_value=91)),
                     ("release_deployment_lock", mock.Mock()),
                     ("require_no_pending_dhcp_transaction", mock.Mock()),

@@ -100,13 +100,46 @@ def _report_preimage_identity(metadata: os.stat_result) -> tuple[int, ...]:
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
-def _require_directory(path: Path) -> tuple[int, int]:
+def _project_owner_refusal(uid: int, project: Path | None) -> int | None:
+    """None when ``uid`` may own a governed directory, else the uid that should.
+
+    The euid always may, as before.  On the project side (``project`` given) a native root load also
+    accepts the project's operator, the directory owner it acts for (I-006 v3.1.2 WP-5;
+    tools/operator_identity.py).  The operator is looked up only then: a non-root run, and the Docker
+    supervisor (Docker frozen; its project owner may be missing from the container's passwd), compare
+    with the euid exactly as before.
+    """
+    euid = os.geteuid()
+    if uid == euid:
+        return None
+    if project is None or euid != 0 or os.environ.get("HTTP_ZTP_RUNTIME_BACKEND") == "supervisor":
+        return euid
+    try:
+        from tools import operator_identity
+    except ModuleNotFoundError as exc:
+        if exc.name != "tools":
+            raise
+        import operator_identity
+    resolution = operator_identity.resolve_operator(project)
+    if resolution.refusal is not None:
+        raise GenerationReportError(resolution.refusal)
+    return None if uid == resolution.operator.uid else resolution.operator.uid
+
+
+def _require_directory(path: Path, *, project: Path | None = None) -> tuple[int, int]:
     try:
         named = os.lstat(path)
     except OSError as exc:
         raise GenerationReportError(f"directory unavailable: {path}") from exc
-    if not stat.S_ISDIR(named.st_mode) or named.st_uid != os.geteuid():
+    if not stat.S_ISDIR(named.st_mode):
         raise GenerationReportError(f"owned no-follow directory required: {path}")
+    expected = _project_owner_refusal(named.st_uid, project)
+    if expected is not None:
+        # 问题文档 I-006 方案第 7 条第 3 点: name the path, the actual and expected owner and the fix.
+        raise GenerationReportError(
+            f"owned no-follow directory required: {path} (uid {named.st_uid}, expected {expected}; "
+            f"fix: sudo chown {expected} {path})"
+        )
     return _identity(named)
 
 
@@ -183,7 +216,7 @@ def _project_name(project: Path) -> str:
     name = project.name
     if not name or name in (".", "..") or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
         raise GenerationReportError("project must have a safe basename")
-    _require_directory(project)
+    _require_directory(project, project=project)
     return name
 
 
@@ -371,7 +404,7 @@ def _validate_report_shape(report: dict[str, Any], project: Path) -> None:
 
 def _output_directory(project: Path) -> Path:
     output = project / "99-output-ztp"
-    _require_directory(output)
+    _require_directory(output, project=project)
     return output
 
 
@@ -385,7 +418,7 @@ def _open_prepared_directory(output: Path, expected: tuple[int, int]) -> int:
     try:
         observed = os.fstat(descriptor)
         if (not stat.S_ISDIR(observed.st_mode)
-                or observed.st_uid != os.geteuid()
+                or _project_owner_refusal(observed.st_uid, output.parent) is not None
                 or _identity(observed) != expected):
             raise GenerationReportError("report output directory rebound")
         return descriptor
@@ -432,7 +465,7 @@ def prepare_generation_report(
     if not isinstance(report["generated_at"], str):
         raise GenerationReportError("invalid report timestamp")
     output = _output_directory(project)
-    directory_identity = _require_directory(output)
+    directory_identity = _require_directory(output, project=project)
     destination = output / REPORT_NAME
     old_identity, old_payload_sha256 = _existing_report_preimage(destination, project)
     payload = (json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
@@ -608,7 +641,7 @@ def inspect_generation_report(project: Path, *, published_dir: Path) -> dict[str
     """Read only the governed path and reject any parent/key/report mismatch."""
     project = Path(project)
     output = _output_directory(project)
-    directory_identity = _require_directory(output)
+    directory_identity = _require_directory(output, project=project)
     directory_fd = _open_prepared_directory(output, directory_identity)
     try:
         parent_payload = _read_regular(

@@ -181,6 +181,9 @@ class SystemdLoadMainFixture:
             "parse_args": mock.Mock(return_value=args),
             "runtime_os": mock.Mock(return_value="Linux"),
             "service_runtime_backend": mock.Mock(return_value=runtime),
+            # v3.1.2 WP-5: Linux management-server load refuses a non-root euid before the lock; this
+            # fixture plays root by replacing that check, never os.geteuid (guide 2.2 #6, WP-5 step 9).
+            "_require_root_for_load": mock.Mock(),
             "acquire_deployment_lock": mock.Mock(return_value=97),
             "release_deployment_lock": mock.Mock(),
             "require_no_pending_dhcp_transaction": mock.Mock(),

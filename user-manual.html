@@ -372,6 +372,7 @@ sudo python3 DAY0-Prepare/11-load.py &lt;project&gt;</code></pre></div>
           <div><h4>失败恢复</h4><p>保留错误与 marker；修复后从失败的受支持事务入口重跑。</p></div>
           <div><h4>验收证据</h4><p>记录 upload SHA、load 退出码、服务状态、HTTP/DHCP 结果。</p></div>
         </div></div>
+        <p>运行身份（v3.1.2 I-006、I-014）：Native 管理服务器上的实际 load 必须以 root 运行（<code>sudo</code> 或 root 直接登录），普通用户直接运行会在加锁前被拒绝并给出完整命令；<code>--dry-run</code> 不检查。项目目录的属主就是操作员，load 开头打印一行身份说明。root 代表操作员运行时，管理 key 取操作员 passwd 家目录下的 <code>.ssh/id_ed25519</code>，缺失时只提示操作员自己执行 <code>ssh-keygen</code>，不替操作员生成；属主不对时报出路径、实际和期望的 uid:gid 和 <code>sudo chown</code> 命令；本次从模板新建的项目条目交给操作员，root 私有状态保持 root；别的用户在 <code>~/.ssh</code> 里新建文件或 touch 它不再让 load 中止。加锁失败分四类报：被占用、打不开（如没有权限）、锁文件异常、finish 事务未完成。Docker 不变。</p>
       </section>
 
       <section id="v1-scenario-operate" data-chapter>

@@ -337,6 +337,8 @@ class GenerationReportWorkflow(unittest.TestCase):
             stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
             stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            # v3.1.2 WP-5: plays root by replacing the check, never os.geteuid (guide 2.2 #6).
+            stack.enter_context(mock.patch.object(LOAD, "_require_root_for_load"))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=97))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))
@@ -476,6 +478,8 @@ class GenerationReportWorkflow(unittest.TestCase):
             stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", self.fixture.root))
             stack.enter_context(self.fixture._http_linux_public_ancestor_model())
             stack.enter_context(mock.patch.object(LOAD, "parse_args", return_value=args))
+            # v3.1.2 WP-5: plays root by replacing the check, never os.geteuid (guide 2.2 #6).
+            stack.enter_context(mock.patch.object(LOAD, "_require_root_for_load"))
             stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=98))
             stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock", unlock))
             stack.enter_context(mock.patch.object(LOAD, "runtime_os", return_value="Linux"))

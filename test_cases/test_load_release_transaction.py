@@ -1006,6 +1006,11 @@ class ReleaseTransactionTests(unittest.TestCase):
                 self.assertEqual(original, authority.read_bytes())
 
     def setUp(self) -> None:
+        # v3.1.2 WP-5: a Linux management-server main refuses a non-root euid before the lock; this
+        # fixture plays root by replacing that check, never os.geteuid (guide 2.2 #6, WP-5 step 9).
+        root_check = mock.patch.object(LOAD, "_require_root_for_load")
+        root_check.start()
+        self.addCleanup(root_check.stop)
         self.temporary = _release_fixture_temporary()
         self.root = Path(self.temporary.name)
         self.project = self.root / "DAY0-Prepare/demo"
@@ -9336,7 +9341,7 @@ print("actual-copied-validator-selected-B")
 
         def capture_selection(
             _project: Path, args, *, allow_management_key_generation: bool,
-            host_role: str,
+            host_role: str, identity=None,   # v3.1.2 WP-5: main passes its operator (interface sync)
         ) -> tuple[object, object]:
             observed["deployment_scope"] = args.deployment_scope
             observed["switch_scope"] = args.switch_scope
@@ -11959,6 +11964,7 @@ class LatestRetirementRecoveryTests(unittest.TestCase):
 
             patch("runtime_os", return_value="Linux")
             patch("service_runtime_backend", return_value=SimpleNamespace(name="systemd"))
+            patch("_require_root_for_load")   # v3.1.2 WP-5: plays root (guide 2.2 #6)
             patch("acquire_deployment_lock", return_value=97)
             patch("release_deployment_lock")
             patch("require_no_pending_dhcp_transaction")
@@ -12671,6 +12677,8 @@ class NativePreinstallPresenceWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(LOAD, "service_runtime_backend", return_value=backend))
                 stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=fixture.project))
                 stack.enter_context(mock.patch.object(LOAD, "active_project", return_value=fixture.project.resolve()))
+                # v3.1.2 WP-5: plays root by replacing the check, never os.geteuid (guide 2.2 #6).
+                stack.enter_context(mock.patch.object(LOAD, "_require_root_for_load"))
                 stack.enter_context(mock.patch.object(LOAD, "acquire_deployment_lock", return_value=91))
                 stack.enter_context(mock.patch.object(LOAD, "release_deployment_lock"))
                 stack.enter_context(mock.patch.object(LOAD, "require_no_pending_dhcp_transaction"))

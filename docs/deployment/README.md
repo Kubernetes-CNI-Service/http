@@ -53,6 +53,24 @@ V3 的 Linux `11-load.py` 必须显式声明 `--host-role=workstation` 或
 命令行声明不是物理角色证明，隔离 VM 和实际环境仍须按
 `test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-REQ16-HOST-ROLE-001` 验证。
 
+Native 管理服务器上的实际 load 以 root 运行（普通用户加 `sudo`，或 root 直接登录；v3.1.2 I-006）。
+普通用户直接运行会在加锁之前被拒绝，并给出完整的 `sudo` 命令；`--dry-run`、macOS 和 workstation
+不检查。load 把项目目录的属主当作操作员，开头打印一行身份说明，例如
+`操作员：<user>（项目目录属主）；当前：root 经 sudo（发起人 <user>）→ 项目侧以 <user> 执行`：
+
+- root 代表普通用户运行时，管理服务器 key 取操作员 passwd 家目录下的 `.ssh/id_ed25519`，不读 root 的；
+  key 不存在时 load 停下，给出由操作员自己（不加 `sudo`）执行的 `ssh-keygen` 命令，不替操作员生成。
+  root 跑 root 自己的项目时照旧自动生成。
+- 项目目录、项目公钥和操作员 `~/.ssh` 的属主按操作员的 uid 和 passwd 主组检查；不对时报出路径、
+  实际和期望的 uid:gid，并给出 `sudo chown` 命令。
+- 本次 load 从模板新建的项目条目（含新项目目录和 `laptop.pub` 空占位）交给操作员；root 私有状态
+  （如 `99-output-backup`、`99-output-ztp/generations`、`99-output-ztp/rollback-receipts`）保持 root。
+- `~/.ssh` 是共用目录：load 准备公钥期间别的用户在里面新建文件或 touch 它，load 不再中止；
+  key 文件内容变化或目录被换掉仍会中止（I-014）。
+- 加锁失败分四类报：被另一个 load 或人工操作占用、打不开锁（如没有权限）、锁文件异常、finish 事务未完成。
+
+Docker（supervisor 后端）不变：仍以容器内 root 和 `/root/.ssh` 运行，不做操作员判定。
+
 | 部署场景 | 源码进入运行主机 | 唯一生命周期 | 同一 Service IP 换接口 |
 |---|---|---|---|
 | Mac 本机开发（不连接交换机） | 不传输；正式本机 load 生成并测试 | 不启动服务 | 不适用 |

@@ -22,7 +22,9 @@ from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime
+import errno
 import fcntl
+import fnmatch
 import getpass
 import gzip
 import hashlib
@@ -105,6 +107,7 @@ if str(TOOLS_DIR) not in sys.path:
 import generation_report
 from infra_components import encode_load_components, select_load_components
 import ssh_key_preparation as ssh_keys
+import operator_identity
 from project_contract import (
     GLOBAL_SCHEMA_VERSION,
     ActiveProjectPointerError,
@@ -151,6 +154,7 @@ from deployment_lock import (
     inherited_lock_subprocess_kwargs,
     release_lock_descriptor,
 )
+from finished_project_state import FinishStateError
 
 _strict_yaml_document = safe_load_global_yaml
 from ztp_service_runtime import (
@@ -1004,6 +1008,27 @@ def verify_local_full_test_attestation(*, validation_only: bool = False) -> None
     )
 
 
+def _require_root_for_load(
+    host_os: str, host_role: str, dry_run: bool, argv: list[str], *, euid: int | None = None,
+) -> None:
+    """Refuse a non-root load on a Linux management server before the deployment lock (I-006).
+
+    Owner 2026-10-27 scheme item 7 (问题文档 I-006): check root before locking, so a plain user reads
+    "use sudo" rather than "another load is running".  macOS, a workstation and --dry-run are not
+    checked, as 13-unload does.  euid defaults to this process; tests replace this function or pass
+    euid instead of mocking os.geteuid (v3.1.2 guide 2.2 #6).
+    """
+    if dry_run or host_os.casefold() != "linux" or host_role != "management-server":
+        return
+    if (os.geteuid() if euid is None else euid) == 0:
+        return
+    command = ("sudo", sys.executable, str(Path(__file__).resolve()), *argv)
+    raise LoadError(
+        "Linux 管理服务器上 load 需要 root：请用 sudo 运行："
+        + " ".join(shlex_quote(part) for part in command)
+    )
+
+
 def acquire_deployment_lock(*, exclusive: bool = True) -> int:
     """Acquire the process-wide deployment gate without waiting.
 
@@ -1033,10 +1058,22 @@ def acquire_deployment_lock(*, exclusive: bool = True) -> int:
     except DeploymentLockError as exc:
         if lock_context is not None and lock_entered:
             lock_context.__exit__(type(exc), exc, exc.__traceback__)
-        raise LoadError(
-            "另一个 load 或人工 ZTP/重置操作正在使用部署 release；"
-            "请等待其完成后重试"
-        ) from exc
+        # Owner 2026-10-27 scheme item 7 (问题文档 I-006): four causes, told apart by the shared lock's
+        # __cause__ (tools/deployment_lock.py unchanged).  Only a busy lock keeps the old text.
+        cause = exc.__cause__
+        if isinstance(cause, BlockingIOError):
+            message = "另一个 load 或人工 ZTP/重置操作正在使用部署 release；请等待其完成后重试"
+        elif isinstance(cause, FinishStateError):
+            message = f"部署锁拒绝写入：finish 事务尚未完成，请先按提示完成或恢复它：{exc}"
+        elif isinstance(cause, OSError):
+            reason = "没有权限" if isinstance(cause, PermissionError) else "系统错误"
+            message = (
+                f"无法打开部署锁 {DEPLOYMENT_LOCK}（{reason}）：{exc}；"
+                "请用 sudo 运行，或检查它的属主和权限"
+            )
+        else:
+            message = f"部署锁文件异常（须是单链接普通文件，继承的锁描述符须有效）：{exc}"
+        raise LoadError(message) from exc
 
 
 def release_deployment_lock(descriptor: int | None) -> None:
@@ -1391,6 +1428,116 @@ def initialize_from_template(project: Path, dry_run: bool = False) -> None:
         else:
             laptop.open("x").close()   # exclusive create: never through a link
             print(f"  [INIT] {LAPTOP_PUBKEY_NAME} ← 空占位（setup 随后准备本机公钥）")
+
+
+def _resolve_load_operator(project: Path) -> operator_identity.Resolution:
+    """This load's operator: the project directory's owner (I-006; tools/operator_identity.py).
+
+    main computes it once, right after the project is resolved, and passes it down.  Tests replace this
+    function with operator_identity.resolve_operator on injected inputs to play root.
+    """
+    return operator_identity.resolve_operator(project)
+
+
+# Root-private state inside a project (agentOP report 4.4, the WP-6 exclusion list http dev adopted):
+# root creates it and checks it by euid or through a receipt, so a load run by root never hands it to
+# the operator.  A pattern matches a project-relative name or one of its ancestors (the whole subtree).
+ROOT_PRIVATE_PROJECT_STATE: tuple[str, ...] = (
+    "99-output-ztp/manual-config-sync",
+    "99-output-ztp/configuration-methods",
+    "99-output-dhcp/.load-dhcp-candidate-*",
+    ".load-inventory-*",
+    "99-output-backup",
+    ".99-output-backup.retention.lock",
+    ".99-output-backup.retention.jsonl",
+    ".99-output-backup.retention-migration.json",
+    "99-output-ztp/.ztp-monitor.pid.lock",
+    "99-output-ztp/..collection-attribution.json.lock",
+    "99-output-ztp/generations",
+    "99-output-ztp/rollback-receipts",
+    "99-output-ztp/ztp-monitor.control",
+)
+
+
+def _root_private_project_state(name: str) -> bool:
+    """True when the project-relative ``name`` lies in ROOT_PRIVATE_PROJECT_STATE."""
+    parts = name.split("/")
+    return any(
+        fnmatch.fnmatchcase("/".join(parts[:count]), pattern)
+        for count in range(1, len(parts) + 1) for pattern in ROOT_PRIVATE_PROJECT_STATE
+    )
+
+
+def _template_entries_to_hand_over(
+    project: Path, identity: operator_identity.Resolution | None, dry_run: bool,
+) -> list[str]:
+    """Names a root template completion may create for the operator, taken before it runs (O11 ②④).
+
+    Only when root acts for an operator (action "represent") outside --dry-run.  The names, relative to
+    the project ("" is the project itself), are those absent now among the project, every template entry
+    and load's own laptop.pub placeholder (initialize_from_template; precheck addendum #1).
+    """
+    if dry_run or identity is None or identity.action != "represent":
+        return []
+    names = ["", LAPTOP_PUBKEY_NAME]
+    for directory, dirnames, filenames in os.walk(TEMPLATE_DIR):
+        relative = Path(directory).relative_to(TEMPLATE_DIR)
+        names.extend((relative / name).as_posix() for name in (*dirnames, *filenames))
+    return [name for name in dict.fromkeys(names) if not os.path.lexists(project / name)]
+
+
+def _hand_new_entries_to_operator(
+    project: Path, names: list[str], identity: operator_identity.Resolution | None,
+) -> None:
+    """Hand what the template completion created among ``names`` to the operator (O11 ②④).
+
+    问题文档 I-006 方案第 4 条: files root writes into the project belong to the real user.  Every
+    component is opened without following a link, so a link and anything behind it is skipped; root-private
+    state stays root's.  fchown only when the owner differs: even an unchanged chown moves ctime, which
+    receipts bind (agentOP report 4.4).
+    """
+    if not names:
+        return
+    operator = identity.operator
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    handed = 0
+    project_fd = os.open(project, directory_flags)
+    try:
+        for name in names:
+            if _root_private_project_state(name):
+                continue
+            parents: list[int] = []
+            try:
+                if name:
+                    *steps, leaf = name.split("/")
+                    current = project_fd
+                    for step in steps:
+                        current = os.open(step, directory_flags, dir_fd=current)
+                        parents.append(current)
+                    descriptor = os.open(
+                        leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                        dir_fd=current,
+                    )
+                else:
+                    descriptor = os.dup(project_fd)
+            except OSError as exc:
+                if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    continue   # not created, or a link on the way
+                raise
+            finally:
+                for parent in parents:
+                    os.close(parent)
+            try:
+                held = os.fstat(descriptor)
+                if (held.st_uid, held.st_gid) != (operator.uid, operator.gid):
+                    os.fchown(descriptor, operator.uid, operator.gid)
+                    handed += 1
+            finally:
+                os.close(descriptor)
+    finally:
+        os.close(project_fd)
+    if handed:
+        print(f"  [OWNER] 本次新建的 {handed} 项交给操作员 {operator.name}（{operator.uid}:{operator.gid}）")
 
 
 def _nonempty_file(path: Path, label: str) -> None:
@@ -2266,6 +2413,7 @@ class _HeldManagementDirectory:
     gid: int
     allowed_modes: tuple[int, ...]
     label: str
+    bind: Callable[[os.stat_result], tuple[int, ...]]
 
     def close(self) -> None:
         if self.descriptor >= 0:
@@ -2477,6 +2625,13 @@ def _management_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
     )
 
 
+def _management_ssh_directory_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    """The operator's ~/.ssh is shared (I-014, owner 2026-11-01): bind which directory it is and its owner
+    and mode, not what other users do in it, so nlink, mtime and ctime are left out.  The key files keep
+    _management_metadata_identity; the DHCP runtime directory keeps _management_directory_identity."""
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_uid, metadata.st_gid)
+
+
 def _management_directory_flags() -> int:
     required = ("O_DIRECTORY", "O_NOFOLLOW", "O_CLOEXEC")
     if any(not hasattr(os, name) for name in required):
@@ -2484,31 +2639,48 @@ def _management_directory_flags() -> int:
     return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
+def _owner_fix(path: Path, metadata, expected: tuple[int, int]) -> str:
+    """问题文档 I-006 方案第 7 条第 3 点: the path, actual and expected uid:gid, and the chown that fixes it."""
+    return (
+        f"{path} 实际 uid:gid {metadata.st_uid}:{metadata.st_gid}，期望 {expected[0]}:{expected[1]}；"
+        f"请执行：sudo chown {expected[0]}:{expected[1]} {shlex_quote(os.fspath(path))}"
+    )
+
+
 def _open_management_directory(
     path: Path, *, label: str, allowed_modes: tuple[int, ...],
+    owner: tuple[int, int] | None = None, shared: bool = False,
 ) -> _HeldManagementDirectory:
+    """Hold one management directory: a project or a ~/.ssh.
+
+    owner: the load operator's (uid, pw_gid) (I-006 WP-5, O9); None keeps the euid/egid authority.
+    shared: the directory is the operator's ~/.ssh, bound without nlink, mtime and ctime (I-014 WP-7).
+    """
+    expected_owner = (os.geteuid(), os.getegid()) if owner is None else owner
+    bind = _management_ssh_directory_identity if shared else _management_directory_identity
     descriptor = -1
     try:
         direct = os.lstat(path)
         if stat.S_ISLNK(direct.st_mode) or not stat.S_ISDIR(direct.st_mode):
             raise LoadError(f"{label} 必须是非 symlink 的安全 directory")
-        if direct.st_uid != os.geteuid() or direct.st_gid != os.getegid():
-            raise LoadError(f"{label} owner uid/gid 不安全")
+        if (direct.st_uid, direct.st_gid) != expected_owner:
+            raise LoadError(f"{label} owner uid/gid 不安全：{_owner_fix(path, direct, expected_owner)}")
         if stat.S_IMODE(direct.st_mode) not in allowed_modes:
             expected = "/".join(f"{mode:04o}" for mode in allowed_modes)
             raise LoadError(f"{label} mode 必须是 {expected}")
         descriptor = os.open(os.fspath(path), _management_directory_flags())
         held = os.fstat(descriptor)
-        if _management_directory_identity(direct) != _management_directory_identity(held):
+        if bind(direct) != bind(held):
             raise LoadError(f"{label} identity changed while opening")
         return _HeldManagementDirectory(
             path=path,
             descriptor=descriptor,
-            identity=_management_directory_identity(held),
+            identity=bind(held),
             uid=held.st_uid,
             gid=held.st_gid,
             allowed_modes=allowed_modes,
             label=label,
+            bind=bind,
         )
     except LoadError:
         if descriptor >= 0:
@@ -2526,10 +2698,7 @@ def _revalidate_management_directory(directory: _HeldManagementDirectory) -> Non
         rebound = os.lstat(directory.path)
     except OSError as exc:
         raise LoadError(f"{directory.label} canonical binding disappeared：{exc}") from exc
-    if (
-        _management_directory_identity(held) != directory.identity
-        or _management_directory_identity(rebound) != directory.identity
-    ):
+    if directory.bind(held) != directory.identity or directory.bind(rebound) != directory.identity:
         raise LoadError(f"{directory.label} directory identity changed or rebound")
 
 
@@ -2551,14 +2720,14 @@ def _management_read_bounded(descriptor: int, limit: int, label: str) -> bytes:
 
 def _validate_management_leaf_metadata(
     metadata: os.stat_result, *, label: str, mode: int,
-    uid: int, gid: int,
+    uid: int, gid: int, path: Path,
 ) -> None:
     if not stat.S_ISREG(metadata.st_mode):
         raise LoadError(f"{label} 必须是 regular file，不能是 symlink/FIFO/special")
     if metadata.st_nlink != 1:
         raise LoadError(f"{label} 必须是 single-link file")
     if metadata.st_uid != uid or metadata.st_gid != gid:
-        raise LoadError(f"{label} owner uid/gid 不安全")
+        raise LoadError(f"{label} owner uid/gid 不安全：{_owner_fix(path, metadata, (uid, gid))}")
     if stat.S_IMODE(metadata.st_mode) != mode:
         raise LoadError(f"{label} mode 必须是 {mode:04o}")
 
@@ -2585,6 +2754,7 @@ def _open_management_leaf(
             mode=mode,
             uid=directory.uid,
             gid=directory.gid,
+            path=directory.path / name,
         )
         descriptor = os.open(name, flags, dir_fd=directory.descriptor)
         held = os.fstat(descriptor)
@@ -2594,6 +2764,7 @@ def _open_management_leaf(
             mode=mode,
             uid=directory.uid,
             gid=directory.gid,
+            path=directory.path / name,
         )
         if _management_metadata_identity(direct) != _management_metadata_identity(held):
             raise LoadError(f"{label} identity changed while opening")
@@ -2672,9 +2843,11 @@ def _management_fd_path(descriptor: int) -> str:
     raise LoadError("当前平台无法把 held management private key 交给 ssh-keygen")
 
 
-def _open_management_pair(ssh_dir: Path) -> _HeldManagementPair:
+def _open_management_pair(
+    ssh_dir: Path, *, owner: tuple[int, int] | None = None, shared: bool = False,
+) -> _HeldManagementPair:
     directory = _open_management_directory(
-        ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+        ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,), owner=owner, shared=shared,
     )
     private: _HeldManagementLeaf | None = None
     public: _HeldManagementLeaf | None = None
@@ -2803,10 +2976,12 @@ def _public_key_identity(path: Path) -> tuple[bytes, bytes]:
         raise LoadError(f"项目公钥身份无效：{exc}") from exc
 
 
-def _management_pair_presence(ssh_dir: Path) -> tuple[bool, bool]:
+def _management_pair_presence(
+    ssh_dir: Path, *, owner: tuple[int, int] | None = None, shared: bool = False,
+) -> tuple[bool, bool]:
     try:
         directory = _open_management_directory(
-            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,), owner=owner, shared=shared,
         )
     except FileNotFoundError:
         return False, False
@@ -2829,7 +3004,9 @@ def _management_pair_presence(ssh_dir: Path) -> tuple[bool, bool]:
         directory.close()
 
 
-def _server_rsa_public_fallback_present(ssh_dir: Path) -> bool:
+def _server_rsa_public_fallback_present(
+    ssh_dir: Path, *, owner: tuple[int, int] | None = None, shared: bool = False,
+) -> bool:
     """Check a server RSA public leaf without consulting its private half.
 
     Native management-key generation must not silently supersede a present
@@ -2838,7 +3015,7 @@ def _server_rsa_public_fallback_present(ssh_dir: Path) -> bool:
     """
     try:
         directory = _open_management_directory(
-            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,),
+            ssh_dir, label="管理服务器 SSH 目录", allowed_modes=(0o700,), owner=owner, shared=shared,
         )
     except LoadError as exc:
         if "无法安全打开" in str(exc) and not ssh_dir.exists():
@@ -2880,12 +3057,21 @@ def _generate_native_management_key(ssh_dir: Path) -> None:
 
 def ensure_management_key(
     ssh_dir: Path, *, dry_run: bool = False, allow_generation: bool,
+    identity: operator_identity.Resolution | None = None,
 ) -> Path:
-    """Validate a held Ed25519 pair; only the native caller may generate it."""
+    """Validate a held Ed25519 pair; only the native caller may generate it.
+
+    identity: the load's operator (I-006 WP-5).  Its ~/.ssh belongs to the operator (uid, pw_gid) and is a
+    shared directory (I-014 WP-7).  When root acts for the operator, a missing key is never generated as
+    root: the operator gets the ssh-keygen command (问题文档 I-006 方案第 3 条).  None (the Docker
+    supervisor, Docker frozen, and direct callers): the euid authority and the full binding, as before.
+    """
     if type(allow_generation) is not bool:
         raise LoadError("allow_generation 必须是调用者提供的 literal bool")
+    owner = None if identity is None else (identity.operator.uid, identity.operator.gid)
+    shared = identity is not None
     try:
-        private_exists, public_exists = _management_pair_presence(ssh_dir)
+        private_exists, public_exists = _management_pair_presence(ssh_dir, owner=owner, shared=shared)
     except LoadError as exc:
         if "无法安全打开" in str(exc) and not ssh_dir.exists():
             private_exists = public_exists = False
@@ -2894,18 +3080,29 @@ def ensure_management_key(
     if private_exists != public_exists:
         raise LoadError("管理服务器 SSH key pair 不完整，未自动修复")
     if not private_exists:
-        if _server_rsa_public_fallback_present(ssh_dir):
+        if _server_rsa_public_fallback_present(ssh_dir, owner=owner, shared=shared):
             raise LoadError(
                 "管理服务器存在 RSA public key；RSA-only server fallback 尚未获准，"
                 "拒绝静默生成或发布另一把 Ed25519 key"
             )
         if not allow_generation:
             raise LoadError("管理服务器 SSH key 尚未由 host helper prepared；Supervisor 不会生成")
+        if identity is not None and identity.action == "represent":
+            name = identity.operator.name
+            keygen = " ".join(shlex_quote(part) for part in (
+                "ssh-keygen", "-t", "ed25519", "-N", "", "-C", f"{name}@management-server",
+                "-f", os.fspath(ssh_dir / MANAGEMENT_PRIVATE_KEY_NAME),
+            ))
+            raise LoadError(
+                f"操作员 {name} 的管理服务器 SSH key 不存在：{ssh_dir}；load 以 root 运行，不替操作员生成。"
+                f"请以 {name} 身份（不加 sudo）执行：mkdir -p -m 700 {shlex_quote(os.fspath(ssh_dir))} "
+                f"&& {keygen}，然后重跑 load"
+            )
         if dry_run:
             raise LoadError("管理服务器 SSH key 不存在；dry-run 不会生成")
         _generate_native_management_key(ssh_dir)
         print(f"[KEY] 已生成管理服务器专用 SSH key：{ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME}")
-    pair = _open_management_pair(ssh_dir)
+    pair = _open_management_pair(ssh_dir, owner=owner, shared=shared)
     try:
         return ssh_dir / MANAGEMENT_PUBLIC_KEY_NAME
     finally:
@@ -2990,14 +3187,22 @@ def prepare_pubkeys(
     project: Path, *, ssh_dir: Path, dry_run: bool = False,
     inject_management_key: bool = True,
     allow_management_key_generation: bool,
+    identity: operator_identity.Resolution | None = None,
 ) -> tuple[Path, ...]:
+    """Inject the management public key into the held project placeholder.
+
+    identity: the load's operator (I-006 WP-5).  The project directory, its key leaves and the operator's
+    ~/.ssh compare with the operator's (uid, pw_gid) (问题文档 I-006 方案第 2 条; O9).  None keeps the
+    euid/egid authority (the Docker supervisor and direct callers, Docker frozen).
+    """
     if type(allow_management_key_generation) is not bool:
         raise LoadError("allow_management_key_generation 必须是 literal bool")
     if not inject_management_key:
         return _prepare_pubkeys_without_management_injection(project, dry_run=dry_run)
 
+    owner = None if identity is None else (identity.operator.uid, identity.operator.gid)
     project_directory = _open_management_directory(
-        project, label="项目 SSH key directory", allowed_modes=(0o700, 0o755),
+        project, label="项目 SSH key directory", allowed_modes=(0o700, 0o755), owner=owner,
     )
     marker: _HeldManagementLeaf | None = None
     placeholder: _HeldManagementLeaf | None = None
@@ -3047,8 +3252,9 @@ def prepare_pubkeys(
             ssh_dir,
             dry_run=dry_run,
             allow_generation=allow_management_key_generation,
+            identity=identity,
         )
-        pair = _open_management_pair(ssh_dir)
+        pair = _open_management_pair(ssh_dir, owner=owner, shared=identity is not None)
         if pair.identity in static_identities:
             raise LoadError("管理服务器公钥与项目电脑公钥相同，无法保证两个独立 key")
         if placeholder_identity == pair.identity:
@@ -3123,6 +3329,7 @@ def prepare_pubkeys(
             mode=0o644,
             uid=project_directory.uid,
             gid=project_directory.gid,
+            path=project_directory.path / placeholder.name,
         )
         if (
             (held.st_dev, held.st_ino) != (placeholder.identity[0], placeholder.identity[1])
@@ -11152,6 +11359,7 @@ def verify_http_publication(inputs: ProjectInputs, images: dict[str, Path], dry_
 
 def require_http_project_source_access(
     project: Path, *, http_root: Path | None = None, ztp_dir: Path | None = None,
+    identity: operator_identity.Resolution | None = None,
 ) -> None:
     """Read-only necessary POSIX access gate, never a chmod or HTTP success proof.
 
@@ -11159,6 +11367,10 @@ def require_http_project_source_access(
     the two public-key leaves for early source admission. Native key parsing,
     output/manifest gates and actual HTTP health remain separately mandatory.
     Extended ACLs need an explicit separate access contract; do not guess.
+
+    The project directory and its two key leaves belong to the load operator
+    (identity, I-006 WP-5: a root load acts for the project owner); every
+    code-tree object keeps the euid authority.  identity None: the euid.
     """
     root_name, project_name = Path(HTTP_ROOT if http_root is None else http_root), Path(project)
     ztp_name = Path(ZTP_DIR if ztp_dir is None else ztp_dir)
@@ -11173,48 +11385,53 @@ def require_http_project_source_access(
     descriptors = []
     directories = set()
     flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    authority = (os.geteuid(), os.getegid())
+    project_owner = authority if identity is None else (identity.operator.uid, identity.operator.gid)
 
-    def identity(metadata, fields):
+    def identity_of(metadata, fields):
         return tuple(getattr(metadata, field) for field in fields)
 
-    def open_object(path, *, directory, inside):
+    def open_object(path, *, directory, inside, owner=authority):
         before = os.lstat(path)
         mode = stat.S_IMODE(before.st_mode)
         if directory:
             if not stat.S_ISDIR(before.st_mode) or mode & 0o111 != 0o111:
                 raise LoadError(f"HTTP public directory is not traversable without permission repair: {path} mode={mode:04o}")
-            if before.st_uid not in (0, os.geteuid()):
-                raise LoadError(f"HTTP public ancestor has foreign owner: {path}")
+            if before.st_uid not in (0, owner[0]):
+                raise LoadError(f"HTTP public ancestor has foreign owner: {path}"
+                                + (f"; {_owner_fix(path, before, owner)}" if inside else ""))
             if mode & 0o022 and not (mode & stat.S_ISVTX and before.st_uid == 0 and not inside):
                 raise LoadError(f"HTTP public directory has unqualified writable ancestor: {path}")
-            if inside and (before.st_uid, before.st_gid) != (os.geteuid(), os.getegid()):
-                raise LoadError(f"HTTP public directory owner uid/gid differs from current authority: {path}")
+            if inside and (before.st_uid, before.st_gid) != owner:
+                raise LoadError(f"HTTP public directory owner uid/gid differs from current authority: {path}; "
+                                + _owner_fix(path, before, owner))
             selected = directory_fields if inside else exterior_directory_fields
         else:
-            if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
-                    or mode != 0o644
-                    or (before.st_uid, before.st_gid) != (os.geteuid(), os.getegid())):
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or mode != 0o644:
                 raise LoadError(f"HTTP public key must be owned single-link regular 0644; no implicit repair: {path}")
+            if (before.st_uid, before.st_gid) != owner:
+                raise LoadError(f"HTTP public key must be owned single-link regular 0644; no implicit repair: {path}; "
+                                + _owner_fix(path, before, owner))
             selected = leaf_fields
         descriptor = os.open(path, flags | (os.O_DIRECTORY if directory else 0))
         # Record ownership before fstat can fail; not-yet-qualified descriptors
         # remain ours to close, never an excuse to leak or retry a reused FD.
         descriptors.append(descriptor)
         opened = os.fstat(descriptor)
-        held.append((path, descriptor, selected, identity(opened, selected)))
-        if identity(before, selected) != identity(opened, selected):
+        held.append((path, descriptor, selected, identity_of(opened, selected)))
+        if identity_of(before, selected) != identity_of(opened, selected):
             raise LoadError(f"HTTP public object changed while opening: {path}")
 
     try:
         # Give a precise root/project/key reason before broader ancestor
         # admission. No file data, directory children or private key is read.
-        for path in (root, canonical):
-            open_object(path, directory=True, inside=True)
+        for path, owner in ((root, authority), (canonical, project_owner)):
+            open_object(path, directory=True, inside=True, owner=owner)
             directories.add(path)
         for name in (LAPTOP_PUBKEY_NAME, MANAGEMENT_PUBKEY_NAME):
             path = canonical / name
             if os.path.lexists(path):
-                open_object(path, directory=False, inside=True)
+                open_object(path, directory=False, inside=True, owner=project_owner)
             # An absent initialization placeholder is not approved for HTTP;
             # Native prepare_pubkeys must later supply exact 0644 authority.
         if ztp_name.parent.resolve(strict=True) != root:
@@ -11248,8 +11465,8 @@ def require_http_project_source_access(
         for path, _descriptor, _selected, _baseline in held:
             require_acl_absent(path)
         for path, descriptor, selected, baseline in held:
-            if (identity(os.fstat(descriptor), selected) != baseline
-                    or identity(os.lstat(path), selected) != baseline):
+            if (identity_of(os.fstat(descriptor), selected) != baseline
+                    or identity_of(os.lstat(path), selected) != baseline):
                 raise LoadError(f"HTTP public object rebound or permission changed before publication: {path}")
         if (root_name.resolve(strict=True) != root
                 or project_name.resolve(strict=True) != canonical):
@@ -11260,8 +11477,8 @@ def require_http_project_source_access(
         for path, _descriptor, _selected, _baseline in held:
             require_acl_absent(path)
         for path, descriptor, selected, baseline in held:
-            if (identity(os.fstat(descriptor), selected) != baseline
-                    or identity(os.lstat(path), selected) != baseline):
+            if (identity_of(os.fstat(descriptor), selected) != baseline
+                    or identity_of(os.lstat(path), selected) != baseline):
                 raise LoadError(f"HTTP public object rebound or permission changed before publication: {path}")
     except OSError as exc:
         raise LoadError(f"HTTP public source access cannot be safely qualified: {exc}") from exc
@@ -12212,6 +12429,7 @@ def validate_inputs(
     project: Path, args: argparse.Namespace, *,
     allow_management_key_generation: bool,
     host_role: str | None = None,
+    identity: operator_identity.Resolution | None = None,
 ) -> tuple[ProjectInputs, dict[str, Path]]:
     host_role = resolve_host_role(host_role or getattr(args, "host_role", None))
     global_file = project / "01-global.yaml"
@@ -12223,7 +12441,7 @@ def validate_inputs(
         global_file, global_data=global_data, switch_scope=switch_scope,
     )
     if host_role == "management-server" and settings.http_enabled and not args.dry_run:
-        require_http_project_source_access(project)
+        require_http_project_source_access(project, identity=identity)
     placeholder_sections = find_placeholder_password_sections(
         global_data, switch_scope=switch_scope,
     )
@@ -12369,6 +12587,7 @@ def validate_inputs(
         dry_run=args.dry_run,
         inject_management_key=host_role == "management-server",
         allow_management_key_generation=allow_management_key_generation,
+        identity=identity,
     )
     if args.no_upgrade:
         images: dict[str, Path] = {}
@@ -12643,7 +12862,7 @@ def _build_parser() -> argparse.ArgumentParser:
         deployment_scope="all", switch_scope=None, ztp_monitor_scope="auto",
     )
     parser.add_argument(
-        "--ssh-dir", type=Path, default=_default_ssh_dir(), help=argparse.SUPPRESS,
+        "--ssh-dir", type=Path, default=None, help=argparse.SUPPRESS,
     )
     parser.epilog = (
         "AIR inventory 说明：生成阶段以 p2p-air.json 为权威来源，原子重建 "
@@ -12719,6 +12938,9 @@ def main(
     completed_successfully = False
     host_role: str | None = None
     native_http_only_inputs: ProjectInputs | None = None
+    # I-006 (v3.1.2 WP-5): the operator, set once after the project is resolved; None for the Docker
+    # supervisor and before that point.
+    load_identity: operator_identity.Resolution | None = None
     try:
         host_os = runtime_os()
         host_role = resolve_host_role(getattr(args, "host_role", None), host_os)
@@ -12759,6 +12981,8 @@ def main(
             allow_management_key_generation = (
                 runtime_backend_instance.name != "supervisor"
             )
+            if runtime_backend_instance.name == "supervisor" and getattr(args, "ssh_dir", None) is None:
+                args.ssh_dir = _default_ssh_dir()   # Docker frozen: v3.1.1's default, checked below
             if (
                 runtime_backend_instance.name == "supervisor"
                 and args.ssh_dir != Path("/root/.ssh")
@@ -12767,6 +12991,9 @@ def main(
                     "Supervisor management SSH authority 固定为 /root/.ssh；"
                     "不接受 --ssh-dir override"
                 )
+        if runtime_backend_instance is None or runtime_backend_instance.name != "supervisor":
+            # Docker frozen (http dev 2026-11-09): the supervisor container keeps v3.1.1's behavior.
+            _require_root_for_load(host_os, host_role, args.dry_run, requested_argv)
         if not args.dry_run:
             deployment_lock_descriptor = acquire_deployment_lock(exclusive=True)
             if local_services_supported:
@@ -12796,13 +13023,29 @@ def main(
                 f"活动项目指针 {activate_pointer} 是实际文件/目录，不是链接，setup 不能切换；"
                 "请先把它挪走（移出 DAY0-Prepare），再重跑 load"
             )
+        # I-006 (v3.1.2 WP-5): the operator is the project directory's owner, computed once here and passed
+        # down.  The Docker supervisor keeps v3.1.1's root authority (Docker frozen: a container may not
+        # know the bind-mounted owner), so load_identity stays None there.
+        if runtime_backend_instance is None or runtime_backend_instance.name != "supervisor":
+            load_identity = _resolve_load_operator(project)
+            if load_identity.refusal is not None:
+                raise LoadError(load_identity.refusal)
+            info(load_identity.banner)
+            if getattr(args, "ssh_dir", None) is None:
+                # 问题文档 I-006 方案第 1 条: a root load acting for the operator reads the operator's key from
+                # the passwd home; otherwise (macOS, a plain user, 方式 B) the running user's HOME as before.
+                args.ssh_dir = (
+                    Path(load_identity.operator.home) / ".ssh"
+                    if host_os.casefold() == "linux" and load_identity.action == "represent"
+                    else _default_ssh_dir()
+                )
         # No monitor stop, A freeze, template/password/key mutation or shared
         # image publication may precede the initial public-source access gate.
         if local_services_supported and not args.dry_run and project.is_dir() and _meaningful_entries(project):
             early_http_settings = load_global(project / "01-global.yaml", switch_scope=switch_scope)
             if early_http_settings.http_enabled:
                 failure_phase = "HTTP public source access prewrite gate"
-                require_http_project_source_access(project)
+                require_http_project_source_access(project, identity=load_identity)
 
         if import_selector is not None:
             if not project.is_dir() or not _meaningful_entries(project):
@@ -12834,7 +13077,9 @@ def main(
             )
         if not project.exists() or not _meaningful_entries(project):
             section("初始化空项目")
+            template_handover = _template_entries_to_hand_over(project, load_identity, args.dry_run)
             initialize_from_template(project, args.dry_run)
+            _hand_new_entries_to_operator(project, template_handover, load_identity)
             required_images = "" if args.no_upgrade else " 和 global 指定版本的 *.bin"
             result_text = (
                 "dry-run：实际执行时将创建项目模板"
@@ -12883,7 +13128,9 @@ def main(
 
         failure_phase = "补齐项目模板合同"
         section("补齐项目模板合同")
+        template_handover = _template_entries_to_hand_over(project, load_identity, args.dry_run)
         initialize_from_template(project, args.dry_run)
+        _hand_new_entries_to_operator(project, template_handover, load_identity)
 
         if bool(getattr(args, "update_passwords", False)):
             section("更新 Cumulus/NVOS 登录密码")
@@ -12901,6 +13148,7 @@ def main(
             args,
             allow_management_key_generation=allow_management_key_generation,
             host_role=host_role,
+            identity=load_identity,
         )
         if (host_role == "management-server" and local_services_supported
                 and not args.dry_run
@@ -13032,7 +13280,7 @@ def main(
         # setup is the first post-quiesce operation allowed to rewrite managed
         # links.  Mark before entry because a child failure may be partial.
         if local_services_supported and inputs.settings.http_enabled and not args.dry_run:
-            require_http_project_source_access(project)
+            require_http_project_source_access(project, identity=load_identity)
         runtime_mutation_started = local_services_supported and not args.dry_run
         activate_project(
             project, inputs.p2p_file,
