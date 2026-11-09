@@ -3,13 +3,13 @@
  "description": "Two-phase full-suite shard plan (G5Q-RA shape, re-derived on the current canonical discovery). Correctness never depends on balance: the runner checks exact coverage.",
  "derivation": {
   "status": "provisional",
-  "weights": "per-test seconds measured inside the lanes of the v3.1.0 FP1 diagnostic sharded run (v310-fp1-diag, candidate 066dc1e, 5 contended free lanes, 2 UFM slices; phase B alone); tests added after it take the module mean, else the median module mean",
+  "weights": "UFM slices (v3.1.2 BF-3): per-test seconds measured inside the lanes of the v3.1.1 formal sharded full run FP-311b (v311-full2, candidate 9b9b7b8, 5 free lanes, 2 UFM slices; phase B alone); free lanes w0-w4: cut in the v3.1.0 SPLAN on the per-test seconds measured inside the lanes of the v3.1.0 FP1 diagnostic sharded run (v310-fp1-diag, candidate 066dc1e, 5 contended free lanes, 2 UFM slices; phase B alone), later modules placed by name (guide appendix A.6); tests added after a run take the module mean, else the median module mean",
   "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.0812",
   "rerun": "re-derive from a timing log of the tree the plan is for before any timed comparison (B-6)",
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
   "dev_rederivation": "DEV re-derivation (v3.1.0 step 3, 2026-11-06) on the post-G1 tree from the canonical-discovery census; quiet lane = TEST's quiet units re-checked on DEV plus the DEV hazard census (scripts/shard/dev_shard_config.py in the v3.1 docs lists the evidence per item)",
   "tlrt": "DEV's test_load_release_transaction is 2.9 s before the 11-load batch, so it has no lane of its own",
-  "ufm": "test_ufm_setup_upgrade (about 2000 s, no class or module fixtures) is cut into 2 contiguous slices and the rest into 5 free lanes: on the diagnostic run's contended weights this gives the smallest phase-A maximum of the 7-lane layouts tried (3 slices + 4 free lanes: 1168 s; 2 + 5: 1061 s)"
+  "ufm": "test_ufm_setup_upgrade (no class or module fixtures) is cut into 3 contiguous slices, each in a phase-A lane of its own (w5, w6, w7; v3.1.2 BF-3, BF-UFM-O1 (a)), and the 5 free lanes w0-w4 keep their cut: the exact min-max contiguous cut (derive_plan_dev.py minmax_dp) of the module's phase-A rows, its 9 quiet TimedSecretTest cases excluded, on FP-311b's contended lane seconds gives 111/19/36 rows and 963.3/946.5/943.8 s, where FP-311b measured the 2 slices at 1460.9 s and 1409.5 s and the free lanes at 1009.7-1106.4 s; v3.1.0 kept 7 lanes (on the step4-diag1 weights 2 slices + 5 free lanes: 1061 s; 3 + 4: 1168 s), the third slice takes an eighth lane instead"
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -44,6 +44,7 @@
     "test_cases.test_collection_cycle_worker_contract",
     "test_cases.test_collection_d70_retirement",
     "test_cases.test_collection_d70_retirement_workflow",
+    "test_cases.test_collection_lock_owner",
     "test_cases.test_collection_ufm_run_binding",
     "test_cases.test_collection_v2_emitter_contract",
     "test_cases.test_collector_inventory_pubkey",
@@ -51,6 +52,8 @@
     "test_cases.test_collector_publication",
     "test_cases.test_continuous_interval_handoff_workflow",
     "test_cases.test_control_auth",
+    "test_cases.test_cron_operator_identity",
+    "test_cases.test_cron_operator_identity_workflow",
     "test_cases.test_cumulus_snippet_rendering",
     "test_cases.test_current_exclusive_deployment_lock",
     "test_cases.test_darwin_lock_kernel_witness",
@@ -226,6 +229,9 @@
    "units": [
     "test_cases.test_infra_component_workflow",
     "test_cases.test_infra_neutral_defaults",
+    "test_cases.test_infra_neutral_parser",
+    "test_cases.test_infra_neutral_producer",
+    "test_cases.test_infra_neutral_producer_workflow",
     "test_cases.test_infra_setup_py",
     "test_cases.test_infra_setup_py_workflow",
     "test_cases.test_initial_setup_authorized_key_quoted_options",
@@ -277,7 +283,12 @@
    "units": [
     "test_cases.test_issue_tracker_sync",
     "test_cases.test_issue_tracker_sync_workflow",
+    "test_cases.test_load_collection_worker_contract",
+    "test_cases.test_load_collection_worker_workflow",
     "test_cases.test_load_ib_cvt",
+    "test_cases.test_load_operator_contract",
+    "test_cases.test_load_operator_workflow",
+    "test_cases.test_load_permission_repair_contract",
     "test_cases.test_load_release_transaction",
     "test_cases.test_log_rotation",
     "test_cases.test_manual_applied_config",
@@ -313,6 +324,8 @@
     "test_cases.test_new_uninstrumented_alias_finite_closure",
     "test_cases.test_new_unknown_formal_callee",
     "test_cases.test_nvue_normalizer",
+    "test_cases.test_operator_identity",
+    "test_cases.test_operator_peripheral_contract",
     "test_cases.test_ops_deployment_review",
     "test_cases.test_optimize_output_layout",
     "test_cases.test_p2p_selection_contract",
@@ -394,6 +407,9 @@
     "test_cases.test_ufm_req7_ib_cycle_workflow",
     "test_cases.test_ufm_setup_upgrade_workflow",
     "test_cases.test_ufm_worker_collection",
+    "test_cases.test_unsetup_operator_crontab",
+    "test_cases.test_upgrade_operator_reexec",
+    "test_cases.test_upgrade_operator_reexec_workflow",
     "test_cases.test_upload_package_contract",
     "test_cases.test_v2_generation_flow",
     "test_cases.test_v2_project_schema",
@@ -415,13 +431,19 @@
   {
    "lane": "w5",
    "units": [
-    "test_cases.test_ufm_setup_upgrade#0/2"
+    "test_cases.test_ufm_setup_upgrade#0/3"
    ]
   },
   {
    "lane": "w6",
    "units": [
-    "test_cases.test_ufm_setup_upgrade#1/2"
+    "test_cases.test_ufm_setup_upgrade#1/3"
+   ]
+  },
+  {
+   "lane": "w7",
+   "units": [
+    "test_cases.test_ufm_setup_upgrade#2/3"
    ]
   }
  ],
@@ -468,7 +490,8 @@
  },
  "slices": {
   "test_cases.test_ufm_setup_upgrade": [
-   "test_cases.test_ufm_setup_upgrade.SimulatedPhasesTest.test_later_commands_report_only_the_password_they_tried"
+   "test_cases.test_ufm_setup_upgrade.SimulatedPhasesTest.test_config_upgrade_converges_fresh_and_manually_configured_nodes_in_one_pass",
+   "test_cases.test_ufm_setup_upgrade.SimulatedUpgradeAndHaTest.test_configuration_the_upgrade_overwrote_is_listed_and_configured_again"
   ]
  },
  "same_lane": [

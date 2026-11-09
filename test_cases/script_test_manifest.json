@@ -205,7 +205,18 @@
         "test_cases.test_activate_project_status_workflow",
         "test_cases.test_independent_ib_csv_workflow",
         "test_cases.test_activate_project_services_workflow",
-        "test_cases.test_activate_project_readers_workflow"
+        "test_cases.test_activate_project_readers_workflow",
+        "test_cases.test_operator_identity",
+        "test_cases.test_infra_neutral_producer",
+        "test_cases.test_infra_neutral_producer_workflow",
+        "test_cases.test_infra_neutral_parser",
+        "test_cases.test_load_collection_worker_contract",
+        "test_cases.test_load_collection_worker_workflow",
+        "test_cases.test_unsetup_operator_crontab",
+        "test_cases.test_operator_peripheral_contract",
+        "test_cases.test_load_operator_contract",
+        "test_cases.test_load_permission_repair_contract",
+        "test_cases.test_load_operator_workflow"
       ]
     },
     {
@@ -301,7 +312,10 @@
         "test_cases.test_collection_d70_retirement_workflow",
         "test_cases.test_monitor_derived_parent_release",
         "test_cases.test_monitor_imported_configs_parent_release",
-        "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
+        "test_cases.test_ibdiagnet_analyzer_shipping_workflow",
+        "test_cases.test_collection_lock_owner",
+        "test_cases.test_cron_operator_identity",
+        "test_cases.test_cron_operator_identity_workflow"
       ]
     },
     {
@@ -440,7 +454,9 @@
         "test_cases.test_ibsw3_source_inverse_fixture_portability",
         "test_cases.test_native_bios_os22_consumer_compatibility",
         "test_cases.test_ibsw3_native_probe_target_query_stop",
-        "test_cases.test_ibsw3_native_scp_landing_docs"
+        "test_cases.test_ibsw3_native_scp_landing_docs",
+        "test_cases.test_upgrade_operator_reexec",
+        "test_cases.test_upgrade_operator_reexec_workflow"
       ]
     },
     {
@@ -886,7 +902,8 @@
     "tools/infra_components.py": "tools/infra_components.py",
     "tools/device_identity.py": "tools/device_identity.py",
     "tools/hostname_ranges.py": "tools/hostname_ranges.py",
-    "tools/inventory_subset.py": "tools/inventory_subset.py"
+    "tools/inventory_subset.py": "tools/inventory_subset.py",
+    "tools/operator_identity.py": "tools/operator_identity.py"
   },
   "test_rules": [
     {
@@ -1032,7 +1049,13 @@
         "test_cases.test_xlsx_zero_row_workflow",
         "test_cases.test_setup_switch_scope_contract",
         "test_cases.test_setup_link_reconcile_contract",
-        "test_cases.test_activate_project_contract"
+        "test_cases.test_activate_project_contract",
+        "test_cases.test_load_collection_worker_contract",
+        "test_cases.test_unsetup_operator_crontab",
+        "test_cases.test_collection_lock_owner",
+        "test_cases.test_load_operator_contract",
+        "test_cases.test_load_permission_repair_contract",
+        "test_cases.test_req22_setup_contract"
       ]
     },
     {
@@ -1071,7 +1094,8 @@
         "test_cases.test_collector_inventory_pubkey_workflow",
         "test_cases.test_collector_publication",
         "test_cases.test_collector_retrieval",
-        "test_cases.test_activate_project_contract"
+        "test_cases.test_activate_project_contract",
+        "test_cases.test_cron_operator_identity"
       ]
     },
     {
@@ -1138,7 +1162,8 @@
         "test_cases.test_ubuntu24_host",
         "test_cases.test_ufm_setup_upgrade",
         "test_cases.test_infra_setup_py",
-        "test_cases.test_infra_setup_py_workflow"
+        "test_cases.test_infra_setup_py_workflow",
+        "test_cases.test_infra_neutral_parser"
       ]
     },
     {
@@ -1207,7 +1232,8 @@
         "test_cases.test_monitor_authority_semantic_workflow",
         "test_cases.test_ztp_monitor_watch_resilience",
         "test_cases.test_ztp_monitor_watch_runtime_workflow",
-        "test_cases.test_activate_project_contract"
+        "test_cases.test_activate_project_contract",
+        "test_cases.test_collection_lock_owner"
       ]
     },
     {
@@ -1352,7 +1378,8 @@
       ],
       "tests": [
         "test_cases.test_generation_report_contract",
-        "test_cases.test_generation_report_workflow"
+        "test_cases.test_generation_report_workflow",
+        "test_cases.test_load_operator_contract"
       ]
     },
     {
@@ -2311,6 +2338,50 @@
       "tests": [
         "test_cases.test_activate_project_air_contract"
       ]
+    },
+    {
+      "id": "operator_identity_direct",
+      "paths": [
+        "tools/operator_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_operator_identity",
+        "test_cases.test_operator_peripheral_contract"
+      ]
+    },
+    {
+      "id": "infra_neutral_producer_direct",
+      "paths": [
+        "DAY0-Prepare/01-a-setup.py",
+        "infra/infra-neutral.conf"
+      ],
+      "tests": [
+        "test_cases.test_infra_neutral_producer"
+      ]
+    },
+    {
+      "id": "upgrade_operator_reexec_direct",
+      "paths": [
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py"
+      ],
+      "tests": [
+        "test_cases.test_upgrade_operator_reexec"
+      ]
+    },
+    {
+      "id": "operator_peripheral_direct",
+      "paths": [
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "ztp/config_sync_authority.py",
+        "infra/deploy_infra.py",
+        "infra/infra-setup.py",
+        "tools/collect-ztp-diagnostics.py",
+        "infra/deps.py"
+      ],
+      "tests": [
+        "test_cases.test_operator_peripheral_contract"
+      ]
     }
   ],
   "workflows": [
@@ -2938,7 +3009,8 @@
         "test_cases.test_collection_cycle_worker_contract",
         "test_cases.test_collection_v2_emitter_contract",
         "test_cases.test_project_contracts",
-        "test_cases.test_monitor_stack_review"
+        "test_cases.test_monitor_stack_review",
+        "test_cases.test_collection_lock_owner"
       ]
     },
     {
@@ -3231,7 +3303,8 @@
         "infra/check_infra.py"
       ],
       "tests": [
-        "test_cases.test_infra_setup_py_workflow"
+        "test_cases.test_infra_setup_py_workflow",
+        "test_cases.test_infra_neutral_parser"
       ]
     },
     {
@@ -3986,6 +4059,117 @@
       "tests": [
         "test_cases.test_independent_ib_csv_workflow"
       ]
+    },
+    {
+      "id": "operator_identity_project_pointer",
+      "members": [
+        "tools/operator_identity.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_operator_identity"
+      ]
+    },
+    {
+      "id": "infra_neutral_producer_to_managed_consumer",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "ztp/config_sync_authority.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_infra_neutral_producer_workflow"
+      ]
+    },
+    {
+      "id": "load_collection_worker_start",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "monitor/switch-collection-worker.py",
+        "DAY0-Prepare/13-unload.py"
+      ],
+      "tests": [
+        "test_cases.test_load_collection_worker_workflow"
+      ]
+    },
+    {
+      "id": "operator_reexec_upgrade_entries",
+      "members": [
+        "tools/operator_identity.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py"
+      ],
+      "tests": [
+        "test_cases.test_upgrade_operator_reexec_workflow",
+        "test_cases.test_upgrade_operator_reexec"
+      ]
+    },
+    {
+      "id": "unsetup_unload_operator_crontab",
+      "members": [
+        "DAY0-Prepare/02-unsetup.py",
+        "DAY0-Prepare/13-unload.py",
+        "tools/operator_identity.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_unsetup_operator_crontab"
+      ]
+    },
+    {
+      "id": "collection_lock_operator_handoff",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "monitor/switch-collection-worker.py",
+        "ethernet/monitor/cron.sh",
+        "tools/operator_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_collection_lock_owner"
+      ]
+    },
+    {
+      "id": "cron_operator_root_parent_marker",
+      "members": [
+        "tools/operator_identity.py",
+        "ethernet/monitor/cron.sh",
+        "monitor/switch-collection-worker.py",
+        "DAY0-Prepare/12-ztp-monitor.py"
+      ],
+      "tests": [
+        "test_cases.test_cron_operator_identity_workflow"
+      ]
+    },
+    {
+      "id": "load_operator_identity_owner_handover",
+      "members": [
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "tools/generation_report.py",
+        "tools/operator_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_load_operator_contract"
+      ]
+    },
+    {
+      "id": "operator_identity_load_unload_flow",
+      "members": [
+        "tools/operator_identity.py",
+        "DAY0-Prepare/11-load.py",
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "DAY0-Prepare/13-unload.py",
+        "tools/generation_report.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "infra/deploy_infra.py",
+        "infra/infra-setup.py",
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_load_operator_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -4201,7 +4385,10 @@
         "test_cases.test_infra_neutral_defaults",
         "test_cases.test_infra_check_and_manual_reset",
         "test_cases.test_load_release_transaction",
-        "test_cases.test_project_contracts"
+        "test_cases.test_project_contracts",
+        "test_cases.test_infra_neutral_producer",
+        "test_cases.test_infra_neutral_producer_workflow",
+        "test_cases.test_infra_neutral_parser"
       ]
     },
     {

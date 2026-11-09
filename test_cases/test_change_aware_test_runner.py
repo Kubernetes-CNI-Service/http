@@ -2985,6 +2985,22 @@ class FullShardDirectTests(unittest.TestCase):
                 names = {node.name for node in ast_module.walk(tree) if isinstance(node, ast_module.FunctionDef)}
                 self.assertFalse(names & {"setUpModule", "tearDownModule", "setUpClass", "tearDownClass"})
 
+    def test_real_plan_cuts_ufm_setup_upgrade_into_three_slices_in_lanes_of_their_own(self):
+        # v3.1.2 BF-3 (v3.1.0 makeup 310-H7; SPLAN f741269 left the third UFM slice, which "needs the slice
+        # pins changed first and one more lane"): three slices, each alone in a phase-A lane of its own.
+        # The boundary case ids follow the measured weights and are deliberately not pinned (BF-UFM-O2).
+        plan = RUNNER.load_full_shard_plan(ROOT)
+        module = "test_cases.test_ufm_setup_upgrade"
+        self.assertEqual(2, len(plan["slices"][module]))
+        slice_lanes = [
+            lane["units"] for lane in plan["phase_a"]
+            if any(unit.startswith(module + "#") for unit in lane["units"])
+        ]
+        self.assertEqual(
+            [[module + "#0/3"], [module + "#1/3"], [module + "#2/3"]],
+            slice_lanes,
+        )
+
     def test_plan_schema_rejects_concurrent_quiet_lanes_and_malformed_units(self):
         RUNNER.validate_full_shard_plan(shard_plan())
         bad = {
