@@ -635,6 +635,9 @@ class DocumentationCatalogTests(unittest.TestCase):
             "apps/ubuntu-24.04/<arch>/", "outputs/*", "download/*",
             "package-imports/*", "firmware/*", "monitor/status/*",
             "Finished-projects/*",
+            # v3.1.2 BF-8 (v3.1.1 deviation H09; v3.1.1 agentWP7 report :156 open point 3; plan row :154,
+            # owner (a)): the active-project pointer is a host runtime link the manual must name.
+            "DAY0-Prepare/activate-project",
         }
         self.assertEqual(
             required_runtime_patterns,

@@ -31,6 +31,12 @@ RUNTIME_PATTERNS = (
         "99-output-*、marker、receipt 与 latest 链接由事务生成，禁止手工拼接。",
     ),
     (
+        "DAY0-Prepare/activate-project",
+        "活动项目指针：符号链接，指向当前激活的 DAY0 项目目录；由 01-a-setup.py 建立和切换，02-unsetup.py 删除，"
+        "树里的固定链接都经它到项目。被 .gitignore 忽略，不进上传包、下载包、sync 和镜像。"
+        "不要手工建或改，切换项目用 setup 或 load。",
+    ),
+    (
         "DAY0-Prepare/dumps/*",
         "tar-for-upload 生成的私有上传归档。按项目、时间、size 和 SHA-256 识别；旧包不能因文件名相近就复用。",
     ),

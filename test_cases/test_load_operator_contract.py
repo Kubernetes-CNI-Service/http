@@ -685,6 +685,49 @@ class LoadOwnerComparisonTests(M3.SystemdLoadMainFixture, unittest.TestCase):
         self.assertIsNone(error)
         resolve.assert_not_called()
 
+    def test_generation_report_owner_refusal_names_uid_gid_and_quoted_chown(self) -> None:
+        # 问题文档 :302（方案第 7 条第 3 点）：属主不对时报出路径、实际和期望的 uid/gid，并给出 chown 命令；
+        # 审核 c-7（指导第 8 节「随 BF 一起做：c-7」），与 11-load 的 _owner_fix 同口径：实际和期望都写 uid:gid，
+        # 命令是 sudo chown <uid>:<gid> <加引号的路径>。期望的 gid：操作员分支是 passwd 主组 pw_gid（O9）；
+        # euid 分支（supervisor）是 egid——两个后端共用这句提示，supervisor 只是随之做文字同步，功能不变
+        # （开发计划 :112 Docker 冻结）。判定本身不变，仍只比 uid。
+        site = self.base / "site root"                # 项目路径带空格：命令里的路径必须加引号
+        project = site / "DAY0-Prepare/demo"
+        output = project / "99-output-ztp"
+        output.mkdir(parents=True)
+        egid = os.getegid()
+        operator_gid = egid + 2                       # 与 egid、目录的实际 gid 都不同：只能来自 pw_gid
+        operator = passwd_entry("opuser", OTHER_UID, operator_gid, self.base / "opuser")
+        stranger_uid = OTHER_UID + 1
+        project_gid, output_gid = project.lstat().st_gid, output.lstat().st_gid
+        self.assertNotIn(operator_gid, (project_gid, output_gid))
+        self.assertNotIn("'", os.fspath(output))
+        owned = {project: OTHER_UID, output: stranger_uid}
+
+        def refusal(backend=None) -> str:
+            resolve = mock.Mock(side_effect=lambda path: represent(path, operator, owner_uid=operator.pw_uid))
+            with mock.patch.dict(os.environ), \
+                    mock.patch("tools.operator_identity.resolve_operator", resolve), \
+                    report_module_as_root(owned) as report:
+                os.environ.pop("HTTP_ZTP_RUNTIME_BACKEND", None)
+                if backend is not None:
+                    os.environ["HTTP_ZTP_RUNTIME_BACKEND"] = backend
+                with self.assertRaises(report.GenerationReportError) as caught:
+                    report.prepare_generation_report(project, valid_report("demo"))
+            return str(caught.exception)
+
+        # 操作员分支：项目目录属于操作员（实际 gid 不是 pw_gid 也通过：只比 uid），99-output-ztp 属于第三方。
+        message = refusal()
+        for fragment in (f"{stranger_uid}:{output_gid}", f"expected {OTHER_UID}:{operator_gid}",
+                         f"sudo chown {OTHER_UID}:{operator_gid} '{output}'"):
+            with self.subTest(branch="operator", fragment=fragment):
+                self.assertIn(fragment, message)
+        # euid 分支：supervisor 不认操作员，属于操作员的项目目录对 euid 0 就是属主不对，期望 0:egid。
+        message = refusal("supervisor")
+        for fragment in (f"{OTHER_UID}:{project_gid}", f"expected 0:{egid}", f"sudo chown 0:{egid} '{project}'"):
+            with self.subTest(branch="supervisor", fragment=fragment):
+                self.assertIn(fragment, message)
+
 
 class LoadRootCreatedFilesTests(M3.SystemdLoadMainFixture, unittest.TestCase):
     """O11 ②④；问题文档 I-006 方案第 4 条：root 在项目里新建的条目交给操作员；root 私有状态不动。"""

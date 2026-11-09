@@ -13620,7 +13620,7 @@ sudo python3 -B DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
   --prod --switch eth --start-services --start-ztp-monitor \
   --ztp-monitor-scope prod</code></pre>
           <p><strong>成功判据</strong>本机 load/full proof 通过；dry-run 差异与预期一致；sync 只更新受管源码/输入并保留远端密码哈希及管理 key，不传当前激活的项目指针 <code>DAY0-Prepare/activate-project</code>（服务器上的指针由服务器上的 setup 建立）；远端 load 提交新的 generation，随后 Runbook 6 全部验收通过。</p>
-          <p><strong>失败处理</strong>本机 proof 失效时禁止 SSH；远端 global/CAS、receipt 或 writer 竞态时禁止覆盖；sync 完成但 load 失败时保留新 source receipt 和失败 marker，修复后完整重跑 load。不要把 sync 成功误认为服务已热加载。Native 正式同步期间（远端存在 <code>.sync-code-in-progress</code>），活动项目指针 <code>DAY0-Prepare/activate-project</code> 会被判为无效，服务不会停，但 ZTP monitor 会在下一轮自行退出，worker 的持续采集和持续备份会被停用；同步完成后按上面的命令重跑 load，load 会重新启动 worker 和 monitor；被停用的持续采集/持续备份要在页面上重新开启。</p>
+          <p><strong>失败处理</strong>本机 proof 失效时禁止 SSH；远端 global/CAS、receipt 或 writer 竞态时禁止覆盖；sync 完成但 load 失败时保留新 source receipt 和失败 marker，修复后完整重跑 load。不要把 sync 成功误认为服务已热加载。Native 正式同步期间（远端存在 <code>.sync-code-in-progress</code>），活动项目指针 <code>DAY0-Prepare/activate-project</code> 会被判为无效，服务不会停，但 ZTP monitor 会在下一轮自行退出，worker 的持续采集和持续备份会被停用；同步完成后按上面的命令重跑 load，load 会重新启动 worker 和 monitor；被停用的持续采集/持续备份要在页面上重新开启。同步期间不要手工运行 <code>infra/</code> 下的脚本（例如 <code>sudo ./infra/infra-teardown.sh</code>、<code>infra/check_infra.py</code> 的探针）：它们的 shell 部分判断活动项目时不看同步标记，可能按同步前的指针工作；等同步和随后的 load 完成后再运行。</p>
           <p><strong>下一步</strong>重复 Runbook 6；只有新 release、服务、HTTP 和设备证据一致，更新才完成。</p>
         </div>
         <!-- end runbook -->

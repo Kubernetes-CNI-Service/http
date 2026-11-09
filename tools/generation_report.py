@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shlex
 import stat
 import sys
 from typing import Any
@@ -100,20 +101,22 @@ def _report_preimage_identity(metadata: os.stat_result) -> tuple[int, ...]:
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
-def _project_owner_refusal(uid: int, project: Path | None) -> int | None:
-    """None when ``uid`` may own a governed directory, else the uid that should.
+def _project_owner_refusal(uid: int, project: Path | None) -> tuple[int, int] | None:
+    """None when ``uid`` may own a governed directory, else the (uid, gid) that should.
 
     The euid always may, as before.  On the project side (``project`` given) a native root load also
     accepts the project's operator, the directory owner it acts for (I-006 v3.1.2 WP-5;
     tools/operator_identity.py).  The operator is looked up only then: a non-root run, and the Docker
     supervisor (Docker frozen; its project owner may be missing from the container's passwd), compare
-    with the euid exactly as before.
+    with the euid exactly as before.  Only the uid is compared; the gid only completes the fix the refusal
+    names (review c-7): the egid beside the euid, the operator's passwd primary group pw_gid beside the
+    operator (O9).
     """
     euid = os.geteuid()
     if uid == euid:
         return None
     if project is None or euid != 0 or os.environ.get("HTTP_ZTP_RUNTIME_BACKEND") == "supervisor":
-        return euid
+        return euid, os.getegid()
     try:
         from tools import operator_identity
     except ModuleNotFoundError as exc:
@@ -123,7 +126,8 @@ def _project_owner_refusal(uid: int, project: Path | None) -> int | None:
     resolution = operator_identity.resolve_operator(project)
     if resolution.refusal is not None:
         raise GenerationReportError(resolution.refusal)
-    return None if uid == resolution.operator.uid else resolution.operator.uid
+    operator = resolution.operator
+    return None if uid == operator.uid else (operator.uid, operator.gid)
 
 
 def _require_directory(path: Path, *, project: Path | None = None) -> tuple[int, int]:
@@ -135,10 +139,12 @@ def _require_directory(path: Path, *, project: Path | None = None) -> tuple[int,
         raise GenerationReportError(f"owned no-follow directory required: {path}")
     expected = _project_owner_refusal(named.st_uid, project)
     if expected is not None:
-        # 问题文档 I-006 方案第 7 条第 3 点: name the path, the actual and expected owner and the fix.
+        # 问题文档 I-006 方案第 7 条第 3 点: name the path, the actual and expected uid:gid and the fix, in
+        # 11-load _owner_fix's form (review c-7).
+        owner = f"{expected[0]}:{expected[1]}"
         raise GenerationReportError(
-            f"owned no-follow directory required: {path} (uid {named.st_uid}, expected {expected}; "
-            f"fix: sudo chown {expected} {path})"
+            f"owned no-follow directory required: {path} (uid:gid {named.st_uid}:{named.st_gid}, "
+            f"expected {owner}; fix: sudo chown {owner} {shlex.quote(os.fspath(path))})"
         )
     return _identity(named)
 
