@@ -12,6 +12,8 @@ Expectations come from the requirement texts, never from the module:
 - v3.1.2 guide 3.2 (owner 2026-11-07 「同意你在v3.1.2里的默认建议」, http dev 转述): O7 ② (V with sudo on U's
   project is refused, the hint names switching to U or a direct root login), O7 ④ (the SUDO_USER/SUDO_UID check is
   done), O9 (the group is passwd's pw_gid), O11 ④ (a project the run creates belongs to the sudo invoker);
+- v3.1.2 guide WP-4 :513 (OP pending point 3, http dev default; review b-6): a project owner missing from passwd
+  is refused, a direct root login included, with the hint `sudo chown <操作员>:<操作员主组> <项目>`;
 - v3.1.2 guide WP-4 (re-run mechanism): trigger = euid 0, operator not root, no marker; argv
   `runuser -u <op> -- env -i <whitelist> <python> <absolute script> <args>`; whitelist PATH, LANG, LC_ALL, TERM plus
   HOME/USER/LOGNAME of the operator plus names the caller adds; exec keeps the caller's fds inheritable, the wait
@@ -161,6 +163,27 @@ class OperatorTableTests(unittest.TestCase):
                     result = resolve(project, 0, environ)
                     self.assert_refused(result, "SUDO_USER")
                     self.assertFalse(OI.needs_reexec(result, environ))
+
+    def test_project_owner_missing_from_passwd_is_refused_with_chown_hint(self):
+        # v3.1.2 guide WP-4 :513 (start check OP pending point 3, http dev default; review b-6, direct case added with
+        # G4 (b)): an owner uid missing from passwd is refused for U directly, for root via sudo by a valid invoker and
+        # for a direct root login alike; the reason is that the project owner has no account and the hint is
+        # `sudo chown <操作员>:<操作员主组> <项目>`.  问题文档 :351: the refusal names who owns the project.
+        orphan, owner = "/srv/fixture/DAY0-Prepare/orphan-project", 1009
+
+        def orphan_stat(path):
+            if str(path) != orphan:
+                raise FileNotFoundError(2, "No such file or directory", str(path))
+            return os.stat_result((0o40755, 1, 1, 3, owner, 0, 4096, 0, 0, 0))
+
+        for label, euid, environ in (("U directly", 1001, {}), ("root via sudo by U", 0, SUDO_U),
+                                     ("direct root login", 0, {})):
+            with self.subTest(label):
+                result = OI.resolve_operator(orphan, euid=euid, environ=dict(environ), getpwuid=getpwuid,
+                                             getpwnam=getpwnam, stat=orphan_stat)
+                self.assert_refused(result, "项目属主没有账户", str(owner),
+                                    f"sudo chown <操作员>:<操作员主组> {orphan}")
+                self.assertFalse(OI.needs_reexec(result, environ))
 
     def test_project_none_skips_identity(self):
         # No pointer -> no project -> nothing to decide; even a broken sudo environment does not refuse.

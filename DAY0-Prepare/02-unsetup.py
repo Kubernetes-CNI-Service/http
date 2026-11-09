@@ -9,8 +9,10 @@
     以及 monitor/99-output-ufm（它的位置上是真实文件或目录时报错、保留，其余照常进行，以 1 退出）。
 撤销配置权威按指针所指的项目做；REQ10C 的 crontab 清理照旧。
 操作员是指针所指项目目录的属主（I-006）：开头打印一行身份说明；以 root 运行、项目属于普通用户时，
-清理的是该操作员的 crontab（crontab -u <操作员>）。身份核对不通过时不碰任何 crontab：有 REQ10C auto 状态要清理
-就以 1 退出（指针和链接也不动），没有就打一条 WARN、其余照常（--dry-run 只提示）。
+清理的是该操作员的 crontab（crontab -u <操作员>）。以 root 运行而身份核对不通过时（别的用户经 sudo、sudo 发起人无效、
+经 sudo 而项目属主在 passwd 里查不到），拿到部署锁之后、停 monitor 之前以 1 退出，什么都不动（--dry-run 同样）；
+root 直接登录而项目属主在 passwd 里查不到时打一条 WARN，照常继续。非 root 运行只多一行身份说明；
+Docker（supervisor 后端）不判身份。
 
 用法：
   python3 02-unsetup.py              # 撤销当前激活的项目
@@ -44,7 +46,7 @@ from project_contract import (
     ACTIVE_PROJECT_POINTER, RETIRED_SETUP_LINKS, ActiveProjectPointerError, active_project_dir,
     infra_log_root_lock, managed_infra_log_project, setup_dynamic_link_patterns,
 )
-from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
+from ztp_service_runtime import RUNTIME_BACKEND_ENV, RuntimeContractError, stop_native_ztp_monitors
 import operator_identity
 
 _AUTO_YES = False
@@ -158,9 +160,10 @@ def _req10c_crontab_lock(state, operator=None):
                 operator is not None and info.st_uid == os.geteuid()
                 and stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_mode & 0o777 == 0o600
             ):
-                # O11 ②: root made this lock in the operator's directory just now (the operator's own
-                # initial-setup needs it as its 0600 file); hand it over before first use.  Only a
-                # single-link regular file, so a planted hard link is never handed over.
+                # O11 ②: a root-owned lock in the operator's directory, made by root just now or left by an
+                # earlier root run, goes to the operator before first use (the operator's own initial-setup
+                # needs it as its 0600 file).  Only a single-link regular 0600 file, so a planted hard link
+                # is never handed over.
                 os.fchown(fd, operator.uid, operator.gid)
                 info = os.fstat(fd)
             if (
@@ -191,12 +194,10 @@ def _req10c_crontab_lock(state, operator=None):
         os.close(directory_fd)
 
 
-def _cleanup_req10c_auto_watch(project_filter=None, operator=None, refusal=None):
+def _cleanup_req10c_auto_watch(project_filter=None, operator=None):
     """Remove only our current-user watch, even when no setup links remain.
 
     operator: see _req10c_crontab_lock; with it the watch is the operator's (crontab -u <operator>).
-    refusal: the operator rule refused this run; then no crontab is touched and no lock is made.  A watch to
-    clean raises OSError (the run stops); without one there is nothing to do (review ruling D3).
     """
     if _DRY_RUN:
         return
@@ -209,11 +210,6 @@ def _cleanup_req10c_auto_watch(project_filter=None, operator=None, refusal=None)
     state = os.path.dirname(credentials)
     # The log link is a fixed link unsetup keeps (Q7): dangling, no project is active and no state is reachable.
     if not os.path.exists(state):
-        return
-    # D3: the same test _cleanup_req10c_auto_watch_locked uses to decide whether the crontab is touched.
-    if refusal is not None and any(os.path.lexists(path) for path in (credentials, marker, terminal)):
-        raise OSError(f"身份核对未通过，没有动 crontab 和 REQ10C 状态：{refusal}")
-    if refusal is not None:
         return
     with _req10c_crontab_lock(state, operator):
         _cleanup_req10c_auto_watch_locked(tool, credentials, marker, terminal, operator)
@@ -350,20 +346,41 @@ def _withdraw_project_configuration_authorities(project):
         config_sync_authority.withdraw_all(os.path.join(current, "99-output-ztp", relative), method=method)
 
 
-def _main_locked_impl(args):
-    project_filter = _resolve_project(args.project) if args.project else None
+def _entry_identity():
+    """Read the pointer once and settle whom this run acts for; None (the reason printed) when it must stop.
+
+    Returns (project, operator): the project the pointer selects (None without one) and the project owner root
+    acts for (operator_identity "represent", I-006), else None.  Owner 2026-11-09 「Q-006 选 (b)」 (v3.1.2 WP-8
+    with G4 (b)): on the native backend a root run the operator rule refuses stops here, before anything is
+    stopped or changed; a direct root login whose project owner is missing from passwd goes on as v3.1.1 did,
+    with a WARN.  A non-root run only prints the identity line; the supervisor (Docker) backend keeps v3.1.1.
+    """
     # R-016 §4.4: read the project from the pointer once, before the pointer goes.
     try:
-        active_project = active_project_dir(HTTP_BASE)
+        project = active_project_dir(HTTP_BASE)
     except ActiveProjectPointerError as exc:
         print(_c(RED, f"[ERROR] {exc}；unsetup 未做任何改动，请先重新运行 setup"))
-        return 1
-    # I-006 (v3.1.2 WP-8): the operator is the owner of the project read just above (no second pointer
-    # read); no project means no identity check.  Root acting for a non-root owner cleans that owner's
-    # watch.  Only that watch depends on the operator (review ruling D3): a refused identity stops the
-    # run only when there is a watch to clean (_cleanup_req10c_auto_watch); the pointer and links do not.
-    identity = operator_identity.resolve_operator(active_project)
+        return None
+    if os.environ.get(RUNTIME_BACKEND_ENV, "systemd") != "systemd":
+        return project, None
+    identity = operator_identity.resolve_operator(project)
     print(identity.banner)
+    if identity.refusal is not None and os.geteuid() == 0:
+        if identity.operator is not None or "SUDO_USER" in os.environ:
+            print(_c(RED, f"[ERROR] {identity.refusal}"))
+            return None
+        print(_c(YELLOW, f"[WARN] root 直接登录，照常继续：{identity.refusal}"))
+    return project, identity.operator if identity.action == "represent" else None
+
+
+def _main_locked_impl(args, entry=None):
+    """entry: _entry_identity()'s result from main; callers without it get the same function run here."""
+    project_filter = _resolve_project(args.project) if args.project else None
+    if entry is None:
+        entry = _entry_identity()
+        if entry is None:
+            return 1
+    active_project, operator = entry
     if project_filter:
         name = os.path.basename(project_filter)
         if active_project is None:
@@ -373,14 +390,10 @@ def _main_locked_impl(args):
             print(_c(RED, f"[ERROR] 当前激活的项目是 {active_project.name}，不是 {name}；unsetup 未做任何改动"))
             return 1
     try:
-        _cleanup_req10c_auto_watch(
-            project_filter, identity.operator if identity.action == "represent" else None, identity.refusal)
+        _cleanup_req10c_auto_watch(project_filter, operator)
     except OSError as exc:
         print(_c(RED, f"[ERROR] REQ10C auto watch cleanup failed: {exc}"))
         return 1
-    if identity.refusal:
-        print(_c(YELLOW, "[WARN] 身份核对未通过，没有核实操作员；REQ10C 的 crontab 和状态都没有动"
-                         f"（有要清理的 auto 状态时实际运行以 1 退出），其余照常：{identity.refusal}"))
     log_root = os.path.join(HTTP_BASE, "infra", "logs")
     # An interrupted setup still owns this link and its original directory
     # backup.  Removing the link would strand receipt-bound recovery even if
@@ -465,11 +478,11 @@ def _main_locked_impl(args):
         return 1
 
 
-def _main_locked(args):
+def _main_locked(args, entry=None):
     """Keep log-link removal serialized with setup and log writers."""
     lock = nullcontext() if _DRY_RUN else infra_log_root_lock(HTTP_BASE)
     with lock:
-        return _main_locked_impl(args)
+        return _main_locked_impl(args, entry)
 
 
 def main(argv=None):
@@ -479,9 +492,13 @@ def main(argv=None):
     _DRY_RUN = args.dry_run
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
+            # Owner 2026-11-09 「Q-006 选 (b)」: the identity is settled before any monitor is stopped.
+            entry = _entry_identity()
+            if entry is None:
+                return 1
             if not _DRY_RUN:
                 stop_native_ztp_monitors(HTTP_BASE)
-            return _main_locked(args)
+            return _main_locked(args, entry)
     except (DeploymentLockError, RuntimeContractError, OSError) as exc:
         print(_c(RED, f"[ERROR] 部署/Monitor 写前保护失败：{exc}"))
         return 1

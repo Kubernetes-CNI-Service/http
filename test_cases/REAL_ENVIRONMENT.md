@@ -3413,11 +3413,11 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    （`crontab -l`，不带 `-u`）。混用：方式 A 的 sudo load → root 登录运行 upgrade → `U` 不加 sudo 运行 upgrade → root 登录
    unload，四步的身份说明行里操作员都是 `U`，root 的 unload 清的是 `U` 的 crontab（upgrade 的细节见
    `TC-REAL-I006-OPERATOR-REEXEC-001`）。
-8. 拒绝：`V` 经 sudo 对 `U` 的项目运行 13-unload（有 REQ10C watch）：02-unsetup 以 1 退出，`[ERROR]` 点名 `U` 与 `V`，`U` 的
-   crontab、状态文件、指针都不动；项目没有 REQ10C 状态时，同样的 `V` 运行打一条 WARN，指针和链接照常删除、以 0 退出。
+8. 拒绝（owner 2026-11-09「Q-006 选 (b)」）：`V` 经 sudo 对 `U` 的项目运行 13-unload，有、没有 REQ10C watch 各一次，再直接 `sudo` 运行 02-unsetup：都以 1 退出，`[ERROR]` 点名 `U` 与 `V`；
+   monitor、服务、DHCP 文件、`U` 的 crontab、状态文件、指针和链接都不动（运行前后对照服务状态、`/etc/dhcp` 下 load 管理的文件、`sudo crontab -u U -l`、状态目录和指针）。
    `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。
-9. Docker（现场有的话，只读核对）：容器内的 load、monitor、diagnostics 没有身份说明行，三把锁与 `/root/.ssh` 的用法和文件属主与
-   v3.1.1 相同；容器内 unload 一个属主 uid 不在容器 passwd 里、没有 REQ10C 状态的项目，结果与 v3.1.1 相同（成功），多一行 WARN。
+9. Docker（现场有的话，只读核对）：容器内的 load、unload、monitor、diagnostics 没有身份说明行，三把锁与 `/root/.ssh` 的用法和文件属主与
+   v3.1.1 相同；容器内 unload 一个属主 uid 不在容器 passwd 里、没有 REQ10C 状态的项目，结果与 v3.1.1 相同（成功），没有身份说明行、没有 WARN。
 
 ### 预期结果
 

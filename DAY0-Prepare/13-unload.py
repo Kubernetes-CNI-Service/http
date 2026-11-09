@@ -565,14 +565,22 @@ def main(argv: list[str] | None = None) -> int:
         project = resolve_project(args.project)
         if not args.dry_run and os.geteuid() != 0:
             raise UnloadError("实际 unload 必须使用 root/sudo 执行；--dry-run 不要求 root")
-        # I-006 (v3.1.2 WP-8): the identity line only (it names the owner and the current user, and says when
-        # they do not fit); the flow is unchanged.  02-unsetup works out the operator itself for its crontab
-        # cleanup and refuses there.
-        print(operator_identity.resolve_operator(project).banner)
+        runtime_backend = service_runtime_backend()
+        # I-006 (v3.1.2 WP-8 with G4 (b); owner 2026-11-09 「Q-006 选 (b)」): on the native backend the identity
+        # line, and a root run the operator rule refuses stops here, before the confirmation, the lock and any
+        # teardown step; a direct root login whose project owner is missing from passwd goes on as v3.1.1 did,
+        # with a WARN.  A non-root --dry-run only prints the line; the supervisor (Docker) backend keeps v3.1.1.
+        # 02-unsetup works out the operator again for its crontab cleanup.
+        if runtime_backend.name == "systemd":
+            identity = operator_identity.resolve_operator(project)
+            print(identity.banner)
+            if identity.refusal is not None and os.geteuid() == 0:
+                if identity.operator is not None or "SUDO_USER" in os.environ:
+                    raise UnloadError(identity.refusal)
+                warn(f"root 直接登录，照常继续：{identity.refusal}")
         if not confirm(args, project):
             info("已取消，没有修改任何内容")
             return 0
-        runtime_backend = service_runtime_backend()
         validate_runtime_options(args, runtime_backend)
 
         with deployment_lock(

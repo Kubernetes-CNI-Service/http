@@ -13,20 +13,30 @@ Expected values come from the requirement texts, never from the scripts:
 - v3.1.2 guide WP-8: only when euid is 0 and the operator is not root does the crontab argv change, every other run
   keeps ['-l'] / ['-'] exactly (the AGENTS.md REQ10C exception tests depend on it); group/other-write rules stay;
   the new parameters have defaults, so no-argument calls keep working; the operator is computed once at the entry
-  from the project the pointer selected; 13-unload only adds the identity line and its flow is unchanged;
-- start check report §5 item 5 (adopted by http dev, BRIEF-v312-wave2): reuse the pointer `_main_locked_impl` read;
+  from the project the pointer selected;
+- start check report §5 item 5 (adopted by http dev, BRIEF-v312-wave2): the pointer is read once (02-unsetup's
+  entry reads it and hands the project on);
 - the existing lock contract (an owned 0600 single-link file, `_req10c_crontab_lock`) is not weakened by the
   hand-over: a lock with a second link is neither handed over nor used;
-- http dev review of agentW8.patch, ruling D3 (Docker is frozen, owner 11-02: its behaviour must not regress): a
-  refused identity stops only the step that would touch a crontab.  With REQ10C auto state to clean (the files
-  that make the cleanup touch the crontab) the run exits 1 and no crontab is touched; without it a WARN says the
-  identity was not verified and the pointer and links go as before, exit code unchanged.  A project owner
-  missing from passwd (a container's case) with no REQ10C state must unset exactly as v3.1.1 did.
+- owner 2026-11-09 「Q-006 选 (b)」 (http dev 转述, 04 Q-006), which replaces review ruling D3; v3.1.2 guide 8.1
+  「随 BF 一起做：G4 (b)」, O7 ② (:223), the decision table (:511): on the native backend (HTTP_ZTP_RUNTIME_BACKEND
+  unset or systemd) root running 13-unload or 02-unsetup is refused at the entry when the operator rule refuses
+  (V via sudo, an invalid sudo invoker, via sudo a project owner missing from passwd): the identity line and an
+  [ERROR] with the refusal, exit 1, nothing stopped or changed; 02-unsetup refuses after the deployment lock and
+  before the monitor stop, 13-unload before its confirmation; --dry-run alike (http dev 2026-11-09).  A direct root
+  login on a project whose owner is missing from passwd goes on as v3.1.1 did, with one [WARN] that names the uid
+  and the hint `sudo chown <操作员>:<操作员主组> <项目>` (http dev 2026-11-09, default 2: that login is the way out
+  O7 ② gives).  The supervisor (Docker) backend works out no identity and prints no identity line: v3.1.1 exactly
+  (开发计划 :112, Docker frozen; review d-3).  A non-root run prints the identity line and is v3.1.1 otherwise
+  (guide WP-8 :868; review d-2; http dev 2026-11-09).
 
 No real uid switch happens (guide 2.2 item 6).  The test process plays root: `operator_identity.resolve_operator`
 receives euid 0, environ and passwd as inputs (the real rule runs on them), and `OwnerView` is 02-unsetup's view of
-`os` in which the files the operator made report the operator's uid and `fchown` is recorded instead of performed.
-The crontab is a fake executable on PATH that records its argv; nothing touches a real crontab.
+`os` (guide 2.2 item 6, exception ①): it reports euid 0, the files the operator made report the operator's uid,
+what this process made reports uid 0, and `fchown` is recorded instead of performed.  02-unsetup's main runs as
+13-unload runs it, the deployment lock held already, with `stop_native_ztp_monitors` a recorder (the way
+test_load_operator_workflow's unload() replaces them).  The crontab is a fake executable on PATH that records its
+argv; nothing touches a real crontab.
 """
 from __future__ import annotations
 
@@ -75,6 +85,12 @@ OPERATOR = OI.Operator("opuser", OP_UID, OP_GID, "/home/opuser")
 BANNER_SUDO = "操作员：opuser（项目目录属主）；当前：root 经 sudo（发起人 opuser）→ 项目侧以 opuser 执行"
 LEGACY = [["-l"], ["-l"], ["-"]]
 DASH_U = [["-u", "opuser", "-l"], ["-u", "opuser", "-l"], ["-u", "opuser", "-"]]
+WATCH = ("auto.env", "auto-watch.state", "auto-terminal.json")
+BACKEND = "HTTP_ZTP_RUNTIME_BACKEND"  # tools/ztp_service_runtime.py RUNTIME_BACKEND_ENV
+# design §4.2 identity line, V running with sudo on opuser's project (the decision part is the rule's).
+BANNER_SUDO_V = "操作员：opuser（项目目录属主）；当前：root 经 sudo（发起人 vuser）"
+# guide WP-4 :513 and 8.1 G4 (b): the way out named when the project owner has no passwd entry.
+CHOWN_HINT = "sudo chown <操作员>:<操作员主组> "
 
 FAKE_CRONTAB = """#!{python}
 import json, os, pathlib, sys
@@ -122,17 +138,25 @@ class OwnerView:
 
     Everything is the real os module, except: stat/lstat/fstat report `owners[(st_dev, st_ino)]` as the owner of the
     inodes listed there (files the operator made), and fchown records (inode, uid, gid) and moves that inode to the
-    new owner instead of calling the kernel.
+    new owner instead of calling the kernel.  With euid 0 (guide 2.2 item 6, exception ①: 02-unsetup's entry reads
+    its own euid; precedent test_collection_lock_owner._WorkerOs(euid=0)) geteuid reports 0 and every other inode
+    this process owns reports uid 0: what the process playing root made is root's, as the lock hand-over
+    (`info.st_uid == os.geteuid()`) expects.  euid None: the real process.
     """
 
-    def __init__(self, owners=None):
-        self.owners, self.fchowns = dict(owners or {}), []
+    def __init__(self, owners=None, euid=None):
+        self.owners, self.fchowns, self.euid = dict(owners or {}), [], euid
 
     def __getattr__(self, name):
         return getattr(os, name)
 
+    def geteuid(self):
+        return os.geteuid() if self.euid is None else self.euid
+
     def _seen(self, info):
         uid = self.owners.get((info.st_dev, info.st_ino))
+        if uid is None and self.euid == 0 and info.st_uid == os.geteuid():
+            uid = 0
         return info if uid is None else Seen(info, uid)
 
     def stat(self, *args, **kwargs):
@@ -235,18 +259,61 @@ class Fixture(unittest.TestCase):
                 stack.enter_context(mock.patch.object(self.unsetup, name, value))
             yield
 
-    def run_unsetup(self, tree, view, environ=None, *, dry_run=False):
-        """Run 02-unsetup's locked body with -y.  environ None: the process's own identity; else it plays root."""
+    def run_unsetup(self, tree, view, environ=None, *, euid=0, dry_run=False, backend=None):
+        """Run 02-unsetup's main with -y (and --dry-run) as 13-unload runs it: the deployment lock is held already and
+        stop_native_ztp_monitors is a recorder.  Returns (code, output); tree.stops gets the output printed before each
+        monitor stop, tree.rule the resolve_operator calls.
+
+        environ None: the process's own identity.  Else the process plays `euid` with these sudo variables, which
+        resolve_operator receives as inputs (the real rule runs on them) and 02-unsetup's os.environ carries; euid 0
+        makes `view` play root too.  backend: HTTP_ZTP_RUNTIME_BACKEND, unset when None.
+        """
         real = OI.resolve_operator
         output = io.StringIO()
+        tree.stops = []
+        (tree.base / "infra").mkdir(exist_ok=True)  # a code tree has it; _main_locked's infra_log_root_lock needs it
+
+        @contextmanager
+        def held(_root, *, dry_run=False):
+            yield 9
+
+        def stop(_root):
+            tree.stops.append(output.getvalue())
+            return ()
+
+        process = {name: value for name, value in os.environ.items() if not name.startswith("SUDO_") and name != BACKEND}
+        process.update(environ or {})
+        if backend is not None:
+            process[BACKEND] = backend
+        if environ is not None and euid == 0:
+            view.euid = 0
+        resolve = real if environ is None else (lambda project: real(
+            project, euid=euid, environ=environ, getpwuid=account, getpwnam=account_named, stat=view.stat))
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, process, clear=True))
             stack.enter_context(self.globals_of(tree, view, dry_run=dry_run))
-            if environ is not None:
-                stack.enter_context(mock.patch.object(OI, "resolve_operator", side_effect=lambda project: real(
-                    project, euid=0, environ=environ, getpwuid=account, getpwnam=account_named, stat=view.stat)))
+            stack.enter_context(mock.patch.object(self.unsetup, "deployment_lock", held))
+            stack.enter_context(mock.patch.object(self.unsetup, "stop_native_ztp_monitors", side_effect=stop))
+            tree.rule = stack.enter_context(mock.patch.object(OI, "resolve_operator", side_effect=resolve))
             stack.enter_context(redirect_stdout(output))
-            code = self.unsetup._main_locked_impl(self.unsetup._parse_args(["-y"]))
+            code = self.unsetup.main(["-y", "--dry-run"] if dry_run else ["-y"])
         return code, output.getvalue()
+
+    @staticmethod
+    def snapshot(tree):
+        """Every entry of the code tree: its kind and its link target or bytes (infra/ made as run_unsetup makes it)."""
+        (tree.base / "infra").mkdir(exist_ok=True)
+        entries = {}
+        for directory, names, files in os.walk(tree.base):
+            for name in names + files:
+                path = Path(directory) / name
+                entries[str(path)] = (("link", os.readlink(path)) if path.is_symlink() else ("dir", None)
+                                      if path.is_dir() else ("file", path.read_bytes()))
+        return entries
+
+    @staticmethod
+    def identity_lines(output):
+        return [line for line in output.splitlines() if line.startswith("操作员：")]
 
     def assert_cleaned(self, tree):
         self.assertEqual(FOREIGN, tree.db.read_text(encoding="utf-8"), "only the project's own watch line goes")
@@ -381,9 +448,10 @@ class UnsetupOperatorCrontabTests(Fixture):
 
     def test_refused_identity_changes_nothing(self):
         # design §4.2 and O7 ②: V with sudo on U's project is refused; 问题文档 :351: the refusal names the owner
-        # and the current user.  A refused real run stops before the crontab, the state and the pointer.
+        # and the current user.  A refused real run stops before the crontab, the state and the pointer; owner
+        # 2026-11-09 「Q-006 选 (b)」 (04 Q-006): at the entry, before the monitor stop.
         tree = self.tree()
-        view = self.operator_made(tree, "auto.env", "auto-watch.state", "auto-terminal.json")
+        view = self.operator_made(tree, *WATCH)
         code, output = self.run_unsetup(tree, view, SUDO_V)
         self.assertEqual([], self.calls(tree), output)
         refusal = [line for line in output.splitlines() if "opuser" in line and "vuser" in line and "[ERROR]" in line]
@@ -394,16 +462,57 @@ class UnsetupOperatorCrontabTests(Fixture):
         self.assertEqual(FOREIGN + tree.own, tree.db.read_text(encoding="utf-8"))
         for leaf in tree.leaves.values():
             self.assertTrue(leaf.exists(), leaf.name)
+        self.assertEqual([], tree.stops, "refused before the monitor stop")
 
-        # A dry run changes nothing anyway: it reports the refusal and lists as before (pending point, default).
+        # A dry run is refused the same way (http dev 2026-11-09: as load does, guide 8.1 G4 (b)).
         tree = self.tree()
-        view = self.operator_made(tree, "auto.env", "auto-watch.state", "auto-terminal.json")
+        view = self.operator_made(tree, *WATCH)
         code, output = self.run_unsetup(tree, view, SUDO_V, dry_run=True)
-        self.assertEqual(0, code, output)
+        self.assertEqual(1, code, output)
         self.assertTrue([line for line in output.splitlines() if "opuser" in line and "vuser" in line
-                         and "[WARN]" in line], output)
+                         and "[ERROR]" in line], output)
         self.assertEqual([], self.calls(tree))
         self.assertTrue(os.path.islink(tree.day0 / "activate-project"))
+
+    def test_sudo_v_is_refused_at_entry_before_the_monitor_stop(self):
+        # O7 ② (:223), decision table :511, owner 2026-11-09 「Q-006 选 (b)」 (04 Q-006; guide 8.1 G4 (b) #1): on the
+        # native backend root running 02-unsetup for V via sudo on U's project is refused after the deployment lock and
+        # before the monitor stop -- whatever REQ10C state there is, and with --dry-run too (http dev 2026-11-09).  The
+        # identity line is printed, the [ERROR] names U and V (问题文档 :351), the exit code is 1, no monitor is stopped,
+        # no crontab runs, and the pointer, links, manifest and REQ10C state are as before, no lock made.  The same
+        # rule refuses an invalid sudo invoker (O7 ④) and, via sudo, a project owner missing from passwd (:513).
+        invalid = {"SUDO_USER": "vuser", "SUDO_UID": str(OP_UID)}
+        cases = (
+            ("V via sudo, REQ10C watch", "watch", OP_UID, SUDO_V, False, ("opuser", "vuser")),
+            ("V via sudo, empty state directory", "idle", OP_UID, SUDO_V, False, ("opuser", "vuser")),
+            ("V via sudo, no state directory", None, OP_UID, SUDO_V, False, ("opuser", "vuser")),
+            ("V via sudo, --dry-run", "watch", OP_UID, SUDO_V, True, ("opuser", "vuser")),
+            ("invalid sudo invoker", "watch", OP_UID, invalid, False, ("opuser", "vuser", "SUDO_UID")),
+            ("via sudo, owner missing from passwd, REQ10C watch", "watch", UNKNOWN_UID, SUDO_V, False,
+             (str(UNKNOWN_UID), "vuser", CHOWN_HINT)),
+            ("via sudo, owner missing from passwd, empty state directory", "idle", UNKNOWN_UID, SUDO_V, False,
+             (str(UNKNOWN_UID), "vuser", CHOWN_HINT)),
+            ("via sudo, owner missing from passwd, no state directory", None, UNKNOWN_UID, SUDO_V, False,
+             (str(UNKNOWN_UID), "vuser", CHOWN_HINT)),
+        )
+        for label, kind, owner, environ, dry_run, needles in cases:
+            with self.subTest(label):
+                tree = self.tree(state_kind=kind)
+                view = self.operator_made(tree, *(WATCH if kind == "watch" else ()), uid=owner)
+                before = self.snapshot(tree)
+                code, output = self.run_unsetup(tree, view, environ, dry_run=dry_run)
+                self.assertEqual(1, code, output)
+                identity = self.identity_lines(output)
+                self.assertEqual(1, len(identity), output)
+                self.assertIn("；当前：root 经 sudo（发起人 vuser）", identity[0])
+                if owner == OP_UID:
+                    self.assertTrue(identity[0].startswith(BANNER_SUDO_V), identity[0])
+                self.assertTrue([line for line in output.splitlines()
+                                 if "[ERROR]" in line and all(needle in line for needle in needles)], output)
+                self.assertEqual([], tree.stops, "refused before stop_native_ztp_monitors")
+                self.assertEqual([], self.calls(tree), output)
+                self.assertEqual(before, self.snapshot(tree), "pointer, links, manifest, state: nothing changes")
+                self.assertEqual([], view.fchowns)
 
     def assert_unset(self, tree, code, output):
         self.assertEqual(0, code, output)
@@ -411,47 +520,153 @@ class UnsetupOperatorCrontabTests(Fixture):
         self.assertFalse(os.path.lexists(tree.key_link), "O14: the per-key link goes")
         self.assertFalse(os.path.lexists(tree.manifest), "Q5: the setup manifest goes")
 
+    def assert_kept(self, tree):
+        self.assertTrue(os.path.islink(tree.day0 / "activate-project"))
+        self.assertTrue(os.path.islink(tree.key_link))
+        self.assertTrue(tree.manifest.exists())
+        self.assertEqual(FOREIGN + tree.own, tree.db.read_text(encoding="utf-8"))
+        for leaf in tree.leaves.values():
+            self.assertTrue(leaf.exists(), leaf.name)
+
     def test_unknown_owner_without_req10c_state_still_unsets(self):
         # D3 regression guard (green on v3.1.1 too): root in a container, project owner missing from passwd, no
-        # REQ10C state at all: unsetup removes the pointer, the links and the manifest and returns 0.
+        # REQ10C state at all: unsetup removes the pointer, the links and the manifest and returns 0.  A container runs
+        # the supervisor backend (owner 2026-11-09 「Q-006 选 (b)」, 04 Q-006; 开发计划 :112: Docker is frozen).
+        tree = self.tree(state_kind=None)
+        view = OwnerView({inode(tree.project): UNKNOWN_UID})
+        code, output = self.run_unsetup(tree, view, {}, backend="supervisor")
+        self.assert_unset(tree, code, output)
+        self.assertEqual([], self.calls(tree), output)
+
+    def test_unknown_owner_without_req10c_watch_is_refused_at_entry(self):
+        # A project owner missing from passwd, no auto state to clean (no log directory, or one without
+        # auto.env/marker/terminal).  Owner 2026-11-09 「Q-006 选 (b)」 (04 Q-006; guide 8.1 G4 (b)) replaces D3's WARN:
+        # via sudo the entry refuses (exit 1, nothing stopped or changed); a direct root login goes on as v3.1.1 did
+        # with one [WARN] naming the uid and the `sudo chown` hint (http dev 2026-11-09, default 2) -- v3.1.1 unsets
+        # without a log directory and stops with 1 at the directory owner check (_req10c_crontab_lock) with one; the
+        # supervisor backend is v3.1.1 with no identity line (开发计划 :112).
+        for kind in (None, "idle"):
+            with self.subTest("via sudo", state_kind=kind):
+                tree = self.tree(state_kind=kind)
+                view = self.operator_made(tree, uid=UNKNOWN_UID)
+                before = self.snapshot(tree)
+                code, output = self.run_unsetup(tree, view, SUDO_OP)
+                self.assertEqual(1, code, output)
+                self.assertTrue([line for line in output.splitlines()
+                                 if "[ERROR]" in line and str(UNKNOWN_UID) in line and CHOWN_HINT in line], output)
+                self.assertEqual([], tree.stops)
+                self.assertEqual(before, self.snapshot(tree))
+            for label, environ, backend in (("direct root login", {}, None), ("supervisor backend", {}, "supervisor")):
+                with self.subTest(label, state_kind=kind):
+                    tree = self.tree(state_kind=kind)
+                    view = self.operator_made(tree, uid=UNKNOWN_UID)
+                    code, output = self.run_unsetup(tree, view, environ, backend=backend)
+                    warns = [line for line in output.splitlines() if "[WARN]" in line]
+                    if backend is None:
+                        self.assertEqual(1, len(warns), output)
+                        self.assertIn(str(UNKNOWN_UID), warns[0])
+                        self.assertIn(CHOWN_HINT + str(tree.project), warns[0])
+                    else:
+                        self.assertEqual([], warns, output)
+                        self.assertEqual([], self.identity_lines(output), output)
+                    self.assertEqual(1, len(tree.stops), "the run goes on: the monitors are stopped as in v3.1.1")
+                    self.assertEqual([], self.calls(tree), output)
+                    self.assertFalse(tree.lock.exists(), "no lock is made in a directory owned by somebody else")
+                    self.assertEqual([], view.fchowns)
+                    if kind is None:
+                        self.assert_unset(tree, code, output)
+                    else:
+                        self.assertEqual(1, code, output)
+                        self.assert_kept(tree)
+
+    def test_unknown_owner_with_req10c_watch_stops_before_the_crontab(self):
+        # The same owner with a watch to clean exits 1; no crontab is read or written, the state, pointer and links
+        # stay; the run names the project and its owner's uid (问题文档 :302, :351).  Owner 2026-11-09 「Q-006 选 (b)」:
+        # via sudo the entry refuses with the [ERROR] before the monitor stop; a direct root login goes on as v3.1.1
+        # (the monitors are stopped) up to the state directory's owner check (_req10c_crontab_lock), which stops it
+        # with 1 and an [ERROR]; there the entry's [WARN] is the line that names the project and the uid.
+        for label, environ in (("via sudo", SUDO_OP), ("direct root login", {})):
+            with self.subTest(label):
+                tree = self.tree()
+                view = self.operator_made(tree, *WATCH, uid=UNKNOWN_UID)
+                code, output = self.run_unsetup(tree, view, environ)
+                lines = output.splitlines()
+                self.assertEqual([], self.calls(tree), output)
+                self.assertEqual(1, code, output)
+                self.assertTrue([line for line in lines if "[ERROR]" in line], output)
+                naming = "[ERROR]" if environ else "[WARN]"
+                self.assertTrue([line for line in lines if naming in line and str(UNKNOWN_UID) in line
+                                 and str(tree.project) in line], output)
+                self.assert_kept(tree)
+                self.assertFalse(tree.lock.exists(), "no lock is made in a directory nobody acts for")
+                self.assertEqual(0 if environ else 1, len(tree.stops), output)
+
+    def test_supervisor_backend_keeps_v311_unsetup(self):
+        # 开发计划 :112 (Docker is frozen), 04 Q-006 result column (owner 2026-11-09 「Q-006 选 (b)」), review d-3; guide
+        # 8.1 G4 (b) #3: with HTTP_ZTP_RUNTIME_BACKEND=supervisor 02-unsetup works out no identity (resolve_operator is
+        # not called) and prints no identity line and no WARN.  Root in a container whose project owner is missing from
+        # passwd: without REQ10C state the pointer, links and manifest go (exit 0); with a state directory owned by that
+        # uid, v3.1.1 stops with 1 at the directory owner check (_req10c_crontab_lock), removing nothing.  13-unload on
+        # this backend: UnloadOperatorIdentityTests.test_supervisor_backend_keeps_v311_unload.
+        for kind in (None, "idle", "watch"):
+            with self.subTest(state_kind=kind):
+                tree = self.tree(state_kind=kind)
+                view = self.operator_made(tree, *(WATCH if kind == "watch" else ()), uid=UNKNOWN_UID)
+                code, output = self.run_unsetup(tree, view, {}, backend="supervisor")
+                tree.rule.assert_not_called()
+                self.assertEqual([], self.identity_lines(output), output)
+                self.assertFalse([line for line in output.splitlines() if "[WARN]" in line], output)
+                self.assertEqual([], self.calls(tree), output)
+                self.assertEqual(1, len(tree.stops), "v3.1.1 stops the native monitors on every backend")
+                if kind is None:
+                    self.assert_unset(tree, code, output)
+                else:
+                    self.assertEqual(1, code, output)
+                    self.assertTrue([line for line in output.splitlines() if "[ERROR]" in line], output)
+                    self.assert_kept(tree)
+                    self.assertFalse(tree.lock.exists())
+
+    def test_non_root_refused_identity_keeps_v311_path(self):
+        # Guide WP-8 :868 (the non-root path is not changed), review d-2; http dev 2026-11-09: a non-root run only
+        # prints the identity line; guide 8.1 G4 (b) #4.  V runs 02-unsetup directly on U's project: with U's state
+        # directory but no auto files v3.1.1 stops with 1 at the directory owner check (_req10c_crontab_lock), the
+        # pointer and links stay; without a state directory it unsets as v3.1.1 (pointer and links go, exit 0).
+        for kind in ("idle", None):
+            with self.subTest(state_kind=kind):
+                tree = self.tree(state_kind=kind)
+                view = self.operator_made(tree)
+                code, output = self.run_unsetup(tree, view, {}, euid=V_UID)
+                identity = self.identity_lines(output)
+                self.assertEqual(1, len(identity), output)
+                self.assertTrue(identity[0].startswith("操作员：opuser（项目目录属主）；当前：vuser"), identity[0])
+                self.assertFalse([line for line in output.splitlines() if "[WARN]" in line], output)
+                self.assertEqual([], self.calls(tree), output)
+                self.assertEqual(1, len(tree.stops), "v3.1.1: the monitors are stopped first")
+                if kind is None:
+                    self.assert_unset(tree, code, output)
+                else:
+                    self.assertEqual(1, code, output)
+                    self.assert_kept(tree)
+                    self.assertFalse(tree.lock.exists())
+
+    def test_root_login_unknown_owner_still_unsets_with_warn(self):
+        # http dev 2026-11-09 (land2 check, default 2): a direct root login is the way out O7 ② (:223) names, so a
+        # project owner missing from passwd does not stop it; v3.1.1 unset such a project and so does this run, with one
+        # [WARN] from the entry (before the monitor stop, guide 8.1 G4 (b) step 3) that names the owner's uid as missing
+        # from passwd and gives `sudo chown <操作员>:<操作员主组> <项目>` (:513).  Native backend, no REQ10C state; guide
+        # 8.1 G4 (b) #6.  13-unload: UnloadOperatorIdentityTests.test_unload_root_login_unknown_owner_goes_on_with_warn.
         tree = self.tree(state_kind=None)
         view = OwnerView({inode(tree.project): UNKNOWN_UID})
         code, output = self.run_unsetup(tree, view, {})
         self.assert_unset(tree, code, output)
         self.assertEqual([], self.calls(tree), output)
-
-    def test_unknown_owner_without_req10c_watch_warns_and_goes_on(self):
-        # D3: no auto state to clean (no log directory, or one without auto.env/marker/terminal): a WARN names the
-        # unverified identity (问题文档 :351, :302: whose project, the owner's uid), nothing in the directory is touched.
-        for kind in (None, "idle"):
-            with self.subTest(state_kind=kind):
-                tree = self.tree(state_kind=kind)
-                view = self.operator_made(tree, uid=UNKNOWN_UID)
-                code, output = self.run_unsetup(tree, view, {})
-                self.assert_unset(tree, code, output)
-                self.assertTrue([line for line in output.splitlines()
-                                 if "[WARN]" in line and str(UNKNOWN_UID) in line], output)
-                self.assertEqual([], self.calls(tree), output)
-                self.assertFalse(tree.lock.exists(), "no lock is made in a directory nobody acts for")
-                self.assertEqual([], view.fchowns)
-
-    def test_unknown_owner_with_req10c_watch_stops_before_the_crontab(self):
-        # D3: the same identity with a watch to clean exits 1; no crontab is read or written, the state, pointer and
-        # links stay; the error names the project and its owner's uid (问题文档 :302, :351).
-        tree = self.tree()
-        view = self.operator_made(tree, "auto.env", "auto-watch.state", "auto-terminal.json", uid=UNKNOWN_UID)
-        code, output = self.run_unsetup(tree, view, {})
-        self.assertEqual([], self.calls(tree), output)
-        self.assertEqual(1, code, output)
-        self.assertTrue([line for line in output.splitlines() if "[ERROR]" in line and str(UNKNOWN_UID) in line
-                         and str(tree.project) in line], output)
-        self.assertEqual(FOREIGN + tree.own, tree.db.read_text(encoding="utf-8"))
-        for leaf in tree.leaves.values():
-            self.assertTrue(leaf.exists(), leaf.name)
-        self.assertFalse(tree.lock.exists(), "no lock is made in a directory nobody acts for")
-        self.assertTrue(os.path.islink(tree.day0 / "activate-project"))
-        self.assertTrue(os.path.islink(tree.key_link))
-        self.assertTrue(tree.manifest.exists())
+        self.assertEqual(1, len(tree.stops), output)
+        warns = [line for line in tree.stops[0].splitlines() if "[WARN]" in line]
+        self.assertEqual(1, len(warns), output)
+        for needle in (str(UNKNOWN_UID), "passwd", CHOWN_HINT + str(tree.project)):
+            self.assertIn(needle, warns[0])
+        self.assertEqual(1, len([line for line in output.splitlines() if "[WARN]" in line]), output)
+        self.assertFalse([line for line in output.splitlines() if "[ERROR]" in line], output)
 
 
 class UnloadOperatorIdentityTests(unittest.TestCase):
@@ -462,44 +677,56 @@ class UnloadOperatorIdentityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.unload = load_script("unsetup_operator_crontab_unload", UNLOAD)
 
-    def run_unload(self, environ):
+    def run_unload(self, environ, *, argv=("-y",), backend="systemd", owner=OP_UID, euid=0):
+        """13-unload's main as `euid` (0: root); environ: the sudo variables, which resolve_operator receives as inputs
+        and os.environ carries; backend: the name service_runtime_backend returns; owner: the project directory's owner.
+        The confirmation and the six teardown steps record into events; self.locks records the deployment lock taken,
+        self.resolved the projects resolve_operator was asked about.  stdout and stderr both go into the output."""
         holder = tempfile.TemporaryDirectory(prefix="w8-unload-")
         self.addCleanup(holder.cleanup)
         project = Path(holder.name).resolve() / "DAY0-Prepare" / PROJECT
         project.mkdir(parents=True)
         real = OI.resolve_operator
         events = []
+        self.locks, self.resolved = [], []
         output = io.StringIO()
 
         def owner_of(path):
             info = os.stat(path)
-            return Seen(info, OP_UID) if Path(path) == project else info
+            return Seen(info, owner) if Path(path) == project else info
+
+        def resolve(path):
+            self.resolved.append(path)
+            return real(path, euid=euid, environ=environ, getpwuid=account, getpwnam=account_named, stat=owner_of)
 
         @contextmanager
         def held(_root, *, dry_run=False, finish_transaction_id=None):
+            self.locks.append(dry_run)
             yield 9
 
         def step(name, result=None):
             return lambda *_args, **_kwargs: events.append(name) or result
 
+        process = {name: value for name, value in os.environ.items() if not name.startswith("SUDO_") and name != BACKEND}
+        process.update(environ)
         with ExitStack() as stack:
             def patch(name, **kwargs):
                 stack.enter_context(mock.patch.object(self.unload, name, **kwargs))
 
+            stack.enter_context(mock.patch.dict(os.environ, process, clear=True))
             patch("resolve_project", return_value=project)
             # 13-unload's own root check (:565-566), patched as test_finish_native_workflow does.
-            stack.enter_context(mock.patch.object(self.unload.os, "geteuid", return_value=0))
+            stack.enter_context(mock.patch.object(self.unload.os, "geteuid", return_value=euid))
             patch("confirm", side_effect=lambda *_args: events.append(("confirm", output.getvalue())) or True)
-            patch("service_runtime_backend", return_value=SimpleNamespace(name="systemd"))
+            patch("service_runtime_backend", return_value=SimpleNamespace(name=backend))
             patch("deployment_lock", new=held)
             patch("unmanaged_dhcp_runtime_files", return_value=[])
             for name in self.STEPS:
                 patch(name, side_effect=step(name, [] if name == "remove_dhcp_runtime_files" else None))
-            stack.enter_context(mock.patch.object(OI, "resolve_operator", side_effect=lambda path: real(
-                path, euid=0, environ=environ, getpwuid=account, getpwnam=account_named, stat=owner_of)))
+            stack.enter_context(mock.patch.object(OI, "resolve_operator", side_effect=resolve))
             stack.enter_context(redirect_stdout(output))
-            stack.enter_context(redirect_stderr(io.StringIO()))
-            code = self.unload.main(["-y"])
+            stack.enter_context(redirect_stderr(output))
+            code = self.unload.main(list(argv))
         return code, events, output.getvalue()
 
     def test_unload_prints_identity_line_before_confirming_and_keeps_its_flow(self):
@@ -510,12 +737,59 @@ class UnloadOperatorIdentityTests(unittest.TestCase):
         self.assertIn(BANNER_SUDO, events[0][1].splitlines(), "the identity line comes before the confirmation")
         self.assertEqual(self.STEPS, events[1:])
 
-    def test_unload_names_a_refused_identity_and_keeps_its_flow(self):
-        # 问题文档 :351: the identity line names who owns the project and who runs; guide WP-8: 13-unload adds only
-        # that line and its flow is unchanged (the refusal happens in 02-unsetup, test_refused_identity_changes_nothing).
-        code, events, output = self.run_unload(SUDO_V)
+    def test_unload_refuses_sudo_v_before_confirming(self):
+        # O7 ② (:223), decision table :511, owner 2026-11-09 「Q-006 选 (b)」 (04 Q-006; guide 8.1 G4 (b) #2): on the
+        # native backend root running 13-unload for V via sudo on U's project is refused at the entry: the identity
+        # line, an [ERROR] naming U and V (问题文档 :351), exit 1; neither the confirmation nor the deployment lock nor
+        # any of the six teardown steps runs.  --dry-run alike (http dev 2026-11-09).
+        for argv in (("-y",), ("--dry-run",)):
+            with self.subTest(argv=argv):
+                code, events, output = self.run_unload(SUDO_V, argv=argv)
+                self.assertEqual(1, code, output)
+                self.assertEqual([], events, output)
+                self.assertEqual([], self.locks, "refused before the deployment lock")
+                lines = output.splitlines()
+                self.assertTrue([line for line in lines if line.startswith(BANNER_SUDO_V)], output)
+                self.assertTrue([line for line in lines if "[ERROR]" in line and "opuser" in line and "vuser" in line],
+                                output)
+
+    def test_supervisor_backend_keeps_v311_unload(self):
+        # Guide 8.1 G4 (b) #3, 13-unload half: on the supervisor backend (开发计划 :112; 04 Q-006; review d-3) 13-unload
+        # works out no identity and prints no identity line, even for a project owner missing from passwd; the flow is
+        # v3.1.1's (confirmation, then the six steps), exit 0.
+        code, events, output = self.run_unload({}, backend="supervisor", owner=UNKNOWN_UID)
         self.assertEqual(0, code, output)
-        self.assertTrue([line for line in events[0][1].splitlines() if "opuser" in line and "vuser" in line], output)
+        self.assertEqual([], self.resolved)
+        self.assertFalse([line for line in output.splitlines() if line.startswith("操作员：") or "[WARN]" in line],
+                         output)
+        self.assertEqual("confirm", events[0][0])
+        self.assertEqual(self.STEPS, events[1:])
+
+    def test_unload_root_login_unknown_owner_goes_on_with_warn(self):
+        # Guide 8.1 G4 (b) #6, 13-unload half (http dev 2026-11-09, default 2): a direct root login on a project whose
+        # owner is missing from passwd tears down as v3.1.1 did, with one [WARN] before the confirmation that names the
+        # owner's uid as missing from passwd and gives `sudo chown <操作员>:<操作员主组> <项目>` (:513).
+        code, events, output = self.run_unload({}, owner=UNKNOWN_UID)
+        self.assertEqual(0, code, output)
+        self.assertEqual("confirm", events[0][0])
+        self.assertEqual(self.STEPS, events[1:])
+        warns = [line for line in events[0][1].splitlines() if "[WARN]" in line]
+        self.assertEqual(1, len(warns), output)
+        for needle in (str(UNKNOWN_UID), "passwd", CHOWN_HINT):
+            self.assertIn(needle, warns[0])
+        self.assertFalse([line for line in output.splitlines() if "[ERROR]" in line], output)
+
+    def test_non_root_dry_run_only_prints_the_identity_line(self):
+        # Guide 8.1 G4 (b) (http dev 2026-11-09): a non-root run -- for 13-unload only --dry-run can be one -- prints
+        # the identity line and is refused nowhere; the rest is v3.1.1 (the dry-run lock, the confirmation, the six
+        # steps listing only).  V on U's project.
+        code, events, output = self.run_unload({}, argv=("--dry-run",), euid=V_UID)
+        self.assertEqual(0, code, output)
+        self.assertTrue([line for line in output.splitlines()
+                         if line.startswith("操作员：opuser（项目目录属主）；当前：vuser")], output)
+        self.assertFalse([line for line in output.splitlines() if "[ERROR]" in line or "[WARN]" in line], output)
+        self.assertEqual([True], self.locks)
+        self.assertEqual("confirm", events[0][0])
         self.assertEqual(self.STEPS, events[1:])
 
 
