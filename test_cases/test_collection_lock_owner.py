@@ -159,7 +159,11 @@ class _LockTree:
 
     def start_worker(self, root: Path, project: Path | None, *, events: list,
                      dry_run: bool = False, record_chown: bool = False, backend=None) -> str:
-        """The real ``start_switch_collection_worker`` (native, no page endpoint) with its launch recorded."""
+        """The real ``start_switch_collection_worker`` (native, no page endpoint) with its launch recorded.
+
+        ``project`` stands for the project main resolved; the operator passed down is what main computes
+        for it (WP-5: ``operator_identity.resolve_operator`` once, and nothing under the Supervisor backend).
+        """
 
         def chown(descriptor, uid, gid):
             metadata = os.fstat(descriptor)
@@ -169,6 +173,11 @@ class _LockTree:
             events.append(("popen", Path(command[2]).name))
             return M3._FakeProcess()
 
+        backend = backend or LOAD.SystemdRuntimeBackend(
+            command_runner=mock.Mock(side_effect=AssertionError("systemctl")),
+        )
+        operator = (operator_identity.resolve_operator(project)
+                    if project is not None and backend.name != "supervisor" else None)
         output = io.StringIO()
         with ExitStack() as stack:
             stack.enter_context(mock.patch.object(LOAD, "HTTP_ROOT", root))
@@ -180,11 +189,8 @@ class _LockTree:
                 stack.enter_context(mock.patch.object(LOAD.os, "fchown", side_effect=chown))
             stack.enter_context(redirect_stdout(output))
             LOAD.start_switch_collection_worker(
-                "prod", dry_run=dry_run,
-                runtime_backend=backend or LOAD.SystemdRuntimeBackend(
-                    command_runner=mock.Mock(side_effect=AssertionError("systemctl")),
-                ),
-                control_endpoint=False, operator_project=project,
+                "prod", dry_run=dry_run, runtime_backend=backend,
+                control_endpoint=False, operator=operator,
             )
         return output.getvalue()
 

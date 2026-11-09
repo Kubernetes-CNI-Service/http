@@ -10541,7 +10541,7 @@ def start_switch_collection_worker(
     scope: str, *, dry_run: bool = False,
     runtime_backend: ServiceRuntimeBackend | None = None,
     control_endpoint: bool = True,
-    operator_project: Path | None = None,
+    operator: operator_identity.Resolution | None = None,
 ) -> None:
     """Start the Switch Status collector with resources separate from ZTP control.
 
@@ -10549,10 +10549,11 @@ def start_switch_collection_worker(
     the control auth, the Apache boundary, the CGI and the Apache reload; the request file is
     written ``idle`` either way so a manual ``collect`` can still trigger a cycle.
 
-    I-029 / O14: ``operator_project`` is the project being loaded.  On a native (systemd) server
-    where root acts for a non-root operator, the three collection locks are pre-created before the
-    worker starts (0600, never through a link; an existing one is only opened) and handed to that
-    operator, so the operator's own cron.sh can take them.  None keeps the start unchanged.
+    I-029 / O14: ``operator`` is this load's operator, computed once in main (WP-5).  On a native
+    (systemd) server where root acts for a non-root operator, the three collection locks are
+    pre-created before the worker starts (0600, never through a link; an existing one is only
+    opened) and handed to that operator, so the operator's own cron.sh can take them.  None keeps
+    the start unchanged.
     """
     status_dir = HTTP_ROOT / "monitor/status"
     request_file = status_dir / "switch-collection.request"
@@ -10597,21 +10598,18 @@ def start_switch_collection_worker(
         ))
     if control_endpoint:
         _reload_apache_if_active(backend)
-    if operator_project is not None and backend.name == "systemd":
-        from operator_identity import resolve_operator
-
-        resolution = resolve_operator(operator_project)
-        if resolution.action == "represent":
+    if operator is not None and backend.name == "systemd":
+        if operator.action == "represent":
             for area in ("ethernet", "infiniband", "nvlink"):
                 descriptor = os.open(
                     HTTP_ROOT / area / "monitor/cron.lock",
                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600,
                 )
                 try:
-                    os.fchown(descriptor, resolution.operator.uid, resolution.operator.gid)
+                    os.fchown(descriptor, operator.operator.uid, operator.operator.gid)
                 finally:
                     os.close(descriptor)
-            ok(f"采集锁 cron.lock（ethernet、infiniband、nvlink）已交给操作员 {resolution.operator.name}")
+            ok(f"采集锁 cron.lock（ethernet、infiniband、nvlink）已交给操作员 {operator.operator.name}")
     if _start_supervisor_program(
         "switch-collection", scope, runtime_backend=backend,
     ):
@@ -13628,7 +13626,7 @@ def main(
                     collection_scope, dry_run=args.dry_run,
                     runtime_backend=runtime_backend_instance,
                     control_endpoint=http_service_available,
-                    operator_project=project,   # I-029 / O14 (WP-9)
+                    operator=load_identity,   # I-029 / O14 (WP-9), WP-5's operator
                 )
             if should_monitor and http_service_available and dhcp_service_available:
                 failure_phase = "启动手工 ZTP worker"
