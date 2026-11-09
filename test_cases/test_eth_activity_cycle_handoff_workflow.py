@@ -2,6 +2,7 @@
 
 SSH/SCP are shimmed; the production Python and Shell entrypoints are copied
 byte-for-byte into a private fixture root.  No real crontab or device runs.
+cron.sh's `id -u` answers 0, the euid of a cron.sh the root worker starts.
 """
 
 from __future__ import annotations
@@ -24,6 +25,23 @@ from monitor.issue_tracker_activity_source import validate_eth_cycle_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# Before K4 the switch-collection worker is root (v3.1.2 guide 3.1 已定 2, owner 2026-11-07; a Linux
+# management server's load refuses a non-root run), and the cron.sh it starts keeps running as root with
+# the root-parent marker.  O14 (owner 2026-11-07, guide WP-11 step 4): a non-root cron.sh with a project
+# pointer only collects, so it never runs the Ethernet closed loop whose LLDP analyzer writes the sidecar
+# below.  The test user cannot become root (guide 2.2 item 6), so cron.sh's `id -u` answers 0 while the
+# process stays the test user, as test_cron_operator_identity plays it; the real worker adds the marker
+# itself.  It goes in through this fixture's BASH_ENV like the other process-boundary shims, so the
+# copied cron.sh stays byte-for-byte; every other id call is the real one.
+ROOT_WORKER_EUID_SHIM = r'''id() {
+    if [[ "$#" -eq 1 && "$1" == "-u" ]]; then
+        echo 0
+        return 0
+    fi
+    command id "$@"
+}
+'''
 
 
 class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
@@ -87,6 +105,9 @@ class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
             boundary = root / "fixture-bin/bash"
             script = boundary.read_text(encoding="utf-8")
             boundary.write_text(self._analyzer_trace_script(script), encoding="utf-8")
+            bash_env = root / "fixture-bash-env.sh"
+            bash_env.write_text(bash_env.read_text(encoding="utf-8") + ROOT_WORKER_EUID_SHIM,
+                                encoding="utf-8")
             analyzer = root / "tools/lldp-analyze-tool"
             shutil.copy2(ROOT / "tools/lldp-analyze-tool/analyze_lldp.py",
                          analyzer / "analyze_lldp.py")
