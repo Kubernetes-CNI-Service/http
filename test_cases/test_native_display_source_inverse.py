@@ -115,17 +115,42 @@ USABILITY_REGIONS = [
 ]
 # END GENERATED USABILITY REVIEW TABLE
 
+# I-006 operator re-exec pre-layer above usability (v3.1.2 WP-14, O16 (a)):
+# independent review table of the WP-10 diff from the previous entry,
+# generated from git (not from SUBJECT tables).
+# BEGIN GENERATED OPERATOR REEXEC REVIEW TABLE
+# Generated from the diff 6cb1b1e1458177e2eeb2be381f870542112c9927:infiniband/bringup/xdr-upgrade/upgrade.py
+# -> d25f867b74fececdab747f32cf4cbdc25e106e5d:infiniband/bringup/xdr-upgrade/upgrade.py (71b63b592fee99664ae7c60ea43de2c6dad42894, WP-10);
+# context=3 lines, 1 hunks. Never edit by hand.
+# previous entry sha256 437ad6b44bfb3a43f5d9d4bf894775a32d4431219a4a55017318613a6c1432c2
+# candidate entry sha256 c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88
+# [previous offset, previous length, candidate offset, candidate length,
+#  previous sha256, candidate sha256]
+OPERATOR_REEXEC_BEFORE_SHA = '437ad6b44bfb3a43f5d9d4bf894775a32d4431219a4a55017318613a6c1432c2'
+OPERATOR_REEXEC_REGIONS = [
+    [152542, 220, 152542, 6978, '75985de03cba4e3b580ff9a5ba090b1b17576d8af23b34bacb2c9fca1417a659', 'fca29eb59bc4ffbb34a1e66a269af7eaa748881702eeba4af0c7428308494b64'],
+]
+# END GENERATED OPERATOR REEXEC REVIEW TABLE
+
 
 def _live_entry():
     return (Path(__file__).resolve().parents[1] / ENTRY).read_bytes()
+
+
+def _usability_candidate(case):
+    """The live entry under exactly the reviewed WP-10 operator re-exec pre-layer."""
+    entry = SUBJECT._restore_native_operator_reexec_layer(_live_entry())
+    case.assertEqual(OPERATOR_REEXEC_BEFORE_SHA, hashlib.sha256(entry).hexdigest())
+    return entry
 
 
 class NativeTransferWordingInverseTests(unittest.TestCase):
     def inputs(self):
         old = (SOURCE / 'candidate' / (ENTRY + '.txt')).read_bytes()
         # wording2's candidate is the previous entry under the reviewed
-        # usability pre-layer; remove exactly that layer first.
-        new = SUBJECT._restore_native_usability_layer(_live_entry())
+        # usability pre-layer, itself under the operator re-exec pre-layer;
+        # remove exactly those layers first.
+        new = SUBJECT._restore_native_usability_layer(_usability_candidate(self))
         self.assertEqual(USABILITY_BEFORE_SHA, hashlib.sha256(new).hexdigest())
         self.assertEqual(WORDING_BEFORE_SHA, hashlib.sha256(old).hexdigest())
         return old, new
@@ -174,7 +199,8 @@ class NativeTransferWordingInverseTests(unittest.TestCase):
 
 
 class NativeUsabilityInverseTests(unittest.TestCase):
-    """The live entry is the previous entry plus exactly the reviewed usability hunks."""
+    """The usability candidate (the live entry under the reviewed operator re-exec
+    pre-layer) is the previous entry plus exactly the reviewed usability hunks."""
 
     def inverse(self):
         function = getattr(SUBJECT, '_restore_native_usability_layer', None)
@@ -182,7 +208,7 @@ class NativeUsabilityInverseTests(unittest.TestCase):
         return function
 
     def inputs(self):
-        new = _live_entry()
+        new = _usability_candidate(self)
         old = self.inverse()(new)
         self.assertEqual(USABILITY_BEFORE_SHA, hashlib.sha256(old).hexdigest())
         return old, new
@@ -202,7 +228,7 @@ class NativeUsabilityInverseTests(unittest.TestCase):
             rebuilt.extend((old[cursor:oldoff], newpart))
             cursor = oldoff + oldlen
         rebuilt.append(old[cursor:])
-        # Forward: outside the reviewed hunks the live entry is byte-identical.
+        # Forward: outside the reviewed hunks the usability candidate is byte-identical.
         self.assertEqual(new, b''.join(rebuilt))
         # The restored entry is exactly wording2's candidate, so the older
         # layers and the unchanged U pin still apply underneath.
@@ -237,6 +263,77 @@ class NativeUsabilityInverseTests(unittest.TestCase):
                 inverse(raw)
         if len(USABILITY_REGIONS) > 1:
             first, second = USABILITY_REGIONS[0], USABILITY_REGIONS[1]
+            a, alen, b, blen = first[2], first[3], second[2], second[3]
+            reordered = new[:a] + new[b:b + blen] + new[a + alen:b] + new[a:a + alen] + new[b + blen:]
+            with self.subTest(mutation='reordered'), self.assertRaises(AssertionError):
+                inverse(reordered)
+
+
+class NativeOperatorReexecInverseTests(unittest.TestCase):
+    """The live entry is the previous entry plus exactly the reviewed WP-10 operator re-exec hunks."""
+
+    def inverse(self):
+        function = getattr(SUBJECT, '_restore_native_operator_reexec_layer', None)
+        self.assertTrue(callable(function), 'strict operator re-exec pre-inverse is required')
+        return function
+
+    def inputs(self):
+        new = _live_entry()
+        old = self.inverse()(new)
+        self.assertEqual(OPERATOR_REEXEC_BEFORE_SHA, hashlib.sha256(old).hexdigest())
+        return old, new
+
+    def test_exact_operator_reexec_hunks_restore_the_whole_previous_entry(self):
+        old, new = self.inputs()
+        self.assertTrue(OPERATOR_REEXEC_REGIONS, 'reviewed operator re-exec table required')
+        self.assertEqual(len(OPERATOR_REEXEC_REGIONS), len(SUBJECT._NATIVE_OPERATOR_REEXEC_REGIONS))
+        self.assertEqual(OPERATOR_REEXEC_BEFORE_SHA, SUBJECT._NATIVE_OPERATOR_REEXEC_BEFORE_SHA256)
+        rebuilt, cursor = [], 0
+        for oldoff, oldlen, newoff, newlen, oldhash, newhash in OPERATOR_REEXEC_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            self.assertEqual(oldhash, hashlib.sha256(oldpart).hexdigest())
+            self.assertEqual(newhash, hashlib.sha256(newpart).hexdigest())
+            self.assertEqual(1, new.count(newpart))
+            self.assertEqual(0, new.count(oldpart))
+            rebuilt.extend((old[cursor:oldoff], newpart))
+            cursor = oldoff + oldlen
+        rebuilt.append(old[cursor:])
+        # Forward: outside the reviewed hunks the live entry is byte-identical.
+        self.assertEqual(new, b''.join(rebuilt))
+        # The restored entry is exactly the usability candidate, so the older
+        # layers and the unchanged U pin still apply underneath.
+        self.assertEqual(USABILITY_BEFORE_SHA,
+                         hashlib.sha256(SUBJECT._restore_native_usability_layer(old)).hexdigest())
+        self.assertEqual(ORIGINAL_SHA, hashlib.sha256(SUBJECT._restore_native_display_layer(
+            SUBJECT._restore_native_transfer_wording_layer(
+                SUBJECT._restore_native_usability_layer(old)))).hexdigest())
+
+    def test_previous_partial_duplicate_reordered_and_external_changes_refuse(self):
+        inverse = self.inverse()
+        old, new = self.inputs()
+        with self.assertRaises(AssertionError):
+            inverse(old)
+        for oldoff, oldlen, newoff, newlen, _oldhash, _newhash in OPERATOR_REEXEC_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            for label, raw in (
+                ('missing', new[:newoff] + new[newoff + newlen:]),
+                ('truncated', new[:newoff + newlen - 1] + new[newoff + newlen:]),
+                ('partial_old', new[:newoff] + oldpart + new[newoff + newlen:]),
+                ('duplicate', new + newpart), ('extra_old', new + oldpart),
+            ):
+                with self.subTest(offset=newoff, mutation=label), self.assertRaises(AssertionError):
+                    inverse(raw)
+        outside = 1000
+        self.assertTrue(all(not row[2] <= outside < row[2] + row[3] for row in OPERATOR_REEXEC_REGIONS))
+        for label, raw in (
+            ('prefix', b'OUTSIDE PREFIX' + new),
+            ('middle', new[:outside] + bytes([new[outside] ^ 1]) + new[outside + 1:]),
+            ('suffix', new + b'OUTSIDE SUFFIX'),
+        ):
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                inverse(raw)
+        if len(OPERATOR_REEXEC_REGIONS) > 1:
+            first, second = OPERATOR_REEXEC_REGIONS[0], OPERATOR_REEXEC_REGIONS[1]
             a, alen, b, blen = first[2], first[3], second[2], second[3]
             reordered = new[:a] + new[b:b + blen] + new[a + alen:b] + new[a:a + alen] + new[b + blen:]
             with self.subTest(mutation='reordered'), self.assertRaises(AssertionError):

@@ -2041,6 +2041,200 @@ def _restore_native_usability_layer(payload):
     return original
 
 
+# I-006 operator re-exec pre-layer above usability (v3.1.2 WP-14, O16 (a), owner 2026-11-07 via http dev):
+# the reviewed WP-10 diff from the previous entry (the v3.1.1 bytes, which are the usability candidate), not a
+# new whole-hash allowance; PRODUCTION_PINS and every older layer are unchanged.  WP-10 edited the __main__
+# block inside usability hunk 11, so this layer is reversed first and the usability, wording2 and display2
+# layers then see exactly the bytes they were generated against.
+# Literals between the markers are generated from that diff by a script that refuses unless the candidate
+# restores through this layer, then usability/wording2/display2, to the unchanged U pin; never edit them by hand.
+# BEGIN GENERATED NATIVE OPERATOR REEXEC LAYER
+# Generated from the diff 6cb1b1e1458177e2eeb2be381f870542112c9927:infiniband/bringup/xdr-upgrade/upgrade.py
+# -> d25f867b74fececdab747f32cf4cbdc25e106e5d:infiniband/bringup/xdr-upgrade/upgrade.py
+# (the only commit between them touching the entry: 71b63b592fee99664ae7c60ea43de2c6dad42894, v3.1.2 WP-10);
+# context=3 lines, 1 hunks. Never edit by hand.
+# previous entry sha256 437ad6b44bfb3a43f5d9d4bf894775a32d4431219a4a55017318613a6c1432c2
+# candidate entry sha256 c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88
+# (previous offset, candidate offset, old complete hunk literal, new complete literal)
+_NATIVE_OPERATOR_REEXEC_BEFORE_SHA256 = '437ad6b44bfb3a43f5d9d4bf894775a32d4431219a4a55017318613a6c1432c2'
+_NATIVE_OPERATOR_REEXEC_REGIONS = (
+    # operator_reexec1: old220B/75985de03cba4e3b580ff9a5ba090b1b17576d8af23b34bacb2c9fca1417a659; new6978B/fca29eb59bc4ffbb34a1e66a269af7eaa748881702eeba4af0c7428308494b64; retained-old0.
+    (152542, 152542,
+     (
+        b'        return 2\n'
+        b'\n'
+        b'\n'
+        b'if __name__ == "__main__":\n'
+        b'    try:\n'
+        b'        _reexec_in_runtime_venv()\n'
+        b'        raise SystemExit(_guarded_main())\n'
+        b'    except KeyboardInterrupt:\n'
+        b'        sys.stderr.write("HOLD: inspection interrupted\\n")\n'
+     ),
+     (
+        b'        return 2\n'
+        b'\n'
+        b'\n'
+        b'# I-006 (v3.1.2 WP-10): root re-runs this entry as the operator, the owner of the project directory, before the\n'
+        b'# venv switch, the runtime guard or any prompt.  O15 (a): the flat bundle has no tools/operator_identity.py, so\n'
+        b'# its rule is copied here; test_cases/test_upgrade_operator_reexec.py keeps the two equal.  Change both together.\n'
+        b"_ROOT_PARENT_MARKER = 'HTTP_ZTP_ROOT_PARENT'\n"
+        b"_REEXEC_ENV_WHITELIST = ('PATH', 'LANG', 'LC_ALL', 'TERM')\n"
+        b'\n'
+        b'\n'
+        b'def _resolve_operator(project_dir, *, euid=None, environ=None, getpwuid=None, getpwnam=None, stat=None):\n'
+        b'    """operator_identity.resolve_operator as a plain tuple: (action, (name, uid, gid, home) or None, banner, refusal)."""\n'
+        b'    import pwd\n'
+        b'    euid = os.geteuid() if euid is None else euid\n'
+        b'    environ = os.environ if environ is None else environ\n'
+        b'    getpwuid = pwd.getpwuid if getpwuid is None else getpwuid\n'
+        b'    getpwnam = pwd.getpwnam if getpwnam is None else getpwnam\n'
+        b'    stat = os.stat if stat is None else stat\n'
+        b'    invoker = problem = None\n'
+        b'    if euid != 0:\n'
+        b'        try:\n'
+        b'            current = getpwuid(euid).pw_name\n'
+        b'        except KeyError:\n'
+        b'            current = f"uid {euid}"\n'
+        b'    elif "SUDO_USER" not in environ:\n'
+        b'        current = "root\xef\xbc\x88\xe7\x94\xb1 root \xe7\x88\xb6\xe8\xbf\x9b\xe7\xa8\x8b\xe5\x90\xaf\xe5\x8a\xa8\xef\xbc\x89" if _ROOT_PARENT_MARKER in environ else "root \xe7\x9b\xb4\xe6\x8e\xa5\xe8\xbf\x90\xe8\xa1\x8c"\n'
+        b'    else:\n'
+        b'        sudo_user, sudo_uid = environ["SUDO_USER"], environ.get("SUDO_UID")\n'
+        b'        current = f"root \xe7\xbb\x8f sudo\xef\xbc\x88\xe5\x8f\x91\xe8\xb5\xb7\xe4\xba\xba {sudo_user}\xef\xbc\x89"\n'
+        b'        try:\n'
+        b'            entry = getpwnam(sudo_user)\n'
+        b'        except KeyError:\n'
+        b'            problem = f"SUDO_USER={sudo_user} \xe5\x9c\xa8 passwd \xe9\x87\x8c\xe6\x9f\xa5\xe4\xb8\x8d\xe5\x88\xb0"\n'
+        b'        else:\n'
+        b'            if entry.pw_uid == 0:\n'
+        b'                problem = f"SUDO_USER={sudo_user} \xe6\x98\xaf root"\n'
+        b'            elif sudo_uid != str(entry.pw_uid):\n'
+        b'                problem = f"SUDO_UID={sudo_uid} \xe4\xb8\x8e passwd \xe9\x87\x8c {sudo_user} \xe7\x9a\x84 uid {entry.pw_uid} \xe4\xb8\x8d\xe4\xb8\x80\xe8\x87\xb4"\n'
+        b'            else:\n'
+        b'                invoker = (entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir)\n'
+        b'    arrow = "\xe2\x86\x92" if current.endswith("\xef\xbc\x89") else " \xe2\x86\x92"\n'
+        b'    if project_dir is None:\n'
+        b'        return ("plain", None, f"\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xef\xbc\x9a\xe6\x9c\xaa\xe5\x88\xa4\xe5\xae\x9a\xef\xbc\x88\xe6\xb2\xa1\xe6\x9c\x89\xe5\xbd\x93\xe5\x89\x8d\xe9\xa1\xb9\xe7\x9b\xae\xef\xbc\x89\xef\xbc\x9b\xe5\xbd\x93\xe5\x89\x8d\xef\xbc\x9a{current}{arrow} \xe5\x8e\x9f\xe6\xa0\xb7\xe8\xbf\x90\xe8\xa1\x8c", None)\n'
+        b'    try:\n'
+        b'        owner_uid = stat(project_dir).st_uid\n'
+        b'    except FileNotFoundError:\n'
+        b'        owner_uid = None\n'
+        b'    source = "\xe9\xa1\xb9\xe7\x9b\xae\xe7\x9b\xae\xe5\xbd\x95\xe5\xb1\x9e\xe4\xb8\xbb" if owner_uid is not None else "\xe6\x96\xb0\xe9\xa1\xb9\xe7\x9b\xae\xef\xbc\x8c\xe5\x8f\x96\xe5\xbd\x93\xe5\x89\x8d\xe7\x94\xa8\xe6\x88\xb7"\n'
+        b'    if owner_uid is None and invoker is not None:\n'
+        b'        owner_uid, source = invoker[1], "\xe6\x96\xb0\xe9\xa1\xb9\xe7\x9b\xae\xef\xbc\x8c\xe5\x8f\x96 sudo \xe5\x8f\x91\xe8\xb5\xb7\xe4\xba\xba"\n'
+        b'    elif owner_uid is None:\n'
+        b'        owner_uid = euid\n'
+        b'    try:\n'
+        b'        entry = getpwuid(owner_uid)\n'
+        b'    except KeyError:\n'
+        b'        operator, owner = None, f"uid {owner_uid}\xef\xbc\x88passwd \xe9\x87\x8c\xe6\x9f\xa5\xe4\xb8\x8d\xe5\x88\xb0\xef\xbc\x89"\n'
+        b'    else:\n'
+        b'        operator = (entry.pw_name, entry.pw_uid, entry.pw_gid, entry.pw_dir)\n'
+        b'        owner = operator[0]\n'
+        b'\n'
+        b'    def refuse(reason, remedy):\n'
+        b'        return ("refuse", operator, f"\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xef\xbc\x9a{owner}\xef\xbc\x88{source}\xef\xbc\x89\xef\xbc\x9b\xe5\xbd\x93\xe5\x89\x8d\xef\xbc\x9a{current}{arrow} \xe6\x8b\x92\xe7\xbb\x9d",\n'
+        b'                f"{reason}\xef\xbc\x9a\xe9\xa1\xb9\xe7\x9b\xae {project_dir} \xe5\xb1\x9e\xe4\xba\x8e {owner}\xef\xbc\x9b\xe5\xbd\x93\xe5\x89\x8d\xef\xbc\x9a{current}\xe3\x80\x82{remedy}")\n'
+        b'\n'
+        b'    if problem is not None:\n'
+        b'        return refuse(f"sudo \xe5\x8f\x91\xe8\xb5\xb7\xe4\xba\xba\xe6\x97\xa0\xe6\x95\x88\xef\xbc\x88{problem}\xef\xbc\x89", "\xe8\xaf\xb7\xe6\xa3\x80\xe6\x9f\xa5 sudo \xe7\x9a\x84\xe7\x8e\xaf\xe5\xa2\x83\xe5\x8f\x98\xe9\x87\x8f SUDO_USER\xe3\x80\x81SUDO_UID\xef\xbc\x8c\xe6\x88\x96\xe7\x94\xb1 root \xe7\x9b\xb4\xe6\x8e\xa5\xe7\x99\xbb\xe5\xbd\x95\xe8\xbf\x90\xe8\xa1\x8c\xe3\x80\x82")\n'
+        b'    if operator is None:\n'
+        b'        return refuse("\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb1\x9e\xe4\xb8\xbb\xe6\xb2\xa1\xe6\x9c\x89\xe8\xb4\xa6\xe6\x88\xb7", f"\xe8\xaf\xb7\xe6\x8a\x8a\xe9\xa1\xb9\xe7\x9b\xae\xe7\x9b\xae\xe5\xbd\x95\xe4\xba\xa4\xe7\xbb\x99\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xef\xbc\x9asudo chown <\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98>:<\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xe4\xb8\xbb\xe7\xbb\x84> {project_dir}")\n'
+        b'    if euid != 0 and operator[1] == 0:\n'
+        b'        return refuse("\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb1\x9e\xe4\xba\x8e root", "\xe8\xaf\xb7\xe7\x94\xa8 sudo \xe6\x88\x96\xe4\xbb\xa5 root \xe8\xbf\x90\xe8\xa1\x8c\xe3\x80\x82")\n'
+        b'    if euid != 0 and operator[1] != euid:\n'
+        b'        return refuse("\xe5\xbd\x93\xe5\x89\x8d\xe7\x94\xa8\xe6\x88\xb7\xe4\xb8\x8d\xe6\x98\xaf\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb1\x9e\xe4\xb8\xbb", f"\xe8\xaf\xb7\xe4\xbb\xa5 {owner} \xe8\xbf\x90\xe8\xa1\x8c\xef\xbc\x8c\xe6\x88\x96\xe7\x94\xb1 root \xe7\x9b\xb4\xe6\x8e\xa5\xe7\x99\xbb\xe5\xbd\x95\xe8\xbf\x90\xe8\xa1\x8c\xef\xbc\x88\xe4\xbc\x9a\xe4\xbb\xa3\xe8\xa1\xa8 {owner} \xe6\x89\xa7\xe8\xa1\x8c\xef\xbc\x89\xe3\x80\x82")\n'
+        b'    if invoker is not None and operator[1] not in (0, invoker[1]):\n'
+        b'        return refuse("sudo \xe5\x8f\x91\xe8\xb5\xb7\xe4\xba\xba\xe4\xb8\x8d\xe6\x98\xaf\xe9\xa1\xb9\xe7\x9b\xae\xe5\xb1\x9e\xe4\xb8\xbb", f"\xe8\xaf\xb7\xe5\x88\x87\xe6\x8d\xa2\xe5\x88\xb0 {owner} \xe8\xbf\x90\xe8\xa1\x8c\xef\xbc\x88\xe9\x9c\x80\xe8\xa6\x81 root \xe7\x9a\x84\xe6\xad\xa5\xe9\xaa\xa4\xe7\x94\xb1 {owner} \xe5\x8a\xa0 sudo\xef\xbc\x89\xef\xbc\x8c"\n'
+        b'                                               f"\xe6\x88\x96\xe7\x94\xb1 root \xe7\x9b\xb4\xe6\x8e\xa5\xe7\x99\xbb\xe5\xbd\x95\xe8\xbf\x90\xe8\xa1\x8c\xef\xbc\x88\xe4\xbc\x9a\xe4\xbb\xa3\xe8\xa1\xa8 {owner} \xe6\x89\xa7\xe8\xa1\x8c\xef\xbc\x89\xe3\x80\x82")\n'
+        b'    if euid == 0 and operator[1] != 0:\n'
+        b'        return ("represent", operator, f"\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xef\xbc\x9a{owner}\xef\xbc\x88{source}\xef\xbc\x89\xef\xbc\x9b\xe5\xbd\x93\xe5\x89\x8d\xef\xbc\x9a{current}{arrow} \xe9\xa1\xb9\xe7\x9b\xae\xe4\xbe\xa7\xe4\xbb\xa5 {owner} \xe6\x89\xa7\xe8\xa1\x8c", None)\n'
+        b'    return ("self", operator, f"\xe6\x93\x8d\xe4\xbd\x9c\xe5\x91\x98\xef\xbc\x9a{owner}\xef\xbc\x88{source}\xef\xbc\x89\xef\xbc\x9b\xe5\xbd\x93\xe5\x89\x8d\xef\xbc\x9a{current}{arrow} \xe4\xbb\xa5 {owner} \xe6\x89\xa7\xe8\xa1\x8c", None)\n'
+        b'\n'
+        b'\n'
+        b'def _reexec_as_operator(argv=None):\n'
+        b'    """Re-run once as the operator when root runs this entry for another account\'s project (v3.1.2 WP-10).\n'
+        b'\n'
+        b'    -h/--help/--version and an argument error (main() reports it) skip the step.  The project is --project, else\n'
+        b'    the one DAY0-Prepare/activate-project selects; no project (flat bundle, clean clone, no pointer) runs\n'
+        b'    unchanged.  An invalid pointer or a refused identity exits 2 before anything runs.  Root acting for another\n'
+        b'    operator execs `runuser -u <op> -- env -i <PATH LANG LC_ALL TERM> HOME= USER= LOGNAME= <python> <entry>\n'
+        b'    <same arguments>`, unless HTTP_ZTP_ROOT_PARENT is set.  Otherwise returns the identity line to print.\n'
+        b'    """\n'
+        b'    args = tuple(sys.argv[1:] if argv is None else argv)\n'
+        b"    if any(arg in ('-h', '--help', '--version') for arg in args):\n"
+        b'        return None\n'
+        b'    try:\n'
+        b'        project = _parse_cli(args).project\n'
+        b'    except Exception:\n'
+        b'        return None  # main() reports the argument error unchanged; nothing runs\n'
+        b'    # No pointer: no project_contract (PyYAML) import before the venv switch.\n'
+        b"    if project is None and os.path.lexists(_REPOSITORY_ROOT / 'DAY0-Prepare' / 'activate-project'):\n"
+        b'        from project_contract import ActiveProjectPointerError, active_project_dir\n'
+        b'        try:\n'
+        b'            project = active_project_dir(_REPOSITORY_ROOT)\n'
+        b'        except ActiveProjectPointerError as error:\n'
+        b"            sys.stderr.write('HOLD [ACTIVE_PROJECT]: ' + str(error) + '\\n')\n"
+        b'            raise SystemExit(2) from None\n'
+        b'    if project is None:\n'
+        b'        return None\n'
+        b'    action, operator, banner, refusal = _resolve_operator(project)\n'
+        b'    if refusal is not None:\n'
+        b"        sys.stderr.write('HOLD [OPERATOR_IDENTITY]: ' + refusal + '\\n')\n"
+        b'        raise SystemExit(2)\n'
+        b"    if action == 'represent' and _ROOT_PARENT_MARKER not in os.environ:\n"
+        b'        name, home = operator[0], operator[3]\n'
+        b'        assignments = {key: os.environ[key] for key in _REEXEC_ENV_WHITELIST if key in os.environ}\n'
+        b'        assignments.update(HOME=home, USER=name, LOGNAME=name)\n'
+        b"        command = ['runuser', '-u', name, '--', 'env', '-i', *(key + '=' + value for key, value in assignments.items()),\n"
+        b'                   sys.executable, os.path.abspath(__file__), *args]\n'
+        b'        sys.stdout.flush()\n'
+        b'        sys.stderr.flush()\n'
+        b'        os.execvp(command[0], command)\n'
+        b'    return banner\n'
+        b'\n'
+        b'\n'
+        b'if __name__ == "__main__":\n'
+        b'    try:\n'
+        b'        _identity = _reexec_as_operator()\n'
+        b'        _reexec_in_runtime_venv()\n'
+        b'        if _identity is not None:\n'
+        b"            sys.stderr.write(_identity + '\\n')\n"
+        b'        raise SystemExit(_guarded_main())\n'
+        b'    except KeyboardInterrupt:\n'
+        b'        sys.stderr.write("HOLD: inspection interrupted\\n")\n'
+     )),
+)
+# END GENERATED NATIVE OPERATOR REEXEC LAYER
+
+
+def _restore_native_operator_reexec_layer(payload):
+    """Reverse every reviewed operator re-exec hunk to the previous entry; else refuse."""
+    if type(payload) is not bytes:
+        raise AssertionError('original entry source bytes required')
+    if not _NATIVE_OPERATOR_REEXEC_REGIONS:
+        raise AssertionError('reviewed operator re-exec layer missing')
+    spans, previous_new_end, previous_old_end, difference = [], 0, 0, 0
+    for old_offset, new_offset, old, new in _NATIVE_OPERATOR_REEXEC_REGIONS:
+        if (payload.count(new) != 1 or payload.find(new) != new_offset
+                or payload.count(old) != 0 or new_offset < previous_new_end
+                or old_offset < previous_old_end or new_offset + difference != old_offset):
+            raise AssertionError('missing/duplicate/old/reordered operator re-exec literal region')
+        spans.append((new_offset, new, old))
+        previous_new_end, previous_old_end = new_offset + len(new), old_offset + len(old)
+        difference += len(old) - len(new)
+    # One pass over the candidate; inserted old bytes are never re-scanned.
+    pieces, cursor = [], 0
+    for offset, new, old in spans:
+        pieces.extend((payload[cursor:offset], old))
+        cursor = offset + len(new)
+    pieces.append(payload[cursor:])
+    original = b''.join(pieces)
+    if _sha(original) != _NATIVE_OPERATOR_REEXEC_BEFORE_SHA256:
+        raise AssertionError('whole previous entry SHA differs after operator re-exec inverse')
+    return original
+
+
 def _native_os_reviewed_source_bytes(files):
     """Preserve baseline19 pins; accept only whole baseline OR exact new layer."""
     if type(files) is not dict or any(path not in files for path in PRODUCTION_PINS):
@@ -2048,6 +2242,9 @@ def _native_os_reviewed_source_bytes(files):
     original = dict(files)
     original.update(_strip_bios_source_layer({p: original[p] for p in _BIOS_TARGETS}))
     if _sha(original[_NATIVE_DISPLAY_ENTRY]) != PRODUCTION_PINS[_NATIVE_DISPLAY_ENTRY]:
+        if any(new in original[_NATIVE_DISPLAY_ENTRY]
+               for _, _, _, new in _NATIVE_OPERATOR_REEXEC_REGIONS):
+            original[_NATIVE_DISPLAY_ENTRY] = _restore_native_operator_reexec_layer(original[_NATIVE_DISPLAY_ENTRY])
         if any(new in original[_NATIVE_DISPLAY_ENTRY]
                for _, _, _, new in _NATIVE_USABILITY_REGIONS):
             original[_NATIVE_DISPLAY_ENTRY] = _restore_native_usability_layer(original[_NATIVE_DISPLAY_ENTRY])
