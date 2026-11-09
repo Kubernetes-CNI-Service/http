@@ -14,6 +14,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import signal
 import shlex
@@ -5392,9 +5393,50 @@ print("actual-copied-validator-selected-B")
         self.assertEqual([True], injected)
         self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
 
-    def test_real_native_load_private_http_source_rejects_before_monitor_freeze_or_keys(self):
+    def test_real_native_load_private_http_source_repaired_and_admitted_before_monitor_freeze_or_keys(self):
+        # O8 (v3.1.2 guide 3.2 and WP-6; owner 2026-11-07「同意你在v3.1.2里的默认建议」, relayed by http dev):
+        # the contract changed from "a 0700 project is refused at the gate" to "a 0700 project is repaired,
+        # recorded with a [PERM] line, then admitted".  The permission repair is the one project change before
+        # the gate; the gate itself stays read-only (its direct tests are unchanged) and still precedes every
+        # monitor stop, A freeze and key or template mutation.  Root acting for the project's owner is played
+        # through operator_identity.resolve_operator on injected inputs, never os.geteuid (guide 2.2 #6).
         self._http_public_source_fixture()
         self.project.chmod(0o700)
+        before = self.project.lstat()
+        me = pwd.getpwuid(os.geteuid())
+        operator = pwd.struct_passwd((me.pw_name, "x", me.pw_uid, me.pw_gid, "fixture",
+                                      str(self.root / "operator-home"), "/bin/sh"))
+
+        def root_for_operator(project):
+            def by_uid(uid):
+                if uid != operator.pw_uid:
+                    raise KeyError(uid)
+                return operator
+
+            def by_name(name):
+                if name != operator.pw_name:
+                    raise KeyError(name)
+                return operator
+
+            return LOAD.operator_identity.resolve_operator(
+                project, euid=0, environ={"SUDO_USER": operator.pw_name, "SUDO_UID": str(operator.pw_uid)},
+                getpwuid=by_uid, getpwnam=by_name,
+            )
+
+        class Admitted(BaseException):
+            """Raised by the first step after the gate: the run ends there."""
+
+        order = []
+        real_gate = LOAD.require_http_project_source_access
+
+        def gate(*args, **kwargs):
+            real_gate(*args, **kwargs)
+            order.append("gate")
+
+        def first_step_after_gate(*_args, **_kwargs):
+            order.append("stop-native-monitor")
+            raise Admitted()
+
         stdout, stderr = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
             stack.enter_context(mock.patch.multiple(LOAD, HTTP_ROOT=self.root, ZTP_DIR=self.ztp, MANIFEST=self.ztp / ".setup_manifest", DEPLOYMENT_LOCK=self.root / ".deployment.lock"))
@@ -5404,16 +5446,24 @@ print("actual-copied-validator-selected-B")
             stack.enter_context(mock.patch.object(LOAD, "require_no_pending_dhcp_transaction"))
             stack.enter_context(mock.patch.object(LOAD, "resolve_project", return_value=self.project))
             stack.enter_context(mock.patch.object(LOAD, "sync_marker_present", return_value=False))
+            stack.enter_context(self._http_linux_public_ancestor_model())
+            stack.enter_context(mock.patch.object(LOAD, "_resolve_load_operator", side_effect=root_for_operator))
+            stack.enter_context(mock.patch.object(LOAD, "require_http_project_source_access", side_effect=gate))
+            stack.enter_context(mock.patch.object(LOAD, "stop_native_ztp_monitors", side_effect=first_step_after_gate))
             oracles = {name: stack.enter_context(mock.patch.object(LOAD, name, side_effect=AssertionError("shared/source mutation before admission: " + name)))
-                       for name in ("stop_native_ztp_monitors", "ensure_previous_generation_frozen", "initialize_from_template", "prepare_pubkeys", "ensure_management_key", "activate_project", "configure_ztp_prefix_publication", "generate_configs")}
+                       for name in ("ensure_previous_generation_frozen", "initialize_from_template", "prepare_pubkeys", "ensure_management_key", "activate_project", "configure_ztp_prefix_publication", "generate_configs")}
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
-            result = LOAD.main([str(self.project), "--host-role", "management-server", "--no-upgrade", "--skip-infra"])
-        self.assertEqual(1, result)
-        self.assertIn("HTTP public source access prewrite gate", stderr.getvalue())
-        self.assertIn("traversable", stderr.getvalue())
+            with self.assertRaises(Admitted):
+                LOAD.main([str(self.project), "--host-role", "management-server", "--no-upgrade", "--skip-infra"])
+        self.assertEqual(["gate", "stop-native-monitor"], order)
+        self.assertNotIn("traversable", stderr.getvalue())
+        self.assertIn(
+            f"[PERM] {self.project} {before.st_uid}:{before.st_gid} 0700 -> {me.pw_uid}:{me.pw_gid} 0755",
+            stdout.getvalue(),
+        )
         for oracle in oracles.values(): oracle.assert_not_called()
-        self.assertEqual(0o700, stat.S_IMODE(self.project.stat().st_mode))
+        self.assertEqual(0o755, stat.S_IMODE(self.project.stat().st_mode))
 
     def test_setup_link_restore_preserves_foreign_stage_before_publish_or_cleanup(self):
         # AP-b (owner 11-03 Q6): the "hold" kind exercised the removed WAL authority guard.

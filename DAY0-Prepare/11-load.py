@@ -1540,6 +1540,152 @@ def _hand_new_entries_to_operator(
         print(f"  [OWNER] 本次新建的 {handed} 项交给操作员 {operator.name}（{operator.uid}:{operator.gid}）")
 
 
+def repair_project_permissions(
+    project: Path, identity: operator_identity.Resolution | None, ssh_dir: Path | None, *,
+    host_os: str, host_role: str | None, backend: ServiceRuntimeBackend | None,
+    dry_run: bool, receipt_bound: bool = False,
+) -> int:
+    """Check and repair the project's owners and modes for the load operator (I-006, v3.1.2 WP-6).
+
+    Owner 2026-10-27 (问题文档 I-006 :331, :407): load checks and repairs the project's permissions.  Scope
+    (O10 ①): every entry under the project, plus ssh_dir (the operator's ~/.ssh), its id_ed25519 and
+    id_ed25519.pub; never the code tree.  Only a root load (root acting for the operator, or root on its own
+    project) on a Linux management server with the systemd backend acts (O9; WP-5 makes such a load root);
+    --dry-run only lists; anything else, and no identity (the Docker supervisor), does nothing.
+
+    Two phases.  A walk over held directory descriptors that never follows a link collects every change; an
+    owner that is neither root nor the operator stops load with every such entry, its uid:gid and a chown
+    command, before anything changed (O7 ③, 问题文档 :302).  Then each entry is reopened without following a
+    link and changed through its own descriptor, fchown and fchmod only where the value differs: even an
+    unchanged chown moves ctime, which rollback receipts bind (agentOP report 4.4).
+
+    Rules (O9): the owner is the operator's uid and passwd primary gid; modes are only tightened (group and
+    other write removed) except the fixed ones: the project 0755, its top-level *.pub 0644, ssh_dir 0700,
+    id_ed25519 0600, id_ed25519.pub 0644.  Links are skipped; ROOT_PRIVATE_PROJECT_STATE stays root's;
+    sockets, FIFOs and devices are not opened.  receipt_bound: while no release is committed a rollback
+    receipt may remain for the next load, so the five 99-output-dhcp publications and the top-level *.pub it
+    binds with ctime stay as they are.  One [PERM] line per entry and a summary; returns the number of entries
+    changed (listed, under --dry-run).
+    """
+    if (identity is None or identity.operator is None or host_os.casefold() != "linux"
+            or host_role != "management-server" or backend is None or backend.name != "systemd"
+            or not (identity.action == "represent" or identity.operator.uid == 0)):
+        return 0
+    operator = identity.operator
+    owner = (operator.uid, operator.gid)
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    gone = (errno.ENOENT, errno.ELOOP, errno.ENOTDIR)   # removed, or replaced by a link, meanwhile
+    changes: list[tuple[Path, str, tuple[int, int], tuple[int, int, int], tuple[int, int, int]]] = []
+    foreign: list[tuple[Path, os.stat_result]] = []
+
+    def plan(anchor: Path, name: str, metadata, fixed_mode: int | None) -> None:
+        if metadata.st_uid not in (0, operator.uid):
+            foreign.append((anchor / name, metadata))
+            return
+        current = (metadata.st_uid, metadata.st_gid, stat.S_IMODE(metadata.st_mode))
+        wanted = (*owner, current[2] & ~0o022 if fixed_mode is None else fixed_mode)
+        if current != wanted:
+            changes.append((anchor, name, (metadata.st_dev, metadata.st_ino), current, wanted))
+
+    def walk(descriptor: int, prefix: str) -> None:
+        for name in sorted(os.listdir(descriptor)):
+            relative = prefix + name
+            top_pub = not prefix and name.endswith(".pub")
+            if _root_private_project_state(relative) or (receipt_bound and (
+                    top_pub or (prefix == "99-output-dhcp/" and name in _RUNTIME_DHCP_NAMES))):
+                continue
+            try:
+                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if stat.S_ISREG(metadata.st_mode):
+                    plan(project, relative, metadata, 0o644 if top_pub else None)
+                elif stat.S_ISDIR(metadata.st_mode):
+                    child = os.open(name, directory_flags, dir_fd=descriptor)
+                    try:
+                        plan(project, relative, os.fstat(child), None)
+                        walk(child, relative + "/")
+                    finally:
+                        os.close(child)
+            except OSError as exc:
+                if exc.errno not in gone:
+                    raise
+
+    if project.is_dir():
+        project_descriptor = os.open(project, directory_flags)
+        try:
+            plan(project, "", os.fstat(project_descriptor), 0o755)
+            walk(project_descriptor, "")
+        finally:
+            os.close(project_descriptor)
+    if ssh_dir is not None and os.path.isdir(ssh_dir) and not os.path.islink(ssh_dir):
+        ssh_descriptor = os.open(ssh_dir, directory_flags)
+        try:
+            plan(ssh_dir, "", os.fstat(ssh_descriptor), 0o700)
+            for name, fixed_mode in ((MANAGEMENT_PRIVATE_KEY_NAME, 0o600), (MANAGEMENT_PUBLIC_KEY_NAME, 0o644)):
+                try:
+                    metadata = os.stat(name, dir_fd=ssh_descriptor, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue   # a missing key is ensure_management_key's to report
+                if stat.S_ISREG(metadata.st_mode):
+                    plan(ssh_dir, name, metadata, fixed_mode)
+        finally:
+            os.close(ssh_descriptor)
+    if foreign:
+        raise LoadError(
+            f"项目权限检查停止：以下 {len(foreign)} 项的属主既不是 root 也不是操作员 {operator.name}"
+            f"（{operator.uid}:{operator.gid}），load 没有改动任何权限；确认可以交给操作员后按提示 chown，"
+            "再重跑 load：\n" + "\n".join("  " + _owner_fix(path, metadata, owner) for path, metadata in foreign)
+        )
+
+    def described(anchor: Path, name: str, current, wanted) -> str:
+        return (f"[PERM] {anchor / name} {current[0]}:{current[1]} {current[2]:04o} "
+                f"-> {wanted[0]}:{wanted[1]} {wanted[2]:04o}")
+
+    who = f"操作员 {operator.name} {operator.uid}:{operator.gid}"
+    if dry_run:
+        for anchor, name, _key, current, wanted in changes:
+            print(described(anchor, name, current, wanted))
+        print(f"[PERM] dry-run：以上 {len(changes)} 项只列出，没有改动（{who}）")
+        return len(changes)
+    applied = 0
+    anchors: dict[Path, int] = {}
+    try:
+        for anchor, name, expected, current, wanted in changes:
+            opened: list[int] = []
+            try:
+                if anchor not in anchors:
+                    anchors[anchor] = os.open(anchor, directory_flags)
+                held = anchors[anchor]
+                parts = name.split("/") if name else []
+                for part in parts[:-1]:
+                    held = os.open(part, directory_flags, dir_fd=held)
+                    opened.append(held)
+                if parts:
+                    held = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+                                   dir_fd=held)
+                    opened.append(held)
+                metadata = os.fstat(held)
+                if (metadata.st_dev, metadata.st_ino) != expected:
+                    continue   # replaced meanwhile: left to the next run
+                if (metadata.st_uid, metadata.st_gid) != wanted[:2]:
+                    os.fchown(held, wanted[0], wanted[1])
+                if stat.S_IMODE(metadata.st_mode) != wanted[2]:
+                    os.fchmod(held, wanted[2])
+            except OSError as exc:
+                if exc.errno in gone:
+                    continue
+                raise
+            finally:
+                for descriptor in reversed(opened):
+                    os.close(descriptor)
+            print(described(anchor, name, current, wanted))
+            applied += 1
+    finally:
+        for descriptor in anchors.values():
+            os.close(descriptor)
+    print(f"[PERM] 权限检查完成：改正 {applied} 项（{who}）")
+    return applied
+
+
 def _nonempty_file(path: Path, label: str) -> None:
     if not path.is_file():
         raise LoadError(f"缺少 {label}：{path.name}")
@@ -12939,6 +13085,9 @@ def main(
     # I-006 (v3.1.2 WP-5): the operator, set once after the project is resolved; None for the Docker
     # supervisor and before that point.
     load_identity: operator_identity.Resolution | None = None
+    # I-006 (v3.1.2 WP-6): True once the repair before the gate ran outside --dry-run; the repairs before the
+    # monitor restart and at the end follow only then.
+    permission_repair_ready = False
     try:
         host_os = runtime_os()
         host_role = resolve_host_role(getattr(args, "host_role", None), host_os)
@@ -13037,8 +13186,21 @@ def main(
                     if host_os.casefold() == "linux" and load_identity.action == "represent"
                     else _default_ssh_dir()
                 )
-        # No monitor stop, A freeze, template/password/key mutation or shared
-        # image publication may precede the initial public-source access gate.
+        # I-006 (v3.1.2 WP-6; owner 2026-10-27, 问题文档 :331): check and repair the project's permissions for
+        # the operator before the public-source gate; --dry-run only lists.  The supervisor has no identity.
+        if load_identity is not None:
+            phase, failure_phase = failure_phase, "项目权限检查与改正"
+            repair_project_permissions(
+                project, load_identity, args.ssh_dir, host_os=host_os, host_role=host_role,
+                backend=runtime_backend_instance, dry_run=args.dry_run,
+            )
+            failure_phase = phase
+            permission_repair_ready = not args.dry_run
+        # No monitor stop, A freeze, template/password/key mutation or shared image publication may precede
+        # the initial public-source access gate.  The permission repair just above is the one project change
+        # allowed before it (with the operator's ~/.ssh key pair): owner 2026-11-07 accepted the v3.1.2 guide
+        # defaults (O8, relayed by http dev), so a root load first repairs the operator's project; the gate
+        # itself stays read-only.
         if local_services_supported and not args.dry_run and project.is_dir() and _meaningful_entries(project):
             early_http_settings = load_global(project / "01-global.yaml", switch_scope=switch_scope)
             if early_http_settings.http_enabled:
@@ -13597,6 +13759,16 @@ def main(
                     dhcp_available=dhcp_service_available,
                 ))
 
+        if permission_repair_ready:
+            # v3.1.2 WP-6 x W12: what this load created as root (the committed release and its members, the
+            # published DHCP files) goes to the operator before 12-ztp-monitor restarts and reads it as the
+            # operator (_method_release_text).  After the commit no rollback receipt binds them any more.
+            phase, failure_phase = failure_phase, "项目权限改正（release 交给操作员）"
+            repair_project_permissions(
+                project, load_identity, args.ssh_dir, host_os=host_os, host_role=host_role,
+                backend=runtime_backend_instance, dry_run=False, receipt_bound=not release_committed,
+            )
+            failure_phase = phase
         if local_services_supported:
             section("ZTP 状态后台监控")
             reset_completion_handoff_state(dry_run=args.dry_run)
@@ -13774,6 +13946,17 @@ def main(
             discard_prepared_release(parent_candidate)
         except BaseException as cleanup_exc:
             final_cleanup_errors.append(("release 暂存清理", cleanup_exc))
+        if permission_repair_ready:
+            # v3.1.2 WP-6, O11 ③: once more at the end, success or failure, for what root processes created
+            # (the setup child, the generators).  Without a commit a rollback receipt may remain for the next
+            # load: what it binds with ctime stays as it is (agentOP report 4.4).
+            try:
+                repair_project_permissions(
+                    project, load_identity, args.ssh_dir, host_os=host_os, host_role=host_role,
+                    backend=runtime_backend_instance, dry_run=False, receipt_bound=not release_committed,
+                )
+            except BaseException as cleanup_exc:
+                final_cleanup_errors.append(("项目权限改正", cleanup_exc))
         try:
             release_deployment_lock(deployment_lock_descriptor)
         except BaseException as cleanup_exc:

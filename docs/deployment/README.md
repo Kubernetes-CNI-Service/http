@@ -69,7 +69,29 @@ Native 管理服务器上的实际 load 以 root 运行（普通用户加 `sudo`
   key 文件内容变化或目录被换掉仍会中止（I-014）。
 - 加锁失败分四类报：被另一个 load 或人工操作占用、打不开锁（如没有权限）、锁文件异常、finish 事务未完成。
 
-Docker（supervisor 后端）不变：仍以容器内 root 和 `/root/.ssh` 运行，不做操作员判定。
+权限检查与改正（v3.1.2 I-006）：root 运行的 load 在 HTTP 公开源闸门之前、服务启动门禁之后 monitor
+重启之前、以及 load 结束时（成功或失败）各检查并改正一次项目权限，属主改为操作员的 uid 和 passwd 主组：
+
+- 范围是项目目录下的全部条目，加上操作员 `~/.ssh` 目录、`id_ed25519`、`id_ed25519.pub` 三项；
+  `~/.ssh` 里别的文件和代码树（活动项目指针、树内链接、`ztp/config/publickey` 等）都不改。
+  遇到链接只跳过，不跟随、不改、不报错。
+- 模式只收紧不放宽：去掉组和其他人的写权限；固定的几项是项目目录 0755、项目根的 `*.pub` 0644、
+  `~/.ssh` 0700、`id_ed25519` 0600、`id_ed25519.pub` 0644。原来是 0600 的文件（如 `cre.json`）保持 0600。
+- 每改一项打印一行 `[PERM] <路径> <原 uid:gid 原模式> -> <新 uid:gid 新模式>`，最后一行汇总改了几项；
+  改完再跑不再有改动。`sudo … --dry-run` 只列出将改的项，不改；普通用户的 `--dry-run` 不列。
+- 有条目的属主既不是 root 也不是操作员时，列出全部这类条目（路径、实际和期望的 uid:gid、`sudo chown`
+  命令）并停止，什么都不改。
+- 不改的 root 私有状态（12 类）：`99-output-ztp/manual-config-sync`、`99-output-ztp/configuration-methods`、
+  `99-output-dhcp/.load-dhcp-candidate-*`、项目根的 `.load-inventory-*`、`99-output-backup`、项目根的
+  `.99-output-backup.retention.lock` 与 `.99-output-backup.retention.jsonl`、
+  `.99-output-backup.retention-migration.json`、`99-output-ztp/.ztp-monitor.pid.lock`、
+  `99-output-ztp/..collection-attribution.json.lock`、`99-output-ztp/generations`、
+  `99-output-ztp/rollback-receipts`、`99-output-ztp/ztp-monitor.control`（root:www-data 0664）。
+- release 没有提交就失败时，load 结束的那次改正不碰 `99-output-dhcp` 的五个发布文件和项目根的 `*.pub`：
+  下一次 load 要用回执恢复，回执绑定了它们的 ctime。v3.1.1 留下的未完成回执在第一次改正之后失效（已知限制）。
+- 不替换公钥：`mgmt-server.pub` 不是操作员的 key 时照旧报 `management public key mismatch`。
+
+Docker（supervisor 后端）不变：仍以容器内 root 和 `/root/.ssh` 运行，不做操作员判定，也不改权限。
 
 | 部署场景 | 源码进入运行主机 | 唯一生命周期 | 同一 Service IP 换接口 |
 |---|---|---|---|
