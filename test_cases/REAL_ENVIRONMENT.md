@@ -3355,13 +3355,18 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    在加锁之前退出，提示「Linux 管理服务器上 load 需要 root：请用 sudo 运行」并给出完整的 sudo 命令（WP-5）；
    `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件改成 `U` 打不开时（隔离副本上
    临时 `chmod 000`）报「无法打开部署锁 …（没有权限）」并带底层原因，做完恢复模式（WP-5，四类中至少这两类）。
-2. 把项目目录本身 `chmod 0700`（O9 只把项目目录本身固定为 0755；子目录 0700 只收紧、不会被改，也没有 `[PERM]` 行），再
+2. 把项目目录本身 `chmod 0700`（O9 只把项目目录本身固定为 0755；子目录 0700 只收紧、不会被改，也没有 `[PERM]` 行），再把项目里
+   一个不属于 root 私有状态的普通子目录 `chmod 0775`（看「其余只去组和其他人写」），然后
    `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
    - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
    - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，项目目录和其余要改的条目逐项打印
-     `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；
-   - 紧接着再跑一次 load（两次之间不在页面触发采集：root 的 worker 起的 cron.sh 往项目里写的文件，下一次闸门前那次会交给 `U`，
-     那属于预期，不在本条判读）。一次实际 load 有三处改正，各打一行汇总 `[PERM] 权限检查完成：改正 N 项（…）`，按出现顺序是闸门前、
+     `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；那个子目录有一行 `… 0775 -> … 0755`；
+   - 紧接着再跑一次 load。两次之间不触发任何采集：不在页面点采集、不开连续采集；第二次 load 之前查
+     `99-output-ztp/ztp-monitor-background.log`，第一次 load 结束以来没有 `[RUN] … cron.sh` 行（load 重启的 ZTP 监控带
+     `--collect-on-complete`，某类设备已全部 100% 时会以 root 自动采集一次，`11-load.py::reset_completion_handoff_state`）。
+     有这类行、或 root 的 worker 起过 cron.sh 时，闸门前那次列出的 `99-output-p2p/`、`99-output-monitor/` 下 `0:0 -> U` 的条目
+     （以及被改写的 `99-output-ztp/ztp-known-hosts*`）属于预期，只把其余逐项行按证伪条件判读。
+     一次实际 load 有三处改正，各打一行汇总 `[PERM] 权限检查完成：改正 N 项（…）`，按出现顺序是闸门前、
      release 交接（启动 ZTP 监控之前）、load 结束时（`11-load.py::main` 里 `repair_project_permissions` 的三个调用点）：
      - 闸门前那次没有逐项的 `[PERM]` 行，汇总写改正 0 项（幂等，设计 §4.6）；
      - release 交接那次会逐项列出这次 load 由 root 新提交的 release 成员（例如 `99-output-ztp/current-release.json`、
@@ -3369,7 +3374,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
        发布提交由 root 建文件、不在提交时 fchown，交接那次才把它们交给 `U`（推断，读码）；
      - load 结束时那次只列 release 交接之后 root 新写进项目的文件（例如重启 ZTP 监控时 load 重写的 `99-output-ztp/ztp-monitor.pid`，
        推断），没有别的逐项行；
-     - 证伪条件：闸门前那次在第二次 load 仍有逐项行，或结束时那次列出 release 交接之前就存在的条目，说明改正不幂等或交接漏改，是缺陷，
+     - 证伪条件：闸门前那次在第二次 load 仍有逐项行，或结束时那次列出交接之后没有被 root 新写或重写的条目，说明改正不幂等或交接漏改，是缺陷，
        记录证据后停下；release 交接那次在第二次 load 没有任何逐项行，说明「release 成员每次由 root 新建」这条推断不成立，
        按实测改本卡；
    - `sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 不列；
