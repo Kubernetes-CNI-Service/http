@@ -3446,7 +3446,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
      - 证伪条件：闸门前那次在第二次 load 仍有逐项行，或结束时那次列出交接之后没有被 root 新写或重写的条目，说明改正不幂等或交接漏改，是缺陷，
        记录证据后停下；release 交接那次在第二次 load 没有任何逐项行，说明「release 成员每次由 root 新建」这条推断不成立，
        按实测改本卡；
-   - `sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 也逐项列出同样的 `[PERM]` 行、不改（c-16）；
+   - 在 chmod 之后、本步正式 load 之前先跑这两次 dry-run：`sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 也逐项列出同样的 `[PERM]` 行、不改（c-16）。排在正式 load 之后跑时改正已做完，两次都是 0 项，不能作为 c-16 的证据（审核 k-1）；
    - 在隔离副本里放一个属于 `V` 的文件再跑：load 列出全部第三方属主条目（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，
      `stat` 前后不变；恢复后继续（agentW6 报告第 9 节 ④）；
    - 跑完：项目除 root 私有状态外都属于 `U`、组是 `U` 的主组；`cre.json`、`auto.env` 一类 0600 文件仍是 0600；
