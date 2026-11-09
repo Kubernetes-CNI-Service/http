@@ -3355,11 +3355,15 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    在加锁之前退出，提示「Linux 管理服务器上 load 需要 root：请用 sudo 运行」并给出完整的 sudo 命令（WP-5）；
    `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件改成 `U` 打不开时（隔离副本上
    临时 `chmod 000`）报「无法打开部署锁 …（没有权限）」并带底层原因，做完恢复模式（WP-5，四类中至少这两类）。
-2. 把项目里一个目录 `chmod 0700`，再
+2. 把项目目录本身 `chmod 0700`（O9 只把项目目录本身固定为 0755；子目录 0700 只收紧、不会被改，也没有 `[PERM]` 行），再
    `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
    - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
-   - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，那个目录逐项打印 `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，
-     结尾有汇总，然后通过闸门；再跑一次 load 没有 `[PERM]` 行（幂等）；
+   - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，项目目录和其余要改的条目逐项打印
+     `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；再跑一次 load 没有逐项的 `[PERM]` 行，
+     汇总写改正 0 项（幂等）；
+   - `sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 不列；
+   - 在隔离副本里放一个属于 `V` 的文件再跑：load 列出全部第三方属主条目（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，
+     `stat` 前后不变；恢复后继续（agentW6 报告第 9 节 ④）；
    - 跑完：项目除 root 私有状态外都属于 `U`、组是 `U` 的主组；`cre.json`、`auto.env` 一类 0600 文件仍是 0600；
      本次新建的条目（模板补齐、`laptop.pub` 占位、新项目目录本身）有 `[OWNER]` 汇总行且属于 `U`；
    - key 从 `U` 的 passwd 家目录读（`/home/U/.ssh`，不是 `/root/.ssh`）；临时把 `U` 的 `id_ed25519` 改名后重跑：load 停下并打印
@@ -3413,7 +3417,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 故障注入：第 1 步的两类加锁失败；第 2 步的 0700 目录和缺 key；第 3 步的 `touch ~/.ssh`；第 8 步的 `V`。
 - 清理/回滚验证：按初始快照恢复项目的属主和模式（`chown`、`chmod`，只针对快照里的路径）；删掉测试加的 cron 行；
   恢复临时改动的锁文件模式和 key 文件名；不删除运行锁和 `cron.lock`；不碰 `/etc/hosts`，不改 eth_jump。
-- 重复执行与幂等性：第 2 步重复 load 没有 `[PERM]` 改动；重复 unload 不再动 crontab。
+- 重复执行与幂等性：第 2 步重复 load 没有逐项的 `[PERM]` 行（汇总为改正 0 项）；重复 unload 不再动 crontab。
 - 风险：load 会 chown、chmod 项目（prod 上不由 AI 执行）；unload 会读写 `U` 的整个 crontab，按 `TC-REAL-REQ10C-AUTO-001` 的同 UID
   静默要求执行；迁移期间交换机只认 root 的 key 时，monitor 和采集靠 root 的默认 key 作后备（O12 ①）；`U` 用 ssh-agent 时 sudo
   会丢掉 agent。已知限制（不在本卡验证）：方式 A 下要拿代码树 `.deployment.lock` 的操作员 CLI（`ztp/manual-ztp.py`、
@@ -3425,6 +3429,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 已加入 `test_cases/test_load_operator_workflow.py`（第一段：方式 A、方式 B、混用，monitor 的 key，infra 日志属主）。
 - [x] 修复前能够稳定失败：workflow 针对已合入的实现，用变异对照证明断言有效（去掉某项已合入的实现后对应用例变红）。
 - [x] 修复后通过。
-- [ ] 第二段（WP-6 合入后）：方式 A 用例补「load 的改正指向 U」，加 `test_sudo_unload_after_repair_still_withdraws_config_authorities`。
+- [x] 第二段（WP-6 合入后）：方式 A 用例补「load 的改正指向 U」，加 `test_sudo_unload_after_repair_still_withdraws_config_authorities`；
+  逐项的 direct 测试在 `test_cases/test_load_permission_repair_contract.py`。
 - [ ] 已纳入全量 discovery（等 manifest 登记和分片车道）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。

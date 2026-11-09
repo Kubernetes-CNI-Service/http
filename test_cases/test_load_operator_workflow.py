@@ -21,12 +21,22 @@ Expected values come from the requirement texts, never from the scripts under te
   new project files are fchown'd to the operator; infra-setup hands its log to the owner of the directory it sits
   in), O12 ① (root logs in with -i <operator home>/.ssh/id_ed25519), O14 (load pre-creates the three cron.lock
   for the operator); agentOP report 4.4 (root-private project state, never handed over).
+- Load's permission repair (owner 2026-10-27: load checks and repairs the project's permissions at its start,
+  问题文档 I-006 :331, :407; design §4.4; guide WP-6 with O8, O9, O10 ①): what root left in U's project and U's
+  too-open ~/.ssh end up U's, one `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>` line each, and a second
+  repair changes nothing (design §4.6); config_sync_authority's two namespaces are system side (design §4.1) and
+  stay root's, so a sudo unload after the repair still withdraws them (guide WP-13 table; design §4.6: way A
+  ends with a sudo unload that must go through).
 
 No real uid switch happens (guide 2.2 item 6) and os.geteuid is never mocked.  The operator U is a passwd entry
 whose uid is the test user's + 1, whose primary group is a second group of the test user and whose home is a
 temporary directory, so a hand-over to the running user or to its egid cannot pass for a hand-over to U.  Root is
 played the way agentL57 does it: the identity rules (tools/operator_identity.py, and upgrade.py's inline copy) get
-euid 0, sudo's environment, that passwd and the project owner as inputs.  The two scripts whose own code asks
+euid 0, sudo's environment, that passwd and the project owner as inputs.  Where load's permission repair runs
+for real, the owners root would meet are modelled the way agentW6 does it (its OwnerModel: 11-load's own ``os``
+view, uid 0 being what root made), and 13-unload's run sees the owners load left, uid 0 standing for the test
+user, who plays root for root's own state (config_sync_authority compares its namespaces with the real euid).
+The two scripts whose own code asks
 whether it runs as root get a root view instead: 13-unload and deploy_infra a module-local view of ``os`` whose
 geteuid is 0 (agentW9's precedent), infra-setup its ``is_root``.  load runs through agentM3's systemd main
 fixture; upgrade.py's real ``__main__`` block through agentW10's in-process launcher; 13-unload and 02-unsetup
@@ -52,6 +62,7 @@ from unittest import mock
 from test_cases import test_collection_lock_owner as W9
 from test_cases import test_load_collection_worker_contract as M3
 from test_cases import test_load_operator_contract as L57
+from test_cases import test_load_permission_repair_contract as W6
 from test_cases import test_operator_peripheral_contract as W12
 from test_cases import test_unsetup_operator_crontab as W8
 from test_cases import test_upgrade_operator_reexec as W10
@@ -62,9 +73,10 @@ if str(ROOT / "tools") not in sys.path:
     sys.path.insert(0, str(ROOT / "tools"))
 import operator_identity as OI  # noqa: E402  (after the tools path, as the scripts import it)
 
-LOAD = M3.LOAD
+LOAD = W6.LOAD                # the 11-load copy agentW6's OwnerModel views; M3's fixture runs the one it is given
 INITIALIZE = LOAD.initialize_from_template
 START_MONITOR = LOAD.start_ztp_monitor
+REPAIR = LOAD.repair_project_permissions
 UNLOAD = load_script("load_operator_workflow_unload", ROOT / "DAY0-Prepare/13-unload.py")
 UNSETUP = load_script("load_operator_workflow_unsetup", ROOT / "DAY0-Prepare/02-unsetup.py")
 AREAS = ("ethernet", "infiniband", "nvlink")
@@ -155,22 +167,75 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
             yield rule
 
     # ---------------------------------------------------------------- load
-    def load(self, flow, *, inputs=None, http=False, dhcp=False, patches=None, **overrides):
+    def load(self, flow, *, inputs=None, http=False, dhcp=False, patches=None, model=None, **overrides):
         """The real 11-load main (agentM3's systemd fixture) on the flow's project, the real template fill
-        included; returns the fixture result plus the recorded fchown calls and the names that existed before."""
+        included; returns the fixture result plus the recorded fchown calls (inode, uid, gid) and the names that
+        existed before.  With ``model`` (agentW6's OwnerModel) the real permission repair runs as well, under
+        root's umask 022 (agentW6 W6-7), and load sees the modelled owners."""
         values = {"HTTP_ROOT": flow.root, "resolve_project": mock.Mock(return_value=flow.project),
                   "initialize_from_template": INITIALIZE}
+        if model is not None:
+            values["repair_project_permissions"] = REPAIR       # M3's fixture records it by default
         values.update(patches or {})
         before = set(L57.entries_by_inode(flow.project).values())
         arguments = dict(project=flow.project.name, ssh_dir=None, deployment_scope="prod")
         arguments.update(overrides)
-        with L57.recorded_fchown() as calls:
+        with ExitStack() as stack:
+            calls = stack.enter_context(L57.recorded_fchown())
+            if model is not None:
+                stack.enter_context(model.active(forbid_path_calls=False))
+                stack.callback(os.umask, os.umask(0o022))
             result = self.run_load_main(self.main_args(**arguments),
                                         inputs or self.main_inputs(http=http, dhcp=dhcp), patches=values)
+        if model is not None:
+            calls = [(entry[1], uid, gid) for entry, uid, gid in model.chowns]
         return SimpleNamespace(result=result, chowns=calls, before=before)
 
-    def assert_sudo_load_acts_for_operator(self, flow, load) -> None:
-        """U's sudo load: who runs it (root, no runuser) and who owns what it made and read (U)."""
+    def migrating_project(self, flow):
+        """Way A's first sudo load on a project root has been writing into (design §4.5), modelled.
+
+        U's own: the project directory (made private: the card's step 2), its REQ10C watch, and a too-open
+        ~/.ssh key pair.  Root's: 01-global.yaml (group-writable) and the bringup parents.  Returns the model, the
+        [PERM] lines O9 asks for (owner U and U's passwd group; the project 0755, ~/.ssh 0700, the private key
+        0600, everything else only tightened) and the names whose owner the repair changes.
+        """
+        operator = (flow.u.pw_uid, flow.u.pw_gid)
+        model = W6.OwnerModel()
+        project = flow.project
+        project.chmod(0o700)
+        for path in (project, flow.tree.state, *flow.tree.leaves.values()):
+            model.own(path, *operator)
+        settings = project / "01-global.yaml"
+        settings.chmod(0o664)
+        model.own(settings, 0, 0)
+        for name in ("99-output-ib_nvl", "99-output-ib_nvl/bringup"):
+            (project / name).chmod(0o755)
+            model.own(project / name, 0, 0)
+        ssh = Path(flow.u.pw_dir) / ".ssh"
+        ssh.mkdir(parents=True)
+        ssh.chmod(0o755)
+        model.own(ssh, *operator)
+        for name in ("id_ed25519", "id_ed25519.pub"):
+            (ssh / name).write_bytes(b"fixture\n")
+            (ssh / name).chmod(0o644)
+            model.own(ssh / name, *operator)
+        lines = {
+            W6.perm_line(project, (*operator, 0o700), (*operator, 0o755)),
+            W6.perm_line(settings, (0, 0, 0o664), (*operator, 0o644)),
+            W6.perm_line(project / "99-output-ib_nvl", (0, 0, 0o755), (*operator, 0o755)),
+            W6.perm_line(project / "99-output-ib_nvl/bringup", (0, 0, 0o755), (*operator, 0o755)),
+            W6.perm_line(ssh, (*operator, 0o755), (*operator, 0o700)),
+            W6.perm_line(ssh / "id_ed25519", (*operator, 0o644), (*operator, 0o600)),
+        }
+        return model, lines, {"01-global.yaml", "99-output-ib_nvl", "99-output-ib_nvl/bringup"}
+
+    @staticmethod
+    def owners_after(model):
+        """The owners load left, as 13-unload's run sees them: uid 0 is the test user, who plays root."""
+        return {entry: (L57.ME.pw_uid if uid == 0 else uid) for entry, (uid, _gid) in model.owners.items()}
+
+    def assert_sudo_load_acts_for_operator(self, flow, load, *, repaired=frozenset()) -> None:
+        """U's sudo load: who runs it (root, no runuser) and who owns what it made, repaired and read (U)."""
         result = load.result
         self.assertEqual(0, result.rc, result.stderr)
         # 以谁执行: load itself stays root (a system tool, design §4.2 「系统侧工作以 root 做」) and says so once.
@@ -185,8 +250,9 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
         validated = result.mocks["validate_inputs"].call_args.args[1].ssh_dir
         self.assertEqual(key_dir, validated)
         self.assertNotEqual(Path(flow.root_entry.pw_dir) / ".ssh", validated, "HOME was root's during the step")
-        # 文件属于谁 (files): every entry load made is handed to U and to U's passwd group (O11 ②, O9); nothing
-        # that existed before, no link and no root-private state is touched (agentOP 4.4).
+        # 文件属于谁 (files): every entry load made, and each entry root had left that the repair corrected
+        # (``repaired``), goes to U and U's passwd group (O11 ②, O9; 问题文档 :331); nothing else that existed
+        # before, no link and no root-private state is touched (agentOP 4.4).
         names = L57.entries_by_inode(flow.project)
         for area in AREAS:   # O14: load pre-creates the three collection locks for the operator
             self.assertTrue(os.path.lexists(flow.root / area / "monitor/cron.lock"), area)
@@ -203,7 +269,8 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
                     and not name.startswith(ROOT_PRIVATE_TEMPLATE_ENTRY + "/")}
         for name in ("laptop.pub", "mgmt-server.pub", "02-devices_config.csv", "99-output-infra", "99-output-ztp"):
             self.assertIn(name, expected)
-        self.assertEqual(expected, set(handed))
+        self.assertLessEqual(set(repaired), load.before)
+        self.assertEqual(expected | set(repaired), set(handed))
 
     # ---------------------------------------------------------------- upgrade
     def upgrade(self, flow, *, euid: int, sudo=None, owner_uid: int | None = None):
@@ -257,9 +324,10 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
         self.assertTrue(run.project_unchanged)
 
     # ---------------------------------------------------------------- unload
-    def unload(self, flow, view):
+    def unload(self, flow, view, authority_view=None):
         """The real 13-unload main as root; its command for 02-unsetup runs the real 02-unsetup main in this
-        process (agentW8's globals: the tree, the fake crontab on PATH, ``view`` as 02-unsetup's os)."""
+        process (agentW8's globals: the tree, the fake crontab on PATH, ``view`` as 02-unsetup's os;
+        ``authority_view`` as config_sync_authority's)."""
         commands = []
 
         @contextmanager
@@ -272,6 +340,8 @@ class _OperatorFlow(M3.SystemdLoadMainFixture):
                 stack.enter_context(W8.Fixture.globals_of(self, flow.tree, view))
                 stack.enter_context(mock.patch.object(UNSETUP, "deployment_lock", held))   # 13-unload holds it
                 stack.enter_context(mock.patch.object(UNSETUP, "stop_native_ztp_monitors", return_value=()))
+                if authority_view is not None:
+                    stack.enter_context(mock.patch.object(UNSETUP.config_sync_authority, "os", authority_view))
                 code = UNSETUP.main(list(command[2:]))
             if code:
                 raise subprocess.CalledProcessError(code, command)
@@ -313,18 +383,38 @@ class OperatorModesWorkflowTests(_OperatorFlow, unittest.TestCase):
     """Design §4.6 workflow rows; guide WP-13 table (the initial-setup step is D1's)."""
 
     def test_mode_a_sudo_load_operator_upgrade_sudo_unload(self) -> None:
-        # Design §1/§4.6 way A: sudo load -> upgrade by U -> sudo unload.
+        # Design §1/§4.6 way A: sudo load -> upgrade by U -> sudo unload; §4.5: the first sudo load meets a project
+        # root has been writing into.
         flow = self.flow()
         name = flow.u.pw_name
+        operator = (flow.u.pw_uid, flow.u.pw_gid)
+        model, lines, repaired = self.migrating_project(flow)
         with self.process_as(flow, euid=0, sudo=flow.u):
-            load = self.load(flow)
-        self.assert_sudo_load_acts_for_operator(flow, load)
+            load = self.load(flow, model=model)
+        self.assert_sudo_load_acts_for_operator(flow, load, repaired=repaired)
+        # load's repair points at U (问题文档 :331; O9): one [PERM] line per corrected entry, each naming U and U's
+        # passwd group, and none from the later repairs (design §4.6: a second run changes nothing).
+        printed = W6.perm_lines(load.result.stdout)
+        self.assertEqual(len(printed), len(set(printed)), load.result.stdout)
+        self.assertEqual(lines, set(printed))
+        for line in printed:
+            self.assertIn(f" -> {flow.u.pw_uid}:{flow.u.pw_gid} ", line)
+        ssh = Path(flow.u.pw_dir) / ".ssh"
+        named = {W6.key(path): path for path in (flow.project, flow.project / "01-global.yaml", ssh,
+                                                 ssh / "id_ed25519")}
+        self.assertEqual({flow.project: 0o755, flow.project / "01-global.yaml": 0o644, ssh: 0o700,
+                          ssh / "id_ed25519": 0o600},
+                         {named.get(entry, entry): value for entry, value in model.chmods})
+        # After load the project, root's leftovers included, and the key pair are U's (design §4.6).
+        for path in (flow.project, *(flow.project / entry for entry in repaired), flow.tree.state,
+                     *flow.tree.leaves.values(), ssh, ssh / "id_ed25519", ssh / "id_ed25519.pub"):
+            self.assertEqual(operator, model.owner(path), path)
 
         with self.process_as(flow, euid=flow.u.pw_uid):
             upgrade = self.upgrade(flow, euid=flow.u.pw_uid)
         self.assert_upgrade_runs_as_itself(upgrade, name)   # design §4.2: 「U 直接运行……以 U 执行」
 
-        view = W8.Fixture.operator_made(flow.tree, *WATCH, uid=flow.u.pw_uid)
+        view = W8.OwnerView(self.owners_after(model))         # the owners load left
         with self.process_as(flow, euid=0, sudo=flow.u):
             unload = self.unload(flow, view)
         self.assert_unload(flow, unload, crontab_user=name)   # design §4.3 :96
@@ -518,6 +608,51 @@ class LoadCrossScriptOwnershipWorkflowTests(_OperatorFlow, unittest.TestCase):
         self.assertEqual(1, len(setup_logs))
         self.assertEqual([(W12.identity_of(deploy_logs[0]), *operator)], deployed)
         self.assertEqual([(setup_logs[0].lstat().st_ino, *operator)], view.fchowns)
+
+    def test_sudo_unload_after_repair_still_withdraws_config_authorities(self) -> None:
+        # Guide WP-13 table; design §4.1 (config_sync_authority's namespaces are system side: root makes and checks
+        # them against its own euid) and §4.6 (way A ends with a sudo unload, which must go through); agentOP 4.4.
+        flow = self.flow()
+        operator = (flow.u.pw_uid, flow.u.pw_gid)
+        model, _lines, _repaired = self.migrating_project(flow)   # way A's first sudo load, as in the test above
+        authority = UNSETUP.config_sync_authority
+        output = flow.project / "99-output-ztp"
+        output.mkdir()
+        output_mode = W6.mode(output)
+        manual, methods = output / "manual-config-sync", output / "configuration-methods"
+        # Eras an earlier root monitor and manual-ztp opened (test_config_sync_authority's calls).
+        authority.begin(manual, "leaf1", "teardown", "teardown-leaf1", "manual_config_sync_cli")
+        authority.begin_method(methods, "leaf1", "first", "first-leaf1", "ztp_monitor_cycle")
+        for read, root in ((authority.read_current, manual), (authority.read_method_current, methods)):
+            self.assertEqual("pending", read(root, "leaf1")["state"])   # open eras before load
+        model.own_tree(output, 0, 0)                          # root made all of 99-output-ztp
+        private = {W6.key(path) for root in (manual, methods) for path in (root, *root.rglob("*"))}
+        self.assertTrue(any(path.name == ".authority" for path in manual.iterdir()))
+
+        with self.process_as(flow, euid=0, sudo=flow.u):
+            load = self.load(flow, model=model)
+        # 以谁执行 / 文件属于谁 (load): root's repair never touched what is under the two namespaces (no fchown, no
+        # fchmod, still root's), whatever else load went on to do; it handed 99-output-ztp itself to U.
+        self.assertEqual(set(), private & model.changed())
+        for root in (manual, methods):
+            for path in (root, *root.rglob("*")):
+                self.assertEqual((0, 0), model.owner(path), path)
+        self.assertEqual(0, load.result.rc, load.result.stderr)
+        self.assertIn(W6.perm_line(output, (0, 0, output_mode), (*operator, output_mode & ~0o022)),
+                      W6.perm_lines(load.result.stdout))
+        self.assertEqual(operator, model.owner(output))
+
+        # 以谁执行: the sudo unload's 02-unsetup is root and withdraws root's own eras; 文件属于谁: it sees the owners
+        # load left (agentW8's OwnerView for 02-unsetup and for config_sync_authority).
+        owners = self.owners_after(model)
+        with self.process_as(flow, euid=0, sudo=flow.u):
+            unload = self.unload(flow, W8.OwnerView(owners), W8.OwnerView(dict(owners)))
+        self.assert_unload(flow, unload, crontab_user=flow.u.pw_name)
+        self.assertEqual([(flow.tree.lock.lstat().st_ino, *operator)], unload.chowns)
+        self.assertEqual(("failed", True), tuple(authority.read_current(manual, "leaf1")[name]
+                                                 for name in ("state", "veto")))
+        self.assertEqual(("failed", True), tuple(authority.read_method_current(methods, "leaf1")[name]
+                                                 for name in ("state", "veto")))
 
 
 if __name__ == "__main__":
