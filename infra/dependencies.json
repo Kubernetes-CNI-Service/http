@@ -981,7 +981,7 @@
         "monitor/issue-tracker/format_precheck.py",
         "ethernet/monitor/cron.sh"
       ],
-      "installed_by": "python3 infra/deps.py install --target venv-cabletracker (as the user who runs 11-load.py: its switch-collection worker runs cron.sh; root only with HOME = root's home, never sudo -E)",
+      "installed_by": "python3 infra/deps.py install --target venv-cabletracker (each account installs into its own home: cron.sh started by the collection worker runs as root and uses root's venv, installed as root with HOME = root's home - a root login or plain sudo, never sudo -E; cron.sh run by hand uses the operator's own venv, installed by the operator without sudo)",
       "kind": "venv",
       "path": "~/.venvs/http/cabletracker",
       "platforms": [
@@ -1000,7 +1000,7 @@
         "infiniband/bringup/xdr-upgrade/upgrade.py",
         "tools/ufm_bootstrap_auth_adapter.py"
       ],
-      "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (as the user who runs upgrade.py; root only with HOME = root's home, never sudo -E; on the macOS full-proof machine: /usr/bin/python3, as the user who runs the formal load / full proof)",
+      "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (each account installs into its own home: upgrade.py run by the operator uses the operator's own venv, installed by the operator without sudo; root only with HOME = root's home, never sudo -E; on the macOS full-proof machine: /usr/bin/python3, as the user who runs the formal load / full proof)",
       "kind": "venv",
       "path": "~/.venvs/http/ibsw-upgrade",
       "platforms": [
