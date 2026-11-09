@@ -1551,7 +1551,8 @@ def repair_project_permissions(
     (O10 ①): every entry under the project, plus ssh_dir (the operator's ~/.ssh), its id_ed25519 and
     id_ed25519.pub; never the code tree.  Only a root load (root acting for the operator, or root on its own
     project) on a Linux management server with the systemd backend acts (O9; WP-5 makes such a load root);
-    --dry-run only lists; anything else, and no identity (the Docker supervisor), does nothing.
+    --dry-run only lists, and the operator's own --dry-run without sudo (action "self") lists the same entries
+    (c-16, O9 「dry-run 只列」); anything else, and no identity (the Docker supervisor), does nothing.
 
     Two phases.  A walk over held directory descriptors that never follows a link collects every change; an
     owner that is neither root nor the operator stops load with every such entry, its uid:gid and a chown
@@ -1569,7 +1570,8 @@ def repair_project_permissions(
     """
     if (identity is None or identity.operator is None or host_os.casefold() != "linux"
             or host_role != "management-server" or backend is None or backend.name != "systemd"
-            or not (identity.action == "represent" or identity.operator.uid == 0)):
+            or not (identity.action == "represent" or identity.operator.uid == 0
+                    or (dry_run and identity.action == "self"))):
         return 0
     operator = identity.operator
     owner = (operator.uid, operator.gid)

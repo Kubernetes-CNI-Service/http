@@ -78,7 +78,7 @@ Native 管理服务器上的实际 load 以 root 运行（普通用户加 `sudo`
 - 模式只收紧不放宽：去掉组和其他人的写权限；固定的几项是项目目录 0755、项目根的 `*.pub` 0644、
   `~/.ssh` 0700、`id_ed25519` 0600、`id_ed25519.pub` 0644。原来是 0600 的文件（如 `cre.json`）保持 0600。
 - 每改一项打印一行 `[PERM] <路径> <原 uid:gid 原模式> -> <新 uid:gid 新模式>`，最后一行汇总改了几项；
-  改完再跑不再有改动。`sudo … --dry-run` 只列出将改的项，不改；普通用户的 `--dry-run` 不列。
+  改完再跑不再有改动。`sudo … --dry-run` 只列出将改的项，不改；普通用户不加 `sudo` 的 `--dry-run` 也逐项列出同样的项，不改。
 - 有条目的属主既不是 root 也不是操作员时，列出全部这类条目（路径、实际和期望的 uid:gid、`sudo chown`
   命令）并停止，什么都不改。
 - 不改的 root 私有状态（12 类）：`99-output-ztp/manual-config-sync`、`99-output-ztp/configuration-methods`、

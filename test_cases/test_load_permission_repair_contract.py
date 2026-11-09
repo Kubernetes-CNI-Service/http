@@ -18,7 +18,9 @@ Expectations come from the owner's decision, the issue, the design and the guide
   is 11-load's ROOT_PRIVATE_PROJECT_STATE (agentOP report 4.4); the release members belong to the operator before
   12-ztp-monitor restarts (the W12 boundary, agentW12 report section 7); what a rollback receipt binds with
   ctime (the five 99-output-dhcp publications, the project's top-level *.pub) is left alone while a failed load
-  leaves its receipt for the next load (agentOP report 4.4, constraints 1-3).
+  leaves its receipt for the next load (agentOP report 4.4, constraints 1-3);
+- http dev 2026-11-09, c-16 (guide WP-6 :748 on O9 「dry-run 只列」, owner 2026-11-07 :225): the operator's own
+  --dry-run without sudo (action "self") lists the [PERM] lines the sudo --dry-run lists and changes nothing.
 
 Root is never real here.  These tests run as a regular user and play root through
 operator_identity.resolve_operator on injected inputs (test_load_operator_contract's helpers).  The owners a
@@ -326,6 +328,45 @@ class PermissionRepairTests(M3.SystemdLoadMainFixture, unittest.TestCase):
         self.assertEqual(([], []), (self.model.chowns, self.model.chmods))
         self.assertEqual((0o700, 0o666), (mode(self.project), mode(loose)))
 
+    def test_plain_user_dry_run_lists_what_the_sudo_run_would_change(self) -> None:
+        # #7 c-16（http dev 2026-11-09 改落地；O9「dry-run 只列」，owner 11-07 已定，指导 :225、WP-6 :736、:748）：
+        # Linux 管理服务器上 U 不加 sudo（动作 self）跑 --dry-run，逐项列出的 [PERM] 行与 U 经 sudo（represent）的
+        # --dry-run 逐字相同，汇总是 dry-run 那一句，没有任何 fchown、fchmod；同样的输入不带 --dry-run 时仍是 0 项、
+        # 没有输出（非 root 的正式 load 先被 WP-5 拒）。root 私有状态照样整棵跳过（指导 1.3、WP-6 排除清单）。
+        self.project.chmod(0o700)
+        self.model.own(self.project, OP_UID, OP_GID)
+        loose = self.mkdir("sub", 0o775, uid=OP_UID, gid=OP_GID)
+        self.mkdir("99-output-ztp", 0o755, uid=OP_UID, gid=OP_GID)
+        root_written = self.write("99-output-ztp/ztp-monitor.pid", 0o644)
+        self.write("99-output-ztp/generations/0123456789abcdef0123/current-release.json", 0o666)
+        laptop = self.write("laptop.pub", 0o600, uid=OP_UID, gid=OP_GID)
+        self.ssh.mkdir(parents=True)
+        self.ssh.chmod(0o755)
+        self.model.own(self.ssh, OP_UID, OP_GID)
+        expected = sorted([
+            perm_line(self.project, (OP_UID, OP_GID, 0o700), (OP_UID, OP_GID, 0o755)),
+            perm_line(loose, (OP_UID, OP_GID, 0o775), (OP_UID, OP_GID, 0o755)),
+            perm_line(root_written, (0, 0, 0o644), (OP_UID, OP_GID, 0o644)),
+            perm_line(laptop, (OP_UID, OP_GID, 0o600), (OP_UID, OP_GID, 0o644)),
+            perm_line(self.ssh, (OP_UID, OP_GID, 0o755), (OP_UID, OP_GID, 0o700)),
+        ])
+        plain = L57.resolution(self.project, euid=OP_UID, entries=(self.operator,), owner_uid=OP_UID)
+        self.assertEqual(("self", OP_UID), (plain.action, plain.operator.uid))
+        sudo_count, sudo_output = self.run_repair(dry_run=True)
+        self.assertEqual(expected, sorted(perm_lines(sudo_output)))
+        count, output = self.run_repair(plain, dry_run=True)
+        self.assertEqual(expected, sorted(perm_lines(output)))
+        self.assertEqual(sudo_output.splitlines(), output.splitlines())
+        summary = [line for line in output.splitlines() if line not in perm_lines(output)]
+        self.assertEqual(1, len(summary), output)
+        self.assertTrue(summary[0].startswith(f"[PERM] dry-run：以上 {len(expected)} 项只列出，没有改动（"), summary)
+        self.assertEqual((len(expected), len(expected)), (sudo_count, count))
+        self.assertEqual(([], []), (self.model.chowns, self.model.chmods))
+        self.assertEqual((0, ""), self.run_repair(plain))
+        self.assertEqual(([], []), (self.model.chowns, self.model.chmods))
+        self.assertEqual((0o700, 0o755, 0o775, 0o600), (mode(self.project), mode(self.ssh), mode(loose), mode(laptop)))
+        self.assertEqual((0, 0), self.model.owner(root_written))
+
     def test_second_run_changes_nothing(self) -> None:
         # #8 设计 §4.6「改完再跑一次不再有改动」。
         self.project.chmod(0o700)
@@ -443,7 +484,9 @@ class PermissionRepairTests(M3.SystemdLoadMainFixture, unittest.TestCase):
     def test_runs_only_on_linux_management_server_systemd(self) -> None:
         # #13 O9：只在 Linux、management-server、systemd、非 dry-run 时改；任务书第 4 条：load_identity 为 None
         # （Docker supervisor 或算出之前）什么都不做。非 root 运行（Linux 管理服务器上只可能是 --dry-run，
-        # WP-5 root 检查，问题文档 :299-303）不改也不列。方式 B（root 跑 root 的项目）照常改，期望属主是 root。
+        # WP-5 root 检查，问题文档 :299-303）不改，dry-run 时逐项列出（c-16，见
+        # test_plain_user_dry_run_lists_what_the_sudo_run_would_change；本条只测非 dry-run，断言不变）。
+        # 方式 B（root 跑 root 的项目）照常改，期望属主是 root。
         self.project.chmod(0o700)
         loose = self.write("a.csv", 0o666)
         cases = {
