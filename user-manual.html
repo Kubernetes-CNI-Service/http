@@ -458,13 +458,14 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>828</strong> 个受维护文件</span>
+          <span><strong>843</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
         <h4 id="v2-runtime-data" data-nav-title="运行与大型数据目录">被忽略的大型数据与运行目录</h4>
         <table class="file-catalog"><thead><tr><th>路径模式</th><th>作用与边界</th></tr></thead><tbody>
           <tr data-path-pattern="DAY0-Prepare/&lt;project&gt;/"><td><code>DAY0-Prepare/&lt;project&gt;/</code></td><td>项目部署输入与项目级生成结果。01-global、devices/subnet CSV、P2P 和策略是输入；99-output-*、marker、receipt 与 latest 链接由事务生成，禁止手工拼接。</td></tr>
+          <tr data-path-pattern="DAY0-Prepare/activate-project"><td><code>DAY0-Prepare/activate-project</code></td><td>活动项目指针：符号链接，指向当前激活的 DAY0 项目目录；由 01-a-setup.py 建立和切换，02-unsetup.py 删除，树里的固定链接都经它到项目。被 .gitignore 忽略，不进上传包、下载包、sync 和镜像。不要手工建或改，切换项目用 setup 或 load。</td></tr>
           <tr data-path-pattern="DAY0-Prepare/dumps/*"><td><code>DAY0-Prepare/dumps/*</code></td><td>tar-for-upload 生成的私有上传归档。按项目、时间、size 和 SHA-256 识别；旧包不能因文件名相近就复用。</td></tr>
           <tr data-path-pattern="image/*"><td><code>image/*</code></td><td>共享交换机 OS、UFM、NetQ 等大制品。真实 payload 与项目根空占位不同，必须按平台、版本、size、header 和 SHA-256 管理。</td></tr>
           <tr data-path-pattern="apps/ubuntu-24.04/&lt;arch&gt;/"><td><code>apps/ubuntu-24.04/&lt;arch&gt;/</code></td><td>Ubuntu 24.04 离线 APT 仓库，按 amd64/arm64 分架构；repository.meta、Packages、Packages.gz 和依赖闭包必须一致。</td></tr>
@@ -714,7 +715,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 481 个文件</summary>
+          <summary><code>test_cases/</code> — 495 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -829,6 +830,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_collection_cycle_worker_contract.py"><td><code>test_cases/test_collection_cycle_worker_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract for collection-cycle parsing and lifecycle wrappers。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collection_d70_retirement.py"><td><code>test_cases/test_collection_d70_retirement.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>The D-70 UFM collection pipeline is retired (codex REQ7 retirement, batch 2, 2026-10-24)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collection_d70_retirement_workflow.py"><td><code>test_cases/test_collection_d70_retirement_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: a completed IB prod cycle carries only its base roles, and a D-70-shaped IB child is refused end。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_collection_lock_owner.py"><td><code>test_cases/test_collection_lock_owner.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-029 (v3.1.2 WP-9, M6): the collection lock ``cron.lock`` belongs to the operator。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collection_ufm_run_binding.py"><td><code>test_cases/test_collection_ufm_run_binding.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: monitor/collection_ufm_run_binding.py binds one worker cycle&#x27;s UFM IB analysis (REQ7 R1,。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collection_v2_emitter_contract.py"><td><code>test_cases/test_collection_v2_emitter_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent direct contract for the private A4 collection-v2 publisher。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_collector_inventory_pubkey.py"><td><code>test_cases/test_collector_inventory_pubkey.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the collectors&#x27; management-key binding。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -839,6 +841,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_config_sync_authority_workflow.py"><td><code>test_cases/test_config_sync_authority_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>F02 real manual writer -&gt; local generation journal, with isolated device I/O。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_continuous_interval_handoff_workflow.py"><td><code>test_cases/test_continuous_interval_handoff_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real-subprocess handoff for the canonical continuous interval floor。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_control_auth.py"><td><code>test_cases/test_control_auth.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the Monitor control-auth credential helper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_cron_operator_identity.py"><td><code>test_cases/test_cron_operator_identity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract of ethernet/monitor/cron.sh&#x27;s operator identity step before K4 (v3.1.2 WP-11, M6, I-006)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_cron_operator_identity_workflow.py"><td><code>test_cases/test_cron_operator_identity_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: the root parents start the real cron.sh with the root-parent marker (v3.1.2 WP-11, M6, I-006)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_cumulus_snippet_rendering.py"><td><code>test_cases/test_cumulus_snippet_rendering.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Cumulus ifupdown2 snippet rendering and runtime-compare contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_current_exclusive_deployment_lock.py"><td><code>test_cases/test_current_exclusive_deployment_lock.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent current-FD EX helper contracts; no stage or writer authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_darwin_lock_kernel_witness.py"><td><code>test_cases/test_darwin_lock_kernel_witness.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Darwin kernel unlock witness (KWV) for the existing current-EX helper。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1012,6 +1016,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_infra_component_entry_contract.py"><td><code>test_cases/test_infra_component_entry_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts: --load-components-v1 on infra/deploy_infra.py and infra/infra-setup.py。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_component_workflow.py"><td><code>test_cases/test_infra_component_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: LOAD component codec -&gt; deploy_infra.py --prepare-only -&gt; infra-setup.py --apply。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_neutral_defaults.py"><td><code>test_cases/test_infra_neutral_defaults.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the unified infra DNS/NTP/timezone fallback。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_infra_neutral_parser.py"><td><code>test_cases/test_infra_neutral_parser.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v3.1.2 WP-2 (D-3): one strict reader of infra&#x27;s neutral DNS/NTP/TIMEZONE defaults, in infra/ubuntu24_host.py。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_infra_neutral_producer.py"><td><code>test_cases/test_infra_neutral_producer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v3.1.2 WP-1 (D-3): setup writes the default managed initial-setup tool root&#x27;s infra-neutral.conf。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_infra_neutral_producer_workflow.py"><td><code>test_cases/test_infra_neutral_producer_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v3.1.2 WP-1 workflow (D-3): the real setup produces the conf the managed initial-setup consumer admits。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_setup_py.py"><td><code>test_cases/test_infra_setup_py.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for infra/infra-setup.py (the management/client host setup entry)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_infra_setup_py_workflow.py"><td><code>test_cases/test_infra_setup_py_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: deploy_infra.py --prepare-only -&gt; infra-setup.py (ubuntu24_host) -&gt; check_infra.classify。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_authorized_key_quoted_options.py"><td><code>test_cases/test_initial_setup_authorized_key_quoted_options.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PUBLIC generated-shell regression; no real HOME/SSH/network is used。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1061,6 +1068,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_load_collection_worker_contract.py"><td><code>test_cases/test_load_collection_worker_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-028 (v3.1.2 M3 WP-3): load starts the Switch collection worker on the management server。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_collection_worker_workflow.py"><td><code>test_cases/test_load_collection_worker_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-028 workflow (v3.1.2 M3 WP-3): load&#x27;s worker start, the real worker, and unload&#x27;s stop。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_ib_cvt.py"><td><code>test_cases/test_load_ib_cvt.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Load turns the project P2P into the IB expected topology, as it does for Ethernet。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_load_operator_contract.py"><td><code>test_cases/test_load_operator_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-006 WP-5 and I-014 WP-7 (v3.1.2 M6): 11-load&#x27;s operator identity and its ~/.ssh binding。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_load_operator_workflow.py"><td><code>test_cases/test_load_operator_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow (v3.1.2 WP-13, M6, I-006): way A, way B, mixing them, and the cross-script owners around load。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_load_permission_repair_contract.py"><td><code>test_cases/test_load_permission_repair_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-006 WP-6 (v3.1.2 M6): load checks and repairs the project&#x27;s permissions for its operator。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_release_transaction.py"><td><code>test_cases/test_load_release_transaction.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Unified release validation, DHCP installation, and rollback transactions。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_log_rotation.py"><td><code>test_cases/test_log_rotation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Log rotation (owner 2026-10-22): whoever writes a log rotates it, with one shared module,。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_manual_applied_config.py"><td><code>test_cases/test_manual_applied_config.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Runtime NVUE normalization and manual ZTP preview/confirm comparisons。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1098,6 +1108,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_new_uninstrumented_alias_finite_closure.py"><td><code>test_cases/test_new_uninstrumented_alias_finite_closure.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>NEW finite regression SOURCE, not historical H28/H55 restoration。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_new_unknown_formal_callee.py"><td><code>test_cases/test_new_unknown_formal_callee.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent unknown formal-callee boundary at the real scanner/consumer API。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_nvue_normalizer.py"><td><code>test_cases/test_nvue_normalizer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Regression tests for the shared NVUE selector normalizer。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_operator_identity.py"><td><code>test_cases/test_operator_identity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract of tools/operator_identity.py: the operator rule, the root re-run and its marker (v3.1.2 WP-4, M6)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_operator_peripheral_contract.py"><td><code>test_cases/test_operator_peripheral_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Operator identity at the edges of load (v3.1.2 WP-12, M6): 12-ztp-monitor, deploy_infra, infra-setup,。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ops_deployment_review.py"><td><code>test_cases/test_ops_deployment_review.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Deployment, packaging, setup, unload, and infrastructure review cases。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_optimize_output_layout.py"><td><code>test_cases/test_optimize_output_layout.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Regression tests for optimize sample/comparison output placement。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_p2p_selection_contract.py"><td><code>test_cases/test_p2p_selection_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>REQ-15 direct contracts for selecting one project-root P2P workbook。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1177,6 +1189,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_ufm_setup_upgrade.py"><td><code>test_cases/test_ufm_setup_upgrade.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct and simulated-login tests for infiniband/bringup/ufm-setup-upgrade。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_setup_upgrade_workflow.py"><td><code>test_cases/test_ufm_setup_upgrade_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: setup-created bringup links are the only inputs ufm-setup-upgrade needs; unsetup knows them。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_worker_collection.py"><td><code>test_cases/test_ufm_worker_collection.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UFM on the worker path (owner 2026-10-21, option A): the frozen target plan carries the server_ufm。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_unsetup_operator_crontab.py"><td><code>test_cases/test_unsetup_operator_crontab.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>02-unsetup cleans the operator&#x27;s REQ10C watch with crontab -u; 13-unload names the operator (v3.1.2 WP-8, M6)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_upgrade_operator_reexec.py"><td><code>test_cases/test_upgrade_operator_reexec.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract: upgrade.py and upgrade2.py re-run as the operator when root runs them (v3.1.2 WP-10, I-006)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_upgrade_operator_reexec_workflow.py"><td><code>test_cases/test_upgrade_operator_reexec_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: root starts upgrade.py / upgrade2.py on an operator&#x27;s project; the entry re-runs once as the operator。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_upload_package_contract.py"><td><code>test_cases/test_upload_package_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Upload archive deployment-input and image-free XLSX contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_v2_generation_flow.py"><td><code>test_cases/test_v2_generation_flow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Schema-v2 workflow across setup, load, DHCP, generators, and Jinja output。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_v2_project_schema.py"><td><code>test_cases/test_v2_project_schema.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for project schema v2, VRR, native VLANs, and bonds。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1200,7 +1215,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-tools" data-nav-title="tools/ 文件" class="catalog-group">
-          <summary><code>tools/</code> — 115 个文件</summary>
+          <summary><code>tools/</code> — 116 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="tools/_package_common.py"><td><code>tools/_package_common.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Internal shared archive implementation for tar-for-upload/download。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/collect-ztp-diagnostics.py"><td><code>tools/collect-ztp-diagnostics.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Create a bounded, redacted support bundle for the ZTP management stack。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1294,6 +1309,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/lldp-analyze-tool/analyze_lldp.py"><td><code>tools/lldp-analyze-tool/analyze_lldp.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Compare expected LLDPq DOT links with the latest Ethernet collection archive。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/lldp-analyze-tool/build_report.py"><td><code>tools/lldp-analyze-tool/build_report.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Render a normalized LLDP validation payload as an XLSX workbook。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/log_rotation.py"><td><code>tools/log_rotation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Size-based log rotation shared by every script that writes a log (owner 2026-10-22: whoever writes a。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/operator_identity.py"><td><code>tools/operator_identity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Operator identity on the management server: who owns the project, who may run, how root re-runs as them (I-006)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/package-project-image.py"><td><code>tools/package-project-image.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build or install one immutable, project-specific HTTP ZTP Docker image。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/package-shared-artifacts.py"><td><code>tools/package-shared-artifacts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build one independent, project-derived shared-artifact transport bundle。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/password-update.py"><td><code>tools/password-update.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Safely rotate Cumulus and NVOS password hashes in a project global YAML。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1477,7 +1493,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>648</strong> 个脚本型文件</span>
+          <span><strong>663</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -2604,7 +2620,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 457 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 471 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -4225,6 +4241,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_collection_d70_retirement_workflow</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_collection_lock_owner.py" class="script-reference">
+          <summary><code>test_cases/test_collection_lock_owner.py</code> — I-029 (v3.1.2 WP-9, M6): the collection lock ``cron.lock`` belongs to the operator。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-029 (v3.1.2 WP-9, M6): the collection lock ``cron.lock`` belongs to the operator。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_collection_lock_owner</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_collection_lock_owner</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_collection_ufm_run_binding.py" class="script-reference">
           <summary><code>test_cases/test_collection_ufm_run_binding.py</code> — Direct: monitor/collection_ufm_run_binding.py binds one worker cycle&#x27;s UFM IB analysis (REQ7 R1,。</summary>
           <div class="script-body"><dl>
@@ -4404,6 +4438,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_control_auth</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_cron_operator_identity.py" class="script-reference">
+          <summary><code>test_cases/test_cron_operator_identity.py</code> — Direct contract of ethernet/monitor/cron.sh&#x27;s operator identity step before K4 (v3.1.2 WP-11, M6, I-006)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct contract of ethernet/monitor/cron.sh&#x27;s operator identity step before K4 (v3.1.2 WP-11, M6, I-006)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_cron_operator_identity</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_cron_operator_identity</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_cron_operator_identity_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_cron_operator_identity_workflow.py</code> — Workflow: the root parents start the real cron.sh with the root-parent marker (v3.1.2 WP-11, M6, I-006)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Workflow: the root parents start the real cron.sh with the root-parent marker (v3.1.2 WP-11, M6, I-006)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_cron_operator_identity_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_cron_operator_identity_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_cumulus_snippet_rendering.py" class="script-reference">
           <summary><code>test_cases/test_cumulus_snippet_rendering.py</code> — Cumulus ifupdown2 snippet rendering and runtime-compare contracts。</summary>
@@ -7519,6 +7589,60 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_neutral_defaults</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_infra_neutral_parser.py" class="script-reference">
+          <summary><code>test_cases/test_infra_neutral_parser.py</code> — v3.1.2 WP-2 (D-3): one strict reader of infra&#x27;s neutral DNS/NTP/TIMEZONE defaults, in infra/ubuntu24_host.py。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>v3.1.2 WP-2 (D-3): one strict reader of infra&#x27;s neutral DNS/NTP/TIMEZONE defaults, in infra/ubuntu24_host.py。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_infra_neutral_parser</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_neutral_parser</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_infra_neutral_producer.py" class="script-reference">
+          <summary><code>test_cases/test_infra_neutral_producer.py</code> — v3.1.2 WP-1 (D-3): setup writes the default managed initial-setup tool root&#x27;s infra-neutral.conf。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>v3.1.2 WP-1 (D-3): setup writes the default managed initial-setup tool root&#x27;s infra-neutral.conf。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_infra_neutral_producer</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_neutral_producer</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_infra_neutral_producer_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_infra_neutral_producer_workflow.py</code> — v3.1.2 WP-1 workflow (D-3): the real setup produces the conf the managed initial-setup consumer admits。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>v3.1.2 WP-1 workflow (D-3): the real setup produces the conf the managed initial-setup consumer admits。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_infra_neutral_producer_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_infra_neutral_producer_workflow</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_infra_setup_py.py" class="script-reference">
           <summary><code>test_cases/test_infra_setup_py.py</code> — Direct contracts for infra/infra-setup.py (the management/client host setup entry)。</summary>
           <div class="script-body"><dl>
@@ -8401,6 +8525,60 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_load_ib_cvt</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_load_operator_contract.py" class="script-reference">
+          <summary><code>test_cases/test_load_operator_contract.py</code> — I-006 WP-5 and I-014 WP-7 (v3.1.2 M6): 11-load&#x27;s operator identity and its ~/.ssh binding。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-006 WP-5 and I-014 WP-7 (v3.1.2 M6): 11-load&#x27;s operator identity and its ~/.ssh binding。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_load_operator_contract</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_load_operator_contract</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_load_operator_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_load_operator_workflow.py</code> — Workflow (v3.1.2 WP-13, M6, I-006): way A, way B, mixing them, and the cross-script owners around load。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Workflow (v3.1.2 WP-13, M6, I-006): way A, way B, mixing them, and the cross-script owners around load。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_load_operator_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_load_operator_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_load_permission_repair_contract.py" class="script-reference">
+          <summary><code>test_cases/test_load_permission_repair_contract.py</code> — I-006 WP-6 (v3.1.2 M6): load checks and repairs the project&#x27;s permissions for its operator。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-006 WP-6 (v3.1.2 M6): load checks and repairs the project&#x27;s permissions for its operator。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_load_permission_repair_contract</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_load_permission_repair_contract</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_load_release_transaction.py" class="script-reference">
           <summary><code>test_cases/test_load_release_transaction.py</code> — Unified release validation, DHCP installation, and rollback transactions。</summary>
           <div class="script-body"><dl>
@@ -9066,6 +9244,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_nvue_normalizer</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_operator_identity.py" class="script-reference">
+          <summary><code>test_cases/test_operator_identity.py</code> — Direct contract of tools/operator_identity.py: the operator rule, the root re-run and its marker (v3.1.2 WP-4, M6)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct contract of tools/operator_identity.py: the operator rule, the root re-run and its marker (v3.1.2 WP-4, M6)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_operator_identity</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_operator_identity</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_operator_peripheral_contract.py" class="script-reference">
+          <summary><code>test_cases/test_operator_peripheral_contract.py</code> — Operator identity at the edges of load (v3.1.2 WP-12, M6): 12-ztp-monitor, deploy_infra, infra-setup,。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Operator identity at the edges of load (v3.1.2 WP-12, M6): 12-ztp-monitor, deploy_infra, infra-setup,。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_operator_peripheral_contract</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_operator_peripheral_contract</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_ops_deployment_review.py" class="script-reference">
           <summary><code>test_cases/test_ops_deployment_review.py</code> — Deployment, packaging, setup, unload, and infrastructure review cases。</summary>
@@ -10489,6 +10703,60 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_worker_collection</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_unsetup_operator_crontab.py" class="script-reference">
+          <summary><code>test_cases/test_unsetup_operator_crontab.py</code> — 02-unsetup cleans the operator&#x27;s REQ10C watch with crontab -u; 13-unload names the operator (v3.1.2 WP-8, M6)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>02-unsetup cleans the operator&#x27;s REQ10C watch with crontab -u; 13-unload names the operator (v3.1.2 WP-8, M6)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_unsetup_operator_crontab</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_unsetup_operator_crontab</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_upgrade_operator_reexec.py" class="script-reference">
+          <summary><code>test_cases/test_upgrade_operator_reexec.py</code> — Direct contract: upgrade.py and upgrade2.py re-run as the operator when root runs them (v3.1.2 WP-10, I-006)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct contract: upgrade.py and upgrade2.py re-run as the operator when root runs them (v3.1.2 WP-10, I-006)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_upgrade_operator_reexec</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_upgrade_operator_reexec</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_upgrade_operator_reexec_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_upgrade_operator_reexec_workflow.py</code> — Workflow: root starts upgrade.py / upgrade2.py on an operator&#x27;s project; the entry re-runs once as the operator。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Workflow: root starts upgrade.py / upgrade2.py on an operator&#x27;s project; the entry re-runs once as the operator。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_upgrade_operator_reexec_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_upgrade_operator_reexec_workflow</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_upload_package_contract.py" class="script-reference">
           <summary><code>test_cases/test_upload_package_contract.py</code> — Upload archive deployment-input and image-free XLSX contracts。</summary>
           <div class="script-body"><dl>
@@ -10831,7 +11099,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH</code></pre></div>
         </details>
-        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 106 个脚本</h4>
+        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 107 个脚本</h4>
         <details data-script-reference="tools/_package_common.py" class="script-reference">
           <summary><code>tools/_package_common.py</code> — Internal shared archive implementation for tar-for-upload/download。</summary>
           <div class="script-body"><dl>
@@ -12326,6 +12594,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B tools/log_rotation.py --help</code></pre></div>
         </details>
+        <details data-script-reference="tools/operator_identity.py" class="script-reference">
+          <summary><code>tools/operator_identity.py</code> — Operator identity on the management server: who owns the project, who may run, how root re-runs as them (I-006)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Operator identity on the management server: who owns the project, who may run, how root re-runs as them (I-006)。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>通常在 canonical 项目电脑；deploy/import/diagnostic 类按说明在目标服务器运行。</dd>
+            <dt>使用场景：</dt><dd>执行“跨主机打包、同步、导入、诊断、制品与分析工具”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B tools/operator_identity.py [options]</dd>
+            <dt>主要参数：</dt><dd>该入口没有可静态提取的长选项；以文件头、所属 README 和实际 --help 为准。</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>python3 -B -m py_compile tools/operator_identity.py  # 仅语法验证；实际运行由上层流程负责</code></pre></div>
+        </details>
         <details data-script-reference="tools/package-project-image.py" class="script-reference">
           <summary><code>tools/package-project-image.py</code> — Build or install one immutable, project-specific HTTP ZTP Docker image。</summary>
           <div class="script-body"><dl>
@@ -13683,7 +13969,7 @@ sudo python3 -B DAY0-Prepare/13-unload.py DAY0-Prepare/&lt;project&gt; --yes
 # 若之后确认要删除 setup 管理的项目链接，仍应先 dry-run：
 sudo python3 -B DAY0-Prepare/02-unsetup.py DAY0-Prepare/&lt;project&gt; --dry-run</code></pre>
           <p><strong>成功判据</strong>unload 只停止并回收当前项目拥有的 Apache/DHCP/monitor/runtime publication；保留范围与 dry-run 一致；项目数据、download archive 和共享大制品仍存在，最终 status 不再声称项目处于 active 服务状态。13-unload 和 02-unsetup 开头各打印一行身份说明（操作员是项目目录的属主；Docker 容器里不打印）；其他用户经 sudo 运行时在入口拒绝，什么都不动；以 sudo 或 root 运行而项目属于普通用户时，02-unsetup 清理的是该操作员 crontab 里 initial-setup 的 auto 任务（<code>crontab -u &lt;操作员&gt;</code>），不是 root 的 crontab。</p>
-          <p><strong>失败处理</strong>项目、DHCP、URL prefix、软链接或 receipt 身份不匹配时立即停止，不使用 <code>--force-dhcp</code> 越过不明配置。备份未验证时不继续。基础设施和软件包清理由操作员另行审阅 unsetup/teardown 提示。客户端 infra 回滚（<code>deploy_infra.py --teardown</code>）要在 <code>13-unload.py</code> 和 <code>02-unsetup.py</code> 之前做：unsetup 删掉指针 <code>DAY0-Prepare/activate-project</code> 后 <code>infra/logs</code> 悬空，deploy_infra.py 没有日志目录可写，会拒绝运行。以 root 运行而身份核对不通过时（例如 sudo 的发起人不是项目属主，或经 sudo 而项目属主在 passwd 里查不到），13-unload 在确认之前、02-unsetup 在停止 monitor 之前以 1 退出，什么都不动（<code>--dry-run</code> 同样），按提示切换到项目属主、由 root 直接登录或 chown 项目目录后重新运行；root 直接登录而项目属主在 passwd 里查不到时只多打一条 WARN（带 <code>sudo chown</code> 提示），其余与 v3.1.1 相同。</p>
+          <p><strong>失败处理</strong>项目、DHCP、URL prefix、软链接或 receipt 身份不匹配时立即停止，不使用 <code>--force-dhcp</code> 越过不明配置。备份未验证时不继续。基础设施和软件包清理由操作员另行审阅 unsetup/teardown 提示。客户端 infra 回滚（<code>deploy_infra.py --teardown</code>）要在 <code>13-unload.py</code> 和 <code>02-unsetup.py</code> 之前做：unsetup 删掉指针 <code>DAY0-Prepare/activate-project</code> 后 <code>infra/logs</code> 悬空，deploy_infra.py 没有日志目录可写，会拒绝运行。以 root 运行而身份核对不通过时（例如 sudo 的发起人不是项目属主，或经 sudo 而项目属主在 passwd 里查不到），13-unload 在确认之前、02-unsetup 在停止 monitor 之前以 1 退出，什么都不动（<code>--dry-run</code> 同样），按提示切换到项目属主、由 root 直接登录或 chown 项目目录后重新运行；root 直接登录而项目属主在 passwd 里查不到时，13-unload 和它调用的 02-unsetup 各多打一条 WARN（带 <code>sudo chown</code> 提示；直接运行 02-unsetup 时是一条），其余与 v3.1.1 相同。</p>
           <p><strong>下一步</strong>保留服务器上的数据直到客户确认；需要重新部署时从 Runbook 5 完整 load，而不是手工恢复单个链接或服务。</p>
         </div>
         <!-- end runbook -->
