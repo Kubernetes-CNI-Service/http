@@ -98,6 +98,41 @@ class AirLinkEndpointDirectTests(unittest.TestCase):
 
 
 class AirLinkEndpointWorkflowTests(unittest.TestCase):
+    def test_air_generation_uses_explicit_csv_not_stale_default(self):
+        # 问题文档 I-057, 05 P-011, owner 2026-11-09 "Q-013 选 ①" (TEST 3403f30): load passes its derived
+        # inventory with --csv (_CSV_FILE); AIR generation checks that file, not the customer CSV beside
+        # the script, so a stale customer air row no longer fails the AIR load.
+        stale = "hostname,type,template\nAIR-stale,air,leaf\n"
+        with self.subTest("the CSV beside the script is not read"), \
+                tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _air_json, sources, bindings = self.fixture(root)
+            default = Path(bindings["SCRIPT_DIR"]) / "02-devices_config.csv"
+            default.write_text(stale)
+            effective = root / "effective.csv"
+            effective.write_text("hostname,type,template\n")
+            bindings["_CSV_FILE"] = str(effective)
+            with mock.patch.multiple(GENERATOR, **bindings), redirect_stdout(io.StringIO()):
+                GENERATOR.generate_air_hostname_configs(str(sources), str(root / "air"))
+            # I-057: the stale air row beside the script does not stop generation.
+            self.assertTrue((root / "air/AIR-fw-01.yaml").is_file())
+            # TC-REAL-AIR-DERIVED-INVENTORY-001: the customer CSV bytes stay unchanged.
+            self.assertEqual(stale, default.read_text())
+        with self.subTest("the --csv inventory is the one checked"), \
+                tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _air_json, sources, bindings = self.fixture(root)
+            effective = root / "effective.csv"
+            effective.write_text(stale)
+            bindings["_CSV_FILE"] = str(effective)
+            # I-057 现状: an AIR device that is not in the AIR JSON fails; here it is the --csv inventory's row.
+            with mock.patch.multiple(GENERATOR, **bindings), redirect_stdout(io.StringIO()), \
+                    self.assertRaises(ValueError) as caught:
+                GENERATOR.generate_air_hostname_configs(str(sources), str(root / "air"))
+            self.assertIn("air-stale", str(caught.exception).casefold())
+            # The refusal happens before any AIR output directory is staged.
+            self.assertFalse((root / "air").exists())
+
     def test_every_shared_loader_keeps_real_lazy_air_import_reachable(self):
         from test_cases.test_qos_evpn_uplink_generation import load_script as qos_load
         from test_cases.test_mlag_evpn_generation import load_script as mlag_load
@@ -167,6 +202,7 @@ class AirLinkEndpointWorkflowTests(unittest.TestCase):
         sources = root / "production"
         sources.mkdir()
         bindings = dict(SCRIPT_DIR=str(template), _GLOBAL_FILE=str(global_file),
+                        _CSV_FILE=str(template / "02-devices_config.csv"),
                         P2P_INPUT_DIR=str(p2p), P2P_OUTPUT_DIR=str(output))
         return air_json, sources, bindings
 

@@ -2755,7 +2755,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 对应需求或缺陷：TEST F22 子包 1、2（`3403f30`）及 REQ23 的 `imported_configs` 摘要（`3e7f8c9`）。v3.1.0 M1a：
   生产者随 11-load 批进入（L0 的 `11-load.py`、P4 的 `c1-generate_dhcp.py --inventory-output`），两个消费者在 FP1
   诊断后补入（manual-ztp、12-ztp-monitor）。TEST 原卡的 Docker 部分不在本卡：`infra/docker/activate.py` 还不认
-  `generated_inputs`，是 v3.1.0 的已知限制，放到阶段 6。
+  `generated_inputs`，是 v3.1.0 的已知限制，放到阶段 6。第三个消费者是 90-c2 的 AIR 生成（读 load 经 `--csv`
+  交来的派生清单），v3.1.0 的 11-load 批漏带，v3.1.2 BF-11 补入（问题文档 I-057）。
 - 自动化文件与测试方法：
   - 生产者：`test_load_release_transaction` 的 `test_parent_binds_source_and_effective_inventory_independently`；
   - manual-ztp：`test_load_release_transaction` 的 `test_manual_consumes_real_derived_parent_and_rejects_derived_drift`、
@@ -2764,7 +2765,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
     `test_manual_derived_authority_direct_rejects_alias_hardlink_and_writable_file`、
     `test_manual_derived_inventory_exact_producer_contract_direct`；
   - 12-ztp-monitor：`test_monitor_derived_parent_release`（direct，以及 load→monitor workflow）、
-    `test_monitor_imported_configs_parent_release`。
+    `test_monitor_imported_configs_parent_release`；
+  - 90-c2 的 AIR 生成：`test_air_link_endpoint_contract` 的 `test_air_generation_uses_explicit_csv_not_stale_default`。
 - 适用平台：management-server（Native，AIR 管理服务器 Ubuntu 22.04）/ AIR。
 
 ### 风险与目标
@@ -2775,7 +2777,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 涉及的模块和状态边界：`DAY0-Prepare/11-load.py`（生成私有派生清单，写 parent）、
   `ztp/config/isc-dhcp-server/c1-generate_dhcp.py --inventory-output`、
   `ztp/manual-ztp.py::validate_parent_release_binding` 与 `verify_prepared_release_binding`、
-  `DAY0-Prepare/12-ztp-monitor.py::load_release_identity`。
+  `DAY0-Prepare/12-ztp-monitor.py::load_release_identity`、
+  `ztp/config/cumulus/template/90-c2-generate_configs.py::generate_air_hostname_configs`。
 - 成功标准：客户设备 CSV 的字节、inode、mtime 不变；parent 同时绑定 `inputs.devices`（源）和
   `generated_inputs.effective_devices`（派生）；manual-ztp 预检和 monitor 都接受这个 parent；派生清单被改动后，
   两者都在动设备或发布页面之前拒绝。
@@ -2804,10 +2807,13 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    - parent 的 path 改成 `../02-devices_config.csv`，并按同一摘要基础重算 release_id。
 5. 两次 load 之间合法修改客户输入后重新 load，确认建立新的派生快照，第 2、3 步重新通过。
 6. 如果现场使用 `--import-configs`：确认 parent 含 `imported_configs`，第 2、3 步通过。
+7. 隔离副本上让客户 CSV 留一条当前 AIR JSON 没有的 air 行（例如先全量 AIR load 再 `--mini`，或副本的 P2P 删一台
+   后重新生成 AIR json），再做 AIR load：load 不因「02-devices_config.csv 中的 AIR 设备不在 AIR JSON」失败；
+   `99-output/<ts>_air/` 的设备集合与派生清单的 air 行一致；客户 CSV 字节不变。
 
 ### 预期结果
 
-- 正向结果：第 1～3、5、6 步通过；源 CSV 不变；DHCP disabled 时五个 DHCP 输出不变。
+- 正向结果：第 1～3、5～7 步通过；源 CSV 不变；DHCP disabled 时五个 DHCP 输出不变。
 - 拒绝/失败结果：第 4 步的每一项，manual-ztp 预检报 derived inventory 相关错误，monitor 报「派生 inventory」
   相关错误，都发生在连接或改动设备、发布页面之前。
 - 不允许发生的副作用：消费者不写、不修复派生清单；不回退去读客户源 CSV；不改设备配置。
