@@ -128,6 +128,10 @@ class SystemdLoadMainFixture:
         project = root / "DAY0-Prepare" / str(args.project)
         project.mkdir(parents=True)
         (project / "01-global.yaml").write_text("# placeholder\n", encoding="utf-8")
+        # The code tree always has the three collector directories; the worker start pre-creates cron.lock
+        # in them when root acts for a non-root operator (v3.1.2 WP-9 O14, main's load_identity).
+        for area in ("ethernet", "infiniband", "nvlink"):
+            (root / area / "monitor").mkdir(parents=True)
         events: list[tuple] = []
         popen: list[list[str]] = []
         runs: list[tuple[str, ...]] = []
