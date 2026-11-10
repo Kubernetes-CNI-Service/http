@@ -262,7 +262,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=22, help="SSH 端口（默认 22）")
     parser.add_argument(
         "--validation-only", action="store_true",
-        help="仅 AIR/prod 验证：接受精确 ISSUE-0016 验证证明，不是生产发布证明",
+        help="仅 AIR/prod 验证：要求全部测试通过的验证证明；不是最终生产发布证明",
     )
     parser.add_argument("--identity", type=Path, help="SSH 私钥路径")
     parser.add_argument(

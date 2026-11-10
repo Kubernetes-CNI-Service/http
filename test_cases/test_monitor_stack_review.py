@@ -8127,17 +8127,28 @@ class BringupSafetyTests(unittest.TestCase):
                 ),
             )
         with mock.patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(module.SetupError, "export NVOS_INITIAL_PASSWORD"):
+            # v3.1.3 table 6-1 row 3 (guide :746, O4 default: adopt v15; I14): a non-interactive
+            # run reports "initial IB credential unavailable: ..."; an interactive one reads the
+            # hidden 5-second prompt (v15 CURRENT-CONTRACT.md:49 "初始 IB 密码 5 秒/回车默认
+            # admin"), not getpass.  Formerly "export NVOS_INITIAL_PASSWORD" and getpass.
+            with self.assertRaisesRegex(module.SetupError, "initial IB credential unavailable"):
                 module.resolve_initial_ib_password(
                     "NVOS_INITIAL_PASSWORD", interactive=False,
                 )
-            with mock.patch.object(module.getpass, "getpass", return_value="typed-secret"):
+            with mock.patch.object(
+                module.getpass, "getpass",
+                side_effect=AssertionError("the initial IB password uses the hidden 5 s prompt"),
+            ), mock.patch.object(
+                module, "_hidden_password_timeout", return_value="typed-secret",
+            ) as hidden:
                 self.assertEqual(
                     "typed-secret",
                     module.resolve_initial_ib_password(
                         "NVOS_INITIAL_PASSWORD", interactive=True,
                     ),
                 )
+            self.assertEqual(1, hidden.call_count)
+            self.assertEqual(5, hidden.call_args.args[1])
 
     def test_initial_setup_duplicate_ib_address_is_rejected(self):
         module = load_module(

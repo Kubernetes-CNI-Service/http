@@ -1902,14 +1902,13 @@ class ImpactManifestTests(unittest.TestCase):
 
 
 class ApprovalLedgerTests(unittest.TestCase):
-    def test_issue0016_validation_report_accepts_only_three_real_known_failures(self):
+    def test_validation_report_accepts_only_zero_failures_and_baseline_skips(self):
+        # v3.1.3 guide O2 (decided 2026-11-08 00:28) and table 4-3 row 1: the REQ10C narrow
+        # exception retires with --auto, so a validation-only report is accepted only with no
+        # failure at all; the other six rejections are unchanged (AGENTS.md: no weakening).
         report = {
             "tests_run": 3735,
-            "failures": [
-                {"id": test_id,
-                 "traceback": "AssertionError: install silently erased a non-cooperating foreign entry"}
-                for test_id in RUNNER.ISSUE0016_FAILURE_IDS
-            ],
+            "failures": [],
             "errors": [],
             "skipped": [
                 {"id": test_id, "reason": "existing real-environment exclusion"}
@@ -1918,12 +1917,19 @@ class ApprovalLedgerTests(unittest.TestCase):
             "expected_failures": [],
             "unexpected_successes": [],
         }
-        self.assertTrue(RUNNER.issue0016_validation_report_is_exact(report))
+        self.assertTrue(RUNNER.validation_report_is_exact(report))
+        former_exception = (
+            "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
+            "test_unsetup_preserves_noncooperating_foreign_cron_or_stops_before_write"
+        )
         for changed in (
             {**report, "tests_run": 3734},
-            {**report, "failures": report["failures"][:-1]},
-            {**report, "failures": report["failures"] + [{"id": "other", "traceback": "x"}]},
-            {**report, "failures": [{**report["failures"][0], "traceback": "unrelated failure"}] + report["failures"][1:]},
+            # Any failure is refused, including a former ISSUE-0016 case with its old text.
+            {**report, "failures": [{"id": "other", "traceback": "x"}]},
+            {**report, "failures": [{
+                "id": former_exception,
+                "traceback": "AssertionError: unsetup silently erased a non-cooperating foreign entry",
+            }]},
             {**report, "errors": [{"id": "other", "traceback": "x"}]},
             {**report, "skipped": report["skipped"][:-1]},
             {**report, "skipped": report["skipped"] + [{"id": "other", "reason": "x"}]},
@@ -1931,16 +1937,15 @@ class ApprovalLedgerTests(unittest.TestCase):
             {**report, "unexpected_successes": ["other"]},
         ):
             with self.subTest(changed=changed):
-                self.assertFalse(RUNNER.issue0016_validation_report_is_exact(changed))
+                self.assertFalse(RUNNER.validation_report_is_exact(changed))
 
-    def test_issue0016_validation_attestation_is_not_normal_release_proof(self):
+    def test_validation_attestation_is_not_normal_release_proof(self):
+        # Table 4-3 row 2 (O2): the known-failure list is gone; the proof still says it is
+        # not a release proof, and the three "not a release proof" checks are unchanged.
         manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
         snapshot = RUNNER.make_snapshot(ROOT, MANIFEST_PATH, manifest)
         validation = RUNNER.full_suite_attestation(snapshot, validation_only=True)
-        self.assertEqual(
-            list(RUNNER.ISSUE0016_FAILURE_IDS),
-            validation["validation_only"]["known_failed_tests"],
-        )
+        self.assertTrue(validation["validation_only"]["not_a_release_proof"])
         self.assertTrue(RUNNER.full_suite_attestation_is_current(
             snapshot, validation, validation_only=True,
         ))
@@ -1988,9 +1993,9 @@ class ApprovalLedgerTests(unittest.TestCase):
             with mock.patch.object(RUNNER, "run_validation_selection", return_value=0):
                 self.assertEqual(0, RUNNER._one_cycle(args)[0])
             payload = json.loads(approvals.read_text(encoding="utf-8"))
-            self.assertEqual(
-                "ISSUE-0016",
-                payload["full_suite_attestation"]["validation_only"]["issue"],
+            # Table 4-3 row 5 (O2): the retired "issue" field gives way to the release-proof flag.
+            self.assertTrue(
+                payload["full_suite_attestation"]["validation_only"]["not_a_release_proof"],
             )
 
     def test_hash_change_is_pending_and_approval_snapshot_is_exact(self):
@@ -2568,20 +2573,15 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             return self.identity
 
         def runTest(self):
-            if self.outcome == "fail":
-                self.fail(RUNNER.ISSUE0016_FAILURE_FRAGMENT)
             if self.outcome == "skip":
                 self.skipTest("unchanged real-environment skip")
 
     def _exact_validation_suite(self):
+        # Table 4-3 row 6 (O2): no failures any more; the four baseline skips and 3735 in all stay.
         cases = [
-            self._ExactValidationProbe(identity, "fail")
-            for identity in RUNNER.ISSUE0016_FAILURE_IDS
-        ]
-        cases.extend(
             self._ExactValidationProbe(identity, "skip")
             for identity in RUNNER.VALIDATION_BASELINE_SKIP_IDS
-        )
+        ]
         cases.extend(
             self._ExactValidationProbe(f"synthetic.success.{index}", "pass")
             for index in range(3735 - len(cases))
@@ -2730,7 +2730,7 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
             self.assertEqual(0, ordinary_code)
             self.assertEqual(ordinary_code, timed_code)
             self.assertEqual(observed_reports[0], observed_reports[1])
-            self.assertTrue(RUNNER.issue0016_validation_report_is_exact(observed_reports[1]))
+            self.assertTrue(RUNNER.validation_report_is_exact(observed_reports[1]))
             self.assertEqual(2, len(observed_commands))
             self.assertEqual(5, len(observed_commands[0]))
             self.assertEqual(["--timings", str(timing_path)], observed_commands[1][-2:])

@@ -231,13 +231,21 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 if argv == worker_argv:
                     # The leaf's own native hash verifier: real child, never a stub.
                     return real_run(argv, **kwargs)
-                if argv[:2] == ["ssh", "-i"]:
-                    self.assertEqual(argv[2], str(private))
+                if argv[0] == "ssh" and "-i" in argv:
+                    # v15's possession probe is `ssh -4 -i <key> ...` (DEV `ssh -i <key> ...`).
+                    self.assertEqual(argv[argv.index("-i") + 1], str(private))
                     self.assertEqual(argv[-2:], ["admin@203.0.113.2", "true"])
                     self.assertIn("PasswordAuthentication=no", argv)
                     held("simulated_possession_transport")
                     transports.append("possession")
                     return subprocess.CompletedProcess(argv, 0, "", "")
+                if argv[0] == "ssh" and "PreferredAuthentications=publickey" in argv:
+                    # v15 tries the OOB public key first (table 6-1 row 5, guide :748); the
+                    # simulated OOB Leaf refuses it, so the fd OOB password is used.
+                    self.assertEqual(argv[-2], "cumulus@192.0.2.10")
+                    self.assertIn("BatchMode=yes", argv)
+                    transports.append("oob_key_probe")
+                    return subprocess.CompletedProcess(argv, 255, "", "cumulus@192.0.2.10: Permission denied (publickey).\n")
                 self.assertIn(argv[0], ("ssh-keygen", "/usr/bin/ssh-keygen"))
                 if argv[1:] == ["-y", "-f", str(private)]:
                     self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
@@ -269,10 +277,18 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 ethernet = {
                     ("hostname",): "EXAMPLE-JUMP01\n",
                     ("nv", "show", "interface"): "Interface Admin Oper\nswp7 up up\n",
-                    ("ip", "-d", "link", "show"): "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9216\n",
+                    # The access VLAN's Leaf SVI with IPv4 keeps the IB on the Leaf path (v15
+                    # CURRENT-CONTRACT.md:26-27「目标 VLAN 的真实 Leaf SVI 存在且具有 IPv4 时走原 Leaf
+                    # 路径」); v15 reads the Leaf addresses for that decision.
+                    ("ip", "-d", "link", "show"): ("7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9216\n"
+                                                   "8: vlan1@bridge: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9216\n"
+                                                   "    vlan protocol 802.1Q id 1 <REORDER_HDR>\n"),
                     ("bridge", "fdb", "show"): "02:00:00:00:00:01 dev swp7 vlan 1 master bridge\n",
                     ("ip", "neighbor"): "fe80::1 dev swp7 lladdr 02:00:00:00:00:01 REACHABLE\n",
                     ("ifquery", "swp7"): "",
+                    ("ip", "-j", "address", "show"): json.dumps([{
+                        "ifname": "vlan1", "flags": ["UP"], "operstate": "UP",
+                        "addr_info": [{"family": "inet", "local": "192.0.2.10", "prefixlen": 24}]}]),
                 }
                 def eth_transport(*args, **kwargs):
                     command = tuple(args[3])
@@ -302,8 +318,22 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                     held("real_observer_transport")
                     transports.append("observation")
                     return subprocess.CompletedProcess(command, 0, wire, "")
+                def ipv4_transport(*args, **kwargs):
+                    # v15 checks IPv4 SSH readiness on every --apply (owner Q-035 (a)); the
+                    # simulated device answers ready.
+                    transports.append("ipv4")
+                def direct_transport(device, interface, user, password, timeout):
+                    # v15's final management-server -> IB direct read (CURRENT-CONTRACT.md
+                    # 「最终测试由管理服务器直连 IB eth0」, guide :754 P4): the simulated device
+                    # answers on eth0 with its applied configuration and the project target.
+                    self.assertEqual((device.hostname, interface, user), ("EXAMPLE-IB01", "eth0", "admin"))
+                    self.assertTrue(password == kat["PASSWORD"], "direct check uses the verified project target")
+                    initial.verify_state(device, initial.parse_nvue_state(_MANAGED_SUCCESS_STATE))
+                    transports.append("direct_ssh")
                 for name, callback in (("run_on_ethernet", eth_transport), ("run_on_ib", ib_transport),
-                                       ("_run_initial_observation", observation_transport)):
+                                       ("_run_initial_observation", observation_transport),
+                                       ("verify_ipv4_login", ipv4_transport),
+                                       ("verify_management_direct_ssh", direct_transport)):
                     patches.enter_context(mock.patch.object(initial, name, side_effect=callback))
                 patches.enter_context(mock.patch.object(initial, "interactive_run", side_effect=AssertionError("No interactive device transport")))
                 # Present-global strict path: PUBLIC adapter for the fresh leaf's private phase
@@ -353,9 +383,13 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
             patches.enter_context(mock.patch.object(socket, "socket", side_effect=AssertionError("No network")))
             patches.enter_context(mock.patch.object(threading.Thread, "start", side_effect=AssertionError("No worker")))
             out, err = io.StringIO(), io.StringIO()
+            # Table 6-1 row 4 (guide :747): passwords come through --credentials-fd (WP-5), not
+            # argv; the simulated device already uses the project target (initial == target).
+            fd_argv = patches.enter_context(req10b_fixtures.credentials_fd(
+                {**req10b_fixtures.strict_fd_payload(kat), "jump_passwords": {"EXAMPLE-JUMP01": "SYNTHETIC_ONLY"}}))
             argv = ["--project", str(project), "--", "--ib-csv", str(csv_path), "--p2p", str(p2p),
                     "--target-cache", str(cache), "--report", str(report_path), "--snapshot-dir", str(project / "snapshots"),
-                    "--apply", "--yes", "--execution-mode", "management", "--ethernet-password", "SYNTHETIC_ONLY"]
+                    "--apply", "--yes", "--execution-mode", "management", *fd_argv]
             with redirect_stdout(out), redirect_stderr(err):
                 try:
                     sys.setprofile(observe)
@@ -366,7 +400,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
             self.assertEqual(err.getvalue(), "")
             self.assertEqual(1, len(witnesses))
             req10b_fixtures.assert_strict_management_path(self, witnesses[0], global_path=global_path,
-                                                         devices=("EXAMPLE-IB01",))
+                                                         devices=("EXAMPLE-IB01",),
+                                                         # --credentials-fd: a non-interactive policy (WP-5).
+                                                         interactive=False)
             self.assertEqual(len(main_globals), 1)
             self.assertEqual(crypto, ["generate", "fingerprint:laptop.pub", "fingerprint:mgmt-server.pub", "derive"])
             self.assertEqual(events.count("pending"), 1)

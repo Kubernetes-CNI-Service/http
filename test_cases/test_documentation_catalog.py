@@ -685,9 +685,11 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("--check", runner)
         self.assertIn("--require-full", runner)
         self.assertNotIn("-m unittest -v test_cases.run_related_tests", runner)
+        # v3.1.3 guide WP-4 (O2): the ISSUE-0016 phrases left with the REQ10C exception; the
+        # manual still says validation-only is not a release permit.
         for required in (
-            "--validation-only", "AIR/prod", "非 dry-run", "ISSUE-0016",
-            "恰好三项", "FAIL", "无其他 failure/error/新增 skip",
+            "--validation-only", "AIR/prod", "非 dry-run",
+            "无其他 failure/error/新增 skip",
             "普通发布证明检查必须拒绝",
         ):
             self.assertIn(required, runner)
@@ -715,9 +717,9 @@ class DocumentationCatalogTests(unittest.TestCase):
         updater = load_path("manual_validation_only_contract", USER_MANUAL_SCRIPT)
         runner = updater.script_profile(ROOT, "test_cases/run_related_tests.py")
         body = " ".join(runner.values())
+        # v3.1.3 guide WP-4 (O2): same intent without the retired ISSUE-0016 phrases.
         for required in (
-            "--validation-only", "AIR/prod", "非 dry-run", "ISSUE-0016",
-            "恰好三项", "安装", "自动移除", "unsetup", "FAIL",
+            "--validation-only", "AIR/prod", "非 dry-run",
             "无其他 failure/error/新增 skip", "普通发布证明", "拒绝",
         ):
             self.assertIn(required, body)

@@ -70,14 +70,6 @@ ROOT_ENTRYPOINT_SCENARIO = "root-entrypoint-workflow"
 ROOT_ENTRYPOINT_NOT_COVERED = (
     "NOT COVERED (requires Linux EUID 0 private namespace)"
 )
-ISSUE0016_FAILURE_IDS = (
-    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
-    "test_install_preserves_noncooperating_foreign_cron_or_stops_before_write",
-    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
-    "test_remove_preserves_noncooperating_foreign_cron_or_stops_before_write",
-    "test_cases.test_req10c_auto_workflow.Req10CAutoUnsetupWorkflowTests."
-    "test_unsetup_preserves_noncooperating_foreign_cron_or_stops_before_write",
-)
 VALIDATION_BASELINE_SKIP_IDS = (
     "test_cases.test_docker_management_ssh_key.DockerManagementSshKeyWorkflowTests."
     "test_real_deploy_entrypoint_drives_locked_helper_then_11_load",
@@ -88,7 +80,6 @@ VALIDATION_BASELINE_SKIP_IDS = (
     "test_cases.test_monitor_stack_review.ControlPlaneTests."
     "test_yaml_backup_memory_socket_is_private_and_inode_pinned",
 )
-ISSUE0016_FAILURE_FRAGMENT = "silently erased a non-cooperating foreign entry"
 GENERATED_RUNTIME_SCRIPTS = frozenset({
     "ztp/ztp-bootstrap_oob.sh",
     "ztp/ztp-bootstrap_oobofoob.sh",
@@ -1243,8 +1234,6 @@ def full_suite_attestation(
     }
     if validation_only:
         result["validation_only"] = {
-            "issue": "ISSUE-0016",
-            "known_failed_tests": list(ISSUE0016_FAILURE_IDS),
             "baseline_skipped_tests": list(VALIDATION_BASELINE_SKIP_IDS),
             "not_a_release_proof": True,
         }
@@ -1604,8 +1593,12 @@ def run_selection(root: Path, selection: Selection, verbose: bool) -> int:
     return 0 if result.returncode == 0 else 1
 
 
-def issue0016_validation_report_is_exact(value: object) -> bool:
-    """Approve only the original three FAILs, with no new skips or masking."""
+def validation_report_is_exact(value: object) -> bool:
+    """Approve only a report with no failure at all, the baseline skips, and no masking.
+
+    The REQ10C narrow exception (three known FAILs) retired with initial-setup --auto in
+    v3.1.3 (guide O2); every other check is unchanged.
+    """
     if not isinstance(value, dict) or set(value) != {
         "tests_run", "failures", "errors", "skipped", "expected_failures",
         "unexpected_successes",
@@ -1618,17 +1611,7 @@ def issue0016_validation_report_is_exact(value: object) -> bool:
             return False
     if value["errors"] or value["expected_failures"] or value["unexpected_successes"]:
         return False
-    failures = value["failures"]
-    if len(failures) != len(ISSUE0016_FAILURE_IDS):
-        return False
-    if not all(
-        isinstance(item, dict) and set(item) == {"id", "traceback"}
-        and isinstance(item["id"], str) and isinstance(item["traceback"], str)
-        and ISSUE0016_FAILURE_FRAGMENT in item["traceback"]
-        for item in failures
-    ):
-        return False
-    if {item["id"] for item in failures} != set(ISSUE0016_FAILURE_IDS):
+    if value["failures"]:
         return False
     skipped = value["skipped"]
     if len(skipped) != len(VALIDATION_BASELINE_SKIP_IDS):
@@ -1695,12 +1678,12 @@ def run_validation_selection(
         except (OSError, ValueError, ImpactError) as exc:
             print(f"validation-only report unavailable: {exc}", file=sys.stderr)
             return 1
-        if completed.returncode != 0 or not issue0016_validation_report_is_exact(report):
-            print("validation-only test report is not the exact ISSUE-0016 exception", file=sys.stderr)
+        if completed.returncode != 0 or not validation_report_is_exact(report):
+            print("validation-only test report is not an exact all-pass report", file=sys.stderr)
             return 1
         print(
-            "VALIDATION ONLY: three ISSUE-0016 tests remain FAIL; "
-            "four unchanged real-environment skips; all others passed; "
+            "VALIDATION ONLY: all tests passed; "
+            "four unchanged real-environment skips; "
             "this is not a final release proof"
         )
         return 0
@@ -3622,8 +3605,8 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--validation-only", action="store_true",
-        help=("AIR/prod validation only: require exactly the three real ISSUE-0016 "
-              "FAILs and no other failure, error, or new skip; never a release proof"),
+        help=("AIR/prod validation only: require all tests to pass with no failure, "
+              "error, or new skip; never a release proof"),
     )
     result.add_argument(
         "--timings", type=Path, metavar="ABSOLUTE_NEW_PATH",

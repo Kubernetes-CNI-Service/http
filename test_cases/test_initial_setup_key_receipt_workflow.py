@@ -179,11 +179,13 @@ class InitialKeyReceiptRealWorkflowTests(unittest.TestCase):
         }
         with mock.patch.dict(os.environ, env), redirect_stdout(output):
             try:
+                # 06 D1a-I: the IB credential is passed explicitly (the value used before).
                 returned = APP.run_key_stage(
                     target, APP.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17"),
                     "PUBLIC-OOB-USER", "PUBLIC-OOB-NOT-USED-BY-MODEL",
                     "admin", 2, keys, local=False, apply=True, authorized=True,
-                    management_private_key=management_private_key)
+                    management_private_key=management_private_key,
+                    ib_password="PUBLIC-OOB-NOT-USED-BY-MODEL")
             except BaseException as caught:
                 error = caught
         events_file = model / "events.jsonl"

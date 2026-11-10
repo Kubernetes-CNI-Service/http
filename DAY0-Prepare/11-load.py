@@ -12940,7 +12940,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="仅显示动作，不安装、生成或启动")
     parser.add_argument(
         "--validation-only", action="store_true",
-        help=("仅 AIR/prod 验证：正式门禁只接受精确三项 ISSUE-0016 已知 FAIL；"
+        help=("仅 AIR/prod 验证：要求全部测试通过的验证证明；"
               "不是最终生产发布证明"),
     )
     parser.add_argument(

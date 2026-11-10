@@ -215,9 +215,9 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         env=root/"auto.env"
         env.write_text("NVOS_INITIAL_PASSWORD="+initial+"\nNVOS_TARGET_PASSWORD="+self.kat["PASSWORD"]+"\nZTP_ETH_PASSWORD_EXAMPLE_JUMP01="+OOB+"\n",encoding="utf-8")
         env.chmod(0o600)
-        # Actual data reader, not a dictionary injected into a consumer.
-        values=APP.read_auto_credentials(env)
-        self.assertTrue(values["NVOS_INITIAL_PASSWORD"]==initial and values["NVOS_TARGET_PASSWORD"]==self.kat["PASSWORD"])
+        # v3.1.3 guide table 4-2: the auto.env reader retires with --auto; the target password is
+        # given directly to ProjectPasswordPolicy(target_password=...) by each test.  The file
+        # stays as a credential leaf whose bytes the protocol must preserve (drive()).
         control=root/"foreign-control";control.write_bytes(b"PUBLIC-CONTROL\n");control.chmod(0o600)
         peer=root/"owned-peer.py";peer.write_text(PEER_PROGRAM,encoding="utf-8");peer.chmod(0o600)
         config=root/"peer-config.json";config.write_text(json.dumps({"case":case,"initial":initial,"target":self.kat["PASSWORD"],"oob":OOB,"global":str(global_path)}),encoding="utf-8");config.chmod(0o600)

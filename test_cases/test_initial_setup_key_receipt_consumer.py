@@ -91,10 +91,11 @@ class InitialKeyReceiptConsumerTests(unittest.TestCase):
                                    side_effect=AssertionError("unexpected prompt")), \
                  redirect_stdout(printed):
                 try:
+                    # 06 D1a-I: the IB credential is passed explicitly (the value used before).
                     result = APP.run_key_stage(
                         target, neighbor, "PUBLIC-OOB-USER", "PUBLIC-OOB-PASSWORD",
                         "admin", 2, keys, local=False, apply=True, authorized=True,
-                        management_private_key=private,
+                        management_private_key=private, ib_password="PUBLIC-OOB-PASSWORD",
                     )
                 except BaseException as error:
                     caught = error

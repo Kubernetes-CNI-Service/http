@@ -58,8 +58,12 @@ class InitialHandoffRealReaderTransportWorkflowTests(unittest.TestCase):
                     INITIAL.run_on_ethernet(device, "PUBLIC-user", "PUBLIC-ONLY",
                                             ["hostname"], 5)
             external.assert_not_called()
-            self.assertEqual(["hostname"], INITIAL.outer_ssh_command(
-                device, "PUBLIC-user", ["hostname"], 5, local=True))
+            # T14 (guide :2300; P3c map :341): the local carrier is the remote fixed-PATH exec
+            # (v15 reference outer_ssh_command :1960-1970).
+            self.assertEqual(
+                ["sh", "-c",
+                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"],
+                INITIAL.outer_ssh_command(device, "PUBLIC-user", ["hostname"], 5, local=True))
 
     def test_supplied_invalid_metadata_is_rejected_by_all_three_before_dispatch(self):
         with tempfile.TemporaryDirectory() as name:

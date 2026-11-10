@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Canonical unittest discovery with an exact, machine-readable result report.
 
-The ordinary unittest output still reports the three ISSUE-0016 cases as FAIL.
-Only the parent governance runner may turn that exact result into a validation-
-only attestation. This helper never edits a test, manifest, or approval ledger.
+The ordinary unittest output is unchanged.  Only the parent governance runner may
+turn an exact all-pass result into a validation-only attestation (the REQ10C
+known-FAIL exception retired with --auto in v3.1.3, guide O2).  This helper never
+edits a test, manifest, or approval ledger.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import sys
 import time
 import unittest
 
-from test_cases.run_related_tests import issue0016_validation_report_is_exact
+from test_cases.run_related_tests import validation_report_is_exact
 
 
 class TimedTextTestResult(unittest.TextTestResult):
@@ -119,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
             handle.flush()
             os.fsync(handle.fileno())
-    return 0 if issue0016_validation_report_is_exact(report) else 1
+    return 0 if validation_report_is_exact(report) else 1
 
 
 if __name__ == "__main__":

@@ -104,7 +104,9 @@ class InitialClosedFactContractTests(unittest.TestCase):
         per_call_native = []
         delivered = []
         read_delivered = []
-        allowed = (INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ)
+        # WP-6 fixture (class 4): the strict Initial stage also reads ZTP through the
+        # helper (owner 04 Q-035 (a) ①; P3c map 2.3 :118); BASE answers it disabled.
+        allowed = (INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ, BASE.ZTP_SHOW)
 
         def helper(*args, **kwargs):
             if len(args) != 8 or type(args[7]) is not list:
@@ -151,12 +153,16 @@ class InitialClosedFactContractTests(unittest.TestCase):
             "consent_count": consent.call_count,
         }
 
-    def _assert_reached_prefix(self, observed, expected, *, consent_count):
+    def _assert_reached_prefix(self, observed, expected, *, consent_count, calls=None):
         # All entries are closed PUBLIC commands or safe booleans/counts.
+        # WP-6: `calls` is the transport order when it differs from the helper order, i.e. it
+        # holds the pending-diff read before the Initial writes (T15, guide :2301), DEV's plain
+        # read outside any helper (f2713f5 main :6256-6261), the only call without a helper gate.
+        calls = expected if calls is None else calls
         self.assertEqual([], observed["errors"])
         self.assertEqual(expected, observed["helpers"])
-        self.assertEqual(expected, [row["command"] for row in observed["calls"]])
-        self.assertEqual([True] * len(expected), observed["per_call_native"],
+        self.assertEqual(calls, [row["command"] for row in observed["calls"]])
+        self.assertEqual([command != BASE.DIFF for command in calls], observed["per_call_native"],
                          "native permission must precede dispatch in this same real helper")
         self.assertEqual([True] * len(expected), observed["delivered"],
                          "every modeled transport must return through the real helper")
@@ -187,12 +193,19 @@ class InitialClosedFactContractTests(unittest.TestCase):
                 observed = self._real_authority_action(
                     policy, target, neighbor, current, BASE_BODY + BOTH_ON,
                     authorized=False)
+                # WP-6 (class 3, owner 04 Q-035 (a) ①; D1a2 report 4.3 R1/R3/R5/R6): v15's Stage 1
+                # skeleton (P3c map 2.3 :118 "initial_configuration_commands、ZTP 已关核验"; map
+                # D32d :284) reads ZTP first, writes both setters (not only the disabled one) with
+                # apply and save after consent, reads back, reads ZTP again and returns the readback
+                # (06 D1a-L).  `setter` names the disabled fact; both are written.  T15: pending diff.
+                helpers = [BASE.ZTP_SHOW, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ, BASE.ZTP_SHOW]
                 self._assert_reached_prefix(
-                    observed, [setter, APPLY, SAVE, READ], consent_count=1)
+                    observed, helpers, consent_count=1,
+                    calls=[BASE.ZTP_SHOW, BASE.DIFF, *helpers[1:]])
                 self.assertTrue(observed["caught"] is None,
                                 "qualified single disabled value was refused")
                 self.assertTrue(type(observed["outcome"]) is tuple and
-                                observed["outcome"] == (True, False),
+                                observed["outcome"] == (BASE_BODY + BOTH_ON, True),
                                 "authorized Initial transaction returned unexpected flags")
                 self.assertTrue(before == self._snapshot(path),
                                 "Initial changed the authority full identity or bytes")
@@ -264,8 +277,13 @@ class InitialClosedFactContractTests(unittest.TestCase):
                     policy, target, neighbor, BASE_BODY + AUTO_OFF + ZTP_ON,
                     returned_body, authorized=True)
                 # Inspect genuine successful helper prefix before the domain outcome.
+                # WP-6 (class 3; D1a2 report 4.3 R1/R3): the prefix starts with the helper's ZTP read
+                # (owner 04 Q-035 (a) ①) and writes both v15 setters (P3c map 2.3 :118, R3, 04 Q-039);
+                # the pending-diff read precedes the writes (T15, guide :2301).
+                helpers = [BASE.ZTP_SHOW, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ]
                 self._assert_reached_prefix(
-                    observed, [INITIAL_AUTO, APPLY, SAVE, READ], consent_count=0)
+                    observed, helpers, consent_count=0,
+                    calls=[BASE.ZTP_SHOW, BASE.DIFF, *helpers[1:]])
                 self.assertTrue(before == self._snapshot(path),
                                 "readback refusal changed authority full identity or bytes")
                 self._safe_closed_failure(observed["caught"], observed["outcome"])

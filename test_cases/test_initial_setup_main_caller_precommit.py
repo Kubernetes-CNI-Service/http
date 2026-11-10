@@ -93,7 +93,9 @@ def show_state(S):
     if C.get("caller_case") == "preflight-bad":
         lines = [line for line in lines if line != "nv set interface eth0-1 ipv4 gateway 203.0.113.1"]
         lines.append("nv set interface eth0-1 ipv4 gateway 203.0.113.254")
-    if C.get("caller_case") == "refresh-conflict" and S.get("post_initial_reads", 0) >= 2:
+    # The conflict appears in the post-Initial readback; the v15 skeleton recomputes the later
+    # stages from that one readback (06 D1a-L; v15 :4199-4204), so it is the first such read.
+    if C.get("caller_case") == "refresh-conflict" and S.get("post_initial_reads", 0) >= 1:
         lines = [line for line in lines if not line.startswith("nv set interface eth0-1 ipv4 gateway ")]
         lines.append("nv set interface eth0-1 ipv4 gateway 203.0.113.254")
     return "\n".join(lines) + "\n"
@@ -103,7 +105,7 @@ def business(command, S):
             S["post_initial_reads"] = S.get("post_initial_reads", 0) + 1
         body = show_state(S)
         record("caller-show", after_initial=S.get("post_initial_reads", 0),
-               conflict=C.get("caller_case") == "refresh-conflict" and S.get("post_initial_reads", 0) >= 2)
+               conflict=C.get("caller_case") == "refresh-conflict" and S.get("post_initial_reads", 0) >= 1)
         return body, 0
     if command == ["nv", "config", "diff", "-o", "commands"]:
         S["caller_probes"] = S.get("caller_probes", 0) + 1
@@ -126,7 +128,9 @@ def business(command, S):
             expected.append(["nv","set","system","config","auto-save","state","enabled"])
         if S["initial_facts"]["ztp"] != "enabled":
             expected.append(["nv","set","system","ztp","config-save","enabled"])
-        if expected and pending == expected:
+        # The modeled NVOS also commits the v15 Initial transaction, which sets both values
+        # even when one is already enabled (P3c map 2.3 :118, D32d :284; R3, 04 Q-039).
+        if expected and pending in (expected, INITIAL):
             S["initial_facts"] = {"autosave":"enabled","ztp":"enabled"}
             S["initial"] = True
             S["initial_transaction_done"] = True
@@ -387,7 +391,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
         if result["error"] is not None or result["rc"] != 0:
             self.fixed_hold()
         cache = json.loads(f["cache"].read_text())
-        self.assertEqual(4, cache["version"])
+        # Table 6-1 row 6 (guide :749): v15 CURRENT-CONTRACT.md:20 "cache version 5".
+        self.assertEqual(5, cache["version"])
         self.assertTrue(self.kat["PASSWORD"] not in f["cache"].read_text(),
                         "P1 cache exposed target; value suppressed")
         f["caller"] = dict(consent=[], stage=[], classifier=[], returned_diff=[], diff_entry=[], timeline=[],
@@ -395,10 +400,15 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                            slots=[], reaps=[], fixture_reaps=[], product_depth=0)
 
     def run_case(self, folder, **scene):
+        check = scene["case"] in ("readonly-initial", "readonly-target", "readonly-expiry", "readonly-network")
+        if not check:
+            # Owner Q-035 (a), guide :438 (v15 inspect_ib_device; P3c map 4.5 P1): an --apply run
+            # needs the device's current password to equal the project target, so the modeled
+            # device of an --apply scene already uses the target (fixture, not an expectation).
+            scene.setdefault("credential", "target")
         f = self.fixture(folder, **scene)
         self.p1(f)
         before = len(self.events(f))
-        check = f["case"] in ("readonly-initial", "readonly-target", "readonly-expiry", "readonly-network")
         result = self.invoke(f, *([] if check else ["--apply"]))
         fresh = self.events(f)[before:]
         # The inherited invoke already checks secret-free output/events; this
@@ -443,16 +453,23 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                 if scene["case"] == "decline":
                     self.assertEqual([], self.writes(events))
                     self.assertEqual([], self.diffs(events))
-                    self.assertEqual([], w["fetch"])
-                    self.assertEqual([], w["native"])
-                    self.assertEqual([], w["helper"])
+                    # Owner Q-035 (a) item 4 (04 Q-035; P3c map D32d :284): with --apply the
+                    # current IB password must equal the project target, so the target is fetched
+                    # and natively verified at authentication, before the declined consent.
+                    self.assertTrue(bool(w["fetch"]) and bool(w["native"])
+                                    and all(row["IB"] and row["target"] for row in w["native"]))
+                    # Owner Q-035 (a) item 1: the strict Initial stage reads ZTP through the
+                    # authorized helper before asking; nothing else reaches the helper.
+                    self.assertEqual([("nv", "show", "system", "ztp")], w["helper"])
                     self.assertFalse(any(event["kind"] == "caller-show" and event["after_initial"] for event in events))
                 else:
                     self.assert_success(result)
                     self.assertTrue(bool(w["native"]) and all(row["IB"] for row in w["native"]))
                     self.assertTrue(bool(w["gate"]) and all(w["gate"]))
                     if scene["case"] == "present-noop":
-                        self.assertEqual(["selector-return", "consent-granted", "diff-entry", "diff-return"]
+                        # P3c map D32d :284 (E10, 04 Q-039; 06 D1a-B): the v15 stage skeleton asks
+                        # for consent at the first write stage, after its empty-pending probe (T15).
+                        self.assertEqual(["selector-return", "diff-entry", "diff-return", "consent-granted"]
                                          + ["setter-entry"] * 4, w["timeline"],
                                          "actual consent and probe return must precede Services setters")
                         self.assertTrue(not any(event.get("command") in (AUTO,ZTP) for event in events))
@@ -461,14 +478,22 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                         self.assertEqual(1, len(self.diffs(events)))
                     else:
                         mutations = [event["command"] for event in events if event["kind"] == "mutation"]
-                        self.assertEqual([AUTO], mutations)
+                        # P3c map 2.3 :118, D32d :284 (R3, 04 Q-039; 06 D1a-B): the v15 Initial
+                        # transaction writes both settings (D1a2 report 4.3 R3).
+                        self.assertEqual([AUTO, ZTP], mutations)
                         self.assertEqual(1, sum(event["kind"] == "apply-y" for event in events))
                         self.assertEqual(1, sum(event["kind"] == "save" for event in events))
-                        self.assertEqual([1,2], [event["after_initial"] for event in events
+                        # 06 D1a-L (guide :487; v15 :4199-4204): Initial returns its one readback
+                        # and the later stages are recomputed from it, so there is one
+                        # post-Initial read and run_initial_stage returns (readback, authorized).
+                        self.assertEqual([1], [event["after_initial"] for event in events
                                               if event["kind"] == "caller-show" and event["after_initial"]])
-                        self.assertTrue((True,False) in w["stage"])
-                        self.assertEqual([dict(initial_pair=True, conflict=False)] * 2,
-                                         w["helper_reads"], "both real authorized readbacks must return")
+                        self.assertTrue(any(type(body) is str and authorized is True
+                                            and all(row in body.splitlines()
+                                                    for row in PUBLIC_INITIAL_ROWS.splitlines())
+                                            for body, authorized in w["stage"]))
+                        self.assertEqual([dict(initial_pair=True, conflict=False)],
+                                         w["helper_reads"], "the real authorized readback must return")
                         self.assertEqual(1, len(self.diffs(events)))
 
     def test_pending_owner_classification_is_not_commit_authority(self):
@@ -484,7 +509,11 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                 if scene["case"] == "KEY-only":
                     self.assert_success(result)
                     self.assertEqual([], self.diffs(events))
-                    self.assertEqual([], [e for e in events if e["kind"] in ("mutation","apply-y","save","ipv4-read")])
+                    # Owner Q-035 (a) item 3 (04 Q-035; P3c map D32d :284): every --apply verifies
+                    # the IPv4 login after Network, so a KEY-only run reads IPv4 once and still
+                    # writes nothing but the keys.
+                    self.assertEqual([], [e for e in events if e["kind"] in ("mutation","apply-y","save")])
+                    self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in events))
                     self.assertEqual(1, sum(e["kind"] == "key-shell" for e in events))
                 else:
                     self.assert_hold(result)
@@ -502,8 +531,11 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                     self.assertEqual([], [e for e in events if e.get("command") not in (AUTO,ZTP)
                                          and e["kind"] == "mutation"])
                     if expected == 0:
-                        self.assertEqual([], w["fetch"])
-                        self.assertEqual([], w["native"])
+                        # Owner Q-035 (a) item 4: with --apply the current password must equal
+                        # the project target, so the target is fetched and natively verified at
+                        # authentication, before the pending refusal.
+                        self.assertTrue(bool(w["fetch"]) and bool(w["native"])
+                                        and all(row["IB"] and row["target"] for row in w["native"]))
 
     def test_actual_preflight_and_changed_only_refresh(self):
         scenes = (
@@ -517,35 +549,71 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                 w = f["caller"]
                 if scene["case"] == "preflight-bad":
                     self.assert_hold(result)
-                    self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
+                    # Owner Q-035 (a) item 4: the --apply scene's device already uses the project
+                    # target, so the successful selector returns the target, not INITIAL.
+                    self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["target"]
                                     and not w["selector"][0]["required"] and w["selector"][0]["bad_gateway"],
-                                    "actual successful INITIAL selector must return independently wrong gateway body")
-                    self.assertTrue(any(row["bad_gateway"] and row["domain_rejected"] and not row["returned"]
-                                        for row in w["network_constructor"]),
-                                    "real pure Network constructor must actually reject that body")
+                                    "actual successful selector must return independently wrong gateway body")
+                    # Owner Q-035 (a) item 2 (04 Q-035; v15 CURRENT-CONTRACT.md:54): a partial or
+                    # conflicting Network is refused before any write, so the Network setter
+                    # constructor is never entered and the report names the conflict.
+                    self.assertEqual([], w["network_constructor"],
+                                     "conflicting Network is refused before the setter constructor")
+                    self.assertTrue("conflict" in result["stdout"],
+                                    "the refusal must name the Network conflict")
                     self.assertEqual([], self.writes(events))
                     self.assertEqual([], w["helper"])
-                    self.assertEqual([], w["fetch"])
-                    self.assertEqual([], w["native"])
+                    # Owner Q-035 (a) item 4: the target is fetched and natively verified at
+                    # authentication, before the refusal.
+                    self.assertTrue(bool(w["fetch"]) and bool(w["native"])
+                                    and all(row["IB"] and row["target"] for row in w["native"]))
                 else:
                     mutations = [e["command"] for e in events if e["kind"] == "mutation"]
                     self.assertEqual([AUTO,ZTP], mutations)
                     self.assertEqual(1, sum(e["kind"] == "apply-y" for e in events))
                     self.assertEqual(1, sum(e["kind"] == "save" for e in events))
-                    self.assertEqual([1,2], [e["after_initial"] for e in events
-                                            if e["kind"] == "caller-show" and e["after_initial"]])
-                    self.assertTrue((True,False) in w["stage"])
-                    self.assertEqual([dict(initial_pair=True, conflict=False),
-                                      dict(initial_pair=True, conflict=scene["case"] == "refresh-conflict")],
+                    # 06 D1a-L (guide :487; v15 :4199-4204): Initial returns its one readback,
+                    # run_initial_stage returns (readback, authorized) and the later stages are
+                    # recomputed from that readback; there is no second refresh read.
+                    self.assertEqual([1], [e["after_initial"] for e in events
+                                          if e["kind"] == "caller-show" and e["after_initial"]])
+                    self.assertTrue(any(type(body) is str and authorized is True
+                                        and all(row in body.splitlines()
+                                                for row in PUBLIC_INITIAL_ROWS.splitlines())
+                                        for body, authorized in w["stage"]))
+                    self.assertEqual([dict(initial_pair=True, conflict=scene["case"] == "refresh-conflict")],
                                      w["helper_reads"], "actual helper return must precede caller qualification")
                     self.assertEqual(1, len(self.diffs(events)))
                     if scene["case"] == "refresh-good":
                         self.assert_success(result)
-                        self.assertFalse(any(e["kind"] == "ipv4-read" for e in events))
+                        # Owner Q-035 (a) item 3: every --apply verifies the IPv4 login once.
+                        self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in events))
                     else:
                         self.assert_hold(result)
                         self.assertTrue(any(e["kind"] == "caller-show" and e["conflict"] for e in events))
                         self.assert_no_later(events)
+
+    def test_apply_with_initial_login_is_refused_before_consent_and_helper(self):
+        # 06 WP6-a8 (WP-6 review A wa-4): the --apply scene whose device still logs in with the
+        # initial password.  Owner Q-035 (a) item 4 (guide :438; P3c map 4.5 P1 :356): with --apply
+        # the current IB password must equal the project target, so this device is stopped (b-5)
+        # before the first-change consent and before the authorized helper; a failed device makes
+        # the run INCOMPLETE, exit 2 (table 6-1 row 11, guide :754).
+        with tempfile.TemporaryDirectory(prefix="caller-initial-apply-") as folder:
+            f, result, events = self.run_case(folder, case="initial-apply", facts=("absent", "absent"),
+                                              network=False, services=True, credential="initial")
+            w = f["caller"]
+            self.assertEqual([], w["consent"], "b-5 refuses before the first-change consent")
+            self.assertEqual([], w["helper"], "b-5 refuses before the authorized helper")
+            self.assertEqual([], self.writes(events))
+            self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
+                            and not w["selector"][0]["required"],
+                            "the read-only authentication selected the initial password")
+            self.assertTrue(any(row["IB"] and not row["target"] and not row["matched"] for row in w["native"]),
+                            "the initial password is checked against the project target and does not match")
+            self.assertTrue(result["error"] is None and result["rc"] == 2,
+                            "a device stopped by b-5 makes the run INCOMPLETE (2)")
+            self.assertIn("current IB password does not match project global", result["stdout"])
 
     def test_checkonly_lazy_selected_current_and_actual_diff_report(self):
         scenes = (
@@ -566,31 +634,31 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                          2 if scene["case"] == "readonly-initial" else 1)
                 self.assertEqual(total, len(inner))
                 if scene["case"] in ("readonly-initial","readonly-target"):
-                    self.assert_success(result)
-                    self.assertEqual(1, len(self.diffs(events)))
-                    # Diff is an additional ordinary SSH read, counted apart
-                    # from auth-probe sessions and uses the selected credential.
+                    # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): a check-only run that
+                    # finds work left (here the public keys to install) ends INCOMPLETE, exit 2.
+                    self.assertTrue(result["error"] is None and result["rc"] == 2,
+                                    "check-only with remaining work must end INCOMPLETE (2)")
+                    # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59): the
+                    # v15 check-only reads no pending diff; its one ordinary read after selection
+                    # is the ZTP state (Q-035 item 1), counted apart from auth-probe sessions, and it
+                    # uses the selected credential.
+                    self.assertEqual(0, len(self.diffs(events)))
                     auth = [e for e in inner if e["operation"] == "auth-probe-readonly"]
                     self.assertEqual(2 if scene["case"] == "readonly-target" else 1, len(auth))
-                    self.assertEqual(1, len(w["returned_diff"]))
-                    row = w["returned_diff"][0]
-                    self.assertEqual(["selector-return", "diff-entry", "diff-return"],
-                                     w["timeline"], "actual selected CURRENT must precede the real diff")
+                    self.assertEqual([], w["returned_diff"])
+                    self.assertEqual([], w["diff_entry"])
+                    self.assertEqual(["selector-return"], w["timeline"])
                     expected_role = "target" if scene["case"] == "readonly-target" else "initial"
                     self.assertTrue(len(w["selector"]) == 1 and not w["selector"][0]["required"]
                                     and w["selector"][0][expected_role],
                                     "one actual nonrequired selector result must establish selected CURRENT")
-                    self.assertTrue(len(w["diff_entry"]) == 1 and w["diff_entry"][0][expected_role]
-                                    and row[expected_role]
-                                    and w["selector"][0]["native"] == w["diff_entry"][0]["native"] == row["native"]
-                                    and w["selector"][0]["fetch"] == w["diff_entry"][0]["fetch"] == row["fetch"],
-                                    "selected return to actual diff entry/return cannot acquire additional authority")
-                    self.assertTrue(row["empty"] and row["rc"] == 0 and row["phase"] is None
-                                    and row["pam"] is False and not row["new_password"])
-                    self.assertTrue(row["target"] if scene["case"] == "readonly-target" else row["initial"],
-                                    "diff must use actual selected current, not a desired role")
-                    self.assertEqual(row["native"], len(w["native"]))
-                    self.assertEqual(row["fetch"], len(w["fetch"]))
+                    reads = [e for e in inner if e["operation"] is None]
+                    self.assertTrue(len(reads) == 1 and reads[0]["command"] == ["nv", "show", "system", "ztp"]
+                                    and reads[0]["phase"] is False and reads[0][expected_role],
+                                    "the ZTP read must use actual selected current, not a desired role")
+                    self.assertTrue(w["selector"][0]["native"] == len(w["native"])
+                                    and w["selector"][0]["fetch"] == len(w["fetch"]),
+                                    "the selected return to the report cannot acquire additional authority")
                     if scene["case"] == "readonly-initial":
                         self.assertEqual([], w["fetch"])
                         self.assertEqual([], w["native"])
@@ -628,8 +696,11 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
     def test_admitted_targets_and_declared_project_survive_second_payload_read(self):
         import stat
         from functools import wraps
+        # Table 6-1 row 6 (guide :749): a v15 cache-version-5 target record also carries
+        # login_interface (v15 CURRENT-CONTRACT.md:20; RUNBOOK.md:22 eth0 entry).
         device_fields = ("hostname", "dev_type", "login_ip", "eth0_prefix",
-                         "eth0_gateway", "eth0_mac", "eth1_prefix", "eth1_gateway")
+                         "eth0_gateway", "eth0_mac", "eth1_prefix", "eth1_gateway",
+                         "login_interface")
         cases = ("MATCH", "TARGET-MISMATCH", "ALIAS-DISAPPEARS")
         for case in cases:
             with self.subTest(admission=case), tempfile.TemporaryDirectory(prefix="caller-admission-") as folder:
@@ -860,19 +931,20 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                 self.assertFalse(f["credentials"].exists() or f["marker"].exists() or f["terminal"].exists())
                 if case == "MATCH":
                     # Behavior failure is a real assertion RED, not a fixture HOLD.
-                    self.assert_success(result)
+                    # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): the admitted
+                    # check-only run still has public keys to install, so it ends INCOMPLETE (2).
+                    self.assertTrue(result["error"] is None and result["rc"] == 2,
+                                    "admitted check-only with remaining work must end INCOMPLETE (2)")
                     self.assertTrue(observed["target_match"] is True)
                     self.assertEqual(1, observed["entries"].count("selector"))
-                    self.assertEqual(1, len(self.diffs(events)))
-                    self.assertEqual(["selector-return", "diff-entry", "diff-return"],
-                                     f["caller"]["timeline"])
+                    # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59):
+                    # the v15 check-only reads no pending diff.
+                    self.assertEqual(0, len(self.diffs(events)))
+                    self.assertEqual(["selector-return"], f["caller"]["timeline"])
                     self.assertTrue(len(f["caller"]["selector"]) == 1
                                     and f["caller"]["selector"][0]["initial"]
                                     and not f["caller"]["selector"][0]["required"])
-                    self.assertTrue(len(f["caller"]["returned_diff"]) == 1
-                                    and f["caller"]["returned_diff"][0]["initial"]
-                                    and f["caller"]["returned_diff"][0]["rc"] == 0
-                                    and f["caller"]["returned_diff"][0]["empty"])
+                    self.assertEqual([], f["caller"]["returned_diff"])
                     self.assertFalse(any(label in ("native", "target-fetch", "confirm",
                                                    "authorized", "IPv4") for label in observed["entries"]))
                 else:

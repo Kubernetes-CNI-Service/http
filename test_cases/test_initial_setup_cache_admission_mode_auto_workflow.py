@@ -34,17 +34,20 @@ KEY_LITERALS = (
      _private_fixture_value("cache_admission_key_1"),
      "SHA256:d1XG1idLGWKZW03ZMN9Xy/UxG8gtz+7myOGwwkmitNo"),
 )
+# Table 6-1 row 6 (guide :749): a v15 cache-version-5 target record carries login_interface
+# (v15 CURRENT-CONTRACT.md:20); both rows log in through their CSV eth0 address (RUNBOOK.md:22).
 TARGET_LITERAL = [{
     "ib": {
         "hostname": "EXAMPLE-IB01", "dev_type": "ib",
         "login_ip": "203.0.113.2", "eth0_prefix": "203.0.113.2/24",
         "eth0_gateway": "203.0.113.1", "eth0_mac": "02:00:00:00:00:17",
-        "eth1_prefix": "", "eth1_gateway": "",
+        "eth1_prefix": "", "eth1_gateway": "", "login_interface": "eth0",
     },
     "ethernet": {
         "hostname": "EXAMPLE-JUMP01", "dev_type": "eth_jump",
         "login_ip": "192.0.2.10", "eth0_prefix": "192.0.2.10",
         "eth0_gateway": "", "eth0_mac": "", "eth1_prefix": "", "eth1_gateway": "",
+        "login_interface": "eth0",
     },
     "ethernet_port": "swp7", "ib_port_alias": "eth0",
 }]
@@ -201,7 +204,7 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
             self.assertTrue(self._protected(f) == protected,
                             "first cache setup changed a protected real input")
             before = self.events(f)
-            observed = dict(timeline=[], loads=[], local=[], parsed=[],
+            observed = dict(timeline=[], loads=[], local=[], parsed=[], late_devices=[],
                             saves=0, second_none=False, devices=None, links=None,
                             produced=None, producer_services=None, producer_keys=None,
                             before_save=None, final_pair=None, errors=[], diff=None)
@@ -228,9 +231,11 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
             def parse(*args, **kwargs):
                 value = real_parse(*args, **kwargs)
                 observed["parsed"].append(value)
-                require(value.execution_mode == "auto" and value.auto is False
+                # v3.1.3 guide table 4-2: --auto and --credentials-file are deleted (O3), so
+                # "no watch, no credential file" is now their absence from the parsed options.
+                require(value.execution_mode == "auto" and "auto" not in vars(value)
                         and value.apply is False and value.yes is False
-                        and value.credentials_file is None
+                        and "credentials_file" not in vars(value)
                         and value.local_ethernet_hostname == "")
                 observed["timeline"].append("parse-return")
                 return value
@@ -301,6 +306,20 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
                 return result
 
             def devices(*args, **kwargs):
+                if len(observed["local"]) == 2:
+                    # After the cache path is settled, v15 main re-reads the same CSV once for the
+                    # transit inventory it routes Jumps with (v15 main :5681
+                    # `_, transit_inventory = load_devices(ib_csv_path)`); it is not the cache
+                    # producer.  Only that one read is let through; every read is recorded (06
+                    # WP6-06), and a further one is answered from it without reading the CSV, so the
+                    # run finishes and the count check below names it.
+                    record = dict(result=None, returned=False)
+                    observed["late_devices"].append(record)
+                    if len(observed["late_devices"]) > 1:
+                        record["result"] = observed["late_devices"][0]["result"]
+                        return record["result"]
+                    record["result"], record["returned"] = real_devices(*args, **kwargs), True
+                    return record["result"]
                 require(second_miss and observed["second_none"] and observed["devices"] is None)
                 result = real_devices(*args, **kwargs)
                 require(type(result) is tuple and len(result) == 2)
@@ -411,9 +430,16 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(app.socket, "getfqdn", return_value=PUBLIC_FQDN))
                 result = self._safe_invoke(f, "--execution-mode", "auto")
 
+            # v15 main :5681: after the cache is settled the CSV is re-read exactly once (06 WP6-06).
+            self.assertEqual(1, len(observed["late_devices"]),
+                             "main re-reads the CSV exactly once after the cache is settled")
+            self.assertTrue(observed["late_devices"][0]["returned"], "the one re-read returned")
             self.assertTrue(observed["errors"] == [],
                             "observer fault must not become product rejection or PASS")
-            self.assert_success(result)
+            # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): the readonly run still
+            # has public keys to install, so it ends INCOMPLETE (2).
+            self.assertTrue(result["error"] is None and result["rc"] == 2,
+                            "readonly mode-auto with remaining work must end INCOMPLETE (2)")
             self.assertTrue(len(observed["parsed"]) == 1
                             and len(observed["loads"]) == 2 and len(observed["local"]) == 2
                             and all(item["returned"] for item in observed["loads"]),
@@ -444,7 +470,9 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
                             <= int(observed["final_pair"][1][0][7]),
                             "final actual cache/sidecar qualification is not coherent")
             prefix = ["parse-return", "first-load-entry", "first-load-return-A"]
-            suffix = ["late-local-return-empty", "selector-return", "diff-entry", "diff-return"]
+            # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59): the v15
+            # check-only report reads no pending diff after the selection.
+            suffix = ["late-local-return-empty", "selector-return"]
             if second_miss:
                 self.assertTrue(second["result"] is None and second["out"] == {}
                                 and observed["saves"] == 1 and observed["before_save"] is not None
@@ -471,12 +499,11 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
             self.assertTrue(len(f["caller"]["selector"]) == 1
                             and f["caller"]["selector"][0]["initial"] is True
                             and f["caller"]["selector"][0]["target"] is False
-                            and f["caller"]["timeline"]
-                            == ["selector-return", "diff-entry", "diff-return"],
-                            "MATCH did not reach actual INITIAL readonly selection and DIFF")
-            self.assertTrue(type(observed["diff"]) is app.SessionResult
-                            and observed["diff"].exit_code == 0 and observed["diff"].output == "",
-                            "actual readonly report did not return empty status0")
+                            and f["caller"]["timeline"] == ["selector-return"],
+                            "MATCH did not reach actual INITIAL readonly selection")
+            # Owner Q-035 (a) (v15 CURRENT-CONTRACT.md:59): no pending-diff read in check-only.
+            self.assertTrue(observed["diff"] is None,
+                            "the readonly report read a pending diff")
             self.assertTrue(not result["hashes"] and "TARGET" not in result["prompts"]
                             and not f["caller"]["native"] and not f["caller"]["fetch"]
                             and not f["caller"]["consent"],

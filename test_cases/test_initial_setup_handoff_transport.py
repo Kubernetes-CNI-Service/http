@@ -153,10 +153,13 @@ class CurrentFormalTransportCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(app.SetupError, "login address is required"):
             app.outer_ssh_command(device, "PUBLIC-user", ["hostname"], 5)
         command = ["hostname"]
-        self.assertEqual(command, app.outer_ssh_command(device, "PUBLIC-user",
-                                                        command, 5, local=True))
-        self.assertNotEqual(["sh", "-c"], app.outer_ssh_command(device, "PUBLIC-user",
-                                                               command, 5, local=True)[:2])
+        # T14 (guide :2300; P3c map :341): a local run uses the remote fixed-PATH exec carrier
+        # (v15 reference outer_ssh_command :1960-1970); the typed argv itself is not mutated.
+        self.assertEqual(
+            ["sh", "-c",
+             "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"],
+            app.outer_ssh_command(device, "PUBLIC-user", command, 5, local=True))
+        self.assertEqual(["hostname"], command)
 
     def test_ethernet_apply_with_or_without_yes_is_still_rejected_pre_dispatch(self):
         with patch.object(app, "interactive_run") as dispatch:

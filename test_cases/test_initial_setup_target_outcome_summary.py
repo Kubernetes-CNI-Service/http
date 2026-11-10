@@ -10,7 +10,6 @@ finite single-scene issuance have distinct lifecycle/worker groupings.
 """
 from __future__ import annotations
 
-import builtins
 from contextlib import ExitStack, contextmanager
 from functools import wraps
 from importlib.machinery import ModuleSpec
@@ -19,11 +18,10 @@ import inspect
 import json
 import os
 from pathlib import Path
-import socket
 import stat
 import subprocess
 import sys
-from types import FunctionType, ModuleType
+from types import ModuleType
 import unittest
 from unittest import mock
 import tempfile
@@ -35,8 +33,14 @@ INITIAL_SOURCE = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
 WORKFLOW_ROOT_PARENT = None
 WORKFLOW_ROOT_PARENT_BIRTH6 = None
 RETAINED_ROOTS = []
+# Table 6-1 row 2 (v3.1.3 guide :745): the DEV per-target 7-column table
+# (_render_target_outcome_summary) is intentionally not merged; the merged run keeps the v15
+# module summary and summary.json and adds no DEV status words.  Its header, explanation line
+# and status words therefore never appear.
+DEV_TABLE_HEADER = "Target outcomes (authoritative):"
 EXPLANATION = "Legacy Summary counters: 原阶段计数，非目标终态"
-SAFE_ARGS = ("invalid target outcome facts",)
+DEV_OUTCOME_WORDS = ("CHECKED_ONLY", "SKIPPED_NO_WORK", "BLOCKED_PREREQUISITE",
+                     "FAILED_AFTER_ATTEMPT", "NOT_ATTEMPTED_AFTER_STOP")
 READ = ["nv", "config", "show", "-o", "commands"]
 NETWORK_SETTERS = (
     ("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"),
@@ -45,33 +49,30 @@ NETWORK_SETTERS = (
     ("nv", "set", "interface", "eth0-1", "type", "eth"),
     ("nv", "set", "system", "hostname", "EXAMPLE-IB01"),
 )
-EXPECTED = {
-    "S0": "Target outcomes (authoritative):\n  targets=3 COMPLETED=0 CHECKED_ONLY=0 SKIPPED_NO_WORK=0 BLOCKED_PREREQUISITE=3 FAILED_AFTER_ATTEMPT=0 NOT_ATTEMPTED_AFTER_STOP=0\n  OOB snapshots: total=1 COLLECTED=0 FAILED=1\n  Network: written=0 readback_verified=0; IPv4: failed=0; would_change=0\n  EXAMPLE-IB01 via EXAMPLE-JUMP01: BLOCKED_PREREQUISITE Network.written=NOT_REACHED Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NOT_REACHED\n  EXAMPLE-IB02 via EXAMPLE-JUMP01: BLOCKED_PREREQUISITE Network.written=NOT_REACHED Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NOT_REACHED\n  EXAMPLE-IB03 via EXAMPLE-JUMP01: BLOCKED_PREREQUISITE Network.written=NOT_REACHED Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NOT_REACHED",
-    "S1": "Target outcomes (authoritative):\n  targets=1 COMPLETED=0 CHECKED_ONLY=1 SKIPPED_NO_WORK=0 BLOCKED_PREREQUISITE=0 FAILED_AFTER_ATTEMPT=0 NOT_ATTEMPTED_AFTER_STOP=0\n  OOB snapshots: total=1 COLLECTED=1 FAILED=0\n  Network: written=0 readback_verified=0; IPv4: failed=0; would_change=1\n  EXAMPLE-IB01 via EXAMPLE-JUMP01: CHECKED_ONLY Network.written=NO Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=YES",
-    "S2": "Target outcomes (authoritative):\n  targets=1 COMPLETED=0 CHECKED_ONLY=0 SKIPPED_NO_WORK=1 BLOCKED_PREREQUISITE=0 FAILED_AFTER_ATTEMPT=0 NOT_ATTEMPTED_AFTER_STOP=0\n  OOB snapshots: total=1 COLLECTED=1 FAILED=0\n  Network: written=0 readback_verified=0; IPv4: failed=0; would_change=0\n  EXAMPLE-IB01 via EXAMPLE-JUMP01: SKIPPED_NO_WORK Network.written=NO Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NO",
-    "S3": "Target outcomes (authoritative):\n  targets=2 COMPLETED=0 CHECKED_ONLY=0 SKIPPED_NO_WORK=0 BLOCKED_PREREQUISITE=0 FAILED_AFTER_ATTEMPT=1 NOT_ATTEMPTED_AFTER_STOP=1\n  OOB snapshots: total=1 COLLECTED=1 FAILED=0\n  Network: written=1 readback_verified=1; IPv4: failed=1; would_change=1\n  EXAMPLE-IB01 via EXAMPLE-JUMP01: FAILED_AFTER_ATTEMPT Network.written=YES Network.readback_verified=YES IPv4.failed=YES would_change=YES\n  EXAMPLE-IB02 via EXAMPLE-JUMP01: NOT_ATTEMPTED_AFTER_STOP Network.written=NOT_REACHED Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NOT_REACHED",
-    "COMPLETED": "Target outcomes (authoritative):\n  targets=2 COMPLETED=1 CHECKED_ONLY=0 SKIPPED_NO_WORK=1 BLOCKED_PREREQUISITE=0 FAILED_AFTER_ATTEMPT=0 NOT_ATTEMPTED_AFTER_STOP=0\n  OOB snapshots: total=1 COLLECTED=1 FAILED=0\n  Network: written=1 readback_verified=1; IPv4: failed=0; would_change=1\n  ExAmPlE-IB02 via ExAmPlE-JUMP01: COMPLETED Network.written=YES Network.readback_verified=YES IPv4.failed=NO would_change=YES\n  EXAMPLE-IB01 via EXAMPLE-JUMP01: SKIPPED_NO_WORK Network.written=NO Network.readback_verified=NOT_REACHED IPv4.failed=NOT_REACHED would_change=NO",
-}
+# Table 6-1 row 2 (guide :745) with v15 CURRENT-CONTRACT.md:21 ("每设备 `oob/port` 保留物理
+# Leaf/端口"): the (IB hostname, OOB Leaf, Leaf port) of every device record in the run's
+# summary.json.  It replaces the DEV 7-column per-target rows and their rendered text.
 TARGET_ROWS = {
-    "S0": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "BLOCKED_PREREQUISITE", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED"), ("EXAMPLE-IB02", "EXAMPLE-JUMP01", "BLOCKED_PREREQUISITE", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED"), ("EXAMPLE-IB03", "EXAMPLE-JUMP01", "BLOCKED_PREREQUISITE", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED")),
-    "S1": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "CHECKED_ONLY", "NO", "NOT_REACHED", "NOT_REACHED", "YES"),),
-    "S2": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "SKIPPED_NO_WORK", "NO", "NOT_REACHED", "NOT_REACHED", "NO"),),
-    "S3": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "FAILED_AFTER_ATTEMPT", "YES", "YES", "YES", "YES"), ("EXAMPLE-IB02", "EXAMPLE-JUMP01", "NOT_ATTEMPTED_AFTER_STOP", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED", "NOT_REACHED")),
-    "COMPLETED": (("ExAmPlE-IB02", "ExAmPlE-JUMP01", "COMPLETED", "YES", "YES", "NO", "YES"), ("EXAMPLE-IB01", "EXAMPLE-JUMP01", "SKIPPED_NO_WORK", "NO", "NOT_REACHED", "NOT_REACHED", "NO")),
+    "S0": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "swp7"), ("EXAMPLE-IB02", "EXAMPLE-JUMP01", "swp8"),
+           ("EXAMPLE-IB03", "EXAMPLE-JUMP01", "swp9")),
+    "S1": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "swp7"),),
+    "S2": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "swp7"),),
+    "S3": (("EXAMPLE-IB01", "EXAMPLE-JUMP01", "swp7"), ("EXAMPLE-IB02", "EXAMPLE-JUMP01", "swp8")),
 }
 
 
-
-SUMMARY_PEER_BASE_SHA256 = "a6cee346fc36929849a68bb98f18f4859b2ea1ca064d5a7e88262f8551f47af9"
+SUMMARY_PEER_BASE_SHA256 = "e79cb3fa63569505380fb367f82d04c7fcc5de6667d0cee9703eb82391009948"
 SUMMARY_PEER_TRANSFORMS = (
     ("OOB two ports", "          (\"nv\",\"show\",\"interface\"): \"Interface Admin Oper\\nswp7 up up\\n\",\n", "          (\"nv\",\"show\",\"interface\"): \"Interface Admin Oper\\nswp7 up up\\nswp8 up up\\n\",\n"),
-    ("OOB two link ports and one vlan", "          (\"ip\",\"-d\",\"link\",\"show\"): \"7: swp7: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:07\\n8: vlan1: <UP> mtu 1500 state UP\\n    vlan protocol 802.1Q id 1\\n\",\n", "          (\"ip\",\"-d\",\"link\",\"show\"): \"7: swp7: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:07\\n8: swp8: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:08\\n9: vlan1: <UP> mtu 1500 state UP\\n    vlan protocol 802.1Q id 1\\n\",\n"),
-    ("OOB two FDB literals", "          (\"bridge\",\"fdb\",\"show\"): \"02:00:00:00:00:17 dev swp7 vlan 1 dynamic\\n\",\n", "          (\"bridge\",\"fdb\",\"show\"): \"02:00:00:00:00:17 dev swp7 vlan 1 dynamic\\n02:00:00:00:00:18 dev swp8 vlan 1 dynamic\\n\",\n"),
+    ("OOB two link ports and one vlan", "          (\"ip\",\"-d\",\"link\",\"show\"): \"7: swp7: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:07\\n8: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan protocol 802.1Q id 1\\n\",\n", "          (\"ip\",\"-d\",\"link\",\"show\"): \"7: swp7: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:07\\n8: swp8: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether 02:00:00:00:00:08\\n9: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan protocol 802.1Q id 1\\n\",\n"),
+    ("OOB two FDB literals", "          (\"bridge\",\"fdb\",\"show\"): \"02:00:00:00:00:17 dev swp7 vlan 1 master br_default dynamic\\n\",\n", "          (\"bridge\",\"fdb\",\"show\"): \"02:00:00:00:00:17 dev swp7 vlan 1 master br_default dynamic\\n02:00:00:00:00:18 dev swp8 vlan 1 master br_default dynamic\\n\",\n"),
     ("OOB two ND literals", "          (\"ip\",\"neighbor\"): \"fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\n\",\n", "          (\"ip\",\"neighbor\"): \"fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\nfe80::18 dev vlan1 lladdr 02:00:00:00:00:18 REACHABLE\\n\",\n"),
     ("closed four endpoints to independent literal state basenames", "    if destination not in (\"admin@fe80::17\", \"admin@203.0.113.2\"):\n        raise ValueError(\"inner endpoint\")\n", "    if destination in (\"admin@fe80::17\", \"admin@203.0.113.2\"):\n        summary_target, summary_state = \"IB01\", \"summary-device-01.json\"\n    elif destination in (\"admin@fe80::18\", \"admin@203.0.113.3\"):\n        summary_target, summary_state = \"IB02\", \"summary-device-02.json\"\n    else:\n        raise ValueError(\"inner endpoint\")\n    selected_state_path = root / summary_state\n    record(\"summary-target-entry\", target=summary_target)\n"),
-    ("actual selected state read and closed identity", "        S = json.loads(state_path.read_text())\n", "        S = json.loads(selected_state_path.read_text())\n        if S.get(\"summary_target\") != summary_target:\n            raise ValueError(\"summary state identity\")\n"),
+    ("actual selected state read and closed identity", "        S = json.loads(state_path.read_text())\n        if phase_nonce:\n", "        S = json.loads(selected_state_path.read_text())\n        if S.get(\"summary_target\") != summary_target:\n            raise ValueError(\"summary state identity\")\n        if phase_nonce:\n"),
     ("existing PAM persistence local selected state", "            state_path.write_text(json.dumps(S))\n", "            selected_state_path.write_text(json.dumps(S))\n"),
     ("ordinary business exact IPv4 destination fact and selected state persistence", "        body, rc = business(command,S)\n        state_path.write_text(json.dumps(S))\n", "        S[\"summary_ipv4\"] = destination == \"admin@203.0.113.2\"\n        body, rc = business(command,S)\n        selected_state_path.write_text(json.dumps(S))\n"),
+    ("direct SSH closed two endpoints to independent literal state basenames", "    if args[:-2] != options or args[-2] != \"admin@203.0.113.2\":\n        raise ValueError(\"direct SSH argv\")\n", "    if args[:-2] != options or args[-2] not in (\"admin@203.0.113.2\", \"admin@203.0.113.3\"):\n        raise ValueError(\"direct SSH argv\")\n    direct_target, direct_state = ((\"IB01\", \"summary-device-01.json\") if args[-2] == \"admin@203.0.113.2\"\n                                   else (\"IB02\", \"summary-device-02.json\"))\n    record(\"summary-direct-entry\", target=direct_target)\n"),
+    ("direct SSH selected state read and closed identity", "        S = json.loads(state_path.read_text())\n        answer = read_answer(\"admin@203.0.113.2's password: \")\n", "        S = json.loads((root / direct_state).read_text())\n        if S.get(\"summary_target\") != direct_target:\n            raise ValueError(\"summary state identity\")\n        answer = read_answer(args[-2] + \"'s password: \")\n"),
     ("finite peer state/show/business wrapper before original run", "def run():\n", "_summary_base_show_state = show_state\n_summary_base_business = business\ndef show_state(S):\n    body = _summary_base_show_state(S)\n    if S[\"summary_target\"] == \"IB02\":\n        body = body.replace(\n            \"nv set system hostname EXAMPLE-IB01\\n\",\n            \"nv set system hostname EXAMPLE-IB02\\n\")\n        body = body.replace(\n            \"nv set interface eth0 ipv4 address 203.0.113.2/24\\n\",\n            \"nv set interface eth0 ipv4 address 203.0.113.3/24\\n\")\n    return body\ndef business(command, S):\n    if (S[\"summary_target\"] == \"IB01\" and S.get(\"summary_ipv4\") is True\n            and command == [\"true\"] and S.get(\"summary_network_saved\") is True):\n        record(\"summary-ipv4-fault\", target=\"IB01\")\n        return \"PUBLIC IPv4 verification could not complete\\n\", 255\n    before_network = S[\"network\"]\n    body, rc = _summary_base_business(command, S)\n    if (S[\"summary_target\"] == \"IB01\"\n            and command == [\"nv\", \"config\", \"apply\", \"-y\"]\n            and rc == 0 and before_network is False and S[\"network\"] is True):\n        S[\"summary_network_applied\"] = True\n        record(\"summary-network-applied\", target=\"IB01\", actual_rc=rc)\n    if (S[\"summary_target\"] == \"IB01\"\n            and command == [\"nv\", \"config\", \"save\"]\n            and rc == 0 and S.get(\"summary_network_applied\") is True):\n        S[\"summary_network_saved\"] = True\n        record(\"summary-network-saved\", target=\"IB01\", actual_rc=rc)\n    return body, rc\n\ndef run():\n"),
 )
 
@@ -98,23 +99,18 @@ def _summary_two_target_peer(caller):
     return program
 
 
-@contextmanager
-def _pure_boundary(attempts):
-    def refuse(*args, **kwargs):
-        attempts.append("PUBLIC pure reporter attempted external effect")
-        raise AssertionError("PUBLIC reporter must be pure")
-    with ExitStack() as stack:
-        for owner, names in (
-                (builtins, ("open", "print", "input")),
-                (os, ("open", "read", "write", "stat", "lstat", "readlink",
-                      "system", "fork", "forkpty", "posix_spawn", "posix_spawnp",
-                      "kill", "killpg", "waitpid")),
-                (subprocess, ("Popen", "run", "call", "check_call", "check_output")),
-                (socket, ("socket", "create_connection"))):
-            for name in names:
-                if hasattr(owner, name):
-                    stack.enter_context(mock.patch.object(owner, name, new=refuse))
-        yield
+def _device_rows(value):
+    """(hostname, oob, port) of every per-device record anywhere in a summary.json document."""
+    rows = []
+    if type(value) is dict:
+        if {"hostname", "oob", "port"} <= set(value):
+            rows.append((value["hostname"], value["oob"], value["port"]))
+        for member in value.values():
+            rows.extend(_device_rows(member))
+    elif type(value) is list:
+        for member in value:
+            rows.extend(_device_rows(member))
+    return rows
 
 
 class _CanonicalI15FixtureReadiness:
@@ -324,7 +320,7 @@ class _CanonicalI15FixtureReadiness:
                     raise
 
     @contextmanager
-    def native_scope(self, source, phase, app=None):
+    def native_scope(self, source, phase, app=None, ib_targets=0):
         self.gate()
         if self.pending_native is not None or phase not in ("setup", "p1", "main"):
             self.hold()
@@ -373,7 +369,10 @@ class _CanonicalI15FixtureReadiness:
                         or not all(slot["reaped"] and slot["closed"]
                                    for slot in self.pty)):
                     self.hold()
-                limit = 4 if phase == "setup" else 10
+                # Owner Q-035 (a) item 4 (guide :438): every --apply login, IPv4 check and stage
+                # verifies the project target, so a main run may need up to 10 per IB target of
+                # its own scene (06 WP6-a2: 10 x the scene's IB targets, not one fixed bound).
+                limit = 4 if phase == "setup" else 10 * ib_targets
                 if len(self.native) - scope_start >= limit:
                     self.hold()
                 if (type(argv) is not list or argv != [
@@ -606,62 +605,23 @@ class TargetOutcomeSummaryDirectTests(unittest.TestCase):
         if sys.modules.get(cls.owned_name) is cls.app:
             del sys.modules[cls.owned_name]
 
-    def renderer(self):
-        function = getattr(self.app, "_render_target_outcome_summary", None)
-        self.assertIs(type(function), FunctionType,
-                      "new private reporting contract is not implemented")
-        self.assertTrue(function.__globals__ is vars(self.app)
-                        and function.__code__.co_filename == str(INITIAL_SOURCE))
-        return function
+    def test_dev_seven_column_target_renderer_is_not_merged(self):
+        # Table 6-1 row 2 (v3.1.3 guide :745): the v15 module summary and summary.json are
+        # adopted; the DEV per-target 7-column renderer is intentionally not merged and no DEV
+        # status word is added.  Former test_four_independent_reports_and_pure_completed_positive
+        # pinned this renderer's output.
+        self.assertIsNone(getattr(self.app, "_render_target_outcome_summary", None),
+                          "the DEV per-target table renderer is not merged (table 6-1 row 2)")
 
-    def observe(self, function, targets, ethernet):
-        value = error = None
-        attempts = []
-        with _pure_boundary(attempts):
-            try:
-                value = function(target_results=targets, ethernet_results=ethernet)
-            except BaseException as caught:
-                error = caught
-        self.assertEqual([], attempts)
-        return value, error
-
-    def test_four_independent_reports_and_pure_completed_positive(self):
-        function = self.renderer()
-        for scene in ("S0", "S1", "S2", "S3", "COMPLETED"):
-            with self.subTest(scene=scene):
-                ethernet = (("EXAMPLE-JUMP01",
-                             "FAILED" if scene == "S0" else "COLLECTED"),)
-                value, error = self.observe(function, TARGET_ROWS[scene], ethernet)
-                self.assertIsNone(error, "valid independent reporting facts rejected")
-                self.assertIs(type(value), str)
-                self.assertEqual(EXPECTED[scene], value)
-
-    def test_duplicate_identity_or_unknown_closed_fact_is_exact_safe_even_in_ambient_error(self):
-        function = self.renderer()
-        good = ("EXAMPLE-IB01", "EXAMPLE-JUMP01", "COMPLETED", "YES", "YES", "NO", "YES")
-        same_identity_other_OOB = ("example-ib01", "EXAMPLE-JUMP02", *good[2:])
-        changed_bucket = (good[0], good[1], "NOT_A_KNOWN_OUTCOME", *good[3:])
-        changed_fact = (*good[:3], "NOT_A_KNOWN_FACT", *good[4:])
-        cases = (
-            ((good, same_identity_other_OOB),
-             (("EXAMPLE-JUMP01", "COLLECTED"), ("EXAMPLE-JUMP02", "COLLECTED"))),
-            ((good,), (("EXAMPLE-JUMP01", "COLLECTED"),
-                       ("example-jump01", "COLLECTED"))),
-            ((changed_bucket,), (("EXAMPLE-JUMP01", "COLLECTED"),)),
-            ((changed_fact,), (("EXAMPLE-JUMP01", "COLLECTED"),)),
-        )
-        for number, (targets, ethernet) in enumerate(cases):
-            with self.subTest(case=number):
-                try:
-                    raise ValueError("PUBLIC unrelated ambient reporting error")
-                except ValueError:
-                    value, error = self.observe(function, targets, ethernet)
-                self.assertIsNone(value)
-                self.assertIs(type(error), self.app.SetupError)
-                self.assertEqual(SAFE_ARGS, error.args)
-                self.assertIsNone(error.__cause__)
-                self.assertIsNone(error.__context__)
-                self.assertEqual({}, vars(error))
+    def test_dev_target_outcome_vocabulary_is_absent_from_the_merged_source(self):
+        # Table 6-1 row 2 (guide :745) "不另加 DEV 的状态词"; v15 CURRENT-CONTRACT.md:66
+        # "沿用分类英文 Summary 和独立阶段统计".  Former
+        # test_duplicate_identity_or_unknown_closed_fact_is_exact_safe_even_in_ambient_error pinned
+        # the closed status words and the safe refusal of that renderer.
+        source = INITIAL_SOURCE.read_text(encoding="utf-8")
+        for word in (DEV_TABLE_HEADER, EXPLANATION, *DEV_OUTCOME_WORDS):
+            with self.subTest(word=word):
+                self.assertNotIn(word, source)
 
 
 class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
@@ -744,8 +704,11 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             state.hold()
         phase = "p1" if options == ("--generate-json",) else "main"
         state.current_fixture = f
+        # The scene's own IB targets: the type=ib rows of the CSV it runs with (06 WP6-a2).
+        ib_targets = sum(1 for line in f["csv"].read_text(encoding="ascii").splitlines()[1:]
+                         if line.split(",")[1:2] == ["ib"])
         try:
-            with state.native_scope(f["source"], phase, app=f["app"]):
+            with state.native_scope(f["source"], phase, app=f["app"], ib_targets=ib_targets):
                 actual = self.caller.MainCallerPrecommitDraftTests.invoke(
                     self, f, *options, **kwargs)
                 state.invoke_returned(f, actual)
@@ -819,12 +782,26 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
         self.assertEqual([], result["cleanup"])
         self.assertEqual([], f["boundary_errors"])
 
-    def require_report(self, result, scene, legacy):
+    def summaries(self, f):
+        return set(f["root"].rglob("summary.json"))
+
+    def require_report(self, f, result, scene, legacy, summaries_before):
         lines = result["stdout"].splitlines()
-        self.assertEqual(1, lines.count(EXPLANATION))
+        # T12 (guide :2298): the DEV counter line stays.
         self.assertEqual(1, lines.count(legacy))
-        self.assertIn(EXPECTED[scene] + "\n", result["stdout"])
-        self.assertEqual(1, result["stdout"].count(EXPECTED[scene] + "\n"))
+        # Table 6-1 row 2 (guide :745): no DEV per-target table, explanation or status word.
+        self.assertNotIn(DEV_TABLE_HEADER, result["stdout"])
+        self.assertEqual(0, lines.count(EXPLANATION))
+        for word in DEV_OUTCOME_WORDS:
+            self.assertNotIn(word, result["stdout"])
+        # Table 6-1 row 2: one summary.json per run (plan :314 "summary.json（逐台结果）");
+        # v15 CURRENT-CONTRACT.md:21: every device keeps oob/port and the summary keeps
+        # spine_jump_routes.
+        fresh = sorted(self.summaries(f) - summaries_before)
+        self.assertEqual(1, len(fresh), "one summary.json per run")
+        summary = json.loads(fresh[0].read_text(encoding="utf-8"))
+        self.assertIn("spine_jump_routes", summary)
+        self.assertEqual(sorted(TARGET_ROWS[scene]), sorted(set(_device_rows(summary))))
 
     def test_S0_one_real_OOB_failure_blocks_three_unattempted_IB_targets(self):
         with self.root() as folder:
@@ -846,11 +823,13 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                              [row["ib"]["hostname"] for row in cache["targets"]])
             self.assertEqual(["EXAMPLE-JUMP01"] * 3,
                              [row["ethernet"]["hostname"] for row in cache["targets"]])
-            before, start = self.protect(f), len(self.events(f))
+            before, start, summaries = self.protect(f), len(self.events(f)), self.summaries(f)
             result = self.invoke(f, "--apply", "--yes")
             fresh = self.events(f)[start:]
             self.assertIsNone(result["error"], "qualified OOB refusal must reach original summary")
-            self.assertEqual(1, result["rc"])
+            # Table 6-1 row 11 (guide :754): v15 main returns 2 INCOMPLETE when devices were not
+            # done (v15 CURRENT-CONTRACT.md:67; RUNBOOK.md:97).
+            self.assertEqual(2, result["rc"])
             self.assertEqual(1, sum(e["kind"] == "non-auth-refusal"
                                   and e.get("reason") == "outer-denied" for e in fresh))
             self.assertEqual(1, sum(e["kind"] == "outer-answer" for e in fresh))
@@ -861,15 +840,18 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                             and not f["caller"]["fetch"] and not f["caller"]["helper"])
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            self.require_report(result, "S0",
-                "Summary: targets=3 configured=0 skipped=0 failed=3 day0-skipped=0 services-skipped=0")
+            # T12 (guide :2298) keeps the counter line; tables 6-1 rows 2 and 11: the three
+            # OOB-blocked devices are a prerequisite skip, not a failure (v15
+            # HANDOFF-CODEX-TEST.md:29 "前提 SKIP 不算脚本崩溃"; CURRENT-CONTRACT.md:67).
+            self.require_report(f, result, "S0",
+                "Summary: targets=3 configured=0 skipped=3 failed=0 day0-skipped=0 services-skipped=0", summaries)
 
     def test_S1_actual_checkonly_missing_plan_never_counts_an_update(self):
         with self.root() as folder:
             f = self.fixture(folder, case="readonly-initial",
                              network=False, services=True, credential="initial")
             self.no_keys_before_real_p1(f)
-            before, start = self.protect(f), len(self.events(f))
+            before, start, summaries = self.protect(f), len(self.events(f)), self.summaries(f)
             plans = []
             original = f["app"]._management_network_commands
             @wraps(original)
@@ -881,16 +863,16 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                 result = self.invoke(f)
             fresh, w = self.events(f)[start:], f["caller"]
             self.assertIsNone(result["error"], "real check-only prefix did not complete")
-            self.assertEqual(0, result["rc"])
+            # Table 6-1 row 11 (guide :754): a check-only run that finds missing configuration
+            # is INCOMPLETE, 2 (v15 CURRENT-CONTRACT.md:67).
+            self.assertEqual(2, result["rc"])
             self.assertEqual([NETWORK_SETTERS], plans)
-            self.assertEqual(["selector-return", "diff-entry", "diff-return"], w["timeline"])
+            # P3c map D32d :284 (the v15 stage skeleton; D1a2 report 4.3 E8; v15
+            # CURRENT-CONTRACT.md:59): a check-only run reads no pending diff.
+            self.assertEqual(["selector-return"], w["timeline"])
             self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
                             and not w["selector"][0]["required"])
-            self.assertTrue(len(w["returned_diff"]) == 1
-                            and w["returned_diff"][0]["empty"]
-                            and w["returned_diff"][0]["rc"] == 0
-                            and w["returned_diff"][0]["initial"]
-                            and not w["returned_diff"][0]["pam"])
+            self.assertEqual([], w["returned_diff"])
             self.assertEqual([], w["fetch"])
             self.assertEqual([], w["native"])
             self.assertEqual([], w["helper"])
@@ -898,37 +880,54 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                                                "ipv4-read", "pam-target") for e in fresh))
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            self.require_report(result, "S1",
-                "Summary: targets=1 configured=0 skipped=0 failed=0 day0-skipped=0 services-skipped=0")
+            self.require_report(f, result, "S1",
+                "Summary: targets=1 configured=0 skipped=0 failed=0 day0-skipped=0 services-skipped=0", summaries)
 
     def test_S2_real_completed_checks_with_no_work_are_not_unattempted(self):
         with self.root() as folder:
+            # Owner Q-035 (a) item 4 (guide :438): an --apply run needs the device's current IB
+            # password to equal the project target, so this already-configured device model
+            # uses the target (fixture precondition, not an expectation).
             f = self.fixture(folder, case="summary-noop",
-                             network=True, services=True, credential="initial")
+                             network=True, services=True, credential="target")
             self.no_keys_before_real_p1(f)
-            before, start = self.protect(f), len(self.events(f))
+            before, start, summaries = self.protect(f), len(self.events(f)), self.summaries(f)
             result = self.invoke(f, "--apply", "--yes")
             fresh, w = self.events(f)[start:], f["caller"]
             self.assertIsNone(result["error"], "actual qualified no-work path failed")
+            # Table 6-1 row 11 (guide :754): configured, no work, direct SSH PASS -> SUCCESS 0.
             self.assertEqual(0, result["rc"])
-            self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
+            # Owner Q-035 (a) item 4 (guide :438): the --apply login is the verified project target.
+            self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["target"]
                             and not w["selector"][0]["required"])
             self.assertEqual(["selector-return"], w["timeline"])
             self.assertEqual([], w["consent"])
-            self.assertEqual([], w["helper"])
-            self.assertEqual([], w["fetch"])
-            self.assertEqual([], w["native"])
+            # Owner Q-035 (a) item 1 (guide :438): ZTP state is read before Initial, on a
+            # management task through the authorized helper (P3c map D32d :284).
+            self.assertEqual([("nv", "show", "system", "ztp")], w["helper"])
+            self.assertTrue(bool(w["gate"]) and all(w["gate"]))
+            # Owner Q-035 (a) item 4: the target is fetched and verified against the global hash.
+            self.assertTrue(bool(w["fetch"]))
+            self.assertTrue(bool(w["native"]) and all(row["target"] and row["IB"] and row["matched"]
+                                                      for row in w["native"]))
             self.assertFalse(any(e["kind"] in ("mutation", "apply-y", "save", "key-shell",
-                                               "ipv4-read", "pam-target") for e in fresh))
+                                               "pam-target") for e in fresh))
+            # Owner Q-035 (a) item 3 (guide :438): every --apply verifies IPv4 login once.
+            self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in fresh))
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            self.require_report(result, "S2",
-                "Summary: targets=1 configured=0 skipped=1 failed=0 day0-skipped=1 services-skipped=1")
+            self.require_report(f, result, "S2",
+                "Summary: targets=1 configured=0 skipped=1 failed=0 day0-skipped=1 services-skipped=1", summaries)
 
-    def test_S3_real_saved_verified_Network_then_IPv4_failure_stops_second_target(self):
+    def test_S3_real_saved_verified_Network_then_IPv4_failure_fails_only_that_target(self):
+        # Table 6-1 row 1 (guide :744): one device failing no longer stops the others (former
+        # name test_S3_real_saved_verified_Network_then_IPv4_failure_stops_second_target).
         with self.root() as folder:
+            # Owner Q-035 (a) item 4 (guide :438): an --apply run needs each device's current IB
+            # password to equal the project target, so both device models use the target
+            # (fixture precondition, not an expectation).
             f = self.fixture(folder, case="summary-two-target-stop",
-                             network=False, services=True, credential="initial")
+                             network=False, services=True, credential="target")
             f["csv"].write_text(
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:17,,,\n"
@@ -957,8 +956,7 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                              [row["ethernet_port"] for row in cache["targets"]])
             self.assertEqual(["203.0.113.2", "203.0.113.3"],
                              [row["ib"]["login_ip"] for row in cache["targets"]])
-            before, start = self.protect(f), len(self.events(f))
-            second_before = self.base.bound_file(state02)
+            before, start, summaries = self.protect(f), len(self.events(f)), self.summaries(f)
             alias = f["tool"] / "01-global.yaml"
             alias_before = (self.base.nine(alias.lstat()), os.readlink(alias))
             app = f["app"]
@@ -1032,51 +1030,77 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(app, "verify_ipv4_login", new=ipv4))
                 result = self.invoke(f, "--apply", "--yes")
             fresh, w = self.events(f)[start:], f["caller"]
-            self.assertIsNone(result["error"], "real Network/IPv4 STOP did not return through main")
-            self.assertEqual(1, result["rc"])
-            self.assertEqual(["IB01"], evaluation)
-            self.assertEqual(["IB01"], selector_entries)
+            self.assertIsNone(result["error"], "real Network/IPv4 failure did not return through main")
+            # Table 6-1 row 11 (guide :754): a device failed, the run is INCOMPLETE, 2 (v15
+            # CURRENT-CONTRACT.md:67; RUNBOOK.md:97 "失败设备继续、最终 incomplete 非零").
+            self.assertEqual(2, result["rc"])
+            # Table 6-1 row 1 (guide :744): only IB01 stops; IB02 is still evaluated and
+            # processed (v15 CURRENT-CONTRACT.md:60 "单设备失败隔离", :65 "全局队列不绑定 OOB").
+            self.assertEqual({"IB01", "IB02"}, set(evaluation))
+            self.assertEqual(["IB01", "IB02"], selector_entries)
+            # Owner Q-035 (a) item 3 (guide :438): IB02 also verifies IPv4 on this --apply.
             self.assertEqual(["apply-return", "save-return", "readback-return",
-                              "verify-return", "ipv4-entry", "ipv4-error"], prefix)
+                              "verify-return", "ipv4-entry", "ipv4-error", "ipv4-entry"], prefix)
             self.assertEqual([True, True, True], statuses)
             self.assertEqual([True], verified)
             self.assertEqual([True], ipv4_errors)
-            self.assertEqual([*NETWORK_SETTERS, ("nv", "config", "apply", "-y"),
-                              ("nv", "config", "save"), tuple(READ)], w["helper"])
-            self.assertTrue(len(w["gate"]) == 8 and all(w["gate"]))
-            self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
-                            and not w["selector"][0]["required"])
+            # Owner Q-035 (a) item 1 (guide :438; P3c map D32d :284): each device reads ZTP
+            # through the authorized helper before Initial; table 6-1 row 1: IB02 is reached.
+            ztp = ("nv", "show", "system", "ztp")
+            self.assertEqual([ztp, *NETWORK_SETTERS, ("nv", "config", "apply", "-y"),
+                              ("nv", "config", "save"), tuple(READ), ztp], w["helper"])
+            self.assertTrue(len(w["gate"]) == 10 and all(w["gate"]))
+            # Owner Q-035 (a) item 4 (guide :438): each --apply login is the project target.
+            self.assertTrue(len(w["selector"]) == 2
+                            and all(row["target"] and not row["required"] for row in w["selector"]))
             self.assertEqual(list(NETWORK_SETTERS),
                              [tuple(e["command"]) for e in fresh if e["kind"] == "mutation"])
             applied = [i for i, e in enumerate(fresh) if e["kind"] == "summary-network-applied"]
             saved = [i for i, e in enumerate(fresh) if e["kind"] == "summary-network-saved"]
             faults = [i for i, e in enumerate(fresh) if e["kind"] == "summary-ipv4-fault"]
-            self.assertTrue(len(applied) == len(saved) == len(faults) == 1
+            # Table 6-1 row 9 (guide :752): IPv4 readiness is tried up to 3 times.
+            self.assertTrue(len(applied) == len(saved) == 1 and len(faults) == 3
                             and applied[0] < saved[0] < faults[0])
             reads = [i for i, e in enumerate(fresh) if e["kind"] == "caller-show"
                      and saved[0] < i < faults[0]]
             self.assertEqual(1, len(reads))
             entries = [e["target"] for e in fresh if e["kind"] == "summary-target-entry"]
-            self.assertTrue(bool(entries) and all(label == "IB01" for label in entries))
+            # Table 6-1 row 1 (guide :744): both devices are entered.
+            self.assertEqual({"IB01", "IB02"}, set(entries))
             self.assertFalse(any(e["kind"] in ("key-shell", "pam-target", "pam-start",
-                                               "inner-rejected", "rejected-business")
+                                               "rejected-business")
                                  for e in fresh))
-            self.assertTrue(all(e.get("initial") is True and e.get("target") is False
-                                and e.get("oob") is False
+            # Owner Q-035 (a) item 4 (guide :438) with v15 CURRENT-CONTRACT.md:49 (initial first,
+            # then the verified project target): only the read-only authentication probe with
+            # the initial password is refused; every later answer is the target, never OOB.
+            self.assertTrue(all(e.get("initial") is True and e.get("operation") == "auth-probe-readonly"
+                                for e in fresh if e["kind"] == "inner-rejected"))
+            self.assertTrue(all(e.get("oob") is False
+                                and (e.get("target") is True
+                                     or (e.get("initial") is True
+                                         and e.get("operation") == "auth-probe-readonly"))
                                 for e in fresh if e["kind"] == "inner-answer"))
-            self.assertNotIn("\n[EXAMPLE-IB02] via ", result["stdout"])
-            self.assertIn("STOP: IPv4 verification did not complete; no subsequent IB device will be configured.",
-                          result["stdout"])
+            # Owner Q-035 (a) item 3: IB02's own IPv4 readiness passes once.
+            self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in fresh))
+            # Table 6-1 row 1: no STOP for the rest of the run.
+            self.assertNotIn("STOP: IPv4 verification did not complete; no subsequent IB device will be configured.",
+                             result["stdout"])
             after = json.loads(state01.read_text(encoding="ascii"))
             self.assertTrue(after["network"] is True and after["initial"] is True
                             and after["services"] is True and after["pending"] == []
                             and after["summary_network_applied"] is True
                             and after["summary_network_saved"] is True)
-            self.assertTrue(self.base.bound_file(state02) == second_before,
-                            "unattempted PUBLIC second device state changed")
+            # Table 6-1 row 1: IB02 is processed; it was already configured, so its
+            # configuration facts are unchanged.
+            after02 = json.loads(state02.read_text(encoding="ascii"))
+            self.assertTrue(all(after02[key] == second[key] for key in (
+                "credential", "initial", "network", "services", "pending", "initial_facts")),
+                            "second device configuration facts changed")
             self.assertTrue((self.base.nine(alias.lstat()), os.readlink(alias)) == alias_before,
                             "protected PUBLIC global alias changed")
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            self.require_report(result, "S3",
-                "Summary: targets=2 configured=0 skipped=0 failed=1 day0-skipped=0 services-skipped=1")
+            # T12 (guide :2298) keeps the counter line; table 6-1 rows 1 and 2: IB02 is checked and
+            # already configured (skipped, its Network present), IB01 failed.
+            self.require_report(f, result, "S3",
+                "Summary: targets=2 configured=0 skipped=1 failed=1 day0-skipped=1 services-skipped=1", summaries)

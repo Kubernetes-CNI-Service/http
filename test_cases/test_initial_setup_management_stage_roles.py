@@ -28,6 +28,13 @@ CURRENT_BASE = "nv set system hostname nvos\nnv set service lldp state enabled\n
 BOTH_INITIAL = ("nv set system config auto-save state enabled\n"
                 "nv set system ztp config-save enabled\n")
 ACK = "PUBLIC-MUTATION-ACK\n"
+# WP-6 fixture (class 4): the remote reads the merged Initial stage makes.  Owner 04 Q-035 (a) ①
+# reads `nv show system ztp` (v15 :2792-2794, :2828-2830; P3c map 2.3 :118); T15 (guide :2301)
+# reads the pending diff before the Initial writes.  The device model answers ZTP disabled in
+# the v15 delivery tests' own format (test_v15_oob_spine.py :420) and an empty pending diff.
+ZTP_SHOW = ("nv", "show", "system", "ztp")
+DIFF = ("nv", "config", "diff", "-o", "commands")
+ZTP_DISABLED = "service disabled\n"
 
 
 class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
@@ -77,16 +84,19 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
         def transport(*args, **kwargs):
             # Only a bounded ordinary remote transport is modeled. No policy,
             # stage, parser, command constructor or authorization is patched.
+            # WP-6 fixture (class 4): a check-only run reads ZTP without the helper
+            # (06 D1a2-01), so only that read may leave allow_password_change unset.
+            read_only_ztp = len(args) == 8 and type(args[7]) is list and tuple(args[7]) == ZTP_SHOW
             if (len(args) != 8 or args[0] is not target or args[1] is not neighbor or
                     args[2] != "cumulus" or args[4] != "admin" or args[6] != 2 or
                     type(args[7]) is not list or kwargs.get("local") is not False or
-                    kwargs.get("allow_password_change") is not False or
+                    kwargs.get("allow_password_change", False if read_only_ztp else None) is not False or
                     kwargs.get("_phase_operation") is not None or
                     kwargs.get("ib_new_password") is not None):
                 adapter_errors.append("ordinary-transport-boundary")
                 raise AssertionError("PUBLIC adapter rejected an unexpected ordinary transport")
             command = tuple(args[7])
-            if command not in (INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ):
+            if command not in (INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ, ZTP_SHOW, DIFF):
                 adapter_errors.append("ordinary-command")
                 raise AssertionError("PUBLIC adapter rejected an unexpected command")
             calls.append({"command": command,
@@ -94,7 +104,9 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                           "inner_initial": hmac.compare_digest(args[5], PUBLIC_INITIAL),
                           "inner_target": hmac.compare_digest(args[5], self.kat["PASSWORD"]),
                           "inner_oob": hmac.compare_digest(args[5], PUBLIC_OOB)})
-            return APP.SessionResult(returned_body if command == READ else ACK, 0)
+            return APP.SessionResult(returned_body if command == READ else
+                                     ZTP_DISABLED if command == ZTP_SHOW else
+                                     "" if command == DIFF else ACK, 0)
         return verify, transport, native, calls, adapter_errors
 
     def test_present_global_write_authority_is_distinct_from_selected_current_and_oob(self):
@@ -158,13 +170,20 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
             self.assertEqual(native_count, len(native), "changed project must not invoke native backend again")
 
     def test_initial_two_literals_commit_only_missing_values_and_skip_when_present(self):
+        # WP-6 (class 3; D1a2 report 4.3 R1/R3/R5/R6, R3 in 04 Q-039): the strict Initial
+        # stage is v15's Stage 1 skeleton (P3c map 2.3 :118 "v15 留 Stage 1 骨架
+        # (initial_configuration_commands、ZTP 已关核验…)"; map D32d :284).  ZTP is read first
+        # (Q-035 ①) also when both values are present, through the authorized helper (D32d);
+        # an unready device gets both v15 setters, apply and save, then the readback and a
+        # second ZTP read; the stage returns its readback (06 D1a-L).  The pending diff is
+        # read before the writes (T15, guide :2301).  The method name predates WP-6.
         cases = (
-            ("present", CURRENT_BASE + BOTH_INITIAL, (), True),
-            ("missing-auto", CURRENT_BASE + "nv set system ztp config-save enabled\n", (INITIAL_AUTO,), False),
-            ("missing-ztp", CURRENT_BASE + "nv set system config auto-save state enabled\n", (INITIAL_ZTP,), False),
-            ("missing-both", CURRENT_BASE, (INITIAL_AUTO, INITIAL_ZTP), False),
+            ("present", CURRENT_BASE + BOTH_INITIAL, False),
+            ("missing-auto", CURRENT_BASE + "nv set system ztp config-save enabled\n", True),
+            ("missing-ztp", CURRENT_BASE + "nv set system config auto-save state enabled\n", True),
+            ("missing-both", CURRENT_BASE, True),
         )
-        for label, current, setters, skipped in cases:
+        for label, current, writes in cases:
             with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="main-initial-direct-") as folder:
                 _, policy, target, neighbor = self.fixture(folder)
                 verify, transport, native, calls, errors = self.observers(target, neighbor, CURRENT_BASE + BOTH_INITIAL)
@@ -176,19 +195,18 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                         local=False, apply=True, authorized=True,
                         _ib_current_password=PUBLIC_INITIAL, _password_policy=policy)
                 self.assertEqual([], errors)
-                self.assertEqual((True, skipped), outcome)
+                self.assertEqual((CURRENT_BASE + BOTH_INITIAL if writes else current, True), outcome)
                 # This independent tuple is never generated by desired_commands.
-                expected = list(setters) + ([APPLY, SAVE, READ] if setters else [])
+                expected = ([ZTP_SHOW, DIFF, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ, ZTP_SHOW]
+                            if writes else [ZTP_SHOW])
                 self.assertEqual(expected, [row["command"] for row in calls])
                 self.assertTrue(all(row["outer_oob"] and row["inner_initial"] and not row["inner_oob"] for row in calls))
-                if setters:
-                    self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"] for row in native),
-                                    "each write stage needs actual verified project authority")
+                # Every helper read and write, the ZTP read included, needs verified project authority.
+                self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"] for row in native),
+                                "each strict Initial read or write needs actual verified project authority")
+                if writes:
                     self.assertEqual(1, sum(row["command"] == APPLY for row in calls))
                     self.assertEqual(1, sum(row["command"] == SAVE for row in calls))
-                else:
-                    self.assertEqual([], native, "satisfied Initial must not acquire an irrelevant target")
-                    self.assertEqual([], calls, "satisfied Initial must not read again, set, apply or save")
                 prompts.assert_not_called()
 
 
@@ -232,7 +250,9 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                             local=False, apply=True, authorized=True,
                             _ib_current_password=PUBLIC_INITIAL, _password_policy=policy)
                 self.assertEqual([], errors)
-                self.assertEqual([INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ],
+                # WP-6 (class 3, owner 04 Q-035 (a) ①; T15, guide :2301): the reached transaction
+                # starts with the ZTP read and the pending-diff read (P3c map 2.3 :118, D32d :284).
+                self.assertEqual([ZTP_SHOW, DIFF, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ],
                                  [row["command"] for row in calls],
                                  "failure must follow the reached setters/commit/save/actual modeled readback")
                 self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"] for row in native),
@@ -241,9 +261,14 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                 prompts.assert_not_called()
 
     def test_initial_check_only_and_actual_confirmation_refusal_never_dispatch(self):
-        for label, apply, authorized, expected, consent_count in (
-            ("check-only", False, True, (True, False), 0),
-            ("refused", True, False, (False, True), 1),
+        # WP-6 (class 3, owner 04 Q-035 (a) ①; D1a2 report 4.3 R1/R6/R7): both cases first read
+        # ZTP (Q-035 ①).  A check-only run reads it without the helper, so it acquires no
+        # target (06 D1a2-01, guide :649) and returns its unchanged current state (06 D1a-L);
+        # an --apply run reads it through the authorized helper (map D32d :284) and a refused
+        # confirmation raises instead of returning a skip (v15 :2812-2813; map 2.3 :118).
+        for label, apply, authorized, consent_count in (
+            ("check-only", False, True, 0),
+            ("refused", True, False, 1),
         ):
             with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="main-initial-not-authorized-") as folder:
                 _, policy, target, neighbor = self.fixture(folder)
@@ -254,14 +279,24 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                      mock.patch("builtins.input", return_value="no") as consent:
                     # Real confirm_first_device_change executes; only the human
                     # terminal input is MODEL. Core authorization is not patched.
-                    outcome = APP.run_initial_stage(
+                    outcome, caught, output = self._eg_capture(lambda: APP.run_initial_stage(
                         target, neighbor, "cumulus", PUBLIC_OOB, "admin", 2, CURRENT_BASE,
                         local=False, apply=apply, authorized=authorized,
-                        _ib_current_password=PUBLIC_INITIAL, _password_policy=policy)
+                        _ib_current_password=PUBLIC_INITIAL, _password_policy=policy))
                 self.assertEqual([], errors)
-                self.assertEqual(expected, outcome)
-                self.assertEqual([], calls, "no mutation or follow-up read after check-only/refused consent")
-                self.assertEqual([], native, "no target permission acquisition for an unapproved change")
+                if apply:
+                    self.assertTrue(type(caught) is APP.SetupError and outcome is None,
+                                    "a refused Initial confirmation must fail this device")
+                    self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"]
+                                                         for row in native),
+                                    "the --apply ZTP read needs actual verified project authority")
+                else:
+                    self.assertTrue(caught is None, "check-only failed; exception material suppressed")
+                    self.assertEqual((CURRENT_BASE, True), outcome)
+                    self.assertEqual([], native, "no target permission acquisition for a check-only read")
+                self.assertEqual([ZTP_SHOW], [row["command"] for row in calls],
+                                 "no mutation or follow-up read after check-only/refused consent")
+                self.assertTrue(all(row["outer_oob"] and row["inner_initial"] and not row["inner_oob"] for row in calls))
                 self.assertEqual(consent_count, consent.call_count)
                 prompts.assert_not_called()
 
@@ -374,8 +409,11 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                     # real helper succeeded. Do not let the inner choke mask
                     # the Initial outer choke's original OSError/fact branch.
                     result = real_helper(*args, **kwargs)
+                    # WP-6 (class 3, Q-035 (a) ①): the stage's first helper call is its ZTP read,
+                    # which the device model answers ZTP_DISABLED rather than ACK.
                     delegated.append(type(result) is APP.SessionResult and
-                                     result.output == ACK and result.exit_code == 0)
+                                     result.output == (ZTP_DISABLED if tuple(args[7]) == ZTP_SHOW else ACK)
+                                     and result.exit_code == 0)
                     reached.append("after-real-helper-return")
                     raise fault
                 wrapper = (mock.patch.object(APP, "_run_authorized_ib_command", side_effect=after_helper)
@@ -411,7 +449,10 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                                 "normalization must not modify the original fault")
                 self.assertTrue(result is None, "failed operation unexpectedly returned success")
                 self.assertEqual([], errors)
-                self.assertEqual([INITIAL_AUTO], [row["command"] for row in calls])
+                # WP-6 (class 3, owner 04 Q-035 (a) ①; map 2.3 :118): the stage's first helper
+                # dispatch is now its ZTP read; the helper entry is unchanged.
+                self.assertEqual([INITIAL_AUTO] if entry == "helper" else [ZTP_SHOW],
+                                 [row["command"] for row in calls])
                 self.assertEqual(["after-validated-transport" if entry == "helper" else
                                   "after-real-helper-return"], reached)
                 self.assertEqual([True] if entry == "stage" else [], delegated)
@@ -453,7 +494,10 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                     self.assertTrue(result is None, "program error returned a success value")
                     self.assertEqual(["after-validated-transport"], reached)
                     self.assertEqual([], errors)
-                    self.assertEqual([INITIAL_AUTO], [row["command"] for row in calls])
+                    # WP-6 (class 3, owner 04 Q-035 (a) ①; map 2.3 :118): the stage's first
+                    # dispatch is now its ZTP read; the helper entry is unchanged.
+                    self.assertEqual([INITIAL_AUTO] if entry == "helper" else [ZTP_SHOW],
+                                     [row["command"] for row in calls])
                     self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"] for row in native),
                                     "program fault must follow actual project/native qualification")
                     self.assertTrue(all(row["outer_oob"] and row["inner_initial"] and not row["inner_oob"] for row in calls))
@@ -496,16 +540,21 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                  mock.patch.object(APP.getpass, "getpass", side_effect=AssertionError("PUBLIC unexpected target prompt")) as prompts:
                 outcome, caught, output = self._eg_capture(
                     lambda: self._eg_entry("stage", policy, target, neighbor))
-            expected = [INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ]
+            # WP-6 (class 3, owner 04 Q-035 (a) ①; D1a2 report 4.3 R1/R5/R6; map 2.3 :118, D32d
+            # :284): the helper also carries the ZTP reads before and after the writes, and the
+            # stage returns its readback (06 D1a-L).  The pending-diff read before the writes
+            # (T15, guide :2301) is DEV's plain read (f2713f5 main :6256-6261), outside any
+            # helper, so it alone has no helper gate.
+            expected = [ZTP_SHOW, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ, ZTP_SHOW]
             self.assertTrue(caught is None,
                             "Initial positive failed; exception material suppressed")
-            self.assertEqual((True, False), outcome)
+            self.assertEqual((CURRENT_BASE + BOTH_INITIAL, True), outcome)
             self.assertEqual([], errors)
             self.assertEqual(expected, helper_commands)
-            self.assertEqual(expected, [row["command"] for row in calls])
-            self.assertEqual([True, True, True, True, True], gate_witnesses,
+            self.assertEqual([ZTP_SHOW, DIFF, *expected[1:]], [row["command"] for row in calls])
+            self.assertEqual([True, False, True, True, True, True, True, True], gate_witnesses,
                              "each actual transport must follow native verification in its own real helper call")
-            self.assertEqual([True, True, True, True, True], delegated)
+            self.assertEqual([True] * 7, delegated)
             self.assertEqual([], active)
             self.assertTrue(bool(native) and all(row["target"] and row["selected_ib_setting"] and row["result"] for row in native),
                             "all reached native checks must verify the selected project IB setting")
@@ -519,7 +568,13 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
             prompts.assert_not_called()
 
     def test_global_change_after_each_real_initial_action_blocks_the_next_action(self):
-        expected = [INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ]
+        # WP-6 (class 3; D1a2 report 4.3 R1/R9/R11): the transaction starts with the helper's ZTP
+        # read (owner 04 Q-035 (a) ①) and DEV's plain pending-diff read (T15, guide :2301).  v15
+        # checks the project input before each Initial write and lets the change stop the batch
+        # (P3c map 2.3 :118, R9/R11, 04 Q-041; CURRENT-CONTRACT.md :60 "共享输入/证据落盘错误仍应停止公共流程"),
+        # so a change after a setter or apply raises ProjectInputChanged; after save the next action
+        # is the helper's readback, whose own guard keeps DEV's fixed Initial UNKNOWN error (map 2.3 :118).
+        expected = [ZTP_SHOW, DIFF, INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE, READ]
         for cutpoint in (INITIAL_AUTO, INITIAL_ZTP, APPLY, SAVE):
             with self.subTest(command=cutpoint), tempfile.TemporaryDirectory(prefix="main-initial-cut-") as folder:
                 path, policy, target, neighbor = self._eg_fixture(folder)
@@ -546,13 +601,13 @@ class PresentGlobalManagementStageRoleDraftTests(unittest.TestCase):
                         lambda: self._eg_entry("stage", policy, target, neighbor))
                 prefix = expected[:expected.index(cutpoint) + 1]
                 self.assertEqual(1, len(perturbations), "the independent post-helper change was not reached")
-                self.assertTrue(type(caught) is APP.SetupError,
+                self.assertTrue(type(caught) is (APP.SetupError if cutpoint == SAVE else APP.ProjectInputChanged),
                                 "changed project must fail closed before the next action; error material suppressed")
                 self.assertTrue(outcome is None, "changed authority returned stage success")
                 self.assertEqual([], errors)
                 self.assertEqual(prefix, [row["command"] for row in calls],
                                  "no next mutation or readback may cross changed authority")
-                self.assertEqual([(command, True) for command in prefix], delegated,
+                self.assertEqual([(command, True) for command in prefix if command != DIFF], delegated,
                                  "the already-reached real helper prefix must remain witnessed, not rolled back")
                 self.assertEqual(perturbations[0][0], len(native),
                                  "changed authority must refuse before another native backend call")

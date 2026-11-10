@@ -78,7 +78,7 @@
 - 类型：direct / integration / scenario / real-environment；对应 backup bounded-process
   修复及 REQ7 当前完整验证的安全前置。现场状态 **NOT RUN / REAL_ENV REQUIRED**。
   本卡不授权真实 SSH、设备、服务、root、cron 或生产项目操作，不替代已有 host-key/
-  BACKUP-AUTH 现场案例；普通发布门禁及 REQ10-C 三项实际 FAIL 的窄例外均不变。
+  BACKUP-AUTH 现场案例；普通发布门禁与 validation-only 判定均不变。
 - 模块：`ztp/backup/yaml-collect.py`、同目录 `_bounded_process.py` 与
   `_bounded_process_launcher.py`，以及真实 worker 到 collector 的交付与执行路径。
   本地 direct/protocol/FD-alias、原六个 core 场景和 staged-worker workflow 是开发替代证据，
@@ -90,8 +90,8 @@
   native 线程/信号下的普遍证明。当前 macOS UID501 开发见证不等于 Linux/容器或其他 UID 验收。
 - 正常步骤：验证 standalone 与实际 worker 的逐文件交付；依次验证正确退出码（包括非零17）
   与完整 stdout/stderr、原 argv/env/stdin、仅外层两个私有 FD/内层零继承，以及完整原件 alias
-  census。真实命令退出状态和持有组号的 anchor 状态分别记录，先信号原有未回收组，再回收原
-  anchor；不得通过 PID 文件、getpgid 或已回收组号重新取得清理权限。
+  census（控制路径：`ztp/backup/_bounded_process.py::run_bounded_anchored` 以 `ztp/backup/_bounded_process.py::outer_kwargs` 起固定 launcher，只经 `pass_fds` 交请求读端和状态写端；launcher 以 `ztp/backup/_bounded_process_launcher.py::command_kwargs` 起真实命令（原 env、原 stdin/stdout/stderr、`close_fds=True`、`pass_fds=()`）；退出码取 `ztp/backup/_bounded_process.py::effective_returncode`）。真实命令退出状态和持有组号的 anchor 状态分别记录，先信号原有未回收组，再回收原
+  anchor；不得通过 PID 文件、getpgid 或已回收组号重新取得清理权限（控制路径：`ztp/backup/_bounded_process.py::finish` 先调 `ztp/backup/_bounded_process.py::signal_original_group`（发信号前先置标记，不 poll、不 getpgid、不按数字重新认领），再调 `ztp/backup/_bounded_process.py::wait_original_anchor`（未发信号不等待）；两种状态由 `ztp/backup/_bounded_process.py::run_bounded_anchored` 分开返回）。
 - 保留故障：原始短期限与64KiB输出界、洪泛、成功 leader 后仍持管道或分离 stdio 的后代；
   原始构造前失败、读取普通异常/操作者中断和 cause 身份；部分初始化/丢失 anchor/收尾失败；
   请求错序/截断/尾随、缺真实状态帧、单独 EOF、父进程丢失、源码或 inode 换件。失败、UNKNOWN
@@ -282,6 +282,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 ## TC-REAL-REQ10C-AUTO-001 — 自动部署与同 UID crontab 静默验证
 
+- 随 D1 退役（v3.1.3，O3）：initial-setup 已没有 `--auto` 和 `--credentials-file`，本卡的安装、自动移除与持续轮次不再可执行，ISSUE-0016 窄例外同时退役（O2）。本卡保留作历史记录，标题与状态不改；原「`02-unsetup.py` 清理」的要求移到 `TC-REAL-D1-AUTO-RESIDUE-001`（旧 auto 残留的只读普查与清理）。
 - Type: real-environment / owner-authorized isolated AIR-management validation; requirement REQ10C §10C.1–10C.9, dependent on REQ10B key/service stage.
 - Status: OPEN / NOT RUN. Hermetic tests do not satisfy real cron UID, OOB Leaf, or IB device claims.
 - Risk: `--auto` can install a 10-minute user crontab and retain `auto.env` containing credentials; it can modify a test IB switch and OOB Leaf. Never run against production or uncontrolled user crontab.
@@ -293,6 +294,140 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - Cleanup: stop own watcher and remove only the own crontab entry; invoke real `02-unsetup.py` scoped to the test project, verify owned state deletion and foreign retention; restore isolated device config and original crontab from the protected baseline; destroy test credential file without publishing its contents. Any cleanup failure remains OPEN and blocks validation.
 - Automated coverage intended: REQ10C direct `test_req10c_auto_contract.py` plus multi-real-script `test_req10c_auto_workflow.py`; candidate direct/workflow tests are locally ported; exact landed full proofs and owner real-environment execution remain OPEN.
 
+## TC-REAL-D1-AUTO-RESIDUE-001 — 旧 auto 定时任务与 auto.env 残留的只读普查和清理
+
+### 基本信息
+
+- Case ID：`TC-REAL-D1-AUTO-RESIDUE-001`。
+- 名称：部署 v3.1.3 后，用过 DEV `--auto` 的管理服务器上旧 auto cron 行与 `auto.env` 等残留的只读普查和清理。
+- 类型：real-environment。
+- 对应需求：`--auto` 退役（owner 2026-11-02，需求文档 :557；O3）；`02-unsetup.py` 的旧 watch 清理保留到 K6r（O11）；
+  步骤取自指导 5.5「要手工处理的」（指导 :1380-1392）。原 `TC-REAL-REQ10C-AUTO-001` 的「`02-unsetup.py` 清理」要求移到本卡。
+- 自动化文件与测试方法：`test_req10c_auto_workflow`（`02-unsetup.py` 旧 watch 清理：非协作同 UID 写者、跨进程串行化、
+  无链接清理、只剩标记的清理、不安全 `auto.env` 保留、两条 paused-watch 用例）；`test_unsetup_operator_crontab`
+  （root 代表操作员时的 `crontab -u`）；`test_ibsw225_initializer_help_guard` 的
+  `test_retired_auto_and_credentials_file_are_unknown_before_guard_or_report`（两个参数按未知参数以 2 退出）。
+- 适用平台：management-server（Ubuntu 24.04）。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**
+
+### 风险与目标
+
+- 要防止的故障：残留的 auto cron 行部署后每 10 分钟以参数错误退出、往 `auto-cron.log` 追加报错，明文 `auto.env`
+  一直留着（指导 :617）；用管道 `crontab -l | … | crontab -` 手工删行时，`crontab -l` 出错会装进空表、删掉这个用户
+  全部 cron 行（指导 :618）。
+- 涉及的边界：操作员与 root 各自的 crontab；状态目录 `xdr-initial-setup-logs`（经链接落在
+  `<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs`）。
+- 成功标准：两类旧 auto 行（带 `# http-v3-req10c-auto` 标记的和旧写法）计数为 0，其他 cron 行逐字保留（指导 :1389）；
+  残留文件按步骤删除（指导 :1391）；证据不含 `auto.env` 内容（指导 :1392）。
+
+### 前置条件与输入
+
+- 只在用过 DEV `--auto` 的服务器上执行（现场经 v15 不可能用过，O3）；已部署 v3.1.3，`--version` 打印本版版本串。
+- 没有 initial-setup 或升级在跑；操作员身份与项目路径已记录；要清 root 自己的 crontab 时由 owner 授权 root 执行。
+- 在没有其他同 UID crontab 写者的窗口里执行。
+
+### 步骤
+
+1. 只读普查，只出行数和元数据（指导 :1382）：`crontab -l 2>/dev/null | grep -c -F '# http-v3-req10c-auto'`；root 下另查
+   `crontab -u <操作员> -l 2>/dev/null | grep -c -F '# http-v3-req10c-auto'`；旧写法用
+   `grep -c -E 'initial-setup\.py --auto --apply --yes --credentials-file'`；文件用
+   `find <状态目录> -maxdepth 1 \( -name auto.env -o -name 'auto-*' -o -name auto.lock \) -printf '%p %u %m %s\n'`；
+   不用 `cat`、`less`、`head`、`cp` 碰 `auto.env`。
+2. 确认没有轮次在跑（指导 :1383）：`<状态目录>/auto.lock` 存在时用 `fuser -v` 或 `lsof` 只读查看，不用 `flock` 探测。
+3. 先删 cron 行、再删文件，按「先落盘、核对、再装」（指导 :1384；反过来会踩 `02-unsetup.py` 局限 1，指导 :505）：
+   1. `crontab -l > <备份>`，退出码不是 0 就停下（指导 :1385）；
+   2. 数总行数 N 与要删的行数 K，两类旧 auto 行都算（指导 :1386）；
+   3. `grep -v -E` 写出 `<新表>`：退出码 1 只表示没有剩下的行，退出码 2 停下（指导 :1387）；
+   4. 核对 `<新表>` 行数等于 N − K，不等就停下（指导 :1388）；
+   5. `crontab <新表>`，再核对两类行计数为 0、总行数为 N − K（指导 :1389）；
+   6. `<备份>` 按 0600 保留在操作员自己的目录里（指导 :1390）。
+4. root 下清操作员的，每条 `crontab` 加 `-u <操作员>`；当年用 sudo 跑过 `--auto` 的，root 自己的 crontab 也按第 3 步
+   做一遍（指导 :1384；`02-unsetup.py` 局限 4，指导 :508）。
+5. 删文件（指导 :1391）：`auto.env` 用 `shred -u`；`auto-watch.state`、`auto-terminal.json`、`auto-crontab.lock`、
+   `auto.lock` 用 `rm -f`；`auto-cron.log` 按现场习惯保留或归档。
+6. 只有一个项目、指针还指着当年那个项目时，也可以改跑 `02-unsetup.py`（O11）：它只清当前用户（root 代表操作员时为
+   操作员）crontab 里本项目的 auto 行和三个状态文件，不清 root 自己的 crontab，不删 `auto-crontab.lock`、`auto.lock`、
+   `auto-cron.log`（指导 :505-509；`DAY0-Prepare/02-unsetup.py::_cleanup_req10c_auto_watch_locked`）。
+
+### 预期结果
+
+- 第 3 步之后两类旧 auto 行的计数为 0、总行数为 N − K（指导 :1389）。
+- 其他 cron 行逐字保留（指导 :1386-1389 的行数核对；`DAY0-Prepare/02-unsetup.py::_cleanup_req10c_auto_watch_locked` 同一判定）。
+- `crontab -l` 出错、grep 退出码 2 或行数不符时停下，不装新表（指导 :1385-1388）。
+- 不允许：用管道一步装表（指导 :618）；读取或复制 `auto.env` 的内容（指导 :1382）。
+- 证据：前后计数、`find -printf` 元数据、`<备份>` 的路径，不保存 `auto.env` 的内容（指导 :1392）。
+
+### 故障注入与清理
+
+- 只在隔离的测试服务器上演练 `crontab -l` 出错：第 3 步第 1 小步必须停下，crontab 不变。
+- 出问题时用 `crontab <备份>` 恢复。
+- 重复执行：第二次普查两类行计数为 0，不再改动。
+
+### 自动化状态
+
+- [x] `02-unsetup.py` 的旧 watch 清理由上列模块覆盖（WP-4）。
+- [ ] 现场普查与清理（NOT RUN）。
+
+## TC-REAL-D1-INITIAL-SETUP-MERGED-001 — 合流后的 initial-setup 替换现场 v15
+
+### 基本信息
+
+- Case ID：`TC-REAL-D1-INITIAL-SETUP-MERGED-001`。
+- 名称：合流后的 initial-setup 部署到 AIR、替换现场 v15 后的真机核对。
+- 类型：real-environment。
+- 对应需求：I-020（以 v15 为底合流，owner 2026-11-06）；R-012 设计 §8.3 `--credentials-fd`（WP-5）。
+  本卡由 WP-3、WP-5、WP-8、WP-10 共同填写（指导 5.3 :1344）；目前只有 WP-5 的 `--credentials-fd` 一节，
+  部署后的 sha256 与 `--version`、只读检查与 v15 对比、`--apply`、`summary.json`、报告文件名、`--project-dir`、
+  V15 REAL 01～04 并入、回退到 v15 由后续工作包补。
+- 自动化文件与测试方法：`test_credentials_fd`（读入合同）；`test_initial_setup_credentials_fd_workflow`（真实 main、
+  假 SSH/PTY 传输）。
+- 适用平台：management-server（AIR）。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**
+
+### 风险与目标
+
+- 要防止的故障：口令出现在 `ps` 输出、`/proc/<pid>/environ`、报告或 `summary.json` 里；fd 模式下仍然提问。
+- 成功标准：只读检查照常完成，上述位置都看不到口令（R-012 设计 :346；指导 :718）。
+
+### 前置条件与输入
+
+- AIR 上已部署合流后的代码树（`tools/credentials_fd.py` 随整棵树部署）；有一组可只读登录的跳板和 IB。
+- 口令由操作员当场输入到生成 JSON 的进程里，不写进文件和 shell 历史。
+
+### 步骤
+
+1. 用一个管道把 JSON 交给 fd（指导 :718）：调用进程建管道、把含 `jump_passwords`、`nvos_initial_password` 的 JSON 写进
+   写端后关闭，再以 `python3 initial-setup.py --credentials-fd <读端> …`（不带 `--apply`）运行只读检查，读端由子进程继承。
+2. 运行期间另开终端核口令不在进程参数和环境里；核法只输出 pid、行数和计数，不输出 environ 内容和口令（指导 :718；R-012 设计 :346）：
+   1. 权限：在 root shell（`sudo -s`）里执行下面各项；不要写成 `sudo tr … < /proc/<pid>/environ`，那样重定向仍由普通用户的 shell 做，读不到；记录执行核对的用户（指导 :718）。
+   2. 进程清单（含子进程）：`pgrep -f -- '--credentials-fd'` 取 initial-setup 主进程的 pid；再对主进程和已列出的每个 pid 反复执行 `pgrep -P <pid>`，直到没有新的 pid（含 worker 和它们起的 ssh 等子进程）；对清单里每个 pid 执行 `ps -o pid,ppid,args -p <pid>` 并记录输出（指导 :718；R-012 设计 :346）。
+   3. 可读性：对清单里每个 pid 执行 `test -r /proc/<pid>/environ && tr '\0' '\n' < /proc/<pid>/environ | grep -c .`，记录是否可读和非空行数；列清单后已退出的 pid（`/proc/<pid>` 已不存在）记「已退出」，不算「无法核」，并重新取一次清单、对新出现的 pid 再核；仍在运行却不可读或行数为 0 的 pid 记为「无法核」，本步不通过，不得把它的计数当作 0（指导 :718）。
+   4. 阳性对照：对每个 pid 用同一核法核它自己 environ 里 `PATH=` 那一行的值，计数须 ≥1：
+      `V=$(tr '\0' '\n' < /proc/<pid>/environ | sed -n 's/^PATH=//p'); [ -n "$V" ] && printf '%s\n' "$V" | grep -c -F -f - <(tr '\0' '\n' < /proc/<pid>/environ); unset V`
+      （对照值不是口令；用 `PATH=` 是因为口令哈希核验子进程的环境只有 PATH、LC_ALL、LANG、PYTHONDONTWRITEBYTECODE，没有 HOME（`infiniband/bringup/xdr-initial-setup/initial-setup.py::verify_password_hash`）；计数为 0 或取不到值说明核法或 pid 有误，本步不通过；指导 :718）。
+   5. 对 fd 里的每个口令（按 JSON 里的键编号记录，不记值）对清单里每个 pid 核一次：
+      `IFS= read -rs P; if [ -n "$P" ]; then printf '%s\n' "$P" | grep -c -F -f - <(tr '\0' '\n' < /proc/<pid>/environ); else echo skipped-empty; fi; unset P`
+      （`IFS=` 保留首尾空白，`read -s` 隐藏输入，`printf`、`[`、`echo` 是 shell 内建命令，口令只经管道进 `grep` 的标准输入，不进任何进程的参数、文件和输出；空值不核，记为跳过；指导 :718；R-012 设计 :346）。
+   6. 证据字段：执行核对的用户；进程清单（pid、ppid、args）；每个 pid 的可读性与非空行数（或「已退出」）；每个 pid 的阳性对照计数；每个口令编号对每个 pid 的计数或「跳过（空值）」（指导 :718）。
+3. 结束后检查报告和 `summary.json`（指导 :718）。
+
+### 预期结果
+
+- 不出现任何提问（R-012 设计 :345；`infiniband/bringup/xdr-initial-setup/initial-setup.py::prompt_ethernet_passwords`）。
+- `ps` 的参数里只有 `--credentials-fd <数字>`，没有口令（R-012 设计 :346；指导 :718）。
+- 第 2 步清单里每个未退出的 pid 的 environ 都可读、非空行数 ≥1，阳性对照计数都 ≥1；每个非空口令对每个 pid 的计数都是 0；报告、`summary.json` 里都看不到口令（R-012 设计 :346；指导 :718）。
+- 口令都被接受时，只读检查的逐台结果与同一批设备用交互方式检查时相同；退出码按 O10（指导 :263）：入口缺键 2，执行中被拒或 INCOMPLETE 也是 2。
+
+### 故障注入与清理
+
+- 在隔离设备上演练：fd 里故意缺 `ib_target_password` 并给 `--apply`，应在碰设备之前以 2 退出（O10）。
+- 证据里不保存 JSON 内容；用完关闭终端，不留含口令的文件。
+
+### 自动化状态
+
+- [x] 读入合同与 fd 模式工作流已由上列模块覆盖（WP-5）。
+- [ ] AIR 真机核对（NOT RUN）。
+
 ## TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001 — initial-setup 严格管理路径测试夹具与私有前置输入
 
 ### 基本信息
@@ -300,14 +435,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - Case ID：`TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001`。
 - 名称：present-global 严格管理路径的测试夹具、口令 worker 合同与私有前置输入。
 - 类型：workflow / fixture / real-environment 前置说明。
-- 对应需求：I18（项目 global 存在时，新 IB 口令必须匹配 global 的目标哈希）。存在项目 global 的 manual／auto
-  管理运行构造 `ProjectPasswordPolicy`，每台 IB 经 `_authenticate_ib_read` → `_execute_ib_phase` 只读认证，
+- 对应需求：I18（项目 global 存在时，新 IB 口令必须匹配 global 的目标哈希）。存在项目 global 的 manual
+  管理运行（auto 已随 D1 退役，v3.1.3）构造 `ProjectPasswordPolicy`，每台 IB 经 `_authenticate_ib_read` → `_execute_ib_phase` 只读认证，
   业务命令经 `_run_authorized_ib_command` → `run_on_ib`；managed 运行同样走这条路径。
 - 自动化：`test_req10b_services_keys_workflow`（严格路径方法，含 managed main 五轮用例）、
   `test_ibsw225_managed_outer_guard_workflow`（managed 成功与下一轮 monitor 消费）、
-  `test_initial_setup_managed_merge_contract`（完成证明失败用例）、`test_req10c_auto_workflow`（`round_complete`
-  两个子用例与 `first_round`，经 REQ10B 的 strict helper 取用 KAT），共享 `strict_management_boundary` 与
-  `assert_strict_management_path`；口令策略与 worker 合同见 `test_initial_setup_target_password_policy`。
+  `test_initial_setup_managed_merge_contract`（完成证明失败用例），共享 `strict_management_boundary` 与
+  `assert_strict_management_path`（`test_req10c_auto_workflow` 的 `round_complete`、`first_round` 用例已随
+  `--auto` 退役）；口令策略与 worker 合同见 `test_initial_setup_target_password_policy`。
 - 适用平台：local；KAT 与私有夹具由操作员按路径提供。
 
 ### 风险与目标

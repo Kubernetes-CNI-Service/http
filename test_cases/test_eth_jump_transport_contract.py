@@ -53,6 +53,16 @@ class EthJumpTransportContractTests(unittest.TestCase):
             "", "", "", "",
         )
 
+    def framed_probe_answer(self, outer):
+        """Fake device for the v15 password-only IPv4 probe (class-4 fixture, table 6-1 row 9,
+        guide :752): it runs the framed command and answers inside the v15 command frame."""
+        def answer(*_args, **_kwargs):
+            script = outer.call_args.args[2][-1]
+            marker = re.search(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", script).group(1)
+            return self.module.SessionResult(
+                "\n__HTTP_IB_BEGIN_" + marker + "__\n\n__HTTP_IB_END_" + marker + "__=0\n", 0)
+        return answer
+
     def test_f02_nvl_declared_initial_setup_is_not_silently_skipped(self):
         with tempfile.TemporaryDirectory() as directory:
             devices_path = Path(directory) / "devices.csv"
@@ -184,17 +194,23 @@ class EthJumpTransportContractTests(unittest.TestCase):
             )
             self.assertEqual("EXAMPLE-JUMP01", targets[0].ethernet.hostname)
 
-    def test_local_transport_executes_typed_argv_without_shell_carrier(self):
+    def test_local_transport_wraps_typed_argv_in_the_fixed_path_carrier(self):
+        # T14 (guide :2300; owner Q-032 default; P3c map :341): a local run uses the same fixed
+        # PATH exec carrier as the remote one (v15 reference outer_ssh_command :1960-1970,
+        # _SAFE_PATH :271).  This reverses the former "never sh -c" intent (listed for the
+        # owner); tokens still cross as one shlex-joined exec, as the remote test
+        # test_allowed_read_command_is_joined_once_at_remote_boundary pins.
         command = ["nv", "config", "show"]
         argv = self.module.outer_ssh_command(
             self.ethernet(), "admin", command, 10, local=True,
         )
         self.assertEqual(
-            command,
+            ["sh", "-c",
+             "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec nv config show"],
             argv,
-            "local jump transport must execute the typed argv directly, never sh -c",
+            "local jump transport uses the remote fixed-PATH exec carrier (T14)",
         )
-        self.assertNotEqual(["sh", "-c"], argv[:2])
+        self.assertEqual(["nv", "config", "show"], command, "the typed argv is not mutated")
 
     def test_typed_argv_independently_enforces_the_complete_shape_contract(self):
         original = ["custom-command", "argument with spaces"]
@@ -498,14 +514,16 @@ class EthJumpTransportContractTests(unittest.TestCase):
             "203.0.113.1", "", "", "",
         )
         target = self.module.Target(ib, self.ethernet(), "swp7", "eth0")
-        completed = self.module.SessionResult("", 0)
+        # Class-4 fixture (table 6-1 row 9, guide :752): the v15 probe waits 10 s before each
+        # attempt and its output is framed; the fake device answers inside the frame.  The IB
+        # credential is passed explicitly (06 D1a-I); it is the value the call used before.
         with mock.patch.object(
             self.module, "outer_ssh_command", return_value=["sentinel"],
         ) as outer, mock.patch.object(
-            self.module, "interactive_run", return_value=completed,
-        ):
+            self.module, "interactive_run", side_effect=self.framed_probe_answer(outer),
+        ), mock.patch.object(self.module.time, "sleep", return_value=None):
             self.module.verify_ipv4_login(
-                target, "default", "admin", "secret", "admin", 10,
+                target, "default", "admin", "secret", "admin", 10, ib_password="secret",
             )
         remote_argv = outer.call_args.args[2]
         self.assertIsInstance(
@@ -514,24 +532,87 @@ class EthJumpTransportContractTests(unittest.TestCase):
             "verify_ipv4_login must pass typed argv to outer_ssh_command",
         )
 
-    def test_ipv4_verification_reuses_closed_nvos_enforcer(self):
+    def test_ipv4_verification_password_probe_runs_only_framed_true(self):
         valid_ib = self.module.Device(
             "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
             "203.0.113.1", "", "", "",
         )
-        completed = self.module.SessionResult("", 0)
         valid_target = self.module.Target(valid_ib, self.ethernet(), "swp7", "eth0")
+        # Class-4 fixture as above (framed answer, no 10 s waits, explicit IB credential).
         with mock.patch.object(
-            self.module, "ib_command_argv", wraps=self.module.ib_command_argv,
-        ) as enforcer, mock.patch.object(
             self.module, "outer_ssh_command", return_value=["sentinel"],
-        ), mock.patch.object(
-            self.module, "interactive_run", return_value=completed,
-        ):
+        ) as outer, mock.patch.object(
+            self.module, "interactive_run", side_effect=self.framed_probe_answer(outer),
+        ), mock.patch.object(self.module.time, "sleep", return_value=None):
             self.module.verify_ipv4_login(
-                valid_target, "default", "admin", "secret", "admin", 10,
+                valid_target, "default", "admin", "secret", "admin", 10, ib_password="secret",
             )
-        enforcer.assert_called_once_with(["true"])
+        # Table 6-1 row 9 (guide :752; 06 D1a-C, D1a-06; owner Q-032 default): the v15 branch
+        # probes with its own password-only, -tt, framed ssh (v15 reference verify_ipv4_login
+        # :2932-2985, nested argv :2945-2953, _framed_script :432-440) instead of the DEV probe
+        # through ib_command_argv; the IB side still runs only `true`.
+        nested = outer.call_args.args[2]
+        self.assertEqual(
+            ["ip", "vrf", "exec", "default", "ssh", "-tt",
+             "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+             "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+             "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
+             "-o", "PreferredAuthentications=password,keyboard-interactive",
+             "admin@203.0.113.2"],
+            nested[:-1],
+        )
+        marker = re.search(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", nested[-1]).group(1)
+        self.assertEqual(
+            ["sh", "-c",
+             'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; true; task_rc=$?; '
+             'printf "\\n__HTTP_IB_END_' + marker + '__=%s\\n" "$task_rc"; exit "$task_rc"'],
+            shlex.split(nested[-1]),
+        )
+        self.assertIs(True, outer.call_args.kwargs.get("tty"))
+
+    def test_non_strict_stages_never_log_in_to_ib_with_the_ethernet_password(self):
+        # 06 D1a-I (pre-review b-9); v3.1.3 guide 1.3 row 8 (the DEV legacy flow that changed IB
+        # to the Ethernet password is not carried over): a non-strict Services, public-key or
+        # IPv4 call that names no selected IB credential reaches no IB transport.
+        ib = self.module.Device(
+            "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
+            "203.0.113.1", "", "", "",
+        )
+        target = self.module.Target(ib, self.ethernet(), "swp7", "eth0")
+        neighbor = self.module.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
+        services = {"dns": ["203.0.113.53"], "ntp": ["ntp.ubuntu.com"], "timezone": "Asia/Taipei"}
+        applied = ("nv set system dns server 203.0.113.53\n"
+                   "nv set system ntp server ntp.ubuntu.com\n"
+                   "nv set system date-time timezone Asia/Taipei\n")
+        calls = (
+            ("services", lambda: self.module.run_service_stage(
+                target, neighbor, "cumulus", "ETH-ONLY", "admin", 10, services, "",
+                local=False, apply=True, authorized=True)),
+            ("keys", lambda: self.module.run_key_stage(
+                target, neighbor, "cumulus", "ETH-ONLY", "admin", 10,
+                [{"name": "laptop.pub", "line": "-", "fingerprint": "-"}],
+                local=False, apply=True, authorized=True)),
+            ("ipv4", lambda: self.module.verify_ipv4_login(
+                target, "default", "cumulus", "ETH-ONLY", "admin", 10)),
+        )
+        for label, invoke in calls:
+            with self.subTest(stage=label), mock.patch.object(
+                self.module, "_stage_ib_command",
+                return_value=self.module.SessionResult(applied, 0),
+            ) as stage_command, mock.patch.object(
+                self.module, "key_install_command", return_value=["true"],
+            ), mock.patch.object(
+                self.module, "interactive_run",
+                return_value=self.module.SessionResult("", 0),
+            ) as transport, mock.patch.object(self.module.time, "sleep", return_value=None):
+                with self.assertRaises(self.module.SetupError):
+                    invoke()
+                # 06 WP6-a6: the refusal is the missing selected IB credential itself, not an
+                # earlier, unrelated SetupError.
+                with self.assertRaisesRegex(self.module.SetupError, "needs the selected IB credential"):
+                    invoke()
+                stage_command.assert_not_called()
+                transport.assert_not_called()
 
     def test_ipv4_verification_binds_target_and_transit_identities(self):
         valid_ib = self.module.Device(
@@ -557,7 +638,7 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 self.module, "interactive_run", return_value=completed,
             ) as runner, self.assertRaises(self.module.SetupError):
                 self.module.verify_ipv4_login(
-                    target, "default", "admin", "secret", "admin", 10,
+                    target, "default", "admin", "secret", "admin", 10, ib_password="secret",
                 )
             outer.assert_not_called()
             runner.assert_not_called()
@@ -594,26 +675,6 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 )
             responder.assert_not_called()
             runner.assert_not_called()
-
-    def test_auto_key_installer_rejects_transit_and_non_management_key_before_ssh(self):
-        oob = self.module.Device(
-            "EXAMPLE-OOB01", "eth", "192.0.2.11", "192.0.2.11",
-            "", "", "", "",
-        )
-        invalid = (
-            (self.ethernet(), {"name": "mgmt-server.pub"}),
-            (oob, {"name": "laptop.pub"}),
-        )
-        for device, entry in invalid:
-            with self.subTest(device=device.dev_type, key=entry["name"]), \
-                    mock.patch.object(self.module, "outer_ssh_command") as outer, \
-                    mock.patch.object(self.module, "interactive_run") as interactive, \
-                    self.assertRaises(self.module.SetupError):
-                self.module.install_oob_management_key(
-                    device, "cumulus", "secret", entry, 10,
-                )
-            outer.assert_not_called()
-            interactive.assert_not_called()
 
     def test_closed_jump_dispatch_caller_sets_are_complete(self):
         tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))

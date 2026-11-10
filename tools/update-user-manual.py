@@ -426,14 +426,14 @@ def script_profile(root: Path, relative: str, *, _facts: _InvocationSources | No
             scenario = ("开发时选择受影响的 direct/workflow，或在正式 load 前签发并复核绑定当前字节的 full proof。"
                         "--validation-only 仅供 owner 授权的 AIR/prod 验证，非 dry-run，绝非最终生产发布许可。")
             prerequisite = ("工作树暂时冻结；manifest 映射完整；测试预期已独立评审；禁止手工修改批准 ledger。"
-                            "AIR/prod 验证还须见证其他同 UID crontab 写者在安装、自动移除和 unsetup 各自整个读—改—写窗口保持静默。")
+                            "REQ10C 窄例外已随 --auto 退役（v3.1.3），AIR/prod 验证同样要求全部通过。")
             syntax = "python3 -B test_cases/run_related_tests.py [options]"
             parameters = ", ".join(script_options(source, _facts=_facts))
             inputs = "当前生产脚本、测试、script_test_manifest.json、批准状态以及 Python/平台身份。"
             outputs = ("选测清单、unittest 结果和退出码；普通 related/full 成功后可按合同原子更新批准状态。"
-                       "验证模式仍如实报告三项 FAIL，只签发与普通发布证明严格区分的验证证明。")
+                       "验证模式只签发与普通发布证明严格区分的验证证明。")
             success = ("普通模式要求零 failure/error；正式发布还必须让 --all 成功，并让普通 --check --require-full 返回 0。"
-                       "--validation-only 只接受 ISSUE-0016 安装、自动移除、unsetup 的恰好三项原断言 FAIL，"
+                       "--validation-only 只接受全部通过：跳过集合恰好是四个基线项，"
                        "无其他 failure/error/新增 skip；普通发布证明检查必须拒绝该验证证明。")
             recovery = "按首个失败区分实现、测试、夹具或平台问题；修复后完整重跑，禁止弱化断言或手改 ledger。"
         else:
@@ -450,13 +450,13 @@ def script_profile(root: Path, relative: str, *, _facts: _InvocationSources | No
     elif is_validation_report_helper:
         direct = "是，仅供开发验证；这是治理 runner 的内部全量发现助手，不是普通 unittest 测试模块或生产入口。"
         environment = "canonical 开发工作树；由 --validation-only 治理 runner 提供一次性报告路径和当前 Python 环境。"
-        scenario = "对当前测试树做完整 unittest discovery，保留原始三项 FAIL 并产生精确机器可读报告。"
+        scenario = "对当前测试树做完整 unittest discovery，并产生精确机器可读报告。"
         prerequisite = "REPORT_PATH 必须是尚不存在的受控文件；只在授权的 AIR/prod 验证流程中解释其结果。"
         syntax = "python3 -B -m test_cases.validation_unittest REPORT_PATH [-v]"
         parameters = "必填 REPORT_PATH；可选 -v 输出详细测试结果。"
         inputs = "当前测试树及独立断言；由父治理 runner 校验报告身份，不从实现复制预期。"
-        outputs = "标准 unittest 结果仍显示 FAIL；另将 tests_run、failures、errors、skipped 等写入机器可读 JSON 报告。"
-        success = "仅精确 ISSUE-0016 三项已知 FAIL、无其他失败或新增跳过时返回 0；不签发普通发布证明。"
+        outputs = "标准 unittest 结果照常显示；另将 tests_run、failures、errors、skipped 等写入机器可读 JSON 报告。"
+        success = "仅全部通过、跳过恰好是四个基线项、无任何失败或新增跳过时返回 0；不签发普通发布证明。"
         recovery = "报告不精确或路径不安全时停止验证；保留原始 FAIL，勿改断言或手工修改批准 ledger。"
         example = "PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH"
     elif relative == "test_cases/f01_sdk_venv.py":

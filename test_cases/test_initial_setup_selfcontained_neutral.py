@@ -32,13 +32,16 @@ PUBLIC_CSV = (
     "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n"
 )
 PUBLIC_P2P = '"EXAMPLE-IB01":"eth0" -- "EXAMPLE-JUMP01":"7";\n'
+# Table 6-1 row 6 (guide :749): a v15 cache-version-5 target record carries login_interface
+# (v15 CURRENT-CONTRACT.md:20); both rows log in through their CSV eth0 address (RUNBOOK.md:22).
 EXPECTED_TARGETS = [{
     "ib": {"hostname": "EXAMPLE-IB01", "dev_type": "ib", "login_ip": "203.0.113.2",
            "eth0_prefix": "203.0.113.2/24", "eth0_gateway": "203.0.113.1",
-           "eth0_mac": "02:00:00:00:00:17", "eth1_prefix": "", "eth1_gateway": ""},
+           "eth0_mac": "02:00:00:00:00:17", "eth1_prefix": "", "eth1_gateway": "",
+           "login_interface": "eth0"},
     "ethernet": {"hostname": "EXAMPLE-JUMP01", "dev_type": "eth_jump", "login_ip": "192.0.2.10",
                  "eth0_prefix": "192.0.2.10", "eth0_gateway": "", "eth0_mac": "",
-                 "eth1_prefix": "", "eth1_gateway": ""},
+                 "eth1_prefix": "", "eth1_gateway": "", "login_interface": "eth0"},
     "ethernet_port": "swp7", "ib_port_alias": "eth0",
 }]
 

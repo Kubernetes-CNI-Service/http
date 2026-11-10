@@ -185,6 +185,35 @@ Authorize this change and subsequent eligible IB devices? [y/N]:
 IPv4 SSH 验证，才会标记 `SUCCESS` 并继续下一台。任何配置后验证失败都会停止后续 IB
 配置，避免扩大影响。
 
+### 经管道传口令：`--credentials-fd`
+
+一站式 bringup 等调用方用 `--credentials-fd N` 把口令交给 initial-setup：从继承的管道 fd `N`
+读一个 JSON 对象（UTF-8，不超过 64 KiB），读完立即关闭。读入由 `tools/credentials_fd.py` 完成，
+在入口只读一次，在碰任何设备之前。
+
+| 键 | 值 | 缺省时 |
+|---|---|---|
+| `jump_passwords` | 对象：跳板交换机主机名 → 口令（`eth_jump`、`eth` 类 OOB Leaf，Spine 跳板也用这张表；主机名按短名、不分大小写比较，同一短名出现两次以 2 退出） | 需要口令的跳板没有条目：这台跳板后面的设备失败 |
+| `nvos_initial_password` | 字符串：NVOS 初始密码 | 用 `admin` |
+| `ib_target_password` | 字符串：IB 目标密码，仍按项目 `01-global.yaml` 的哈希核对 | 给了 `--apply` 时以 2 退出；只读检查不需要 |
+
+- 只取上表的键，多余的键忽略；值必须是非空字符串（`jump_passwords` 是这样的对象）。
+- fd 模式下不提问：不调隐藏输入，也不读 `NVOS_INITIAL_PASSWORD` 等环境变量。跳板仍先试公钥，公钥
+  通了就不用表里的口令。口令被拒的跳板或 IB 只让对应设备失败，其余设备照做。
+- 口令不经 argv、环境变量或文件，报告、`summary.json` 和设备日志里都没有。隐藏参数
+  `--ethernet-password` 仍然存在，一给就以 2 退出并提示不要把口令放进 argv。
+- 退出码：入口缺键、JSON 不合法、fd 不可读都以 2 退出；执行中有设备没做完（INCOMPLETE）也是 2，
+  按 `summary.json` 的逐台结果区分。
+- 在 OOB Leaf 上本地运行并使用 `--credentials-fd` 时，同目录要带 `tools/credentials_fd.py`；fd 里有
+  `jump_passwords` 时再带 `tools/device_identity.py`（短名比较）。目录里不放 `__init__.py`，也不需要
+  PyYAML：
+
+```text
+<目录>/initial-setup.py
+<目录>/tools/credentials_fd.py
+<目录>/tools/device_identity.py
+```
+
 ### `--plan` 是否需要
 
 标准三步流程不需要 `--plan`。第一步已经完成全部离线输入校验并生成可审查 JSON；第二步
@@ -223,41 +252,53 @@ python3 initial-setup.py --execution-mode ethernet \
   --local-ethernet-hostname NM1FL08SH04OOBLE03
 ```
 
-`--execution-mode auto` 只判断执行位置，与 REQ10C 的 `--auto` 持续配置模式不是同一开关。
-仅在 owner 授权的隔离管理服务器与测试设备上使用持续模式；它会自动启用
-`--apply --yes`，可能执行初次改密及配置变更，不能用作只读检查：
+`--execution-mode auto` 只判断执行位置（本地 Ethernet 还是管理服务器）。
 
-```bash
-python3 initial-setup.py --auto --execution-mode management --ib-csv ib.csv --p2p p2p.xlsx
-```
+### 旧 `--auto` 定时任务的移除步骤
 
-首次运行必须有交互终端，逐台取得 OOB Leaf 与 IB 密码并显示凭据保留风险。只要 CSV 中仍有
-未完成的 IB，脚本在自己的日志目录中创建归属当前 UID 的 `0600 auto.env`，并仅给当前
-UID 的 crontab 加一条带归属标记的十分钟任务；cron 以非阻塞 `flock` 防止重叠轮次。
-后续无 TTY 轮次只能用 `--auto --credentials-file <受控 auto.env 路径>`，文件必须是当前
-UID 拥有、单链接、非符号链接的普通 `0600` 文件。不要把密码写进命令行、crontab 或日志。
-每轮重新采集 OOB 状态；同一输入中出现终止性 Day-0 冲突时停止对该 IB 的危险重试，
-输入字节改变后重新评估。所有 CSV IB 完成时仅移除本工具拥有的 cron 行及凭据，保留
-其他 crontab 内容；项目 `02-unsetup.py` 也负责清理本工具持有的 watch 状态。
-安装、自动完成时删除以及 `02-unsetup.py` 清理都会读写**整个当前用户的 crontab**；`02-unsetup.py` 以 root
-运行（例如 sudo unload）而项目属于普通用户时，读写的是该操作员（项目目录属主）的整个 crontab（`crontab -u <操作员>`）。
-每次替换前会在项目锁内连续读取两次；若字节发生变化就会在写入前失败并保留现状，
-用于发现正在活动但不使用项目锁的同 UID 写者。
-操作前须由该 UID 的调度负责人盘点并保证其他所有 crontab 写者在每次读到写完成的
-整个区间完全静默，包含未来无 TTY 自动完成的时刻；无法持续保证时不得启用或清理
-watch，应停止并保留证据。`auto-crontab.lock` 仅串行化本项目的写者，不能阻止其他
-不使用该锁的进程；两次稳定读取也不是 compare-and-swap，不能消除第二次读取与写入
-之间的竞态，事后重读也不能恢复曾被并发覆盖的未知任务。
-`--auto` 只能在管理服务器上运行。若本机被识别为 P2P 中的本地 OOB Leaf，脚本在提示
-任何口令（Initial NVOS 口令或 Ethernet 密码）、采集 OOB 状态、访问 IB 或读写 crontab
-之前失败，并给出包含 `management server` 的专门诊断。Leaf 上从不安装 watch，因此这一
-拒绝不执行 watch 暂停，也不创建或修改该主机的 crontab、`auto-crontab.lock`、
-`auto-watch.state` 或 `auto.env`；其他 `--auto` 早期失败仍按原规则先暂停本项目自有
-watch 再报告。Leaf 判定来自本机 hostname/FQDN 与 CSV Ethernet 行的匹配，或
-`--local-ethernet-hostname`；若管理服务器被误判为 Leaf（例如误加了该参数），它已有的
-本项目 watch 不会被这次拒绝暂停，需要去掉误判原因后重新运行，或按 unsetup 流程处理。
-任何真实 cron、OOB 或 IB 行为仍须按 `test_cases/REAL_ENVIRONMENT.md` 的
-`TC-REAL-REQ10C-AUTO-001` 由 owner 授权并留证；本地测试不等于真实验收。
+`--auto` 和 `--credentials-file` 已随 v3.1.3 退役（owner 2026-11-02，统一改用一站式 bringup）：
+再给这两个参数，脚本按未知参数以 2 退出，不建运行锁、不写报告。本脚本不再安装 cron，
+也不再写 `auto.env`。
+
+只有用过 DEV 版 `--auto` 的服务器才会有残留（现场的 v15 一进来就拒绝 `--auto`）。残留的
+cron 行部署后每 10 分钟以参数错误退出、往 `auto-cron.log` 追加报错，明文 `auto.env` 一直
+留着，所以要清理一次，**先删 cron 行，再删文件**（反过来，`02-unsetup.py` 会因为三个状态
+文件都不在而不碰 cron 行）。状态目录是 `xdr-initial-setup-logs`，经链接落在
+`<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs`。
+
+1. 只读普查，只看行数和元数据，不用 `cat`、`less`、`head`、`cp` 碰 `auto.env`：
+
+   ```bash
+   crontab -l 2>/dev/null | grep -c -F '# http-v3-req10c-auto'
+   crontab -l 2>/dev/null | grep -c -E 'initial-setup\.py --auto --apply --yes --credentials-file'
+   find <状态目录> -maxdepth 1 \( -name auto.env -o -name 'auto-*' -o -name auto.lock \) -printf '%p %u %m %s\n'
+   ```
+
+   以 root 查操作员的，`crontab` 加 `-u <操作员>`。
+2. 确认没有轮次在跑：`<状态目录>/auto.lock` 存在时用 `fuser -v` 或 `lsof` 只读查看；不要用
+   `flock` 探测（锁文件不存在时它会新建一个）。
+3. 在没有其他同 UID crontab 写者的窗口里删 cron 行，**先落盘、核对、再装**，不要用管道
+   `crontab -l | … | crontab -` 一步装表（`crontab -l` 出错时会装进空表，删掉这个用户全部
+   cron 行）：
+   1. `crontab -l > <备份>`，退出码不是 0 就停下（「no crontab」也算没有残留）；
+   2. 数总行数 N：`wc -l < <备份>`；数要删的行数 K：
+      `grep -c -E '# http-v3-req10c-auto|initial-setup\.py --auto --apply --yes --credentials-file' <备份>`；
+   3. `grep -v -E '<同上>' <备份> > <新表>`：退出码 1 只表示没有剩下的行，退出码 2 才是出错，停下；
+   4. 核对 `wc -l < <新表>` 等于 N − K，不等就停下；
+   5. `crontab <新表>`，再确认上面两种行的计数为 0、总行数为 N − K；
+   6. `<备份>` 按 0600 保留在操作员自己的目录里，出问题时 `crontab <备份>` 恢复。
+
+   root 下清操作员的，每条 `crontab` 都加 `-u <操作员>`；当年用 sudo 跑过 `--auto` 的，root
+   自己的 crontab 也照做一遍（`02-unsetup.py` 以 root 代表操作员时只处理操作员的 crontab）。
+4. 删文件：`auto.env` 用 `shred -u`；`auto-watch.state`、`auto-terminal.json`、`auto-crontab.lock`、
+   `auto.lock` 用 `rm -f`；`auto-cron.log` 按现场习惯保留或归档。
+5. 留证据：前后的计数、`find -printf` 的元数据、`<备份>` 的路径；不保存 `auto.env` 的内容。
+
+`02-unsetup.py` 仍保留旧 watch 的清理（保留到 K6r）：在指针还指着当年那个项目时运行，它删掉
+当前用户（root 代表操作员时为操作员）crontab 里本项目的 auto 行和 `auto.env`、`auto-watch.state`、
+`auto-terminal.json`。它只看当前链接的项目、不删 `auto-crontab.lock`、`auto.lock`、`auto-cron.log`，
+也不碰 root 自己的 crontab；其余情况按上面的手工步骤处理。现场执行与留证按
+`test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-D1-AUTO-RESIDUE-001`。
 
 无论本机还是远端，每台 Ethernet 的 interface/link/FDB/neighbor/VRF 只采集一次，
 并独立验证 hostname。

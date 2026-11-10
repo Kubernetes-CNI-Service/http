@@ -155,13 +155,6 @@
         "test_cases.test_ufm_ha_status_parity",
         "test_cases.test_initial_setup_authorized_key_quoted_options",
         "test_cases.test_initial_setup_authorized_key_shell_workflow",
-        "test_cases.test_initial_setup_auto_credentials_writer",
-        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
-        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow",
-        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
-        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
-        "test_cases.test_initial_setup_auto_policy_fact",
-        "test_cases.test_initial_setup_auto_watch_pause",
         "test_cases.test_initial_setup_bare_expiry_readonly",
         "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
         "test_cases.test_initial_setup_cache_admission_output",
@@ -216,7 +209,11 @@
         "test_cases.test_operator_peripheral_contract",
         "test_cases.test_load_operator_contract",
         "test_cases.test_load_permission_repair_contract",
-        "test_cases.test_load_operator_workflow"
+        "test_cases.test_load_operator_workflow",
+        "test_cases.test_initial_setup_external_contract_workflow",
+        "test_cases.test_credentials_fd",
+        "test_cases.test_initial_setup_credentials_fd_workflow",
+        "test_cases.test_initial_setup_strict_stage_skeleton"
       ]
     },
     {
@@ -903,7 +900,8 @@
     "tools/device_identity.py": "tools/device_identity.py",
     "tools/hostname_ranges.py": "tools/hostname_ranges.py",
     "tools/inventory_subset.py": "tools/inventory_subset.py",
-    "tools/operator_identity.py": "tools/operator_identity.py"
+    "tools/operator_identity.py": "tools/operator_identity.py",
+    "tools/credentials_fd.py": "tools/credentials_fd.py"
   },
   "test_rules": [
     {
@@ -1107,7 +1105,8 @@
         "test_cases.test_eth_jump_transport_contract",
         "test_cases.test_monitor_stack_review",
         "test_cases.test_req10b_services_keys_contract",
-        "test_cases.test_req10c_auto_contract"
+        "test_cases.test_req10c_auto_contract",
+        "test_cases.test_req10c_auto_workflow"
       ]
     },
     {
@@ -2220,13 +2219,6 @@
         "test_cases.test_initial_setup_network_diagnostics",
         "test_cases.test_initial_setup_cache_admission_output",
         "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
-        "test_cases.test_initial_setup_auto_watch_pause",
-        "test_cases.test_initial_setup_auto_credentials_writer",
-        "test_cases.test_initial_setup_auto_policy_fact",
-        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
-        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
-        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
-        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow",
         "test_cases.test_initial_setup_target_outcome_summary"
       ]
     },
@@ -2381,6 +2373,24 @@
       ],
       "tests": [
         "test_cases.test_operator_peripheral_contract"
+      ]
+    },
+    {
+      "id": "credentials_fd_direct",
+      "paths": [
+        "tools/credentials_fd.py"
+      ],
+      "tests": [
+        "test_cases.test_credentials_fd"
+      ]
+    },
+    {
+      "id": "initial_setup_strict_stage_skeleton_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_strict_stage_skeleton"
       ]
     }
   ],
@@ -2588,16 +2598,6 @@
       ],
       "tests": [
         "test_cases.test_req10b_global_link_workflow"
-      ]
-    },
-    {
-      "id": "req10c_auto_watch_lifecycle",
-      "members": [
-        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-        "DAY0-Prepare/02-unsetup.py"
-      ],
-      "tests": [
-        "test_cases.test_req10c_auto_workflow"
       ]
     },
     {
@@ -3854,8 +3854,7 @@
       "id": "initial_target_credentials_main_auto_lifecycle",
       "members": [
         "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-        "ztp/config/nvos/template/90-c2-generate_configs.py",
-        "DAY0-Prepare/02-unsetup.py"
+        "ztp/config/nvos/template/90-c2-generate_configs.py"
       ],
       "tests": [
         "test_cases.test_initial_setup_target_credentials_workflow",
@@ -3864,14 +3863,7 @@
         "test_cases.test_initial_setup_network_diagnostics",
         "test_cases.test_initial_setup_cache_admission_output",
         "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
-        "test_cases.test_initial_setup_auto_watch_pause",
-        "test_cases.test_initial_setup_auto_credentials_writer",
-        "test_cases.test_initial_setup_auto_policy_fact",
-        "test_cases.test_initial_setup_auto_oob_tail_latch_workflow",
-        "test_cases.test_initial_setup_auto_early_common_pause_workflow",
-        "test_cases.test_initial_setup_auto_first_interactive_linkdown_workflow",
-        "test_cases.test_initial_setup_bare_expiry_readonly",
-        "test_cases.test_initial_setup_auto_early_input_diagnostics_workflow"
+        "test_cases.test_initial_setup_bare_expiry_readonly"
       ]
     },
     {
@@ -4169,6 +4161,28 @@
       ],
       "tests": [
         "test_cases.test_load_operator_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_external_contract",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config_sync_authority.py",
+        "tools/fleet_distribution.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_external_contract_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_credentials_fd",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/credentials_fd.py",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_credentials_fd_workflow"
       ]
     }
   ],

@@ -30,9 +30,9 @@ RED，也不 skip、不生成替代向量、不自动安装：
 - 私有夹具：环境变量 `HTTP_TEST_PUBLIC_FIXTURE_INPUT_PATH` 提供绝对定位路径；原内容长度与整份摘要
   独立固定在 `private_public_fixture_input.py` 中，环境变量不能自行授权内容；非私有权限或身份失证
   同样是失败／HOLD。
-- 依赖范围：直接取用 KAT 的模块为 `test_initial_setup_target_password_policy`、`test_initial_setup_target_credentials_workflow`、`test_initial_setup_auto_credentials_writer`、`test_initial_setup_auto_policy_fact`、`test_initial_setup_ib_phase_protocol`、`test_initial_setup_management_stage_roles`、`test_initial_setup_explicit_consumer_context`、`test_initial_setup_initial_closed_facts`、`test_eth_jump_transport_contract`、`test_req10b_services_keys_workflow`、`test_ibsw225_managed_outer_guard_workflow`、`test_initial_setup_managed_merge_contract`；
-  经导入它们的基类或 helper 间接取用的模块同样依赖（例如 `test_req10c_auto_workflow` 经 REQ10B 的 strict
-  helper 取用），不走严格路径的方法不读取 KAT。取用私有夹具的
+- 依赖范围：直接取用 KAT 的模块为 `test_initial_setup_target_password_policy`、`test_initial_setup_target_credentials_workflow`、`test_initial_setup_ib_phase_protocol`、`test_initial_setup_management_stage_roles`、`test_initial_setup_explicit_consumer_context`、`test_initial_setup_initial_closed_facts`、`test_eth_jump_transport_contract`、`test_req10b_services_keys_workflow`、`test_ibsw225_managed_outer_guard_workflow`、`test_initial_setup_managed_merge_contract`；
+  经导入它们的基类或 helper 间接取用的模块同样依赖（例如 `test_initial_setup_bare_expiry_readonly` 经
+  `test_initial_setup_ib_phase_protocol` 的夹具取用），不走严格路径的方法不读取 KAT。取用私有夹具的
   模块为 `test_private_public_fixture_input`、`test_initial_setup_handoff_transport`、`test_initial_setup_pending_diff`、`test_initial_setup_cache_admission_mode_auto_workflow`。现场要求与证据见
   `REAL_ENVIRONMENT.md` 的 `TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001`。
 
@@ -157,14 +157,11 @@ TMPDIR、运行期间无人写入的专用父目录下；主 checkout 开跑前�
 发布前合同是：生产行为变更必须先或同时更新独立测试预期；确认
 `script_test_manifest.json` 的 direct 与 workflow 映射；执行 `--all` 并全部通过；随后执行
 `--check --require-full`，确认源码、测试、manifest、执行环境和批准状态仍是同一组精确身份。
-AIR/prod 验证阶段有且只有 ISSUE-0016 的三个同 UID 非协作 crontab 并发反例，经 owner
-2026-09-28 明确授权登记为已知 FAIL。三个测试仍实际运行且断言不变；全量结果必须
-明示 `failures=3`、`errors=0`，原有四项真实环境 skip 的身份不可增加或替换，不能把三项写成 PASS。
-使用 `--all --validation-only` 运行全量，并用 `--check --require-full --validation-only`
-复核；正式 AIR/prod 验证 load/sync/package 必须各自显式传 `--validation-only`。
-普通 `--all` 和不带验证意图的正式检查继续失败，验证证明不能作为最终发布证明。
-该例外以其他同 UID crontab 写者在安装、自动移除及 unsetup 的完整读—改—写窗口保持静默
-为前提，见 `REAL_ENVIRONMENT.md` 的 REQ10C 卡片；不证明任意并发安全，不授予最终生产发布。
+2026-09-28 的 REQ10C 窄例外（ISSUE-0016 的三个已知 FAIL）已随 initial-setup 的 `--auto` 在 v3.1.3
+退役。AIR/prod 验证同样要求全部通过：`failures=0`、`errors=0`，原有四项真实环境 skip 的身份不可
+增加或替换。使用 `--all --validation-only` 运行全量，并用 `--check --require-full --validation-only`
+复核；正式 AIR/prod 验证 load/sync/package 必须各自显式传 `--validation-only`。validation-only
+证明与普通发布证明严格区分，普通 `--check --require-full` 拒绝它，它不能作为最终发布证明。
 `sync-code.py` 与 `tar-for-upload.py` 只复核并复用这份证明，不会运行全量测试；证明缺失、过期
 或执行环境不匹配时必须要求重新完成本机正式 load，并在任何打包或远端连接前停止。Linux
 管理服务器 load 与 macOS `--dry-run` 不运行开发测试。任一步失败都必须阻断

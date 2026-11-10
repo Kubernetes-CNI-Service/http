@@ -33,9 +33,11 @@ PUBLIC_SERVICES = {
     "timezone": "Asia/Taipei",
 }
 DNS_REPLACEMENT = "198.51.100.77"
+# Table 6-1 row 6 (guide :749): a v15 cache-version-5 target record also carries
+# login_interface (v15 CURRENT-CONTRACT.md:20).
 DEVICE_FIELDS = (
     "hostname", "dev_type", "login_ip", "eth0_prefix", "eth0_gateway",
-    "eth0_mac", "eth1_prefix", "eth1_gateway",
+    "eth0_mac", "eth1_prefix", "eth1_gateway", "login_interface",
 )
 ENTRY_NAMES = (
     "_authenticate_ib_read", "_execute_ib_phase", "run_on_ib",
@@ -427,19 +429,20 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
             if case == "MATCH":
                 self.assertTrue(observed["profile_changed"] is False,
                                 "matching control changed the profile")
-                self.assert_success(result)
+                # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): the check-only run
+                # still has public keys to install, so it ends INCOMPLETE (2).
+                self.assertTrue(result["error"] is None and result["rc"] == 2,
+                                "matching check-only with remaining work must end INCOMPLETE (2)")
                 self.assertTrue(len(f["caller"]["selector"]) == 1
                                 and f["caller"]["selector"][0]["initial"] is True
                                 and f["caller"]["selector"][0]["target"] is False,
                                 "matching control did not select actual INITIAL current")
-                self.assertTrue(f["caller"]["timeline"] ==
-                                ["selector-return", "diff-entry", "diff-return"],
+                # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59): the
+                # v15 check-only report reads no pending diff.
+                self.assertTrue(f["caller"]["timeline"] == ["selector-return"],
                                 "matching control did not perform one actual readonly report")
-                self.assertTrue(len(f["caller"]["returned_diff"]) == 1
-                                and f["caller"]["returned_diff"][0]["rc"] == 0
-                                and f["caller"]["returned_diff"][0]["empty"] is True
-                                and f["caller"]["returned_diff"][0]["initial"] is True,
-                                "matching control readonly report was not qualified")
+                self.assertTrue(f["caller"]["returned_diff"] == [],
+                                "matching control readonly report read a pending diff")
             else:
                 self.assertTrue(observed["profile_changed"] is True,
                                 "negative control did not substitute a legal profile")

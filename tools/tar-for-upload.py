@@ -180,7 +180,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=22, help="SSH port (default: 22)")
     parser.add_argument(
         "--validation-only", action="store_true",
-        help="AIR/prod validation only: exact ISSUE-0016 proof; not final release",
+        help="AIR/prod validation only: proof requires every test to pass; not final release proof",
     )
     parser.add_argument("--identity", type=Path, help="SSH private key")
     parser.add_argument(

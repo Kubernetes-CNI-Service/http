@@ -14,6 +14,7 @@ import hmac
 import io
 import os
 from pathlib import Path
+import re
 import shlex
 import struct
 import stat
@@ -169,8 +170,12 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
         return roles.PresentGlobalManagementStageRoleDraftTests._eg_global_snapshot(self, path)
 
     def invoke(self, kind, f, current, policy, *, apply=True, authorized=True,
-               service_body=BASE, keys=None, user="admin"):
+               service_body=BASE, keys=None, user="admin", ib_password=None):
         context = dict(_ib_current_password=current, _password_policy=policy)
+        if ib_password is not None:
+            # WP-6 fixture (class 4, 06 D1a-I): a caller outside the management-server
+            # context names its IB credential; no Ethernet-credential fallback.
+            context["ib_password"] = ib_password
         if kind == "service":
             return APP.run_service_stage(
                 f["target"], f["neighbor"], "cumulus", PUBLIC_OOB, user, 2,
@@ -287,10 +292,33 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                         or not carrier[2].startswith(SAFE_PATH) or timeout != 45):
                     raise ValueError("PUBLIC IPv4 outer carrier")
                 nested = shlex.split(carrier[2][len(SAFE_PATH):])
-                expected = ["ip", "vrf", "exec", "default", "ssh",
-                            "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
-                            "-o", "LogLevel=ERROR", "admin@203.0.113.2", "true"]
-                if nested != expected or responder.allow_password_change is not False:
+                marker = None
+                if legacy:
+                    # WP-6 (class 3, table 6-1 row 9, guide :752): outside the management-server
+                    # context the probe is v15's own -- ssh -tt, password-only authentication and a
+                    # framed `true` (v15 verify_ipv4_login :2945-2953, _framed_script :432-440)
+                    # -- not the DEV probe.
+                    framed = shlex.split(nested[-1]) if nested else []
+                    found = re.findall(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", framed[2]) if len(framed) == 3 else []
+                    marker = found[0] if len(found) == 1 else None
+                    expected = ["ip", "vrf", "exec", "default", "ssh", "-tt",
+                                "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
+                                "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                                "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
+                                "-o", "PreferredAuthentications=password,keyboard-interactive",
+                                "admin@203.0.113.2"]
+                    if (marker is None or framed[:2] != ["sh", "-c"] or nested[:-1] != expected
+                            or framed[2] != ('printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; true; '
+                                             'task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                                             + '__=%s\\n" "$task_rc"; exit "$task_rc"')):
+                        raise ValueError("PUBLIC IPv4 inner carrier")
+                else:
+                    expected = ["ip", "vrf", "exec", "default", "ssh",
+                                "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
+                                "-o", "LogLevel=ERROR", "admin@203.0.113.2", "true"]
+                    if nested != expected:
+                        raise ValueError("PUBLIC IPv4 inner carrier")
+                if responder.allow_password_change is not False:
                     raise ValueError("PUBLIC IPv4 inner carrier")
                 if legacy:
                     role_ok = (hmac.compare_digest(responder.ethernet_password, PUBLIC_OOB)
@@ -308,6 +336,9 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     raise fault
                 if change_transport:
                     mutate()
+                if marker is not None:
+                    # WP-6 fixture (class 4, row 9): the modeled device answers the framed probe.
+                    return APP.SessionResult(f"\n__HTTP_IB_BEGIN_{marker}__\n__HTTP_IB_END_{marker}__=0\n", 0)
                 return APP.SessionResult("", 0)
             except (ValueError, IndexError, TypeError):
                 observation["errors"].append("ipv4-carrier")
@@ -329,6 +360,9 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(APP, "verify_management_key_possession", side_effect=possession))
             stack.enter_context(mock.patch.object(APP.getpass, "getpass", side_effect=getpass))
             stack.enter_context(mock.patch("builtins.input", side_effect=terminal))
+            # WP-6 fixture (class 4, table 6-1 row 9, guide :752): the IPv4 readiness
+            # probe waits 10 s before each attempt; the wait itself is not under test.
+            stack.enter_context(mock.patch.object(APP.time, "sleep", return_value=None))
             yield observation
 
     def common(self, outcome, observation):
@@ -454,7 +488,13 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     outcome = self.capture(lambda: self.invoke(kind, f, PUBLIC_INITIAL, f["policy"]))
                 self.common(outcome, observation)
                 self.assertEqual(1, len(observation["mutation"]), "actual PUBLIC perturbation not reached")
-                self.assertTrue(type(outcome["error"]) is APP.SetupError and not outcome["normal"],
+                # WP-6 (class 3; D1a2 report 4.3 S3/V5): Services wraps the helper's refusal in v15's
+                # IBConfigurationStageUncertain (P3c map 2.3 :121, S3, 04 Q-039; v15 :3716-3720); the
+                # IPv4 probe lets the input change stop the batch as v15 does (map D32d :284, V5, 04
+                # Q-041; CURRENT-CONTRACT.md :60 "共享输入/证据落盘错误仍应停止公共流程"); Keys is unchanged.
+                expected_error = {"service": APP.IBConfigurationStageUncertain,
+                                  "ipv4": APP.ProjectInputChanged}.get(kind, APP.SetupError)
+                self.assertTrue(type(outcome["error"]) is expected_error and not outcome["normal"],
                                 "changed project must prevent a success return")
                 self.assertEqual(expected, observation["calls"], "next write/readback crossed changed authority")
                 self.reached_native(observation)
@@ -499,6 +539,17 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                 self.assertTrue(fault.args == original_args, "normalization changed the original fault")
                 if mode == "known":
                     caught = outcome["error"]
+                    if kind == "service":
+                        # WP-6 (class 3; D1a2 report 4.3 S3, 04 Q-039): the Services
+                        # consumer keeps v15's wrapper for a write or verification failure (P3c map
+                        # 2.3 :121 "v15 的 IBConfigurationStageUncertain 包装保留"; v15 :3716-3720),
+                        # so the helper's fixed safe error is carried inside it, not returned bare.
+                        wrapped, caught = caught, (observation["helper_errors"] or [None])[0]
+                        self.assertTrue(type(wrapped) is APP.IBConfigurationStageUncertain
+                                        and wrapped.args == ("services were not fully verified; writes may be "
+                                                             "partial: " + SAFE_ARGS[0],)
+                                        and wrapped.__cause__ is None and wrapped.__context__ is caught,
+                                        "Services must wrap only its real helper's safe error")
                     self.assertTrue(type(caught) is APP.SetupError and caught is not fault,
                                     "known IO must become the fixed safe domain error")
                     self.assertTrue(caught.args == SAFE_ARGS and caught.__cause__ is None and caught.__context__ is None,
@@ -525,7 +576,10 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                 f = self.fixture(folder, block_birth=True)
                 before = self.snapshot(f["path"])
                 with self.boundaries(f, kind, PUBLIC_OOB, legacy=True) as observation:
-                    outcome = self.capture(lambda: self.invoke(kind, f, None, None))
+                    # WP-6 fixture (class 4, 06 D1a-I): the IB credential this direct caller
+                    # used implicitly (the Ethernet one) is now passed explicitly.
+                    outcome = self.capture(lambda: self.invoke(kind, f, None, None,
+                                                               ib_password=PUBLIC_OOB))
                 self.common(outcome, observation)
                 self.assertTrue(outcome["normal"] and outcome["error"] is None,
                                 "actual legacy delegation changed")

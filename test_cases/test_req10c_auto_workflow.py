@@ -1,15 +1,19 @@
-"""REQ10C initial-setup/unsetup workflow with isolated fake device boundaries."""
+"""REQ10C 02-unsetup old-watch cleanup workflow with isolated fake crontab boundaries.
+
+The initial-setup --auto watch retired in v3.1.3 (owner 2026-11-02; guide O3, table 4-1); the
+02-unsetup cleanup of an old watch stays until K6r (O11), so its workflows stay here, together
+with the P2 baked-cache refusal that is not an --auto case.
+"""
 
 from __future__ import annotations
 
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
-import base64
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import importlib.util
 import os
 from pathlib import Path
 import shutil
-import struct
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,82 +29,37 @@ ROOT = Path(os.environ.get("REQ10C_TEST_ROOT") or Path(__file__).resolve().paren
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
 UNSETUP = ROOT / "DAY0-Prepare/02-unsetup.py"
 
+# Moved with the unsetup halves of test_initial_setup_auto_watch_pause (v3.1.3 guide table
+# 4-1: its two "待核" workflows; the install/pause halves retired with --auto).
+PAUSED_FOREIGN = (
+    "MAILTO=PUBLIC-operator@example.test\n"
+    "3 4 * * * /PUBLIC/foreign-before # retain-order\n\n"
+    "7 6 * * * /PUBLIC/foreign-after # retain-bytes\n"
+    "# PUBLIC final comment without final LF"
+)
+PAUSED_MARKER_BYTES = b"http-v3-req10c-auto-v1\n"
+PAUSED_ENV_BYTES = (
+    b"NVOS_INITIAL_PASSWORD=PUBLIC-INITIAL-Only-17!\n"
+    b"NVOS_TARGET_PASSWORD=PUBLIC-TARGET-Only-81!\n"
+    b"ZTP_ETH_PASSWORD_EXAMPLE_JUMP01=PUBLIC-OOB-Only-91!\n"
+)
+_NINE = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
+         "st_size", "st_mtime_ns", "st_ctime_ns")
+
+
+def _bound_file(path: Path) -> tuple[tuple, bytes]:
+    """Identity (nine stat fields) and bytes of one regular single-link file."""
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise RuntimeError("FIXTURE HOLD: bound file is not a regular single-link file")
+    return tuple(getattr(info, name) for name in _NINE), path.read_bytes()
+
 
 class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.initial = load_script("req10c_auto_workflow_initial", INITIAL)
         cls.unsetup = load_script("req10c_auto_workflow_unsetup", UNSETUP)
-
-    def strict_main(self, tool: Path, *, devices: tuple[str, ...], interactive: bool) -> int:
-        """One present-global --auto round, then its strict-path witness.
-
-        A SetupError is held until the witness (shared with the REQ10B workflow)
-        is checked, so a round that never reached the strict path fails on that;
-        the held error's class name and fixed text are carried in that message.
-        """
-        from test_cases import test_req10b_services_keys_workflow as strict
-
-        failure = None
-        result = None
-        kat = strict.strict_kat(self.initial)
-        # REQ10C fixtures state their own device facts (parse_nvue_state model),
-        # so the device boundary holds no extra rows here.
-        with strict.strict_management_boundary(
-            self, self.initial, kat=kat, held_rows=(),
-        ) as witness:
-            try:
-                result = self.initial.main()
-            except self.initial.SetupError as error:
-                failure = error
-        strict.assert_strict_management_path(
-            self, witness, global_path=tool / "01-global.yaml",
-            devices=devices, interactive=interactive,
-            note=strict.held_failure_note(failure, tuple(value for value in kat.values()
-                                                        if type(value) is str)),
-        )
-        if failure is not None:
-            raise failure
-        return result
-
-    def write_strict_project_global(self, tool: Path) -> Path:
-        """Project global with the IB target hash from the reviewed external KAT."""
-        from test_cases import test_req10b_services_keys_workflow as strict
-
-        path = tool / "01-global.yaml"
-        path.write_text(strict.strict_global_text(strict.strict_kat(self.initial)),
-                        encoding="utf-8")
-        return path
-
-    def bake_strict_cache(self, tool: Path, csv: Path, p2p: Path, cache: Path, target):
-        """Write the project global and mgmt-server.pub, then bake the cache as P1.
-
-        Returns a callable that re-bakes the same profile after an operator
-        edits CSV/P2P (re-running P1).  Services equal the IB section of the
-        REQ10B global; the key line and fingerprint come from that module's
-        independent helpers, not from the implementation.
-        """
-        from test_cases import test_req10b_services_keys_workflow as strict
-
-        global_path = self.write_strict_project_global(tool)
-        line = strict.public_key(18, "management").strip()
-        (tool / "publickey").mkdir()
-        (tool / "publickey/mgmt-server.pub").write_text(line + "\n", encoding="ascii")
-        services = {
-            "dns": list(strict.EXPECTED_IB["dns"]),
-            "ntp": list(strict.EXPECTED_IB["ntp"]),
-            "timezone": strict.EXPECTED_IB["timezone"],
-        }
-        keys = [{"name": "mgmt-server.pub", "line": line, "fingerprint": strict.fingerprint(line)}]
-
-        def bake() -> None:
-            self.initial.save_target_cache(
-                cache, csv.resolve(), p2p.resolve(), 1, [target],
-                global_file=global_path, services=services, public_keys=keys,
-            )
-
-        bake()
-        return bake
 
     @staticmethod
     def fake_crontab(base: Path, initial: str) -> tuple[Path, Path]:
@@ -176,7 +135,10 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                 encoding="ascii",
             )
             credentials.chmod(0o600)
-            self.initial._auto_marker(state / "auto-watch.state")
+            # Marker bytes written directly (v3.1.3 guide WP-4: initial-setup's writer retires).
+            marker = state / "auto-watch.state"
+            marker.write_bytes(b"http-v3-req10c-auto-v1\n")
+            marker.chmod(0o600)
             own = (
                 "*/10 * * * * cd " + str(tool) + " && python3 "
                 + str(tool / "initial-setup.py")
@@ -184,7 +146,7 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                 + str(credentials) + " # http-v3-req10c-auto\n"
             )
             existing = "1 * * * * /usr/bin/true # foreign-before-read\n"
-            initial = existing if mode == "install" else existing + own
+            initial = existing + own
             cron_db, bin_dir = self.noncooperating_crontab(base, initial)
             environment = dict(os.environ)
             environment.update({
@@ -201,19 +163,12 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             failure = None
             with mock.patch.dict(os.environ, environment), \
                  mock.patch.object(subprocess, "run", side_effect=guarded_run):
+                # v3.1.3 (guide table 4-1): only the 02-unsetup writer remains; the install and
+                # remove modes retired with initial-setup --auto.
                 try:
-                    if mode == "install":
-                        self.initial._install_auto_watch(
-                            tool, credentials, base / "ib.csv", base / "p2p.dot",
-                            base / "cache.json", base / "report.log", base / "snapshots",
-                            force=False,
-                        )
-                    elif mode == "remove":
-                        self.initial._remove_auto_watch(tool, credentials)
-                    else:
-                        with mock.patch.object(self.unsetup, "HTTP_BASE", str(base)):
-                            self.unsetup._cleanup_req10c_auto_watch()
-                except (self.initial.SetupError, OSError) as exc:
+                    with mock.patch.object(self.unsetup, "HTTP_BASE", str(base)):
+                        self.unsetup._cleanup_req10c_auto_watch()
+                except OSError as exc:
                     failure = exc
 
             events = (base / "cron-events").read_text(encoding="ascii") if (base / "cron-events").exists() else ""
@@ -234,41 +189,37 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             for line in injected_lines:
                 self.assertIn(line, final, f"{mode} silently erased a non-cooperating foreign entry")
             self.assertIn(existing, final)
-            if mode == "install":
-                self.assertEqual(1, final.count("# http-v3-req10c-auto"))
-            else:
-                self.assertNotIn("# http-v3-req10c-auto", final)
-
-    def test_install_preserves_noncooperating_foreign_cron_or_stops_before_write(self) -> None:
-        self.assert_foreign_interleave_safe("install")
-
-    def test_remove_preserves_noncooperating_foreign_cron_or_stops_before_write(self) -> None:
-        self.assert_foreign_interleave_safe("remove")
+            self.assertNotIn("# http-v3-req10c-auto", final)
 
     def test_unsetup_preserves_noncooperating_foreign_cron_or_stops_before_write(self) -> None:
         self.assert_foreign_interleave_safe("unsetup")
 
-    def test_project_install_remove_unsetup_serialize_crontab_across_processes(self) -> None:
-        """A paused read must exclude another project writer until its write ends."""
+    def test_project_unsetup_serializes_crontab_across_processes(self) -> None:
+        """A paused read must exclude another project writer until its write ends.
+
+        v3.1.3 split (guide table 4-1, :251-368): the install/remove halves retired with
+        initial-setup --auto; the unsetup half stays (O11).  The second project writer is now a
+        cooperating fixture writer that takes the same project lock inode through 02-unsetup's
+        own lock and read helpers and appends one owned line, in place of the retired install;
+        every assertion is unchanged.
+        """
         worker = (
-            "import os, sys\n"
+            "import os, subprocess, sys\n"
             "from pathlib import Path\n"
             "from test_cases.module_loader import load_script\n"
             "mode, root, tool = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3])\n"
-            "initial = load_script('req10c_lock_initial', root / 'infiniband/bringup/xdr-initial-setup/initial-setup.py')\n"
+            "unsetup = load_script('req10c_lock_unsetup', root / 'DAY0-Prepare/02-unsetup.py')\n"
             "Path(os.environ['REQ10C_READY']).write_text('ready')\n"
-            "credentials = tool / 'xdr-initial-setup-logs/auto.env'\n"
-            "if mode == 'install':\n"
-            "    initial._install_auto_watch(tool, credentials, root / 'ib.csv', root / 'p2p.dot', "
-            "root / 'cache.json', root / 'report.log', root / 'snapshots', force=False)\n"
-            "elif mode == 'remove':\n"
-            "    initial._remove_auto_watch(tool, credentials)\n"
+            "if mode == 'writer':\n"
+            "    with unsetup._req10c_crontab_lock(str(tool / 'xdr-initial-setup-logs')):\n"
+            "        current = unsetup._read_stable_req10c_crontab()\n"
+            "        subprocess.run(['crontab', '-'], input=current + os.environ['REQ10C_OWN_LINE'],\n"
+            "                       text=True, check=True)\n"
             "else:\n"
-            "    unsetup = load_script('req10c_lock_unsetup', root / 'DAY0-Prepare/02-unsetup.py')\n"
             "    unsetup.HTTP_BASE = str(tool.parents[2])\n"
             "    unsetup._cleanup_req10c_auto_watch()\n"
         )
-        for first_mode in ("install", "remove", "unsetup"):
+        for first_mode in ("unsetup",):
             with self.subTest(first_mode=first_mode), tempfile.TemporaryDirectory(
                 prefix="req10c-project-cron-"
             ) as directory:
@@ -282,7 +233,10 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                     encoding="ascii",
                 )
                 credentials.chmod(0o600)
-                self.initial._auto_marker(state / "auto-watch.state")
+                # Marker bytes written directly (v3.1.3 guide WP-4: initial-setup's writer retires).
+                marker = state / "auto-watch.state"
+                marker.write_bytes(b"http-v3-req10c-auto-v1\n")
+                marker.chmod(0o600)
                 foreign = "1 * * * * /usr/bin/true\n"
                 own = (
                     "*/10 * * * * cd " + str(tool)
@@ -291,7 +245,7 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                     + " # http-v3-req10c-auto\n"
                 )
                 cron_db = base / "cron.db"
-                cron_db.write_text(foreign if first_mode == "install" else foreign + own)
+                cron_db.write_text(foreign + own)
                 events = base / "events"
                 claim = base / "claimed"
                 entered = base / "entered"
@@ -323,6 +277,7 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
                     "PATH": str(bin_dir) + os.pathsep + environment.get("PATH", ""),
                     "PYTHONPATH": str(ROOT),
                     "REQ10C_FAKE_BASE": str(base),
+                    "REQ10C_OWN_LINE": own,
                 })
 
                 def await_file(path: Path) -> None:
@@ -339,7 +294,7 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
 
                 processes = []
                 try:
-                    for index, mode in enumerate((first_mode, "install")):
+                    for index, mode in enumerate((first_mode, "writer")):
                         current_env = dict(environment)
                         ready = base / f"ready-{index}"
                         current_env["REQ10C_READY"] = str(ready)
@@ -401,390 +356,12 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             )
             cron_db, bin_dir = self.fake_crontab(base, foreign + watch)
 
-            # Both real scripts participate.  Capture CLI failure but still
-            # test unsetup independently, avoiding a masked cleanup failure.
-            with mock.patch.object(
-                sys, "argv", ["initial-setup.py", "--auto", "--credentials-file", str(credentials)]
-            ), redirect_stderr(io.StringIO()):
-                try:
-                    auto_args = self.initial.parse_args()
-                except SystemExit as exc:
-                    auto_args = None
-                    parse_error = exc.code
-                else:
-                    parse_error = None
+            # v3.1.3 (guide O3): initial-setup no longer parses --auto/--credentials-file, so
+            # the half that parsed the old watch arguments retired; the unsetup half is unchanged.
             result = self.unsetup_with_no_links(base, bin_dir, cron_db)
             self.assertIn(result, (None, 0))
             self.assertFalse(credentials.exists(), "unsetup must delete auto.env even without links")
             self.assertEqual(foreign, cron_db.read_text(encoding="utf-8"))
-            self.assertIsNotNone(auto_args, f"initial-setup cannot parse watch state: exit {parse_error}")
-            self.assertTrue(auto_args.auto)
-            self.assertEqual(credentials, auto_args.credentials_file)
-
-    def test_real_first_round_installs_own_watch_then_real_unsetup_removes_it(self) -> None:
-        """Real main, fake network+crontab, real unsetup: no device operations."""
-        with tempfile.TemporaryDirectory(prefix="req10c-watch-round-") as directory:
-            base = Path(directory)
-            tool = base / "infiniband/bringup/xdr-initial-setup"
-            tool.mkdir(parents=True)
-            (tool / "initial-setup.py").write_bytes(INITIAL.read_bytes())
-            # Present project authority (D1): the management global carries the
-            # IB target hash from the reviewed external KAT; P1 inside the first
-            # round bakes services from it with the neutral fallback file.
-            self.write_strict_project_global(tool)
-            (tool / "infra-neutral.conf").write_text(
-                "DNS=192.0.2.53\nNTP=time.neutral.example.test\nTIMEZONE=Etc/UTC\n",
-                encoding="ascii",
-            )
-            csv = base / "ib.csv"
-            csv.write_text(
-                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
-                "eth1_ip,netmask,eth1_gw\n"
-                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,\n"
-                "EXAMPLE-LEAF01,eth,192.0.2.10,,,,,,\n",
-                encoding="utf-8",
-            )
-            p2p = base / "p2p.dot"
-            p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-LEAF01":"7";\n')
-            pubdir = tool / "publickey"
-            pubdir.mkdir()
-            blob = (
-                struct.pack(">I", len(b"ssh-ed25519")) + b"ssh-ed25519"
-                + struct.pack(">I", 32) + b"m" * 32
-            )
-            (pubdir / "mgmt-server.pub").write_text(
-                "ssh-ed25519 " + base64.b64encode(blob).decode("ascii") + " fixture\n",
-                encoding="ascii",
-            )
-            state_dir = tool / "xdr-initial-setup-logs"
-            credentials = state_dir / "auto.env"
-            foreign = "1 * * * * /usr/bin/true\n"
-            cron_db, bin_dir = self.fake_crontab(base, foreign)
-            argv = [
-                "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                "--p2p", str(p2p), "--target-cache", str(state_dir / "targets.json"),
-                "--report", str(state_dir / "report.log"),
-                "--snapshot-dir", str(state_dir / "snapshots"),
-            ]
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                    "REQ10C_CRON_DB": str(cron_db),
-                    "NVOS_INITIAL_PASSWORD": "fixture-initial",
-                },
-            ), mock.patch.object(sys, "argv", argv), \
-                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
-                 mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")), \
-                 mock.patch.object(Path, "home", return_value=base), \
-                 mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()), \
-                 mock.patch.object(self.initial, "prompt_ethernet_passwords", return_value={"example-leaf01": "fixture-ethernet"}), \
-                 mock.patch.object(self.initial, "collect_ethernet_interfaces", return_value=("EXAMPLE-LEAF01", "table")) as interfaces, \
-                 mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=("links", "fdb", "neighbors")) as network, \
-                 mock.patch.object(self.initial, "save_ethernet_snapshot", return_value=state_dir / "snapshot"), \
-                 mock.patch.object(self.initial, "interface_status_line", return_value="swp7 down"), \
-                 mock.patch.object(self.initial, "interface_oper_status", return_value="down") as port_status, \
-                 mock.patch.object(self.initial, "install_oob_management_key", side_effect=[self.initial.SetupError("transient OOB login"), None]) as key_stage, \
-                 mock.patch.object(self.initial, "run_on_ib", side_effect=AssertionError("IB network must not start")), \
-                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                try:
-                    try:
-                        initial_result = self.strict_main(tool, devices=(), interactive=True)
-                    except SystemExit as exc:
-                        self.fail(f"first --auto round not implemented: exit {exc.code}")
-                finally:
-                    if self.initial.REPORT_HANDLE is not None:
-                        self.initial.REPORT_HANDLE.close()
-                        self.initial.REPORT_HANDLE = None
-                self.assertEqual(0, initial_result)
-                self.assertTrue(credentials.is_file())
-                argv.extend(["--credentials-file", str(credentials)])
-                try:
-                    second_result = self.strict_main(tool, devices=(), interactive=False)
-                finally:
-                    if self.initial.REPORT_HANDLE is not None:
-                        self.initial.REPORT_HANDLE.close()
-                        self.initial.REPORT_HANDLE = None
-                self.assertEqual(0, second_result)
-                self.assertEqual(2, interfaces.call_count)
-                self.assertEqual(2, network.call_count)
-                self.assertEqual(2, key_stage.call_count)
-                self.assertTrue(credentials.is_file(), "unresolved IB must retain auto.env")
-                self.assertEqual(0, credentials.stat().st_mode & 0o077)
-                installed = cron_db.read_text(encoding="utf-8")
-                self.assertIn("*/10 * * * *", installed)
-                self.assertIn("flock -w 0", installed)
-                self.assertEqual(1, installed.count("*/10 * * * *"))
-                self.assertIn("--auto", installed)
-                self.assertIn("--credentials-file", installed)
-                self.assertNotIn("fixture-initial", installed)
-                self.assertNotIn("fixture-ethernet", installed)
-                port_status.return_value = "up"
-                key_stage.side_effect = None
-                # Device text model for the round where the IB link comes up.
-                # The former parse_nvue_state side_effect=[unconfigured,
-                # configured] matched the legacy path's two parses; the
-                # present-global strict path parses every actual readback
-                # (Initial check, Network facts, post-commit verification), so
-                # the device is now modeled as NVUE text: a factory running
-                # configuration that changes only when `nv config apply -y`
-                # commits the setters sent before it.  Assertions unchanged.
-                running = ["nv set system hostname nvos"]
-                pending: list[str] = []
-
-                def ib_device(*args, **_kwargs):
-                    command = list(args[7])
-                    if command == ["nv", "config", "show", "-o", "commands"]:
-                        return self.initial.SessionResult("\n".join(running) + "\n", 0)
-                    if command[:2] == ["nv", "set"]:
-                        pending.append(" ".join(command))
-                    elif command == ["nv", "config", "apply", "-y"]:
-                        for line in pending:
-                            if line.startswith("nv set system hostname "):
-                                running[:] = [kept for kept in running
-                                              if not kept.startswith("nv set system hostname ")]
-                            if line not in running:
-                                running.append(line)
-                        pending.clear()
-                    return self.initial.SessionResult("", 0)
-
-                with ExitStack() as round_three:
-                    for patch in (
-                        mock.patch.object(self.initial, "fdb_port_for_interface", return_value="swp7"),
-                        mock.patch.object(self.initial, "neighbor_for_port", return_value=self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")),
-                        mock.patch.object(self.initial, "verify_fdb_eth0_mac"),
-                        mock.patch.object(self.initial, "interface_vrf", return_value="default"),
-                        mock.patch.object(self.initial, "run_on_ib", side_effect=ib_device),
-                        mock.patch.object(self.initial, "verify_ipv4_login"),
-                        mock.patch.object(self.initial, "run_service_stage", return_value=(True, False)),
-                        mock.patch.object(self.initial, "run_key_stage", return_value=True),
-                    ):
-                        round_three.enter_context(patch)
-                    try:
-                        third_result = self.strict_main(
-                            tool, devices=("EXAMPLE-IB01",), interactive=False,
-                        )
-                    finally:
-                        if self.initial.REPORT_HANDLE is not None:
-                            self.initial.REPORT_HANDLE.close()
-                            self.initial.REPORT_HANDLE = None
-                self.assertEqual(0, third_result)
-                self.assertEqual(3, interfaces.call_count)
-                self.assertEqual(3, network.call_count)
-                self.assertFalse(credentials.exists(), "online next round must converge and erase secret")
-            self.assertEqual(0, initial_result)
-            self.assertEqual(foreign, cron_db.read_text(encoding="utf-8"))
-            self.assertIn(self.unsetup_with_no_links(base, bin_dir, cron_db), (None, 0))
-            self.assertFalse(credentials.exists())
-            self.assertEqual(foreign, cron_db.read_text(encoding="utf-8"))
-
-    def test_first_round_unknown_oob_key_outcome_holds_without_watch(self) -> None:
-        """An OOB key failure with UNKNOWN cleanup is not a transient retry.
-
-        Ordinary installer failures retry in the next round, but a failure whose
-        own cleanup is uncertain (the W2 UNKNOWN class) must latch: the round
-        fails, no own watch line is installed, no auto.env is written, and the
-        foreign crontab line stays byte-identical.
-        """
-        with tempfile.TemporaryDirectory(prefix="req10c-oob-unknown-") as directory:
-            base = Path(directory)
-            tool = base / "infiniband/bringup/xdr-initial-setup"
-            tool.mkdir(parents=True)
-            (tool / "initial-setup.py").write_bytes(INITIAL.read_bytes())
-            self.write_strict_project_global(tool)
-            (tool / "infra-neutral.conf").write_text(
-                "DNS=192.0.2.53\nNTP=time.neutral.example.test\nTIMEZONE=Etc/UTC\n",
-                encoding="ascii",
-            )
-            csv = base / "ib.csv"
-            csv.write_text(
-                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
-                "eth1_ip,netmask,eth1_gw\n"
-                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,\n"
-                "EXAMPLE-LEAF01,eth,192.0.2.10,,,,,,\n",
-                encoding="utf-8",
-            )
-            p2p = base / "p2p.dot"
-            p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-LEAF01":"7";\n')
-            pubdir = tool / "publickey"
-            pubdir.mkdir()
-            blob = (
-                struct.pack(">I", len(b"ssh-ed25519")) + b"ssh-ed25519"
-                + struct.pack(">I", 32) + b"m" * 32
-            )
-            (pubdir / "mgmt-server.pub").write_text(
-                "ssh-ed25519 " + base64.b64encode(blob).decode("ascii") + " fixture\n",
-                encoding="ascii",
-            )
-            state_dir = tool / "xdr-initial-setup-logs"
-            # Owner-only state directory, so the latched round's real pause can
-            # take its lock whatever the process umask is.
-            state_dir.mkdir(mode=0o700)
-            state_dir.chmod(0o700)
-            credentials = state_dir / "auto.env"
-            foreign = "1 * * * * /usr/bin/true\n"
-            cron_db, bin_dir = self.fake_crontab(base, foreign)
-            unknown = self.initial.SetupError("PUBLIC OOB key session cleanup is UNKNOWN")
-            unknown.cleanup_uncertain = True
-            argv = [
-                "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                "--p2p", str(p2p), "--target-cache", str(state_dir / "targets.json"),
-                "--report", str(state_dir / "report.log"),
-                "--snapshot-dir", str(state_dir / "snapshots"),
-            ]
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                    "REQ10C_CRON_DB": str(cron_db),
-                    "NVOS_INITIAL_PASSWORD": "fixture-initial",
-                },
-            ), mock.patch.object(sys, "argv", argv), \
-                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
-                 mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")), \
-                 mock.patch.object(Path, "home", return_value=base), \
-                 mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()), \
-                 mock.patch.object(self.initial, "prompt_ethernet_passwords", return_value={"example-leaf01": "fixture-ethernet"}), \
-                 mock.patch.object(self.initial, "collect_ethernet_interfaces", return_value=("EXAMPLE-LEAF01", "table")), \
-                 mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=("links", "fdb", "neighbors")), \
-                 mock.patch.object(self.initial, "save_ethernet_snapshot", return_value=state_dir / "snapshot"), \
-                 mock.patch.object(self.initial, "interface_status_line", return_value="swp7 down"), \
-                 mock.patch.object(self.initial, "interface_oper_status", return_value="down"), \
-                 mock.patch.object(self.initial, "install_oob_management_key", side_effect=[unknown]) as key_stage, \
-                 mock.patch.object(self.initial, "run_on_ib", side_effect=AssertionError("IB network must not start")), \
-                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                try:
-                    result = self.strict_main(tool, devices=(), interactive=True)
-                finally:
-                    if self.initial.REPORT_HANDLE is not None:
-                        self.initial.REPORT_HANDLE.close()
-                        self.initial.REPORT_HANDLE = None
-            self.assertEqual(1, result)
-            self.assertEqual(1, key_stage.call_count)
-            self.assertFalse(credentials.exists(), "an UNKNOWN OOB outcome must not enroll a watch")
-            self.assertEqual(foreign, cron_db.read_text(encoding="utf-8"))
-
-    def test_first_round_oob_tail_authority_failure_holds_without_watch(self) -> None:
-        """A project authority failure in the OOB tail is not a transient retry.
-
-        The authority re-check that precedes the OOB key installer fails in two
-        independent ways: the project global really changes after the verified
-        target fetch (the W2 global-changed class), or that re-check refuses
-        directly without marking the policy.  Either way the round latches
-        before the installer: rc 1, installer never called, no auto.env, and
-        the foreign crontab line byte-identical.
-        """
-        for case in ("global-changed", "direct-refusal"):
-            with self.subTest(case=case), tempfile.TemporaryDirectory(
-                prefix="req10c-oob-authority-"
-            ) as directory:
-                base = Path(directory)
-                tool = base / "infiniband/bringup/xdr-initial-setup"
-                tool.mkdir(parents=True)
-                (tool / "initial-setup.py").write_bytes(INITIAL.read_bytes())
-                global_path = self.write_strict_project_global(tool)
-                (tool / "infra-neutral.conf").write_text(
-                    "DNS=192.0.2.53\nNTP=time.neutral.example.test\nTIMEZONE=Etc/UTC\n",
-                    encoding="ascii",
-                )
-                csv = base / "ib.csv"
-                csv.write_text(
-                    "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
-                    "eth1_ip,netmask,eth1_gw\n"
-                    "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,\n"
-                    "EXAMPLE-LEAF01,eth,192.0.2.10,,,,,,\n",
-                    encoding="utf-8",
-                )
-                p2p = base / "p2p.dot"
-                p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-LEAF01":"7";\n')
-                pubdir = tool / "publickey"
-                pubdir.mkdir()
-                blob = (
-                    struct.pack(">I", len(b"ssh-ed25519")) + b"ssh-ed25519"
-                    + struct.pack(">I", 32) + b"m" * 32
-                )
-                (pubdir / "mgmt-server.pub").write_text(
-                    "ssh-ed25519 " + base64.b64encode(blob).decode("ascii") + " fixture\n",
-                    encoding="ascii",
-                )
-                state_dir = tool / "xdr-initial-setup-logs"
-                # Owner-only, so the latched round's real pause can take its lock.
-                state_dir.mkdir(mode=0o700)
-                state_dir.chmod(0o700)
-                credentials = state_dir / "auto.env"
-                foreign = "1 * * * * /usr/bin/true\n"
-                cron_db, bin_dir = self.fake_crontab(base, foreign)
-                real_value = self.initial._ib_project_value
-                observed = {"fetched": False, "fired": False}
-
-                def project_value(*args, **kwargs):
-                    fetch = kwargs.get("fetch") is True
-                    after_fetch = observed["fetched"] and not fetch and not observed["fired"]
-                    if after_fetch and case == "direct-refusal":
-                        observed["fired"] = True
-                        raise self.initial.SetupError("PUBLIC injected OOB-tail authority refusal")
-                    try:
-                        return real_value(*args, **kwargs)
-                    except self.initial.SetupError:
-                        if after_fetch:
-                            observed["fired"] = True
-                        raise
-                    finally:
-                        if fetch and not observed["fetched"]:
-                            observed["fetched"] = True
-                            if case == "global-changed":
-                                with global_path.open("a", encoding="utf-8") as stream:
-                                    stream.write("# PUBLIC changed after the verified target fetch\n")
-
-                argv = [
-                    "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                    "--p2p", str(p2p), "--target-cache", str(state_dir / "targets.json"),
-                    "--report", str(state_dir / "report.log"),
-                    "--snapshot-dir", str(state_dir / "snapshots"),
-                ]
-                with ExitStack() as stack:
-                    # One ExitStack keeps the static block depth under the
-                    # compiler limit inside this loop and subTest.
-                    stack.enter_context(mock.patch.dict(
-                        os.environ,
-                        {
-                            "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                            "REQ10C_CRON_DB": str(cron_db),
-                            "NVOS_INITIAL_PASSWORD": "fixture-initial",
-                        },
-                    ))
-                    for patch in (
-                        mock.patch.object(sys, "argv", argv),
-                        mock.patch.object(sys.stdin, "isatty", return_value=True),
-                        mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")),
-                        mock.patch.object(Path, "home", return_value=base),
-                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()),
-                        mock.patch.object(self.initial, "prompt_ethernet_passwords", return_value={"example-leaf01": "fixture-ethernet"}),
-                        mock.patch.object(self.initial, "collect_ethernet_interfaces", return_value=("EXAMPLE-LEAF01", "table")),
-                        mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=("links", "fdb", "neighbors")),
-                        mock.patch.object(self.initial, "save_ethernet_snapshot", return_value=state_dir / "snapshot"),
-                        mock.patch.object(self.initial, "interface_status_line", return_value="swp7 down"),
-                        mock.patch.object(self.initial, "interface_oper_status", return_value="down"),
-                        mock.patch.object(self.initial, "_ib_project_value", new=project_value),
-                        mock.patch.object(self.initial, "run_on_ib", side_effect=AssertionError("IB network must not start")),
-                    ):
-                        stack.enter_context(patch)
-                    key_stage = stack.enter_context(
-                        mock.patch.object(self.initial, "install_oob_management_key"))
-                    stack.enter_context(redirect_stdout(io.StringIO()))
-                    stack.enter_context(redirect_stderr(io.StringIO()))
-                    try:
-                        result = self.strict_main(tool, devices=(), interactive=True)
-                    finally:
-                        if self.initial.REPORT_HANDLE is not None:
-                            self.initial.REPORT_HANDLE.close()
-                            self.initial.REPORT_HANDLE = None
-                self.assertTrue(observed["fetched"] and observed["fired"],
-                                "the OOB-tail authority re-check was not reached")
-                self.assertEqual(1, result)
-                self.assertEqual(0, key_stage.call_count, "the installer must not run")
-                self.assertFalse(credentials.exists(), "an authority failure must not enroll a watch")
-                self.assertEqual(foreign, cron_db.read_text(encoding="utf-8"))
 
     def test_real_unsetup_removes_owned_cron_when_secret_was_deleted_separately(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10c-marker-cleanup-") as directory:
@@ -821,168 +398,6 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             self.assertFalse(marker.exists())
             self.assertFalse(terminal.exists())
 
-    def test_real_auto_round_complete_stops_without_watch_partial_is_terminal(self) -> None:
-        """Main must use the entire CSV IB denominator and not repair partial Day-0."""
-        for kind in ("complete", "partial"):
-            with self.subTest(kind=kind), tempfile.TemporaryDirectory(
-                prefix="req10c-auto-state-"
-            ) as directory:
-                base = Path(directory)
-                tool = base / "infiniband/bringup/xdr-initial-setup"
-                tool.mkdir(parents=True)
-                csv = base / "ib.csv"
-                csv.write_text("fixture CSV\n", encoding="ascii")
-                p2p = base / "p2p.dot"
-                p2p.write_text("fixture P2P\n", encoding="ascii")
-                state_dir = tool / "xdr-initial-setup-logs"
-                state_dir.mkdir()
-                cache = state_dir / "targets.json"
-                ib = self.initial.Device(
-                    "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-                    "203.0.113.1", "", "", "",
-                )
-                eth = self.initial.Device(
-                    "EXAMPLE-LEAF01", "eth", "192.0.2.10", "192.0.2.10/24",
-                    "192.0.2.1", "", "", "",
-                )
-                target = self.initial.Target(ib, eth, "swp7", "eth0")
-                # Present project authority (D1): the management global carries
-                # the IB target hash and a validated mgmt-server.pub is baked by
-                # the real cache writer, as P1 does, so the real loader and the
-                # strict admission accept the same cache.  This replaces the
-                # former hand-written cache and load_target_cache stub.
-                bake_cache = self.bake_strict_cache(tool, csv, p2p, cache, target)
-                actual = self.initial.DeviceState(
-                    ("203.0.113.2/24",), (),
-                    ("203.0.113.1",) if kind == "complete" else (),
-                    (), "EXAMPLE-IB01",
-                    # The modeled IB already holds its Initial facts, which the
-                    # separately tested Initial stage owns (not REQ10C).
-                    "nv set system config auto-save state enabled\n"
-                    "nv set system ztp config-save enabled",
-                )
-                cron_db, bin_dir = self.fake_crontab(
-                    base, "1 * * * * /usr/bin/true\n"
-                )
-                argv = [
-                    "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                    "--p2p", str(p2p), "--target-cache", str(cache),
-                    "--report", str(state_dir / "report.log"),
-                    "--snapshot-dir", str(state_dir / "snapshots"),
-                ]
-                with ExitStack() as stack:
-                    stack.enter_context(mock.patch.dict(os.environ, {
-                        "PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
-                        "REQ10C_CRON_DB": str(cron_db),
-                        "NVOS_INITIAL_PASSWORD": "fixture-initial",
-                    }))
-                    patches = (
-                        mock.patch.object(sys, "argv", argv),
-                        mock.patch.object(sys.stdin, "isatty", return_value=True),
-                        mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")),
-                        mock.patch.object(Path, "home", return_value=base),
-                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()),
-                        mock.patch.object(self.initial, "prompt_ethernet_passwords", return_value={"example-leaf01": "fixture-ethernet"}),
-                        mock.patch.object(self.initial, "collect_ethernet_interfaces", return_value=("EXAMPLE-LEAF01", "table")),
-                        mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=("links", "fdb", "neighbors")),
-                        mock.patch.object(self.initial, "save_ethernet_snapshot", return_value=state_dir / "snapshot"),
-                        mock.patch.object(self.initial, "interface_status_line", return_value="swp7 up"),
-                        mock.patch.object(self.initial, "interface_oper_status", return_value="up"),
-                        mock.patch.object(self.initial, "fdb_port_for_interface", return_value="swp7"),
-                        mock.patch.object(self.initial, "neighbor_for_port", return_value=self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")),
-                        mock.patch.object(self.initial, "verify_fdb_eth0_mac"),
-                        mock.patch.object(self.initial, "interface_vrf", return_value="default"),
-                        mock.patch.object(self.initial, "parse_nvue_state", return_value=actual),
-                        mock.patch.object(self.initial, "install_oob_management_key"),
-                        # Present-global auto now verifies IPv4 for every eligible
-                        # target; that transport is outside this PUBLIC model.
-                        mock.patch.object(self.initial, "verify_ipv4_login"),
-                    )
-                    for patch in patches:
-                        stack.enter_context(patch)
-                    ib_run = stack.enter_context(mock.patch.object(
-                        self.initial, "run_on_ib",
-                        return_value=self.initial.SessionResult("fixture", 0),
-                    ))
-                    service = stack.enter_context(mock.patch.object(
-                        self.initial, "run_service_stage", return_value=(True, False)
-                    ))
-                    key = stack.enter_context(mock.patch.object(
-                        self.initial, "run_key_stage", return_value=True
-                    ))
-                    output = io.StringIO()
-                    stack.enter_context(redirect_stdout(output))
-                    stack.enter_context(redirect_stderr(io.StringIO()))
-                    try:
-                        result = self.strict_main(
-                            tool, devices=("EXAMPLE-IB01",), interactive=True,
-                        )
-                    finally:
-                        if self.initial.REPORT_HANDLE is not None:
-                            self.initial.REPORT_HANDLE.close()
-                            self.initial.REPORT_HANDLE = None
-                    if kind == "partial":
-                        first_summaries = [
-                            line for line in output.getvalue().splitlines()
-                            if line.startswith("Summary:")
-                        ]
-                        self.assertEqual(1, len(first_summaries))
-                        self.assertIn(
-                            "terminal-devices=EXAMPLE-IB01", first_summaries[0],
-                            "10C.5 requires terminal device names in the final summary, "
-                            "not only earlier per-target logs or JSON",
-                        )
-                        self.assertTrue((state_dir / "auto.env").exists())
-                        self.assertTrue((state_dir / "auto-terminal.json").exists())
-                        argv.extend(["--credentials-file", str(state_dir / "auto.env")])
-                        ib_run.reset_mock()
-                        output.truncate(0)
-                        output.seek(0)
-                        try:
-                            second_result = self.strict_main(
-                                tool, devices=(), interactive=False,
-                            )
-                        finally:
-                            if self.initial.REPORT_HANDLE is not None:
-                                self.initial.REPORT_HANDLE.close()
-                                self.initial.REPORT_HANDLE = None
-                        self.assertEqual(1, second_result)
-                        ib_run.assert_not_called()
-                        self.assertIn("Day-0 TERMINAL", output.getvalue())
-                        retry_summaries = [
-                            line for line in output.getvalue().splitlines()
-                            if line.startswith("Summary:")
-                        ]
-                        self.assertEqual(1, len(retry_summaries))
-                        self.assertIn(
-                            "terminal-devices=EXAMPLE-IB01", retry_summaries[0],
-                            "persisted terminal state must remain visible in each round summary",
-                        )
-                        csv.write_text("fixture CSV changed by operator\n", encoding="ascii")
-                        # The operator re-runs P1 after editing the CSV.
-                        bake_cache()
-                        ib_run.reset_mock()
-                        try:
-                            third_result = self.strict_main(
-                                tool, devices=("EXAMPLE-IB01",), interactive=False,
-                            )
-                        finally:
-                            if self.initial.REPORT_HANDLE is not None:
-                                self.initial.REPORT_HANDLE.close()
-                                self.initial.REPORT_HANDLE = None
-                        self.assertEqual(1, third_result)
-                        ib_run.assert_called()
-                if kind == "complete":
-                    self.assertEqual(0, result)
-                    service.assert_called_once()
-                    key.assert_called_once()
-                    self.assertFalse((state_dir / "auto.env").exists())
-                    self.assertEqual("1 * * * * /usr/bin/true\n", cron_db.read_text())
-                else:
-                    self.assertEqual(1, result)
-                    service.assert_not_called()
-                    key.assert_not_called()
-
     def test_real_unsetup_reports_unsafe_secret_failure_without_unlinking_target(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10c-unsafe-cleanup-") as directory:
             base = Path(directory)
@@ -998,110 +413,92 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             self.assertTrue(credential.is_symlink())
             self.assertEqual("MUST PRESERVE\n", foreign_secret.read_text(encoding="ascii"))
 
-    def test_emitted_cron_line_nonblocking_lock_blocks_second_round(self) -> None:
-        """Run the emitted shell job under a portable fcntl-backed flock fixture."""
-        with tempfile.TemporaryDirectory(prefix="req10c-race-") as directory:
-            base = Path(directory)
-            tool = base / "xdr-initial-setup"
-            tool.mkdir()
-            marker = base / "entered.log"
-            (tool / "initial-setup.py").write_text(
-                "import os, pathlib, time\n"
-                "with pathlib.Path(os.environ['REQ10C_NETWORK_MARKER']).open('a') as out:\n"
-                "    out.write('entered\\n')\n"
-                "time.sleep(0.7)\n",
-                encoding="ascii",
-            )
-            cron_db, bin_dir = self.fake_crontab(base, "")
-            fake_flock = bin_dir / "flock"
-            fake_flock.write_text(
-                "#!/usr/bin/env python3\n"
-                "import fcntl, os, sys\n"
-                "if sys.argv[1:3] != ['-w', '0']: sys.exit(2)\n"
-                "fd = os.open(sys.argv[3], os.O_CREAT | os.O_RDWR, 0o600)\n"
-                "try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                "except BlockingIOError: sys.exit(1)\n"
-                "os.set_inheritable(fd, True)\n"
-                "os.execvp(sys.argv[4], sys.argv[4:])\n",
-                encoding="ascii",
-            )
-            fake_flock.chmod(0o700)
-            credentials = tool / "xdr-initial-setup-logs/auto.env"
-            env = dict(os.environ)
-            env.update({
-                "PATH": str(bin_dir) + os.pathsep + env.get("PATH", ""),
-                "REQ10C_CRON_DB": str(cron_db),
-                "REQ10C_NETWORK_MARKER": str(marker),
-            })
-            with mock.patch.dict(os.environ, env):
-                self.initial._install_auto_watch(
-                    tool, credentials, base / "ib.csv", base / "p2p.dot",
-                    base / "targets.json", base / "report.log", base / "snapshots",
-                    force=False,
-                )
-            installed = cron_db.read_text(encoding="utf-8")
-            self.assertEqual(1, installed.count("*/10 * * * *"))
-            shell = installed.removeprefix("*/10 * * * * ")
-            first = subprocess.Popen(["/bin/sh", "-c", shell], env=env)
-            try:
-                deadline = time.monotonic() + 5
-                while not marker.exists() and time.monotonic() < deadline:
-                    time.sleep(0.02)
-                self.assertTrue(marker.exists(), "first job must enter protected body")
-                second = subprocess.run(
-                    ["/bin/sh", "-c", shell], env=env,
-                    capture_output=True, text=True, timeout=3, check=False,
-                )
-                self.assertNotEqual(0, second.returncode, "overlap must fail immediately")
-                self.assertEqual("entered\n", marker.read_text(encoding="ascii"))
-            finally:
-                first.wait(timeout=5)
-            self.assertEqual(0, first.returncode)
+    def paused_watch_fixture(self, folder: Path) -> dict:
+        """State an operator has after a paused old watch: own cron line already gone,
+        auto.env, marker and the project lock still present, plus a foreign control leaf."""
+        root = Path(folder)
+        tool = root / "infiniband/bringup/xdr-initial-setup"
+        state = tool / "xdr-initial-setup-logs"
+        state.mkdir(parents=True, mode=0o700)
+        state.chmod(0o700)
+        credentials = state / "auto.env"
+        credentials.write_bytes(PAUSED_ENV_BYTES)
+        credentials.chmod(0o600)
+        marker = state / "auto-watch.state"
+        marker.write_bytes(PAUSED_MARKER_BYTES)
+        marker.chmod(0o600)
+        lock = state / "auto-crontab.lock"
+        os.close(os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+        control = root / "foreign-control"
+        control.write_bytes(b"PUBLIC immutable foreign control\n")
+        control.chmod(0o600)
+        cron = root / "owned-crontab.db"
+        cron.write_text(PAUSED_FOREIGN + "\n", encoding="utf-8")
+        cron.chmod(0o600)
+        return dict(root=root, credentials=credentials, marker=marker, lock=lock,
+                    control=control, cron=cron)
 
-    def test_main_rejects_unlinked_csv_ib_before_network_or_cron(self) -> None:
-        from test_cases import test_req10c_auto_contract as h1_contract
+    def paused_crontab_adapter(self, f: dict):
+        """The external crontab process as an owned model; counts reads and writes."""
+        observed = dict(reads=0, writes=0, adapter_errors=[])
 
-        with tempfile.TemporaryDirectory(prefix="req10c-unlinked-") as directory:
-            base = Path(directory)
-            csv = base / "ib.csv"
-            p2p = base / "p2p.dot"
-            csv.write_text("fixture CSV\n", encoding="ascii")
-            p2p.write_text("fixture P2P\n", encoding="ascii")
-            ib = self.initial.Device(
-                "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-                "203.0.113.1", "", "", "",
-            )
-            eth = self.initial.Device(
-                "EXAMPLE-LEAF01", "eth", "192.0.2.10", "192.0.2.10/24",
-                "192.0.2.1", "", "", "",
-            )
-            target = self.initial.Target(ib, eth, "swp7", "eth0")
-            argv = [
-                "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                "--p2p", str(p2p), "--target-cache", str(base / "target.json"),
-                "--report", str(base / "report.log"),
-                "--snapshot-dir", str(base / "snapshots"),
-            ]
-            with h1_contract._h1_owned_scheduler(
-                self, self.initial, base, guard_kind="unlinked", expected_target=target,
-            ) as h1, mock.patch.object(sys, "argv", argv), \
-                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
-                 mock.patch.object(self.initial, "load_target_cache", return_value=(2, [target])), \
-                 mock.patch.object(self.initial, "collect_ethernet_interfaces") as network, \
-                 mock.patch.object(self.initial, "_install_auto_watch") as cron, \
-                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                try:
-                    with self.assertRaises(self.initial.SetupError) as caught:
-                        self.initial.main()
-                finally:
-                    if self.initial.REPORT_HANDLE is not None:
-                        self.initial.REPORT_HANDLE.close()
-                        self.initial.REPORT_HANDLE = None
-                h1["main_error"] = caught.exception
-            self.assertIn("csv", str(caught.exception).casefold())
-            self.assertIn("p2p", str(caught.exception).casefold())
-            network.assert_not_called()
-            cron.assert_not_called()
+        def run(command, *args, **kwargs):
+            if command == ["crontab", "-l"]:
+                if args or kwargs != {"capture_output": True, "text": True,
+                                      "timeout": 10, "check": False}:
+                    observed["adapter_errors"].append("read-shape")
+                    raise AssertionError("PUBLIC owned adapter shape")
+                observed["reads"] += 1
+                return subprocess.CompletedProcess(command, 0, f["cron"].read_text(encoding="utf-8"), "")
+            if command == ["crontab", "-"]:
+                observed["writes"] += 1
+                f["cron"].write_text(kwargs["input"], encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+            observed["adapter_errors"].append("unexpected-boundary")
+            raise AssertionError("PUBLIC only owned crontab boundary is permitted")
+
+        return run, observed
+
+    def run_unsetup_after_paused_watch(self, f: dict) -> tuple:
+        before_control = _bound_file(f["control"])
+        lock_before = _bound_file(f["lock"])[0]
+        cleanup_run, cleanup = self.paused_crontab_adapter(f)
+        with mock.patch.object(self.unsetup, "HTTP_BASE", str(f["root"])), \
+                mock.patch.object(self.unsetup.subprocess, "run", new=cleanup_run):
+            self.unsetup._cleanup_req10c_auto_watch()
+        if cleanup["adapter_errors"]:
+            raise RuntimeError("FIXTURE HOLD: owned crontab adapter prerequisite unavailable")
+        return before_control, lock_before, cleanup
+
+    def test_real_unsetup_after_paused_watch_preserves_foreign_lifecycle(self) -> None:
+        # Unsetup half of test_initial_setup_auto_watch_pause::
+        # test_real_install_pause_and_real_unsetup_preserve_foreign_lifecycle (assertions as there).
+        with tempfile.TemporaryDirectory(prefix="req10c-paused-unsetup-") as folder:
+            f = self.paused_watch_fixture(Path(folder))
+            before_control, lock_before, cleanup = self.run_unsetup_after_paused_watch(f)
+            self.assertFalse(f["credentials"].exists())
+            self.assertFalse(f["marker"].exists())
+            self.assertTrue(f["cron"].read_text(encoding="utf-8") == PAUSED_FOREIGN + "\n")
+            self.assertEqual(0, cleanup["writes"])
+            self.assertTrue(_bound_file(f["control"]) == before_control,
+                            "real unsetup must preserve the foreign control leaf")
+            self.assertTrue(_bound_file(f["lock"])[0][:2] == lock_before[:2],
+                            "real unsetup must not delete the retained project lock")
+
+    def test_real_unsetup_after_paused_watch_with_canonical_quoted_paths(self) -> None:
+        # Unsetup half of test_initial_setup_auto_watch_pause::
+        # test_real_canonical_quoted_paths_pause_and_unsetup (assertions as there).
+        with tempfile.TemporaryDirectory(prefix="req10c-paused-quoted-") as outer:
+            f = self.paused_watch_fixture(Path(outer) / "PUBLIC project 'alpha'")
+            self.assertTrue(" " in str(f["root"]) and "'" in str(f["credentials"]),
+                            "owned input must actually exercise both path quoting boundaries")
+            before_control, lock_before, cleanup = self.run_unsetup_after_paused_watch(f)
+            self.assertFalse(f["credentials"].exists())
+            self.assertFalse(f["marker"].exists())
+            self.assertTrue(f["cron"].read_text(encoding="utf-8") == PAUSED_FOREIGN + "\n")
+            self.assertEqual(0, cleanup["writes"])
+            self.assertTrue(_bound_file(f["control"]) == before_control)
+            self.assertTrue(_bound_file(f["lock"])[0][:2] == lock_before[:2])
 
     def test_p2_invalid_baked_cache_fails_closed_before_local_yaml_or_network(self) -> None:
         self.assertIsNotNone(
@@ -1159,57 +556,6 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             yaml.assert_not_called()
             parse_csv.assert_not_called()
             network.assert_not_called()
-
-    def test_auto_refuses_local_leaf_and_never_installs_leaf_cron(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="req10c-no-leaf-cron-") as directory:
-            base = Path(directory)
-            tool = base / "leaf-tool"
-            tool.mkdir()
-            csv = base / "ib.csv"
-            p2p = base / "p2p.dot"
-            csv.write_text("fixture CSV\n", encoding="ascii")
-            p2p.write_text("fixture P2P\n", encoding="ascii")
-            cache = base / "targets.json"
-            cache.write_text(
-                '{"services":{},"public_keys":[{"name":"mgmt-server.pub",'
-                '"line":"fixture","fingerprint":"SHA256:fixture"}]}',
-                encoding="ascii",
-            )
-            ib = self.initial.Device(
-                "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-                "203.0.113.1", "", "", "",
-            )
-            eth = self.initial.Device(
-                "EXAMPLE-LEAF01", "eth", "192.0.2.10", "192.0.2.10/24",
-                "192.0.2.1", "", "", "",
-            )
-            target = self.initial.Target(ib, eth, "swp7", "eth0")
-            argv = [
-                "initial-setup.py", "--auto", "--ib-csv", str(csv),
-                "--p2p", str(p2p), "--target-cache", str(cache),
-                "--report", str(base / "report.log"),
-            ]
-            with mock.patch.dict(os.environ, {"NVOS_INITIAL_PASSWORD": "fixture"}), \
-                 mock.patch.object(sys, "argv", argv), \
-                 mock.patch.object(sys.stdin, "isatty", return_value=True), \
-                 mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")), \
-                 mock.patch.object(self.initial, "load_target_cache", return_value=(1, [target])), \
-                 mock.patch.object(self.initial, "local_ethernet_keys", return_value={"example-leaf01"}), \
-                 mock.patch.object(self.initial, "prompt_ethernet_passwords", side_effect=AssertionError("Leaf auto must fail before password prompt")), \
-                 mock.patch.object(self.initial, "collect_ethernet_interfaces") as network, \
-                 mock.patch.object(self.initial, "_install_auto_watch") as cron, \
-                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
-                try:
-                    with self.assertRaises(self.initial.SetupError) as caught:
-                        self.initial.main()
-                finally:
-                    if self.initial.REPORT_HANDLE is not None:
-                        self.initial.REPORT_HANDLE.close()
-                        self.initial.REPORT_HANDLE = None
-            self.assertIn("management server", str(caught.exception).casefold())
-            network.assert_not_called()
-            cron.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()

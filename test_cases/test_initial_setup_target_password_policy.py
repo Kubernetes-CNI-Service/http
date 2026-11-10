@@ -197,46 +197,6 @@ class IndependentTargetCredentialPolicyDraftTests(unittest.TestCase):
                             policy.password()
             prompts.assert_not_called()
 
-    def test_owned_auto_env_supports_explicit_target_without_relaxing_legacy_data_grammar(self):
-        initial = "PUBLIC-INITIAL-ONLY"
-        oob = "PUBLIC-OOB-ONLY"
-        base = "NVOS_INITIAL_PASSWORD=" + initial + "\nZTP_ETH_PASSWORD=" + oob + "\n"
-        target_line = "NVOS_TARGET_PASSWORD=" + self.kat["PASSWORD"] + "\n"
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "auto.env"
-            with self.subTest(format="extended"):
-                path.write_text(base + target_line, encoding="utf-8")
-                path.chmod(0o600)
-                values = APP.read_auto_credentials(path)
-                self.assertEqual({"NVOS_INITIAL_PASSWORD", "NVOS_TARGET_PASSWORD", "ZTP_ETH_PASSWORD"}, set(values))
-                self.assertEqual(initial, values["NVOS_INITIAL_PASSWORD"])
-                self.assertEqual(oob, values["ZTP_ETH_PASSWORD"])
-                self.assertTrue(hmac.compare_digest(self.kat["PASSWORD"], values["NVOS_TARGET_PASSWORD"]))
-            # Legacy format may still be read as data; actual AUTO write admission
-            # must separately reject its missing target. No silent OOB migration.
-            with self.subTest(format="legacy data only"):
-                path.write_text(base, encoding="utf-8")
-                path.chmod(0o600)
-                values = APP.read_auto_credentials(path)
-                self.assertEqual({"NVOS_INITIAL_PASSWORD", "ZTP_ETH_PASSWORD"}, set(values))
-                self.assertNotIn("NVOS_TARGET_PASSWORD", values)
-            for label, payload in (
-                ("duplicate target", base + target_line + target_line),
-                ("empty target", base + "NVOS_TARGET_PASSWORD=\n"),
-                ("unknown key", base + target_line + "NVOS_TARGET_PASSWORD_EXTRA=PUBLIC\n"),
-            ):
-                with self.subTest(format=label):
-                    path.write_text(payload, encoding="utf-8")
-                    path.chmod(0o600)
-                    with self.assertRaises(APP.SetupError):
-                        APP.read_auto_credentials(path)
-            with self.subTest(format="unsafe mode"):
-                path.write_text(base + target_line, encoding="utf-8")
-                path.chmod(0o644)
-                with self.assertRaises(APP.SetupError):
-                    APP.read_auto_credentials(path)
-
-
     def test_supplied_target_rejects_non_string_length_and_non_printable_ascii_before_backend(self):
         samples = (
             ("missing", None), ("boolean", True), ("integer", 7),
@@ -507,41 +467,6 @@ class WorkerMalformedProtocolTests(unittest.TestCase):
             self.assertEqual("", result.stderr)
             self.assertEqual(before, canary.read_bytes())
             self.assertEqual(["01-global.yaml"], sorted(path.name for path in home.iterdir()))
-
-
-class AutoEnvTargetShapeTests(unittest.TestCase):
-    def test_reader_admits_only_valid_explicit_target_and_never_verifies_or_prompts(self):
-        base = "NVOS_INITIAL_PASSWORD=PUBLIC-INITIAL\nZTP_ETH_PASSWORD=PUBLIC-OOB\n"
-        valid = ("A" * 8, "B" * 128, " " * 8, "PUBLIC-TARGET-ONLY")
-        invalid = ("A" * 7, "B" * 129, "PUBLIC-\u00e9-TARGET", "PUBLIC-\x7f-TARGET", "PUBLIC-\x00-TARGET")
-        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
-                  "st_size", "st_mtime_ns", "st_ctime_ns")
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "auto.env"
-            with patch.object(APP, "verify_password_hash",
-                    side_effect=AssertionError("credential data reader must not verify project hashes")) as verify, \
-                 patch.object(APP.getpass, "getpass",
-                    side_effect=AssertionError("credential data reader must never prompt")) as prompts:
-                for target in valid:
-                    path.write_text(base + "NVOS_TARGET_PASSWORD=" + target + "\n", encoding="utf-8")
-                    path.chmod(0o600)
-                    before = (tuple(getattr(path.lstat(), key) for key in fields), path.read_bytes())
-                    result = APP.read_auto_credentials(path)
-                    self.assertEqual({"NVOS_INITIAL_PASSWORD", "ZTP_ETH_PASSWORD", "NVOS_TARGET_PASSWORD"}, set(result))
-                    self.assertTrue(hmac.compare_digest(result["NVOS_TARGET_PASSWORD"], target),
-                                    "the reader must preserve the supplied target, not substitute an OOB value")
-                    self.assertTrue(before == (tuple(getattr(path.lstat(), key) for key in fields), path.read_bytes()),
-                                    "a valid credential read must preserve file identity and bytes")
-                for target in invalid:
-                    path.write_text(base + "NVOS_TARGET_PASSWORD=" + target + "\n", encoding="utf-8")
-                    path.chmod(0o600)
-                    before = (tuple(getattr(path.lstat(), key) for key in fields), path.read_bytes())
-                    with self.assertRaises(APP.SetupError):
-                        APP.read_auto_credentials(path)
-                    self.assertTrue(before == (tuple(getattr(path.lstat(), key) for key in fields), path.read_bytes()),
-                                    "rejected credential data must remain untouched")
-                self.assertEqual(0, verify.call_count, "data parsing does not grant project authority")
-                self.assertEqual(0, prompts.call_count, "auto credential data parsing cannot become interactive")
 
 
 if __name__ == "__main__":

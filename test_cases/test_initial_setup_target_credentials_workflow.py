@@ -7,6 +7,7 @@ This file must not be issued until Root reviews its fixture/closure and budget.
 """
 from __future__ import annotations
 import base64
+import builtins
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import hashlib
 import hmac
@@ -31,7 +32,6 @@ from test_cases.test_initial_setup_target_password_policy import required_extern
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
 C2 = ROOT / "ztp/config/nvos/template/90-c2-generate_configs.py"
-UNSETUP = ROOT / "DAY0-Prepare/02-unsetup.py"
 FIELDS = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink",
           "st_size", "st_mtime_ns", "st_ctime_ns")
 PUBLIC_INITIAL = "PUBLIC-INITIAL-Only-17!"
@@ -294,11 +294,43 @@ def readonly_expiry_observation(operation):
         signal.signal(signal.SIGINT, previous_int)
         signal.signal(signal.SIGTERM, previous_term)
 
+def direct_check(args):
+    # v15 Stage 5 (CURRENT-CONTRACT.md:57): the management server reads the IB over its eth0
+    # address directly, password-only and read-only (guide :754, D1a-16/D1a-19); no OOB jump.
+    options = ["-4","-tt","-o","ConnectTimeout=2","-o","ServerAliveInterval=10",
+               "-o","ServerAliveCountMax=2","-o","StrictHostKeyChecking=accept-new",
+               "-o","LogLevel=ERROR","-o","ConnectionAttempts=1","-o","ProxyCommand=none",
+               "-o","ProxyJump=none","-o","ControlMaster=no","-o","ControlPath=none",
+               "-o","NumberOfPasswordPrompts=1","-o","PubkeyAuthentication=no",
+               "-o","PreferredAuthentications=password,keyboard-interactive"]
+    if args[:-2] != options or args[-2] != "admin@203.0.113.2":
+        raise ValueError("direct SSH argv")
+    command, frame = unframe(args[-1])
+    if command != ["nv","config","show","-o","commands"] or frame is None:
+        raise ValueError("direct SSH command")
+    lock = os.open(root / "observer-state.lock", os.O_RDWR|os.O_CREAT,0o600)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        S = json.loads(state_path.read_text())
+        answer = read_answer("admin@203.0.113.2's password: ")
+        facts = role(answer)
+        record("direct-answer", **facts)
+        if answer != C[S["credential"]]:
+            emit("\nadmin@203.0.113.2: Permission denied (password).\n")
+            return 255
+        response(show_state(S), 0, frame)
+        return 0
+    finally:
+        fcntl.flock(lock,fcntl.LOCK_UN)
+        os.close(lock)
+
 def run():
     attrs = termios.tcgetattr(0)
     attrs[3] &= ~termios.ECHO
     termios.tcsetattr(0, termios.TCSANOW, attrs)
     args = sys.argv[2:]
+    if args[:1] == ["-4"]:
+        return direct_check(args)
     options = ["-o","ConnectTimeout=2","-o","ServerAliveInterval=10",
                "-o","ServerAliveCountMax=2","-o","StrictHostKeyChecking=accept-new",
                "-o","LogLevel=ERROR","-o","ControlMaster=no","-o","ControlPath=none"]
@@ -317,12 +349,21 @@ def run():
         return 255
     logical = unwrap(rest)
     if logical in (["hostname"],["nv","show","interface"],["ip","-d","link","show"],
-                   ["bridge","fdb","show"],["ip","neighbor"],["ifquery","vlan1"]):
+                   ["bridge","fdb","show"],["ip","neighbor"],["ifquery","vlan1"],
+                   ["ip","-j","address","show"]):
         payloads = {
+          # v15 reads the Leaf's own addresses before any Spine step (D1a-19, guide :748):
+          # the access VLAN's real 802.1Q SVI (vlan1 on the bridge that learned the MAC) has
+          # its own IPv4, so the original Leaf path stays (v15 CURRENT-CONTRACT.md:26-27).
+          ("ip","-j","address","show"): json.dumps([{
+              "ifname": "vlan1", "flags": ["UP"], "operstate": "UP",
+              "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24},
+                            {"family": "inet6", "local": "fe80::1", "prefixlen": 64, "scope": "link"}],
+          }]) + "\n",
           ("hostname",): "EXAMPLE-JUMP01\n",
           ("nv","show","interface"): "Interface Admin Oper\nswp7 up up\n",
-          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 state UP\n    link/ether 02:00:00:00:00:07\n8: vlan1: <UP> mtu 1500 state UP\n    vlan protocol 802.1Q id 1\n",
-          ("bridge","fdb","show"): "02:00:00:00:00:17 dev swp7 vlan 1 dynamic\n",
+          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 state UP\n    link/ether 02:00:00:00:00:07\n8: vlan1@br_default: <UP> mtu 1500 state UP\n    vlan protocol 802.1Q id 1\n",
+          ("bridge","fdb","show"): "02:00:00:00:00:17 dev swp7 vlan 1 master br_default dynamic\n",
           ("ip","neighbor"): "fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\n",
           ("ifquery","vlan1"): "iface vlan1\n    vrf default\n",
         }
@@ -587,7 +628,6 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                 raise RuntimeError("FIXTURE HOLD: original negative KAT unavailable")
         with mock.patch.object(sys, "argv", ["90-c2-generate_configs.py"]):
             cls.c2 = load_script("target_workflow_actual_c2", C2)
-        cls.unsetup = load_script("target_workflow_actual_unsetup", UNSETUP)
 
     def fixture(self, folder, *, scenario="normal", expiry=True, configured=False,
                 initial=PUBLIC_INITIAL):
@@ -737,6 +777,16 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                                         "IB": hmac.compare_digest(payload["hash"], self.kat["YESCRYPT"]),
                                         "supplied_bad": hmac.compare_digest(payload["password"], "PUBLIC-Wrong-Target-81!")})
                     return real_run(command, **kwargs)
+                if (type(command) is list and command[:1] == ["ssh"]
+                        and "BatchMode=yes" in command
+                        and "PreferredAuthentications=publickey" in command
+                        and command[-2] == "cumulus@192.0.2.10"):
+                    # Table 6-1 row 5 (guide :748): v15 tries the OOB public key first; the
+                    # owned Leaf refuses it, so the shared-password prompt follows.
+                    self.assertFalse(args)
+                    self.assertTrue(kwargs.get("capture_output") is True and kwargs.get("check") is False)
+                    return subprocess.CompletedProcess(
+                        command, 255, "", "cumulus@192.0.2.10: Permission denied (publickey).\n")
                 validator = shutil.which("ssh-keygen")
                 if command == [validator, "-l", "-E", "sha256", "-f", "/dev/stdin"]:
                     self.assertFalse(args)
@@ -768,7 +818,9 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
             try:
                 if cron_round:
                     raise AssertionError("cron must never prompt")
-                if label.startswith("Ethernet password for EXAMPLE-JUMP01 "):
+                # Table 6-1 row 5 (guide :748): one shared OOB Leaf password after the
+                # refused public-key probe (v15 CURRENT-CONTRACT.md:48).
+                if label == "Shared OOB Leaf password: ":
                     prompt_roles.append("OOB")
                     return PUBLIC_OOB
                 if label in ("IB target password (admin): ", "Confirm IB target password: "):
@@ -796,6 +848,24 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
             return real_kill(pid, sig)
         def clock():
             return real_clock() + (1000 if uncertain and (f["root"] / "uncertain-ready").is_file() else 0)
+        real_sleep = time.sleep
+        def readiness_sleep(seconds):
+            # Table 6-1 row 9 (guide :752): the v15 10 s wait before each IPv4 readiness
+            # attempt is not spent in the test; every other wait is real.
+            if seconds == 10:
+                return None
+            return real_sleep(seconds)
+        previous_input = builtins.input
+        def shared_selection(prompt=""):
+            # Table 6-1 row 5 (guide :748): v15 asks once whether all password Leafs share one
+            # password and the operator accepts the default; any other prompt (the consent
+            # terminal a caller may model) goes to the input already in place.
+            if prompt == "Use the same password for all OOB Leafs requiring a password? [Y/n]: ":
+                if cron_round:
+                    fail("input", AssertionError("cron must never prompt"))
+                    raise AssertionError("cron must never prompt")
+                return "y"
+            return previous_input(prompt)
         original_interactive = app.interactive_run
         def interactive(*args, **kwargs):
             try:
@@ -813,6 +883,8 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(sys, "stdin", _OwnedTTY()))
                 stack.enter_context(mock.patch.object(Path, "home", return_value=f["root"]))
                 stack.enter_context(mock.patch.object(app.getpass, "getpass", new=getpass))
+                stack.enter_context(mock.patch.object(builtins, "input", new=shared_selection))
+                stack.enter_context(mock.patch.object(app.time, "sleep", new=readiness_sleep))
                 stack.enter_context(mock.patch.object(app.subprocess, "run", new=run))
                 stack.enter_context(mock.patch.object(app.os, "execvp", new=execvp))
                 stack.enter_context(mock.patch.object(app.pty, "fork", new=fork))
@@ -888,7 +960,8 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
         self.assertIsNone(observation["error"])
         self.assertEqual(0, observation["rc"])
         cache = json.loads(f["cache"].read_text())
-        self.assertEqual(4, cache["version"], "legacy offline cache version is not silently changed")
+        # Table 6-1 row 6 (guide :749): v15 CURRENT-CONTRACT.md:20 "cache version 5".
+        self.assertEqual(5, cache["version"], "P1 writes the v15 offline cache version 5")
         self.assertFalse(self.kat["PASSWORD"] in f["cache"].read_text(),
                          "P1 cache may not contain cleartext target")
         return cache
@@ -960,198 +1033,6 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                             "provisional phase protocol must be actual wire, not synthesized evidence")
             self.assertFalse(f["credentials"].exists())
             self.assertEqual(FOREIGN_CRON, f["cron"].read_text())
-
-    def test_real_auto_writer_reader_two_round_partial_target_reuse_and_equal_candidate_collapse(self):
-        with tempfile.TemporaryDirectory(prefix="initial-target-auto-") as folder:
-            f = self.fixture(folder, scenario="after-pam-network")
-            self.p1(f)
-            first = self.invoke(f, "--auto")
-            self.assertTrue(first["error"] is not None or first["rc"] != 0)
-            self.assertTrue(f["credentials"].is_file(), "actual first-round writer must retain resumable roles")
-            credentials_before = bound_file(f["credentials"])
-            self.assertEqual(0o600, stat.S_IMODE(f["credentials"].stat().st_mode))
-            # These are real reader calls, not an expected mapping mocked into main.
-            values = f["app"].read_auto_credentials(f["credentials"])
-            self.assertTrue(hmac.compare_digest(values["NVOS_INITIAL_PASSWORD"], PUBLIC_INITIAL))
-            self.assertTrue(hmac.compare_digest(values["NVOS_TARGET_PASSWORD"], self.kat["PASSWORD"]))
-            self.assertTrue(hmac.compare_digest(values["ZTP_ETH_PASSWORD_EXAMPLE_JUMP01"], PUBLIC_OOB))
-            self.assertTrue(f["marker"].exists())
-            self.assertEqual(1, f["cron"].read_text().count("# http-v3-req10c-auto"))
-            self.assertIn(FOREIGN_CRON, f["cron"].read_text())
-            self.assertEqual(1, sum(e["kind"] == "pam-target" for e in first["events"]))
-            self.assertFalse(any(e["kind"] == "mutation" for e in first["events"]))
-            before_events = len(first["events"])
-            self.set_scenario(f, "normal")
-            second = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assert_complete(f, second)
-            later = second["events"][before_events:]
-            refusals = [e for e in later if e["kind"] == "inner-rejected"]
-            self.assertEqual(1, len(refusals), "only initial may be rejected before the one verified fallback")
-            self.assertTrue(refusals[0]["initial"] and not refusals[0]["oob"])
-            self.assertTrue(refusals[0]["phase"] and refusals[0]["operation"] == "auth-probe-readonly",
-                            "retry must follow independent inner attribution, not arbitrary banner text")
-            answers = [e for e in later if e["kind"] == "inner-answer"]
-            self.assertTrue(answers[0]["initial"] and all(e["target"] for e in answers[1:]))
-            self.assertEqual([], second["prompts"])
-            self.assertFalse(f["credentials"].exists())
-            self.assertFalse(f["marker"].exists())
-            self.assertEqual(FOREIGN_CRON, f["cron"].read_text())
-            self.assertTrue(credentials_before[1], "original saved bytes witnessed before completion cleanup")
-        with tempfile.TemporaryDirectory(prefix="initial-target-equal-") as folder:
-            f = self.fixture(folder, configured=True, expiry=False, initial=self.kat["PASSWORD"])
-            self.p1(f)
-            self.write_credentials(f, self.kat["PASSWORD"])
-            result = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assert_complete(f, result)
-            probes = [e for e in result["events"] if e["kind"] == "inner-answer" and
-                      e["operation"] == "auth-probe-readonly"]
-            self.assertEqual(1, len(probes), "equal initial/target is one candidate, not two attempts")
-            self.assertFalse(any(e["kind"] in ("inner-rejected", "mutation", "apply-y", "save")
-                                 for e in result["events"]))
-
-    def test_actual_extended_reader_target_admission_and_global_change_stop_before_mutation(self):
-        for label, supplied in (("missing", None), ("mismatch", "PUBLIC-Wrong-Target-81!")):
-            with self.subTest(label=label), tempfile.TemporaryDirectory(prefix="initial-target-admission-") as folder:
-                f = self.fixture(folder)
-                self.p1(f)
-                self.write_credentials(f, supplied)
-                values = f["app"].read_auto_credentials(f["credentials"])
-                self.assertEqual(supplied is not None, "NVOS_TARGET_PASSWORD" in values,
-                                 "old unknown-field prerequisite ERROR must not count as policy rejection")
-                before = bound_file(f["credentials"])
-                original_key = bound_file(f["auth"])
-                cron = bound_file(f["cron"])
-                result = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-                self.assertTrue(result["error"] is not None or result["rc"] != 0)
-                self.assertEqual([], result["prompts"])
-                if supplied is not None:
-                    self.assertTrue(any(not e["target"] and e["IB"] for e in result["hashes"]),
-                                    "bad target must reach the actual same-project IB native verifier")
-                    self.assertTrue(any(e["supplied_bad"] and e["IB"] for e in result["hashes"]),
-                                    "this exact supplied bad target must reach the actual project IB native verifier")
-                self.assert_no_new_writes([], result["events"])
-                self.assertTrue(before == bound_file(f["credentials"]), "credential full9/bytes changed")
-                self.assertEqual(original_key, bound_file(f["auth"]))
-                self.assertEqual(cron, bound_file(f["cron"]))
-                self.assertTrue(all(not e.get("oob") for e in result["events"] if e["kind"] == "inner-answer"))
-        with tempfile.TemporaryDirectory(prefix="initial-target-input-change-") as folder:
-            f = self.fixture(folder, scenario="change-global-after-read", expiry=False)
-            self.p1(f)
-            self.write_credentials(f, self.kat["PASSWORD"])
-            before = bound_file(f["credentials"])
-            original_key = bound_file(f["auth"])
-            result = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assertTrue(result["error"] is not None or result["rc"] != 0)
-            self.assertEqual(1, sum(e["kind"] == "global-changed-after-read" for e in result["events"]))
-            self.assert_no_new_writes([], result["events"])
-            self.assertTrue(before == bound_file(f["credentials"]), "credential full9/bytes changed")
-            self.assertEqual(original_key, bound_file(f["auth"]))
-            self.assertEqual(FOREIGN_CRON, f["cron"].read_text())
-            self.assertFalse(f["marker"].exists(), "changed authority may not install a fresh retry writer")
-
-    def test_non_auth_wire_errors_key_receipts_and_uncertain_cleanup_never_fallback_or_complete(self):
-        for scenario in ("network", "hostkey", "outer-denied", "pam-expired",
-                         "no-frame", "duplicate-frame", "empty-key-wire", "invalid-key-wire"):
-            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="initial-target-nonauth-") as folder:
-                f = self.fixture(folder, scenario=scenario, configured=True, expiry=False)
-                state = json.loads(f["state"].read_text())
-                state["credential"] = "initial"
-                f["state"].write_text(json.dumps(state), encoding="ascii")
-                self.p1(f)
-                self.write_credentials(f, self.kat["PASSWORD"])
-                before = bound_file(f["credentials"])
-                result = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-                self.assertTrue(result["error"] is not None or result["rc"] != 0,
-                                "arbitrary error/receipt must never become completion")
-                self.assertEqual([], result["prompts"])
-                answers = [e for e in result["events"] if e["kind"] == "inner-answer"]
-                if scenario == "outer-denied":
-                    self.assertEqual([], answers, "outer refusal precedes every inner phase")
-                elif scenario not in ("empty-key-wire", "invalid-key-wire"):
-                    self.assertEqual(1, len(answers), "non-auth read failure cannot start another credential session")
-                    self.assertFalse(any(e["kind"] == "mutation" for e in result["events"]))
-                self.assertTrue(all(not e["target"] for e in answers),
-                                "the target is not an error recovery guess for unrelated errors")
-                self.assertTrue(f["credentials"].exists(), "failed consumer must not clear the only resumable roles")
-                # Writer must not rewrite a supplied explicit credential file.
-                self.assertTrue(before == bound_file(f["credentials"]), "credential full9/bytes changed")
-                self.assertIn(FOREIGN_CRON, f["cron"].read_text())
-                if scenario in ("empty-key-wire", "invalid-key-wire"):
-                    self.assertTrue(any(e["kind"] == "key-shell" and e["actual_rc"] == 0
-                                        for e in result["events"]),
-                                    "receipt rejection must follow actual generated shell execution")
-        with tempfile.TemporaryDirectory(prefix="initial-target-uncertain-") as folder:
-            f = self.fixture(folder, scenario="uncertain", configured=True, expiry=False)
-            state = json.loads(f["state"].read_text())
-            state["credential"] = "initial"
-            f["state"].write_text(json.dumps(state), encoding="ascii")
-            self.p1(f)
-            self.write_credentials(f, self.kat["PASSWORD"])
-            uncertain_credentials_before = bound_file(f["credentials"])
-            result = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]),
-                                 cron_round=True, uncertain=True)
-            self.assertTrue(uncertain_credentials_before == bound_file(f["credentials"]),
-                            "uncertain cleanup must preserve credential full9/bytes")
-            self.assertTrue(result["error"] is not None or result["rc"] != 0)
-            self.assertIn(True, result["cleanup"], "actual primitive exception must expose uncertainty")
-            self.assertIn("FIXTURE_DRAIN_NOT_SUT", result["cleanup"],
-                          "fixture custody is not attributed to SUT cleanup")
-            answers = [e for e in result["events"] if e["kind"] == "inner-answer"]
-            self.assertEqual(1, len(answers))
-            self.assertFalse(answers[0]["target"])
-            self.assertFalse(any(e["kind"] == "mutation" for e in result["events"]))
-            # No assumed new persistence schema: either no automatic watch, or
-            # its real next round must suppress UNKNOWN device dispatch.
-            if f["marker"].exists():
-                self.set_scenario(f, "normal")
-                boundary = len(result["events"])
-                again = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-                self.assertFalse(any(e["kind"] == "inner-answer" for e in again["events"][boundary:]),
-                                 "UNKNOWN custody cannot silently trigger an auto credential retry")
-            self.assertIn(FOREIGN_CRON, f["cron"].read_text())
-
-    def test_actual_terminal_input_identity_and_unsetup_preserve_foreign_lifecycle(self):
-        with tempfile.TemporaryDirectory(prefix="initial-target-terminal-") as folder:
-            f = self.fixture(folder, scenario="terminal-partial", expiry=False)
-            self.p1(f)
-            self.write_credentials(f, self.kat["PASSWORD"])
-            first = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assertTrue(first["error"] is not None or first["rc"] != 0)
-            self.assertTrue(f["terminal"].is_file())
-            terminal = json.loads(f["terminal"].read_text())
-            self.assertTrue("example-ib01" in json.dumps(terminal).lower(),
-                            "terminal identity remains the actual protected CSV device")
-            before_credentials = bound_file(f["credentials"])
-            before_events = len(first["events"])
-            again = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assertFalse(any(e["kind"] == "inner-answer" for e in again["events"][before_events:]),
-                             "same actual CSV/P2P terminal input must suppress IB sessions")
-            self.assertTrue(before_credentials == bound_file(f["credentials"]), "credential full9/bytes changed")
-            # Real P1 from a changed input retires the old terminal identity;
-            # no hand-written receipt/history or fake digest is used.
-            f["p2p"].write_text(f["p2p"].read_text() + "# PUBLIC new input identity\n", encoding="ascii")
-            self.p1(f)
-            boundary = len(self.events(f))
-            changed = self.invoke(f, "--auto", "--credentials-file", str(f["credentials"]), cron_round=True)
-            self.assertTrue(any(e["kind"] == "inner-answer" for e in changed["events"][boundary:]))
-            self.assertIn(FOREIGN_CRON, f["cron"].read_text())
-            # Actual unsetup cleanup, not its helper mocked to return success.
-            original_run = subprocess.run
-            def own_cron(command, *args, **kwargs):
-                if command == ["crontab", "-l"]:
-                    return subprocess.CompletedProcess(command, 0, f["cron"].read_text(), "")
-                if command == ["crontab", "-"]:
-                    f["cron"].write_text(kwargs["input"], encoding="utf-8")
-                    return subprocess.CompletedProcess(command, 0, "", "")
-                raise AssertionError("unsetup may reach only the owned crontab adapter")
-            with mock.patch.object(self.unsetup, "HTTP_BASE", str(f["root"])), \
-                 mock.patch.object(self.unsetup.subprocess, "run", new=own_cron):
-                self.unsetup._cleanup_req10c_auto_watch()
-            self.assertFalse(f["credentials"].exists())
-            self.assertFalse(f["marker"].exists())
-            self.assertFalse(f["terminal"].exists())
-            self.assertEqual(FOREIGN_CRON, f["cron"].read_text())
-            self.assertEqual(f["control_before"], bound_file(f["control"]))
 
 if __name__ == "__main__":
     unittest.main()

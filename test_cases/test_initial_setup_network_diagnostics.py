@@ -270,9 +270,11 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
     assert_success = caller.MainCallerPrecommitDraftTests.assert_success
 
     def diagnostic_fixture(self, folder, selected):
+        # Owner Q-035 (a) item 4 (guide :438): an --apply run needs the device's current password
+        # to equal the project target, so the modeled device already uses the target.
         f = self.fixture(folder, case="diagnostic-" + selected,
                          network=selected != "readback", services=True,
-                         credential="initial")
+                         credential="target")
         program = f["stub"].read_text(encoding="utf-8")
         marker = "def run():\n"
         if program.count(marker) != 1:
@@ -383,10 +385,12 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
             fresh = self.events(f)[before:]
             self.assertTrue(result["rc"] != 0 or result["error"] is not None,
                             "failed Network readback returned success")
+            # Owner Q-035 (a) item 4: the --apply device already uses the project target, so the
+            # successful selector returns the target, not INITIAL.
             self.assertTrue(len(f["caller"]["selector"]) == 1
-                            and f["caller"]["selector"][0]["initial"] is True
+                            and f["caller"]["selector"][0]["target"] is True
                             and f["caller"]["selector"][0]["required"] is False,
-                            "actual INITIAL selector must precede Network writes")
+                            "actual selector must precede Network writes")
             transactions = [command for command in observed["commands"]
                             if command[:2] == ("nv", "set") or
                             command in (tuple(APPLY), tuple(SAVE))]
@@ -396,15 +400,15 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
             self.assertEqual(["diagnostic-network-applied", "diagnostic-network-saved",
                               "diagnostic-bad-read"], markers,
                              "actual false-to-true commit/save must precede model bad READ")
-            self.assertTrue(observed["order"] ==
-                            ["authorized-read-return", "actual-verify-entry"]
+            # P3c map D32d :284 and map :159 (E9, 04 Q-039; 06 D1a-B) "DEV 的写后核验与 v15 的
+            # verify_state 合用（v15 day0 段 :4229 调 verify_state；DEV 再核 link、type）"): the
+            # v15 verify_state rejects the bad readback first, so the DEV link/type verifier is
+            # not entered and the report carries the v15 post-configuration failure.
+            self.assertTrue(observed["order"] == ["authorized-read-return"]
                             and observed["helper_reads"] == [dict(bad=True, status0=True)]
-                            and len(observed["verifies"]) == 1
-                            and observed["verifies"][0]["bad"] is True,
-                            "real authorized READ returned bad body before actual verification")
-            self.assert_fixed_error(f["app"], observed["verifies"][0]["error"], READBACK)
-            self.assertTrue("post-configuration verification failed" in result["stdout"]
-                            and READBACK in result["stdout"],
+                            and observed["verifies"] == [],
+                            "real authorized READ returned bad body before verification")
+            self.assertTrue("post-configuration verification failed" in result["stdout"],
                             "original report diagnostic compatibility is required")
             self.assertEqual([], observed["following"],
                              "bad Network READ must stop Services/KEY/IPv4 consumer entry")
@@ -428,16 +432,16 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
                 fresh = self.events(f)[before:]
                 self.assertTrue(result["rc"] != 0 or result["error"] is not None,
                                 "actual preflight conflict returned success")
+                # Owner Q-035 (a) item 4: the --apply device already uses the project target.
                 self.assertTrue(len(f["caller"]["selector"]) == 1
-                                and f["caller"]["selector"][0]["initial"] is True
+                                and f["caller"]["selector"][0]["target"] is True
                                 and f["caller"]["selector"][0]["required"] is False,
-                                "conflict must reach after actual INITIAL authentication")
-                self.assertTrue(len(observed["constructors"]) == 1
-                                and observed["constructors"][0][
-                                    "host" if field == "hostname" else "gateway"] is True,
-                                "real constructor did not receive the one conflicting actual field")
-                self.assert_fixed_error(
-                    f["app"], observed["constructors"][0]["error"], FIELD_ERRORS[field])
+                                "conflict must reach after actual authentication")
+                # Owner Q-035 (a) item 2 (04 Q-035; v15 CURRENT-CONTRACT.md:55 "--force 只补缺失
+                # Network 字段，不绕过……冲突"): the conflict is refused before any write and before
+                # the Network setter constructor; the report names the conflicting field.
+                self.assertEqual([], observed["constructors"],
+                                 "a --force conflict is refused before the setter constructor")
                 report = result["stdout"].lower()
                 self.assertTrue("conflict" in report and field in report
                                 and "unknown" in report,
@@ -451,10 +455,13 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
                                         command in (tuple(APPLY), tuple(SAVE))
                                         for command in observed["commands"]),
                                 "preflight conflict may not issue setters/apply/save")
-                self.assertTrue(not f["caller"]["fetch"] and not f["caller"]["native"]
+                # Owner Q-035 (a) item 4: the target is fetched and natively verified at
+                # authentication; still no helper (write authority) and no consent.
+                self.assertTrue(bool(f["caller"]["fetch"]) and bool(f["caller"]["native"])
+                                and all(row["IB"] and row["target"] for row in f["caller"]["native"])
                                 and not f["caller"]["helper"] and
                                 "consent-granted" not in f["caller"]["timeline"],
-                                "preflight conflict acquired Target/native/consent/write authority")
+                                "preflight conflict acquired write/consent authority")
                 self.assertEqual([], observed["following"],
                                  "preflight conflict may not enter later consumers")
                 self.assertTrue(not any(event["kind"] in

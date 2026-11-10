@@ -849,7 +849,7 @@ class UploadPackageContractTests(unittest.TestCase):
                 extracted / "02-dhcp-subnet_config.csv", settings,
             )
 
-    def test_issue0016_validation_only_intent_flows_across_load_sync_and_package(self):
+    def test_validation_only_intent_flows_across_load_sync_and_package(self):
         self.assertTrue(load_tool.parse_args([
             "sample", "--air", "--validation-only",
         ]).validation_only)
@@ -897,7 +897,47 @@ class UploadPackageContractTests(unittest.TestCase):
                 run.call_args_list[2].args[0],
             )
 
-    def test_issue0016_validation_load_rejects_all_scope_and_preview(self):
+    def test_validation_only_help_requires_every_test_and_is_not_final_release(self):
+        # v3.1.3 O2 (guide :521, AGENTS.md :47): the REQ10C/ISSUE-0016 exception is retired;
+        # --validation-only still yields a validation proof kept apart from release proof, it
+        # "要求全部通过……不授权最终生产发布".  06 D1b-J: the load, sync and package help say
+        # "要求全部通过、不是最终发布证明"; arguments, forwarding and behaviour are unchanged.
+        sync_spec = importlib.util.spec_from_file_location(
+            "sync_validation_help_contract", TOOLS / "sync-code.py")
+        assert sync_spec and sync_spec.loader
+        sync_tool = importlib.util.module_from_spec(sync_spec)
+        sys.modules[sync_spec.name] = sync_tool
+        sync_spec.loader.exec_module(sync_tool)
+        # parse_args and tar-for-upload's parse_intermixed_args both go through
+        # parse_known_args; each parser is read once.
+        real_parse = argparse.ArgumentParser.parse_known_args
+        for name, tool, argv, phrases in (
+            ("load", load_tool, ["sample", "--air", "--validation-only"],
+             ("要求全部测试通过", "不是最终生产发布证明")),
+            ("sync", sync_tool, ["sample", "host.example", "--validation-only"],
+             ("要求全部测试通过", "不是最终生产发布证明")),
+            ("package", upload_tool, ["sample", "host.example", "--validation-only"],
+             ("every test to pass", "not final release proof")),
+        ):
+            parsers = []
+
+            def capture(parser, *args, **kwargs):
+                if all(parser is not seen for seen in parsers):
+                    parsers.append(parser)
+                return real_parse(parser, *args, **kwargs)
+
+            with self.subTest(tool=name), mock.patch.object(
+                argparse.ArgumentParser, "parse_known_args", autospec=True, side_effect=capture,
+            ):
+                self.assertTrue(tool.parse_args(argv).validation_only)
+                helps = [action.help for parser in parsers for action in parser._actions
+                         if "--validation-only" in action.option_strings]
+                self.assertEqual(1, len(helps))
+                self.assertNotIn("ISSUE-0016", helps[0])
+                for phrase in phrases:
+                    self.assertIn(phrase, helps[0])
+
+    def test_validation_load_rejects_all_scope_and_preview(self):
         for argv in (
             ["sample", "--validation-only"],
             ["sample", "--air", "--dry-run", "--validation-only"],

@@ -32,8 +32,11 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.initial = load_script("req10b_services_keys_direct", SCRIPT)
 
-    def test_target_cache_version_is_four(self) -> None:
-        self.assertEqual(4, self.initial.TARGET_CACHE_VERSION)
+    def test_target_cache_version_is_five(self) -> None:
+        # v3.1.3 table 6-1 row 6 (guide :749, O4 default "采用 5；测试改名并断言 5"); v15
+        # CURRENT-CONTRACT.md:20 "cache version 5 只保存有输入校验的静态目标" (Device gains
+        # login_interface).  Formerly test_target_cache_version_is_four asserting 4.
+        self.assertEqual(5, self.initial.TARGET_CACHE_VERSION)
 
     def test_f02_cache_snapshot_missing_member_never_falls_back_to_filesystem(self):
         """A finite immutable input map is closed, not a best-effort read cache."""

@@ -5,7 +5,8 @@ Expected values come from the agreed merge contract, not from the implementation
     target hash; a managed run whose global has no target hash fails closed and
     writes nothing to the device.
   * Q1/Q2: a managed run whose own-session completion proof fails is not
-    summarized as COMPLETED and keeps DEV's exit contract (1 for a failed target).
+    summarized as completed; since v3.1.3 (table 6-1 rows 2 and 11) that is the v15
+    summary, and a failed target exits 2 (INCOMPLETE) instead of DEV's 1.
   * Q3: managed method authority and --auto are refused together at entry, before
     the auto watch can be armed or any output exists.
   * D-2/H22: only the exact argv ["--_verify-password"] reaches the private password
@@ -21,8 +22,10 @@ from __future__ import annotations
 import ast
 from contextlib import ExitStack, redirect_stderr
 import io
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,9 +80,9 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
         private.chmod(0o600)
         return helper, root, tool.resolve(), global_path, ib_csv, p2p.resolve(), cache.parent.resolve() / cache.name
 
-    def device_io(self, stack, calls, *, observe=None):
+    def device_io(self, stack, calls, *, observe=None, initial="fixture"):
         neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")
-        stack.enter_context(mock.patch.dict(os.environ, {"NVOS_INITIAL_PASSWORD": "fixture"}))
+        stack.enter_context(mock.patch.dict(os.environ, {"NVOS_INITIAL_PASSWORD": initial}))
         for name, value in (("local_ethernet_keys", set()),
                             ("prompt_ethernet_passwords", {"example-jump01": "fixture"}),
                             ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "table")),
@@ -87,7 +90,10 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                             ("save_ethernet_snapshot", Path("/nonexistent/snapshot")),
                             ("interface_status_line", "swp7 up"), ("interface_oper_status", "up"),
                             ("fdb_port_for_interface", "swp7"), ("neighbor_for_port", neighbor),
-                            ("interface_vrf", "default")):
+                            ("interface_vrf", "default"),
+                            # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check
+                            # is a transport outside the PUBLIC model.
+                            ("verify_ipv4_login", None)):
             stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
 
         def device(*args, **kwargs):
@@ -171,7 +177,11 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                         "reason": "initial-current-configuration-not-verified"}
 
             with ExitStack() as stack:
-                self.device_io(stack, calls, observe=unverified)
+                # The modeled device already uses the project target, which the initial
+                # credential names (v15: with --apply the current IB password must equal the
+                # project global, P3c map 4.5 P1 :356; owner Q-035 (a)).
+                self.device_io(stack, calls, observe=unverified,
+                               initial=req10b.strict_kat(self.initial)["PASSWORD"])
                 witness = stack.enter_context(req10b.strict_management_boundary(
                     self, self.initial, kat=req10b.strict_kat(self.initial)))
                 try:
@@ -182,10 +192,18 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
             req10b.assert_strict_management_path(self, witness, global_path=global_path,
                                                  devices=("EXAMPLE-IB01",))
             self.assertEqual(["EXAMPLE-IB01"], observed, "completion proof must be requested once")
-            self.assertEqual(1, result, "DEV contract: a failed managed target exits 1")
+            # Table 6-1 row 11 (guide :754): a failed target is INCOMPLETE, exit 2 (v15
+            # CURRENT-CONTRACT.md「只有脚本/公共流程异常才称 FAILED，正常完成但仍有前提阻塞用
+            # INCOMPLETE」).
+            self.assertEqual(2, result, "a failed managed target exits 2 (INCOMPLETE)")
             report = (cache.parent / "report.log").read_text(encoding="utf-8")
             self.assertIn("managed current initial-setup configuration was not verified", report)
-            self.assertIn("COMPLETED=0", report)
+            # Table 6-1 row 2 (guide :745): the v15 summary and the run's summary.json replace
+            # the DEV per-target table; no target is counted as set up and verified.
+            summary_path = re.search(r"(?m)^Structured results: (.+)$", report)
+            self.assertIsNotNone(summary_path, "the run writes its summary.json")
+            summary = json.loads(Path(summary_path.group(1)).read_text(encoding="utf-8"))
+            self.assertEqual(0, summary["summary"]["setup_and_direct_ssh_verified"])
             self.assertNotIn("EXAMPLE-IB01 via EXAMPLE-JUMP01: COMPLETED", report)
             storage = root / "99-output-ztp/configuration-methods"
             self.assertIsNone(self.authority.read_method_receipt(storage, "EXAMPLE-IB01"))
@@ -225,34 +243,6 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                     self.assertFalse(cache.parent.exists(), "no output directory may be created")
                     self.assertEqual([], calls)
                     self.assertTrue(project_copy.is_file(), "the project copy is never consumed or changed")
-
-    def test_q3_managed_authority_with_auto_is_refused_before_watch_or_output(self):
-        with tempfile.TemporaryDirectory(prefix="managed-q3-") as directory:
-            helper, root, tool, _, ib_csv, p2p, cache = self.managed_project(directory, strict=False)
-            cycle = self.authority.ManagedInitialMethodCycle(root, self.initial)
-            before = sorted(str(path.relative_to(root)) for path in root.rglob("*"))
-            calls = []
-            touched = {name: mock.MagicMock(side_effect=AssertionError(name)) for name in (
-                "_pause_auto_watch", "_install_auto_watch", "read_auto_credentials",
-                "_write_auto_credentials", "resolve_initial_ib_password")}
-            with ExitStack() as stack:
-                self.device_io(stack, calls)
-                for name, recorder in touched.items():
-                    stack.enter_context(mock.patch.object(self.initial, name, recorder))
-                admit = stack.enter_context(mock.patch.object(cycle, "admit_paths", wraps=cycle.admit_paths))
-                with self.assertRaises(self.initial.SetupError) as caught:
-                    # A credentials file keeps the ordinary --auto path past its tty gate, so
-                    # only an entry refusal can stop it before credentials or watch work.
-                    helper.run_initial(tool, ib_csv, p2p, cache, "--auto", "--execution-mode", "management",
-                                       "--credentials-file", str(root / "never-read-auto.env"),
-                                       method_cycle=cycle)
-                cycle.close()
-            self.assertIn("--auto", str(caught.exception))
-            self.assertIn("managed", str(caught.exception))
-            self.assertEqual({name: 0 for name in touched}, {name: m.call_count for name, m in touched.items()})
-            self.assertEqual(0, admit.call_count, "refusal precedes admission and every output")
-            self.assertEqual([], calls)
-            self.assertEqual(before, sorted(str(path.relative_to(root)) for path in root.rglob("*")))
 
     def main_block(self):
         tree = ast.parse(INITIAL.read_text(encoding="utf-8"))

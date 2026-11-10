@@ -450,8 +450,8 @@ unlink/rmdir 失败放开目录权限后重试，其余失败原样报告；清�
 都不改；执行方式、计划摘要、各车道读数、遗留/残留与清理结果只写在仓库外的
 `ABSOLUTE_NEW_DIR/audit.json`。`--sharded` 不能与 `--validation-only`、`--timings`、`--check`、
 `--require-full`、`--list`、`--preflight`、`--watch`、`--suite`、`--list-suites`、`--changed`、
-`--changed-file`、`--git`、`--git-base` 同用；REQ10C 例外的 validation-only 证明仍只能由串行
-`--all --validation-only` 取得。没有任何跳过证明检查的参数。
+`--changed-file`、`--git`、`--git-base` 同用；validation-only 证明（要求全部通过；REQ10C 例外已于
+v3.1.3 随 `--auto` 退役）仍只能由串行 `--all --validation-only` 取得。没有任何跳过证明检查的参数。
 
 前置条件（与串行 `--all` 相同，分片不放宽也不另加判定）：主 checkout 必须带有已 fetch 的
 `refs/remotes/origin/v2`（历史 P 锚点），且 HEAD 到该锚点的第一父链无 merge、在既有上限之内；
@@ -786,7 +786,7 @@ runner 选测：只改该测试模块时，runner 选 baseline 4 个模块加本
 
 `run_related_tests.py --all --validation-only` 支持显式诊断参数
 `--timings ABSOLUTE_NEW_PATH`，并原样传给 `validation_unittest.py`。默认调用、
-测试发现、原有结果 JSON 字段和 ISSUE-0016 精确判定不变。提供该参数时，额外写一个
+测试发现、原有结果 JSON 字段和 validation-only 精确判定不变。提供该参数时，额外写一个
 0600、独占创建的 JSONL 文件，每个已完成的 `unittest.TestCase` 记录 `id` 与
 `duration_seconds`（包含 setup/test/tearDown 及子测试总时长）。路径须是仓库外、
 已存在目录中的绝对路径，目标不能已存在；无效路径会在测试和 ledger 写入前拒绝。
@@ -804,7 +804,7 @@ PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B test_cases/run_related_tests.p
 
 `UNIQUE` 应替换为本次运行的唯一标识。成功的 validation-only 证明仍不是正式发布证明；
 计时文件不进入结果 JSON、批准 ledger 或证明指纹，计时写入失败时全量运行 fail closed。
-不得因计时输出修改已知 FAIL 判定或 proof 的输入输出。
+不得因计时输出修改 validation-only 判定或 proof 的输入输出。
 
 在没有并行 full proof、且当前 checkout 可供测试创建临时制品时，也可以单独运行一次诊断
 （不执行正式 runner 的 preflight/approval 流程，不更新 ledger）：

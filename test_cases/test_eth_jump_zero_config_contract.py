@@ -494,9 +494,12 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
             device = transit["example-jump01"]
             with self.assertRaisesRegex(INITIAL.SetupError, "login address"):
                 INITIAL.outer_ssh_command(device, "cumulus", ["hostname"], 3)
-            # Existing explicit local mode does not require a remote endpoint.
+            # Existing explicit local mode does not require a remote endpoint.  T14 (guide
+            # :2300; P3c map :341): it is wrapped in the remote fixed-PATH exec carrier
+            # (v15 reference outer_ssh_command :1960-1970).
             self.assertEqual(
-                ["hostname"],
+                ["sh", "-c",
+                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"],
                 INITIAL.outer_ssh_command(device, "cumulus", ["hostname"], 3, local=True),
             )
 
@@ -516,8 +519,9 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                 target, neighbor, "cumulus", "PUBLIC", "admin", "PUBLIC", 3,
                 ["nv", "config", "show"],
             )),
+            # 06 D1a-I: the IB credential is passed explicitly (the value the call used before).
             ("ipv4", lambda: INITIAL.verify_ipv4_login(
-                target, "default", "cumulus", "PUBLIC", "admin", 3,
+                target, "default", "cumulus", "PUBLIC", "admin", 3, ib_password="PUBLIC",
             )),
         )
         for label, invoke in calls:
@@ -527,14 +531,18 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                 INITIAL, "ethernet_responder", wraps=INITIAL.ethernet_responder,
             ) as responder, mock.patch.object(
                 INITIAL, "NestedResponder", wraps=INITIAL.NestedResponder,
-            ) as nested:
+            ) as nested, mock.patch.object(INITIAL.time, "sleep", return_value=None):
+                # Class-4 fixture (table 6-1 row 9): no real 10 s wait before the v15 probe.
                 with self.assertRaisesRegex(INITIAL.SetupError, "login address"):
                     invoke()
                 interactive.assert_not_called()
                 responder.assert_not_called()
                 nested.assert_not_called()
+        # T14 (guide :2300; P3c map :341): the local carrier is the remote fixed-PATH exec
+        # (v15 reference outer_ssh_command :1960-1970).
         self.assertEqual(
-            ["hostname"],
+            ["sh", "-c",
+             "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"],
             INITIAL.outer_ssh_command(jump, "cumulus", ["hostname"], 3, local=True),
         )
 
@@ -574,9 +582,17 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                     LOAD.load_device_types(path, schema_version=2),
                 )
                 self.assertEqual(([], []), SETUP._validate_eth_csv(str(path)))
-                _ib, transit = INITIAL.load_devices(path)
-                self.assertEqual({"example-jump01"}, set(transit))
-                self.assertEqual("", transit["example-jump01"].login_ip)
+                if populated:
+                    # T13 (guide :2299; 06 D1a-C, D1a-05; owner Q-032 default): two VLAN/SVI
+                    # login candidates and no eth0_ip are refused when the inventory is read
+                    # (v15 reference eth_jump_login_address :835).  The unpopulated row keeps the
+                    # DEV I19 expectation: admitted with an empty login address.
+                    with self.assertRaisesRegex(INITIAL.SetupError, "multiple VLAN login addresses"):
+                        INITIAL.load_devices(path)
+                else:
+                    _ib, transit = INITIAL.load_devices(path)
+                    self.assertEqual({"example-jump01"}, set(transit))
+                    self.assertEqual("", transit["example-jump01"].login_ip)
                 if populated:
                     for index, label, value in (
                         (17, "svi_ip[2]", "300.1.1.1"),
