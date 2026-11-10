@@ -40,9 +40,10 @@ DOCKER_ROOT = ROOT / "infra/docker"
 # 2026-10-24: same section, REQ7 retirement step 3b (the two old REQ7 locks and gates left the image).
 # 2026-10-24: same section, step 3b review S2/S3 (per-file venv origin check; the full-suite
 # proof does not bind the engine library versions yet).
-PUBLISHED_DOCKER_README_SIZE = 49938
+# 2026-11-10: Native ownership sentence (v3.1.3 I-058, guide 9.7; owner 04 Q-033 (a)): code jobs keep the owner/group contract, project jobs send no owner/group like Docker.
+PUBLISHED_DOCKER_README_SIZE = 50014
 PUBLISHED_DOCKER_README_SHA256 = (
-    "d4e4a87b265b44729a54203ea22e1db1897502f0195f2ca3625783f7afdf137d"
+    "a84d7fa06c5245d5edb364c5e6d788030c4ed1f5018a3bc3f0e92d0f900922d2"
 )
 
 
