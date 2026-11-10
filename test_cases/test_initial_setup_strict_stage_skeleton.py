@@ -727,10 +727,14 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             self.assertEqual(0, code, err)
             for stale in world.root.rglob("summary.json"):
                 stale.rename(stale.with_name("p1-summary.json.done"))
+            # The override names the Leaf; never resolve the real host name (socket.getfqdn()
+            # makes macOS libc keep an mDNSResponder socket open for the rest of the process).
             code, err = self.run_main(
                 world, world.argv("--execution-mode", "ethernet", "--local-ethernet-hostname", "EXAMPLE-JUMP01"),
                 self.credentials(world, initial=target), target=target,
-                extra=(mock.patch.object(app, "interactive_run", leaf_transport(world)),))
+                extra=(mock.patch.object(app, "interactive_run", leaf_transport(world)),
+                       mock.patch.object(app.socket, "gethostname", return_value="EXAMPLE-JUMP01"),
+                       mock.patch.object(app.socket, "getfqdn", return_value="EXAMPLE-JUMP01")))
             self.assertIn("Local Ethernet execution", world.report(), "the run is the Leaf-local path")
             record = world.record(1)
             self.assertEqual("CHECK_ONLY", record["outcome"])
