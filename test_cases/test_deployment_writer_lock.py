@@ -12,6 +12,7 @@ import io
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import shlex
 import shutil
@@ -207,6 +208,137 @@ class SyncDeploymentLockTests(unittest.TestCase):
                 self.assertNotIn("-az", command)
                 self.assertNotIn("--owner", command)
                 self.assertNotIn("--group", command)
+
+    def test_native_project_jobs_send_no_owner_or_group(self):
+        # I-058 (04 Q-021, owner 2026-11-10 chose (b); 问题文档 I-058; v3.1.3 guide 9.2, 9.5 #1): a native sync
+        # no longer carries the workstation's owner into the server's project.  rsync(1): -a is -rlptgoD, so a
+        # project job keeps r l p t D and sends neither -a nor -o/-g, whether or not the receiver is sudo's root.
+        # Guard (TC-REAL-DEPLOYMENT-MATRIX-001, the code-job half of the current contract): code jobs stay -az.
+        with tempfile.TemporaryDirectory() as outside, materialized_public_project(ROOT) as project:
+            # The public fixture copies regular files only; one user input link gives the project-links job
+            # (R-014 第 3 条: 02-devices_config.csv, *.pub and ib.csv may be links).
+            target = Path(outside) / "ib.csv"
+            target.write_text("hostname\n", encoding="utf-8")
+            (project / "ib.csv").symlink_to(target)
+            with redirect_stdout(io.StringIO()):
+                jobs = SYNC.build_jobs(project, "/var/www/html")
+            remote_project = f"/var/www/html/DAY0-Prepare/{project.name}"
+            project_jobs = [job for job in jobs if job.remote_dir == remote_project]
+            self.assertEqual(
+                {f"project:{project.name}", f"project-links:{project.name}"},
+                {job.label for job in project_jobs},
+            )
+            code_jobs = [job for job in jobs if job.remote_dir != remote_project]
+            self.assertTrue(code_jobs)
+            for sudo in (True, False):
+                args = sync_args(runtime="native", sudo=sudo)
+                for job in project_jobs:
+                    with self.subTest(sudo=sudo, job=job.label):
+                        command = SYNC.rsync_command(job, args)
+                        self.assertRegex(command[1], r"^-[A-Za-z]+$")
+                        letters = set(command[1][1:])
+                        self.assertEqual(set(), letters & set("aog"), command[1])
+                        self.assertLessEqual(set("rlptD"), letters, command[1])
+                        rendered = " ".join(command)
+                        for option in ("--owner", "--group", "--chown", "--usermap", "--groupmap"):
+                            self.assertNotIn(option, rendered)
+                for job in code_jobs:
+                    with self.subTest(sudo=sudo, job=job.label):
+                        self.assertEqual("-az", SYNC.rsync_command(job, args)[1])
+
+    def test_native_new_project_directory_belongs_to_the_ssh_login_identity(self):
+        # I-058 (04 Q-021 (b); v3.1.3 guide 9.2, 9.4 #2, 9.5 #2, I058-O2): a project directory the sync creates
+        # belongs to the SSH login identity -- under sudo the invoker, SUDO_UID with SUDO_USER's passwd primary
+        # group; root logging in is root.  Same rule as the new project of v3.1.2 guide O11 ④ and 问题文档
+        # I-006's current identity.  An existing project directory is left alone, no other directory is
+        # chowned, --no-sudo needs nothing (the login user creates it), Docker is frozen (I058-O5, http dev
+        # 2026-11-09), and a dry-run only says what it would do.
+        # The remote command ensure_remote_directories hands to ssh runs here under sh -c, as OpenSSH joins
+        # the remote argv with spaces; a recording sudo sets SUDO_USER and SUDO_UID and execs the command, a
+        # recording chown only writes its arguments down.
+        real_run = subprocess.run
+        me = pwd.getpwuid(os.getuid())
+        root = pwd.getpwnam("root")
+        with tempfile.TemporaryDirectory() as temporary, materialized_public_project(ROOT) as project:
+            base = Path(temporary).resolve()
+
+            def run_case(name: str, *, invoker=me, existing: bool = False, **overrides):
+                stubs = base / name / "bin"
+                stubs.mkdir(parents=True)
+                calls = base / name / "chown.calls"
+                for stub, text in (
+                    ("sudo", "if [ \"$1\" = -n ]; then shift; fi\n"
+                             f"SUDO_USER={shlex.quote(invoker.pw_name)}; SUDO_UID={invoker.pw_uid}\n"
+                             "export SUDO_USER SUDO_UID\n"
+                             "exec \"$@\"\n"),
+                    ("chown", f"printf '%s\\t' \"$@\" >> {shlex.quote(str(calls))}\n"
+                              f"printf '\\n' >> {shlex.quote(str(calls))}\n"),
+                ):
+                    (stubs / stub).write_text("#!/bin/sh\n" + text, encoding="utf-8")
+                    (stubs / stub).chmod(0o755)
+                server = base / name / "server"
+                server.mkdir()
+                remote_project = server / "DAY0-Prepare" / project.name
+                if existing:
+                    remote_project.mkdir(parents=True)
+                with redirect_stdout(io.StringIO()):
+                    jobs = SYNC.build_jobs(project, str(server))
+                args = sync_args(remote_root=str(server), **overrides)
+                outputs = []
+
+                def remote(command, **_kwargs):
+                    remote_argv = command[command.index(args.host) + 1:]
+                    completed = real_run(
+                        ["/bin/sh", "-c", " ".join(remote_argv)],
+                        env={"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(base)},
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False,
+                    )
+                    outputs.append(completed.stdout)
+                    return completed
+
+                printed = io.StringIO()
+                with mock.patch.object(SYNC.subprocess, "run", side_effect=remote) as ssh, \
+                        redirect_stdout(printed):
+                    SYNC.ensure_remote_directories(jobs, args)
+                recorded = [] if not calls.exists() else [
+                    line.split("\t")[:-1] for line in calls.read_text(encoding="utf-8").splitlines()
+                ]
+                return SimpleNamespace(
+                    project=remote_project, jobs=jobs, ssh=ssh, chowns=recorded,
+                    remote="".join(outputs), printed=printed.getvalue(),
+                )
+
+            for name, invoker in (("by-user", me), ("by-root", root)):
+                with self.subTest(case=f"native sudo, new project, {name}"):
+                    case = run_case(f"new-{name}", invoker=invoker)
+                    self.assertTrue(case.project.is_dir())
+                    for job in case.jobs:
+                        self.assertTrue(Path(job.remote_dir).is_dir(), job.remote_dir)
+                    self.assertEqual(
+                        [[f"{invoker.pw_uid}:{invoker.pw_gid}", str(case.project)]], case.chowns,
+                    )
+                    self.assertEqual(1, case.remote.count("[OWNER]"), case.remote)
+            with self.subTest(case="native sudo, existing project"):
+                case = run_case("existing", existing=True)
+                self.assertEqual([], case.chowns)
+                self.assertNotIn("[OWNER]", case.remote)
+            with self.subTest(case="native --no-sudo, new project"):
+                case = run_case("no-sudo", sudo=False)
+                self.assertTrue(case.project.is_dir())
+                self.assertEqual([], case.chowns)
+            with self.subTest(case="docker sudo, new project"):
+                case = run_case("docker", runtime="docker")
+                self.assertTrue(case.project.is_dir())
+                self.assertEqual([], case.chowns)
+            with self.subTest(case="native sudo, dry-run"):
+                case = run_case("dry-run", dry_run=True)
+                case.ssh.assert_not_called()
+                self.assertFalse(case.project.exists())
+                self.assertTrue(
+                    any(line.startswith("[DRY]") and str(case.project) in line
+                        for line in case.printed.splitlines()),
+                    case.printed,
+                )
 
     def test_upload_accepts_host_as_second_positional_operand(self):
         positional = UPLOAD.parse_args([

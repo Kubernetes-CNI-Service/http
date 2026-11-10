@@ -43,15 +43,20 @@ fixture; upgrade.py's real ``__main__`` block through agentW10's in-process laun
 through agentW8's tree, fake crontab and owner view, 13-unload's command for 02-unsetup being run in this process;
 12-ztp-monitor, deploy_infra and infra-setup through agentW12's module copies.  fchown and runuser are recorded,
 never performed.  The real uid switch belongs to TC-REAL-I006-OPERATOR-LOAD-001 (NOT RUN).
+
+SyncThenLoadOperatorWorkflowTests (v3.1.3 I-058, owner 2026-11-10 04 Q-021 (b)) puts tools/sync-code.py's real
+project jobs in front of load; its expectations and its receiver model are in its own docstring.
 """
 
 from __future__ import annotations
 
+import argparse
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import functools
 import io
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -67,6 +72,7 @@ from test_cases import test_operator_peripheral_contract as W12
 from test_cases import test_unsetup_operator_crontab as W8
 from test_cases import test_upgrade_operator_reexec as W10
 from test_cases.module_loader import load_script
+from test_cases.public_project_fixture import materialized_public_project
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "tools") not in sys.path:
@@ -79,6 +85,10 @@ START_MONITOR = LOAD.start_ztp_monitor
 REPAIR = LOAD.repair_project_permissions
 UNLOAD = load_script("load_operator_workflow_unload", ROOT / "DAY0-Prepare/13-unload.py")
 UNSETUP = load_script("load_operator_workflow_unsetup", ROOT / "DAY0-Prepare/02-unsetup.py")
+SYNC = load_script("load_operator_workflow_sync", ROOT / "tools/sync-code.py")
+SYNC_REMOTE_ROOT = "/var/www/html"
+# rsync(1) --itemize-changes: the update type, the file type, the attribute columns, a space, the name.
+ITEMIZED = re.compile(r"^[<>ch.*][fdLDS]\S* (.+)$")
 AREAS = ("ethernet", "infiniband", "nvlink")
 SUDO_NAMES = ("SUDO_USER", "SUDO_UID", "SUDO_GID", OI.ROOT_PARENT_MARKER, "HTTP_ZTP_RUNTIME_BACKEND")
 WATCH = ("auto.env", "auto-watch.state", "auto-terminal.json")
@@ -655,6 +665,138 @@ class LoadCrossScriptOwnershipWorkflowTests(_OperatorFlow, unittest.TestCase):
                                                  for name in ("state", "veto")))
         self.assertEqual(("failed", True), tuple(authority.read_method_current(methods, "leaf1")[name]
                                                  for name in ("state", "veto")))
+
+
+class _RootLoadOwnerModel(W6.OwnerModel):
+    """agentW6's OwnerModel for way B: what the test user made and the model names no owner for is root's.
+
+    The test user plays root's load here (as owners_after has it for 13-unload), so what the real load creates
+    while it runs (template backfill, outputs) is root's, as on the server; modelled owners still win.
+    """
+
+    def _view(self, metadata):
+        if (metadata.st_dev, metadata.st_ino) in self.owners or metadata.st_uid != L57.ME.pw_uid:
+            return super()._view(metadata)
+        fields = {name: getattr(metadata, name) for name in dir(metadata) if name.startswith("st_")}
+        fields["st_uid"], fields["st_gid"] = 0, 0
+        return SimpleNamespace(**fields)
+
+    def owner(self, path: Path) -> tuple[int, int]:
+        metadata = os.lstat(path)
+        played = (0, 0) if metadata.st_uid == L57.ME.pw_uid else (metadata.st_uid, metadata.st_gid)
+        return self.owners.get((metadata.st_dev, metadata.st_ino), played)
+
+
+class SyncThenLoadOperatorWorkflowTests(_OperatorFlow, unittest.TestCase):
+    """I-058 (v3.1.3 guide 9.5 #3): sync-code's project jobs, then load on what they left, in way A and way B.
+
+    Expected values: 问题文档 I-006 (the operator is the owner of the project directory), the v3.1.2 release notes
+    3.3 table (way A: U's project; way B: root's), 04 Q-017 (an owner that is neither root nor the operator is
+    listed and load stops) and 04 Q-021 / 问题文档 I-058 (owner 2026-11-10 (b): a native sync does not carry the
+    workstation's owner into the server's project; guide 9.2: an existing project directory keeps its owner, what
+    the sync writes belongs to the receiver, root, until load's repair hands it to the operator).
+
+    The real SYNC.build_jobs and rsync_command build the project jobs, replayed between local directories as
+    test_project_link_inputs_workflow's sync_project does (sudo=False; the flag string depends on the runtime
+    only, and the sudo=True string is compared directly).  The receiver would be root on the server and cannot be
+    here, so what it owns afterwards is modelled from rsync(1) in agentW6's OwnerModel: a flag string that keeps
+    the owner (a or o) gives the project directory and every itemized entry the workstation's account -- either a
+    uid the server's passwd lacks, or a same-named server account that is not the operator; one that does not
+    keeps what existed and gives every new entry 0:0.  Then the real 11-load main runs as the model's project
+    owner says.  The real mapping is TC-REAL-I006-OPERATOR-LOAD-001's step 0 (guide 9.8).
+    """
+
+    WORKSTATION_ACCOUNTS = ("uid missing from the server's passwd", "same-named server account")
+
+    def sync_then_load(self, way: str, workstation: str) -> SimpleNamespace:
+        flow = self.flow()
+        owner = (0, 0) if way == "B" else (flow.u.pw_uid, flow.u.pw_gid)
+        model = _RootLoadOwnerModel() if way == "B" else W6.OwnerModel()
+        model.own_tree(flow.project, *owner)       # the project as the server has it before the sync
+        if workstation == self.WORKSTATION_ACCOUNTS[0]:
+            account = (L57.ME.pw_uid, L57.ME.pw_gid)  # the test user plays the workstation account
+            self.assertNotIn(L57.ME.pw_uid, {entry.pw_uid for entry in flow.entries})
+        else:
+            namesake = L57.passwd_entry(L57.ME.pw_name, L57.ME.pw_uid + 3, L57.ME.pw_gid + 3,
+                                        flow.root / "home-namesake")
+            flow.entries = (*flow.entries, namesake)
+            account = (namesake.pw_uid, namesake.pw_gid)
+        args = argparse.Namespace(runtime="native", dry_run=False, sudo=False, host="sync-target", port=22,
+                                  identity=None)
+        root_receiver = argparse.Namespace(**{**vars(args), "sudo": True})
+        flags, itemized = set(), []
+        with materialized_public_project(ROOT) as source:
+            with redirect_stdout(io.StringIO()):
+                jobs = SYNC.build_jobs(source, SYNC_REMOTE_ROOT)
+            jobs = [job for job in jobs if job.remote_dir == f"{SYNC_REMOTE_ROOT}/DAY0-Prepare/{source.name}"]
+            self.assertTrue(jobs)
+            for job in jobs:
+                command = SYNC.rsync_command(job, args)
+                self.assertEqual(SYNC.rsync_command(job, root_receiver)[1], command[1])
+                flags.add(command[1])
+                transport = command.index("-e")
+                del command[transport:transport + 2]
+                self.assertEqual(f"{args.host}:{job.remote_dir}/", command[-1])
+                command[-1] = os.fspath(flow.project) + "/"
+                done = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                      text=True)
+                for line in done.stdout.splitlines():
+                    match = ITEMIZED.match(line)
+                    if match:
+                        itemized.append(match.group(1).split(" -> ", 1)[0].rstrip("/"))
+        self.assertTrue(itemized)
+        written = []
+        if any(letter in flag[1:] for flag in flags for letter in "ao"):
+            for path in (flow.project, *(flow.project / name for name in itemized)):
+                model.own(path, *account)
+        else:
+            written = [name for name in itemized if W6.key(flow.project / name) not in model.owners]
+            for name in written:
+                model.own(flow.project / name, 0, 0)
+        modes = {name: W6.mode(flow.project / name) for name in written}
+        with self.process_as(flow, euid=0, sudo=flow.u if way == "A" else None,
+                             owner_uid=model.owner(flow.project)[0]):
+            load = self.load(flow, model=model)
+        return SimpleNamespace(flow=flow, model=model, written=written, modes=modes, load=load)
+
+    def test_way_b_root_project_keeps_root_as_operator_after_a_sync(self) -> None:
+        # Guide 9.5 #3 way B; v3.1.2 release notes 3.3 (way B: root's project); 04 Q-017; 04 Q-021, 问题文档 I-058.
+        for workstation in self.WORKSTATION_ACCOUNTS:
+            with self.subTest(workstation=workstation):
+                run = self.sync_then_load("B", workstation)
+                result = run.load.result
+                # 以谁执行: design §4.2's line for root on its own project (guide 9.5 #3 quotes it).
+                self.assertEqual(["操作员：root（项目目录属主）；当前：root 直接运行 → 以 root 执行"],
+                                 identity_lines(result.stdout), result.stdout + result.stderr)
+                self.assertEqual(0, result.rc, result.stderr)
+                # 文件属于谁: the gate-side repair met no third-party owner (04 Q-017); the project directory is
+                # still root's and what the sync wrote is the receiver's, root's (guide 9.2).
+                self.assertNotIn("项目权限检查停止", result.stdout + result.stderr)
+                self.assertEqual((0, 0), run.model.owner(run.flow.project))
+                self.assertTrue(run.written)
+                for name in run.written:
+                    self.assertEqual((0, 0), run.model.owner(run.flow.project / name), name)
+
+    def test_way_a_operator_keeps_the_project_and_takes_what_the_sync_wrote(self) -> None:
+        # Guide 9.5 #3 way A; 问题文档 I-006 (operator = project owner; what root writes goes to the real user);
+        # v3.1.2 release notes 3.3 (way A: U's project); 04 Q-021, 问题文档 I-058 and guide 9.2 (load's repair
+        # before the HTTP gate hands the sync's root:root entries to the operator).
+        for workstation in self.WORKSTATION_ACCOUNTS:
+            with self.subTest(workstation=workstation):
+                run = self.sync_then_load("A", workstation)
+                flow, result = run.flow, run.load.result
+                self.assertEqual([banner_sudo(flow.u.pw_name)], identity_lines(result.stdout),
+                                 result.stdout + result.stderr)
+                self.assertEqual(0, result.rc, result.stderr)
+                operator = (flow.u.pw_uid, flow.u.pw_gid)
+                self.assertEqual(operator, run.model.owner(flow.project))
+                self.assertTrue(run.written)
+                printed = W6.perm_lines(result.stdout)
+                for name in run.written:
+                    path = flow.project / name
+                    before = run.modes[name]
+                    self.assertIn(W6.perm_line(path, (0, 0, before), (*operator, before & ~0o022)), printed)
+                    self.assertEqual(operator, run.model.owner(path), name)
 
 
 if __name__ == "__main__":

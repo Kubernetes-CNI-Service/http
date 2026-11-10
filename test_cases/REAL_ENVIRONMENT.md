@@ -1257,7 +1257,7 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   到 Ubuntu rsync 3.2.x receiver 的 Docker sync argv 与最终 owner：sender 不得协商 `-o/-g`，
   receiver 命令不得含 `--chown`、`--usermap` 或 `--groupmap`；同一 deployment lock 的 commit
   阶段必须仅把 source manifest 精确登记的对象及 manifest 本身收敛为 `root:root`，远端额外文件
-  owner 不变。Native 对照轮次必须保持原 owner/group 传输合同。
+  owner 不变。Native 对照轮次：代码 job 保持原 owner/group 传输合同；项目 job 与 Docker 一样不发送 owner/group（I-058）。
 - 清理与风险：所有服务、容器、地址和 adapter 直通仅在隔离环境操作；按对应 unload/down 和宿主
   网络恢复流程回到初始状态。任何组合缺少证据不得借用另一组合的 PASS。
 
@@ -3372,15 +3372,17 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 对应需求或缺陷：问题文档 I-006（owner 2026-10-27 同意的方案第 1～4、7 条，:290-306；load 开头检查并改正权限 :331、:407；
   身份一致 :351；混用 :352）、I-014（owner 2026-11-01，:906）、I-029（:1311-1329）；设计 `设计/I-006与R-005实现计划.md`
   §1、§4.2～§4.6；v3.1.2 详细工作指导 WP-5～WP-9、WP-12、WP-13，第 3 节 O7～O14（owner 2026-11-07「同意你在v3.1.2里的
-  默认建议」，http dev 转述；O8 已定为改合同：闸门之前的改正有 `[PERM]` 行并通过闸门）。
+  默认建议」，http dev 转述；O8 已定为改合同：闸门之前的改正有 `[PERM]` 行并通过闸门）；问题文档 I-058（owner 2026-11-10
+  答复 04 Q-021，改为 (b)：sync-code 同步项目不带开发机属主；v3.1.3 详细工作指导第 9 节，第 0、7 步）。
 - 自动化文件与测试方法：`test_cases/test_load_operator_workflow.py`（`OperatorModesWorkflowTests`、
-  `LoadCrossScriptOwnershipWorkflowTests`），以及各包的 direct 测试 `test_load_operator_contract.py`、
+  `LoadCrossScriptOwnershipWorkflowTests`、`SyncThenLoadOperatorWorkflowTests`（I-058：真实的项目 job 在本机目录之间回放，
+  接收端属主按 rsync(1) 建模，再跑真实的 load））、`test_deployment_writer_lock.py` 的 I-058 两条 direct 测试，以及各包的 direct 测试 `test_load_operator_contract.py`、
   `test_load_permission_repair_contract.py`（WP-6）、`test_unsetup_operator_crontab.py`、`test_collection_lock_owner.py`、
   `test_operator_peripheral_contract.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、sudo 环境、passwd、项目属主），
   `fchown`、`runuser`、`crontab` 都用记录替身；真实的 uid 切换、属主改正和 crontab 只能在本卡验证。
 - 覆盖范围：`DAY0-Prepare/11-load.py`、`01-a-setup.py`（load 进程内的模板补齐）、`13-unload.py`、`02-unsetup.py`、
   `12-ztp-monitor.py`（load 起的常驻进程）、`infra/deploy_infra.py`、`infra/infra-setup.py`、`tools/collect-ztp-diagnostics.py`、
-  `monitor/switch-collection-worker.py` 与三个 `cron.lock`；upgrade、upgrade2、cron.sh 的降权见
+  `monitor/switch-collection-worker.py` 与三个 `cron.lock`；`tools/sync-code.py`（第 0、7 步：项目同步后的属主，I-058）；upgrade、upgrade2、cron.sh 的降权见
   `TC-REAL-I006-OPERATOR-REEXEC-001`；initial-setup 随 D1（v3.1.3），本卡不做，v3.1.2 期间 initial-setup 仍由项目属主不加 sudo 运行。
 - 适用平台：
 
@@ -3408,6 +3410,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - `<项目>/mgmt-server.pub` 已换成 `U` 的公钥（或是空占位）：否则第 2 步的 load 停在「management public key mismatch」，
   不替换已有的 key（设计 §4.4 最后一条、§4.5；`11-load.py::prepare_pubkeys`，http dev 2026-11-09 读码核对）。
 - 当前源码的正式 full proof；代码树用 `tools/sync-code.py` 同步到 `/var/www/html`。
+- 第 0 步的新项目子步：开发机上另备两个隔离的项目副本 `<新项目A>`、`<新项目B>`，名字在服务器的 `DAY0-Prepare/` 下还不存在
+  （`ls -d /var/www/html/DAY0-Prepare/<新项目A> /var/www/html/DAY0-Prepare/<新项目B>` 都报不存在）；不在 prod 上做。
 - 所需权限：`U` 可以 sudo；方式 B 需要 root 登录（prod 上要 owner 允许）。
 - 初始状态（只记路径、属主、模式，不记内容）：
   - `stat -c '%U:%G %a %n' /var/www/html /var/www/html/DAY0-Prepare /var/www/html/DAY0-Prepare/<项目>`，以及
@@ -3417,9 +3421,22 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ### 步骤
 
-0. 同步之后（agentOP 报告第 7 节第 9 条）：`stat -c %U /var/www/html /var/www/html/DAY0-Prepare/<项目>`，记录代码树和项目的属主。
-   原生同步用 `rsync -a` 时可能保留开发机映射过来的 uid（推断）；项目属主在 passwd 里查不到时，后面的 load 应拒绝并给出
-   `sudo chown <操作员>:<操作员主组> <项目>` 提示（wave2 http dev 定的第 2 条），按提示改好再继续。
+0. 同步之后（agentOP 报告第 7 节第 9 条；v3.1.3 起项目同步不带开发机属主）：同步前先记录
+   `stat -c '%U:%G %a %n' /var/www/html/DAY0-Prepare/<项目>`；从开发机用 `tools/sync-code.py <项目> --host <登录身份>@<服务器> --runtime native`
+   （默认 `--sudo`；方式 A 以 `U` 登录，方式 B 以 root 登录）同步一次，保存它的输出（`[SYNC] project:<项目>` 段里逐条的
+   `--itemize-changes` 行），再 `stat -c '%U:%G %a %n' /var/www/html /var/www/html/DAY0-Prepare/<项目>`，并对 itemize 行里 `>f`、`cd`
+   开头（新写或新建）的每个条目 `stat -c '%U:%G %n'`：
+   - 期望：项目目录的属主、属组与同步前相同（方式 A 是 `U`，方式 B 是 root）；`>f`、`cd` 开头的条目是 `root:root`，只改了属性的
+     （`.` 开头）属主不变。项目 job 不发送 owner/group，接收端是经 `sudo -n rsync` 或 root 登录的 root，沿
+     `tools/sync-code.py::main` → `run_job` → `tools/sync-code.py::rsync_command`（项目 job 用 `-rlptDz`）推出（I-058；指导 :2090-2094）。
+   - 证伪条件：项目目录属主变成开发机账户或开发机的 uid，或 `>f`、`cd` 条目带上开发机属主（I-058；指导 :2210）。
+   - 新项目子步（隔离副本）：`U` 登录、默认 `--sudo` 同步 `<新项目A>` 后，`stat -c '%U:%G %n'` 显示目录是 `U:<U 主组>`，同步输出有
+     一行 `[OWNER]`；root 登录同步 `<新项目B>` 后目录是 `root:root`。沿 `tools/sync-code.py::main` → `tools/sync-code.py::ensure_remote_directories`
+     推出：目录原来不存在时，`mkdir -p` 之后经 sudo 执行 `chown "$SUDO_UID:$(id -g -- "$SUDO_USER")"` 并打印 `[OWNER]`；不经 sudo 时由
+     登录用户自己建（I-058；指导 :2097、:2127-2129）。
+   - 接着对两个新项目各跑一次 load 加 `--dry-run`（`<新项目A>` 由 `U` 加 sudo，`<新项目B>` 由 root）：身份说明行分别是「操作员：U（项目目录属主）；
+     当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」和「操作员：root（项目目录属主）；当前：root 直接运行 → 以 root 执行」。11-load 在
+     `tools/operator_identity.py::resolve_operator` 按项目目录属主判出操作员后打印这一行（问题文档 I-006 操作员即项目目录属主；I-058；指导 :2211）。
 1. `U` 直接运行 `/usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
    在加锁之前退出，提示「Linux 管理服务器上 load 需要 root：请用 sudo 运行」并给出完整的 sudo 命令（WP-5）；
    `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件改成 `U` 打不开时（隔离副本上
@@ -3483,7 +3500,10 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
    unload，四步的身份说明行里操作员都是 `U`，root 的 unload 清的是 `U` 的 crontab（upgrade 的细节见
    `TC-REAL-I006-OPERATOR-REEXEC-001`）。方式 B 的属主检查（owner 2026-11-09 同意，04 Q-017）：在这个 root 的项目副本里把一个文件
    `chown U`，先以 root 跑 load 加 `--dry-run`：列出这一项（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，什么都不改；
-   不带 `--dry-run` 再跑一次结果相同；按提示 chown 回 root 后重跑通过。
+   不带 `--dry-run` 再跑一次结果相同；按提示 chown 回 root 后重跑通过。同步之后（I-058）：root 登录、用 `tools/sync-code.py` 把这个 root 的
+   项目副本同步一次，再以 root 跑 load 加 `--dry-run`：身份说明行是「操作员：root（项目目录属主）；当前：root 直接运行 → 以 root 执行」，
+   没有「项目权限检查停止」。项目 job 不带开发机属主，项目目录仍属 root、同步写的条目是 root:root，`11-load.py` 闸门前的
+   `repair_project_permissions` 只见到 root 属主（`tools/sync-code.py::rsync_command`；指导 :2212）。
 8. 拒绝（owner 2026-11-09「Q-006 选 (b)」）：`V` 经 sudo 对 `U` 的项目运行 13-unload，有、没有 REQ10C watch 各一次，再直接 `sudo` 运行 02-unsetup：都以 1 退出，`[ERROR]` 点名 `U` 与 `V`；
    monitor、服务、DHCP 文件、`U` 的 crontab、状态文件、指针和链接都不动（运行前后对照服务状态、`/etc/dhcp` 下 load 管理的文件、`sudo crontab -u U -l`、状态目录和指针）。
    `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。
@@ -3494,7 +3514,9 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 - 正向结果：见各步。方式 A 结束时，除第 5 步列出的 root 私有状态外，项目里的条目都属于 `U`；第 2 步的第二次 load 在闸门前那次
   改正没有改动，release 交接和结束时那两次的逐项行按第 2 步判读。
-- 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步属主查不到时拒绝并给出 chown 提示；第 2 步遇到第三方（`V`）属主时列出全部
+- 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步项目目录或同步新写的条目带上开发机账户或开发机 uid 是缺陷，记录证据后停下
+  （I-058）；用 v3.1.2 及更早的 sync-code 同步过、项目目录属主已是 passwd 里查不到的 uid 的服务器，load 照旧拒绝并给出
+  `sudo chown` 提示（`tools/operator_identity.py::resolve_operator`），按用户手册里 I-058 的迁移步骤只改目录本身后再继续；第 2 步遇到第三方（`V`）属主时列出全部
   第三方属主条目后停下，什么都不改；第 8 步按所列退出码和提示。
 - 不允许发生的副作用：替 root 生成 key；改动 root 私有状态的属主或模式；跟随项目里的链接改到项目外；
   动 `V` 或 root 的 crontab；碰 `/etc/hosts`；改 eth_jump。
@@ -3506,6 +3528,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 故障注入：第 1 步的两类加锁失败；第 2 步的 0700 目录、缺 key、属于 `V` 的文件和 `--dry-run`；第 3 步的 `touch ~/.ssh`；
   第 8 步的 `V`。
 - 清理/回滚验证：按初始快照恢复项目的属主和模式（`chown`、`chmod`，只针对快照里的路径）；删掉第 2 步放的 `V` 属主文件；
+  删掉第 0 步新项目子步在服务器上新建的 `/var/www/html/DAY0-Prepare/<新项目A>`、`<新项目B>` 两个目录（只针对这两个名字）；
   删掉测试加的 cron 行；
   恢复临时改动的锁文件模式和 key 文件名；不删除运行锁和 `cron.lock`；不碰 `/etc/hosts`，不改 eth_jump。
 - 重复执行与幂等性：第 2 步重复 load 时，闸门前那次改正没有逐项的 `[PERM]` 行（汇总为改正 0 项），release 交接和结束时那两次的

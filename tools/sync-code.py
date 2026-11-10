@@ -160,6 +160,11 @@ HELP_EPILOG = """
      当前 live 来源身份链匹配且经验证的镜像，可重新执行 deploy-preloaded <IMAGE_ID>。
      load 仅用于没有 source write 且已有运行中的 inactive 控制容器。
      tools/sync-code.py 本身不会自动执行上述生命周期事务。
+  9. 项目同步不带开发机属主（I-058）：项目 job 在 Native 下也与 Docker 一样不发送 owner/group。
+     服务器上已有的项目目录属主不变；本次写入的条目属于远端接收身份（经 sudo 或 root 登录时是
+     root），由 load 在 HTTP 闸门前的权限改正交给操作员。服务器上还没有的项目，目录由脚本新建后
+     归 SSH 登录身份：经 sudo 时是发起人 SUDO_USER 和它的主组（此时打印一行 [OWNER]），root
+     登录时是 root。代码 job 的属主传输不变。
 
 常用示例：
   # Native/systemd 先预览、再正式同步
@@ -202,6 +207,9 @@ class SyncJob:
     # Only for jobs whose sources are individual user input links (R-014 第 3 条):
     # rsync sends each link's target content as a regular file.
     copy_links: bool = False
+    # False for the project's jobs (I-058, owner Q-021 (b)): they send no owner/group,
+    # so the workstation's owner never reaches the server's project.
+    transfer_owner: bool = True
 
 
 @dataclass
@@ -615,12 +623,13 @@ def build_jobs(
         COMMON_EXCLUDES + PROJECT_RUNTIME_EXCLUDES + tuple(sorted(set(protected)))
         + tuple(f"/{name}" for name in sorted(excluded_links))
         + runtime_link_excludes(f"DAY0-Prepare/{project.name}"),
+        transfer_owner=False,
     ))
     if linked:
         jobs.append(SyncJob(
             f"project-links:{project.name}",
             tuple(project / item.name for item in linked),
-            remote_project, COMMON_EXCLUDES, copy_links=True,
+            remote_project, COMMON_EXCLUDES, copy_links=True, transfer_owner=False,
         ))
     return jobs
 
@@ -1376,7 +1385,12 @@ def rsync_command(job: SyncJob, args: argparse.Namespace) -> list[str]:
     # The root receiver owns newly written objects; the locked source-commit
     # guard then normalizes and verifies every exact manifest member, including
     # unchanged objects, before it publishes the new source receipt.
-    transfer_flags = "-rlptDz" if args.runtime == "docker" else "-az"
+    # Native project jobs use the same flags (I-058, owner Q-021 (b)): the
+    # receiver owns what it writes, an existing project directory keeps its
+    # owner, and load's permission repair hands entries to the operator.
+    transfer_flags = (
+        "-rlptDz" if args.runtime == "docker" or not job.transfer_owner else "-az"
+    )
     command = [
         "rsync", transfer_flags,
         "--itemize-changes", "--human-readable", "--stats",
@@ -1401,13 +1415,46 @@ def rsync_command(job: SyncJob, args: argparse.Namespace) -> list[str]:
 
 
 def ensure_remote_directories(jobs: list[SyncJob], args: argparse.Namespace) -> None:
+    # I-058 (owner Q-021 (b)): on native, a project directory this sync creates
+    # belongs to the SSH login identity.  Under sudo that is the invoker:
+    # SUDO_UID and SUDO_USER's passwd primary group (root logging in is root),
+    # the new-project rule of operator_identity.resolve_operator.  Without sudo
+    # the login user creates it.  An existing project directory keeps its owner
+    # and no entry is chowned here: load's permission repair hands entries to
+    # the operator.  Docker is frozen.
+    native_sudo = args.runtime == "native" and args.sudo
+    if native_sudo:
+        (project_dir,) = {job.remote_dir for job in jobs if not job.transfer_owner}
     if args.dry_run:
+        if native_sudo:
+            print(
+                "[DRY] 远端项目目录不存在时将新建，并交给 SSH 登录身份"
+                f"（sudo 发起人 SUDO_USER 和它的 passwd 主组）：{project_dir}"
+            )
         return
+    directories = sorted({job.remote_dir for job in jobs})
     command = ssh_command_base(args) + [args.host]
-    if args.sudo:
-        command += ["sudo", "-n"]
-    command += ["mkdir", "-p", "--"]
-    command += sorted({job.remote_dir for job in jobs})
+    if native_sudo:
+        script = (
+            "set -eu; project=$1; shift; new=0; "
+            "[ -e \"$project\" ] || new=1; "
+            "mkdir -p -- \"$@\"; "
+            "if [ \"$new\" = 1 ]; then "
+            "owner=\"$SUDO_UID:$(id -g -- \"$SUDO_USER\")\"; "
+            "chown \"$owner\" \"$project\"; "
+            "echo \"[OWNER] new project directory ${project} -> "
+            "SSH login identity ${SUDO_USER} (${owner})\"; "
+            "fi"
+        )
+        command.append(shlex.join([
+            "sudo", "-n", "sh", "-c", script, "sync-directories",
+            project_dir, *directories,
+        ]))
+    else:
+        if args.sudo:
+            command += ["sudo", "-n"]
+        command += ["mkdir", "-p", "--"]
+        command += directories
     print("[RUN] " + shlex.join(command))
     completed = subprocess.run(command, check=False)
     if completed.returncode != 0:

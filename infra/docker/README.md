@@ -310,7 +310,8 @@ Docker sync 固定使用远端 root rsync receiver；sender 显式保留 archive
 `--groupmap`，因为 macOS `openrsync` 与 Ubuntu rsync 3.2.x 会把这类 receiver 映射拒绝为重复
 user-affecting 选项。传输完成后，同一个 deployment lock holder 只针对当前 source manifest 精确
 登记的对象及 manifest 本身执行 no-follow `root:root` 收敛与复核，再发布 source receipt；不会
-递归改变远端额外文件。Native sync 保持既有 ownership 行为。不要用手工 `chown -R` 修复混合
+递归改变远端额外文件。Native sync：代码 job 保持既有 ownership 行为；项目 job 与 Docker 一样不发送
+owner/group（I-058）。不要用手工 `chown -R` 修复混合
 来源，旧目标应重新执行一次受控 Docker sync 并核对 source receipt。
 
 ```bash
