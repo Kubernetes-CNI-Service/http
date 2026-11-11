@@ -4283,6 +4283,17 @@
       "tests": [
         "test_cases.test_initial_setup_comma_interfaces_workflow"
       ]
+    },
+    {
+      "id": "sync_project_owner_operator",
+      "members": [
+        "tools/sync-code.py",
+        "tools/operator_identity.py",
+        "DAY0-Prepare/11-load.py"
+      ],
+      "tests": [
+        "test_cases.test_load_operator_workflow"
+      ]
     }
   ],
   "path_rules": [

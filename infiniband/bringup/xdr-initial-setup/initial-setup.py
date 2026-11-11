@@ -5515,9 +5515,9 @@ def parse_args() -> argparse.Namespace:
                         help="with --apply, do not ask for final confirmation")
     parser.add_argument(
         "--report", type=Path,
-        default=Path("xdr-initial-setup-logs/initial-setup-report.log"),
-        help=("run report path (default: "
-              "./xdr-initial-setup-logs/initial-setup-report.log)"),
+        help=("run report path (default: a new file per run, "
+              "./xdr-initial-setup-logs/initial-setup-report-<YYYYmmdd-HHMMSS>.log, "
+              "with -<pid> added when that name exists)"),
     )
     parser.add_argument(
         "--snapshot-dir", type=Path,
@@ -6119,7 +6119,9 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
     log(f"Scheduler: ready-ib={len(tasks)} workers={count} "
         f"rule=min({getattr(args, 'max_workers', 16)},ceil(N/16)); hard cap 16; global queue, no OOB affinity")
     result = {"outcomes": {}, "direct_rows": [], "records": {}, "fatal": "", "workers": count}
-    directory = Path(tempfile.mkdtemp(prefix="devices-", dir=Path(args.report).resolve().parent))
+    # O12: the run's report timestamp; a direct caller without one gets the current time.
+    stamp = getattr(args, "run_stamp", None) or time.strftime("%Y%m%d-%H%M%S")
+    directory = Path(tempfile.mkdtemp(prefix=f"devices-{stamp}-", dir=Path(args.report).resolve().parent))
     result["log_dir"] = str(directory)
     log(f"Run evidence: {directory} (parent-only writes)")
     if not tasks:
@@ -7202,6 +7204,14 @@ def main(*, method_cycle=None) -> int:
     p2p_path = discover_input_file(
         args.p2p, "p2p.xlsx", ".xlsx", "P2P workbook"
     )
+    # O12 (guide :1071): without --report every run writes its own report in the default directory,
+    # initial-setup-report-<YYYYmmdd-HHMMSS>.log, with -<pid> when that name exists; the devices-*
+    # evidence directory starts with the same timestamp (run_prepared_tasks).  --report is used as given.
+    args.run_stamp = time.strftime("%Y%m%d-%H%M%S")
+    if args.report is None:
+        args.report = Path("xdr-initial-setup-logs") / f"initial-setup-report-{args.run_stamp}.log"
+        if args.report.exists():
+            args.report = args.report.with_name(f"initial-setup-report-{args.run_stamp}-{os.getpid()}.log")
     if method_cycle is not None:
         # Typed/executor admission must precede report/cache/authority writes.
         method_cycle.admit_paths((ib_csv_path, p2p_path),

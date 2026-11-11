@@ -27,9 +27,14 @@ Fixture rewrites (public audit, guide :835): synthetic host names, documentation
 02:00:00 MACs, credentials assembled at run time, SSH public keys generated at run time.  Two
 tests start real local worker processes, both through run_local_pool (17 tasks, two workers); the
 one-task run_prepared_tasks calls stay in the inline slot.  The version test calls main() in
-process with only --version, which exits in parse_args() before any input is read; no other test
-reaches main().  No test reaches a device, and the generated key shell runs against a temporary
-HOME.
+process with only --version, which exits in parse_args() before any input is read.
+PerRunReportNameTests (v3.1.3 guide WP-10, :1078-1084) runs main() in process on a temporary
+project and working directory (management mode, OOB access replaced, HOME temporary): without
+--report every run writes its own report in the same directory, and its devices-* directory
+carries the report's timestamp; an explicit --report is written verbatim.  Expectation sources:
+开发计划.md :314 「每次运行用单独的文件名（目录不变）」 and O12 (guide :265, :1071); not derived from
+the implementation.  No test reaches a device, and the generated key shell runs against a
+temporary HOME.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import struct
 import subprocess
@@ -751,6 +757,118 @@ class SummaryOutputTests(unittest.TestCase):
             self.assertFalse(any(c[:2] == ["nv", "set"] for c in calls))
             self.assertEqual(json.loads(Path(two["log"]).with_suffix(".json").read_text())["public_key_update"],
                              two["public_key_update"])
+
+
+class PerRunReportNameTests(unittest.TestCase):
+    """O12 (guide :265, :1071): without --report the report is
+    xdr-initial-setup-logs/initial-setup-report-<YYYYmmdd-HHMMSS>.log under the current directory,
+    with -<pid> added when that name is taken; its path is printed first; the devices-* evidence
+    directory starts with the same timestamp; an explicit --report is written as given."""
+
+    STAMPED = re.compile(r"initial-setup-report-(\d{8}-\d{6})(?:-(\d+))?\.log")
+
+    def setUp(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        self.root = Path(folder.name).resolve()
+        self.cwd, self.home, project = self.root / "cwd", self.root / "home", self.root / "project"
+        for path in (self.cwd, self.home, project):
+            path.mkdir()
+        (project / "ib.csv").write_text(
+            "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+            "example-ib001,ib,192.0.2.10,24,192.0.2.1,02:00:00:00:00:10,,,\n"
+            "example-oob-leaf01,eth_jump,198.51.100.10,,,,,,\n", encoding="utf-8")
+        (project / "p2p.dot").write_text('"example-ib001":"eth0" -- "example-oob-leaf01":"swp1"\n',
+                                         encoding="utf-8")
+        # Inputs and the cache and snapshots stay in the project, so the working directory's
+        # xdr-initial-setup-logs/ holds only what the report rule writes there.
+        self.options = ["--project-dir", str(project), "--ib-csv", str(project / "ib.csv"),
+                        "--p2p", str(project / "p2p.dot"), "--target-cache", str(project / "tasks.json"),
+                        "--snapshot-dir", str(project / "snapshots"), "--execution-mode", "management"]
+        self.logs = self.cwd / "xdr-initial-setup-logs"
+
+    def run_main(self, *options):
+        """The real main() from self.cwd.  Management mode needs no host-name lookup; the OOB Leaf
+        accepts the public key and then fails its snapshot, so no IB login is ever attempted."""
+        blocked = AssertionError("no external command or device session in this test")
+        previous = os.getcwd()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(app.sys, "argv", [str(INITIAL), *self.options, *options]))
+            for name, value in (("REPORT_HANDLE", None), ("_CONSOLE_VERBOSE", False),
+                                ("_CREDENTIALS_FD_MODE", False)):
+                stack.enter_context(patch.object(app, name, value))
+            stack.enter_context(patch.dict(os.environ, {"HOME": str(self.home)}))
+            stack.enter_context(patch.object(Path, "home", return_value=self.home))
+            for name in ("run", "Popen"):
+                stack.enter_context(patch.object(app.subprocess, name, side_effect=blocked))
+            stack.enter_context(patch.object(app, "interactive_run", side_effect=blocked))
+            stack.enter_context(patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(patch.object(app, "run_on_ethernet",
+                                             side_effect=app.SetupError("synthetic OOB Leaf unreachable")))
+            stack.enter_context(patch.object(app.time, "sleep", return_value=None))
+            output = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            os.chdir(self.cwd)
+            try:
+                code = app.main()
+            finally:
+                os.chdir(previous)
+                if app.REPORT_HANDLE is not None:
+                    app.REPORT_HANDLE.close()
+        return code, output.getvalue()
+
+    def reports(self):
+        return sorted(self.logs.glob("initial-setup-report*.log"))
+
+    # 开发计划.md :314 「每次运行用单独的文件名（目录不变）」; O12 (guide :265, :1071): the name format,
+    # -<pid> on a clash, the report path printed first.
+    def test_default_report_name_is_unique_per_run_in_same_directory(self):
+        code, _ = self.run_main("--plan")
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(self.reports()))
+        first = self.reports()[0]
+        first_bytes = first.read_bytes()
+        code, _ = self.run_main("--plan")
+        self.assertEqual(0, code)
+        reports = self.reports()
+        self.assertEqual(2, len(reports), "dev plan :314: a second run writes its own report file")
+        second = next(path for path in reports if path != first)
+        self.assertEqual(first.parent, second.parent, "dev plan :314: the directory does not change")
+        self.assertEqual(first_bytes, first.read_bytes(), "the first run's report is left as it was")
+        stamps = []
+        for report in (first, second):
+            self.assertRegex(report.name, self.STAMPED, "O12: initial-setup-report-<YYYYmmdd-HHMMSS>.log")
+            self.assertEqual("Report: " + str(report), report.read_text(encoding="utf-8").splitlines()[0],
+                             "O12: the report path is printed first")
+            stamps.append(self.STAMPED.fullmatch(report.name).groups())
+        if stamps[0][0] == stamps[1][0]:
+            self.assertEqual(str(os.getpid()), stamps[1][1], "O12: the same second adds -<pid>")
+
+    # 开发计划.md :314 only changes the default; O12 「显式 --report 照用户给的路径写」: the given
+    # path is written even when that file exists, and no default report appears.
+    def test_explicit_report_path_is_used_verbatim(self):
+        explicit = self.root / "chosen" / "my-run.log"
+        explicit.parent.mkdir()
+        explicit.write_text("previous run\n", encoding="utf-8")
+        code, output = self.run_main("--plan", "--report", str(explicit))
+        self.assertEqual(0, code)
+        self.assertEqual([explicit], sorted(explicit.parent.iterdir()))
+        self.assertEqual("Report: " + str(explicit), explicit.read_text(encoding="utf-8").splitlines()[0])
+        self.assertIn("Report: " + str(explicit), output)
+        self.assertEqual([], self.reports())
+
+    # O12 (guide :265, :1071): 「devices-* 目录用同一个时间戳做前缀」; the directory sits beside the
+    # report (v15 run_prepared_tasks :4393-4395, guide :1065).
+    def test_devices_dir_shares_the_report_timestamp(self):
+        self.run_main()
+        reports = self.reports()
+        self.assertEqual(1, len(reports))
+        self.assertRegex(reports[0].name, self.STAMPED, "O12: the default report name carries the timestamp")
+        stamp = self.STAMPED.fullmatch(reports[0].name).group(1)
+        devices = [path for path in self.logs.iterdir() if path.name.startswith("devices-")]
+        self.assertEqual(1, len(devices))
+        self.assertTrue((devices[0] / "summary.json").is_file(), "fixture: the run reached the summary")
+        self.assertTrue(devices[0].name.startswith("devices-" + stamp),
+                        f"O12: {devices[0].name} starts with devices-{stamp}")
 
 
 if __name__ == "__main__":

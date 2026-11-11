@@ -376,12 +376,17 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 名称：合流后的 initial-setup 部署到 AIR、替换现场 v15 后的真机核对。
 - 类型：real-environment。
 - 对应需求：I-020（以 v15 为底合流，owner 2026-11-06）；R-012 设计 §8.3 `--credentials-fd`（WP-5）；
-  O8 `--project-dir` 按 v3.1.1 的布局读（WP-8，指导 :955）。
-  本卡由 WP-3、WP-5、WP-8、WP-10 共同填写（指导 5.3 :1344）；目前有 WP-5 的 `--credentials-fd` 和 WP-8 的
-  `--project-dir` 两节，部署后的 sha256 与 `--version`、只读检查与 v15 对比、`--apply`、`summary.json`、报告文件名、
-  V15 REAL 01～04 并入、回退到 v15 由后续工作包补。
+  O8 `--project-dir` 按 v3.1.1 的布局读（WP-8，指导 :955）；O12 每次运行单独的报告文件名（WP-10，指导 :1071）；
+  部署、替换与回退照指导 5.5（:1373-1379）、5.6（:1416）。
+  本卡由 WP-3、WP-5、WP-8、WP-10 共同填写（指导 5.3 :1344），已经齐了：第 1～3 步 `--credentials-fd`（WP-5），
+  第 4～6 步 `--project-dir`（WP-8）；第 7～14 步由 WP-10 并入：部署前后核对（sha256、`--version`）、只读检查与 v15 对比
+  和报告文件名、`--apply` 与 `summary.json`、V15 REAL 01～04（原在 v15 真机矩阵
+  `参考/initial-setup-v15/initial-setup-v15-test-cases/REAL_ENVIRONMENT.md`，指导 :1068，以本卡为准）、回退到 v15。
 - 自动化文件与测试方法：`test_credentials_fd`（读入合同）；`test_initial_setup_credentials_fd_workflow`（真实 main、
-  假 SSH/PTY 传输）；`test_initial_setup_project_names_workflow`（真实 setup 生成项目、真实 main，`--plan` 与只读检查）。
+  假 SSH/PTY 传输）；`test_initial_setup_project_names_workflow`（真实 setup 生成项目、真实 main，`--plan` 与只读检查）；
+  `test_initial_setup_summary_output` 的 `PerRunReportNameTests`（报告文件名、`devices-*` 时间戳）；
+  `test_initial_setup_offline_main`（真实 main 的只读流程、退出码）；`test_initial_setup_oob_spine`、
+  `test_initial_setup_oob_spine_main`（Spine 跳板选择）。本机测试只替换 SSH，不连真实交换机。
 - 适用平台：management-server（AIR）。
 - 状态：**NOT RUN / REAL_ENV REQUIRED**
 
@@ -391,6 +396,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 成功标准：只读检查照常完成，上述位置都看不到口令（R-012 设计 :346；指导 :718）。
 - `--project-dir`（WP-8）要防止的故障：给了 `--project-dir` 仍经脚本旁的链接读到激活项目的 global、公钥，
   或读 `02-devices_config.csv`、`<项目>/publickey/`；成功标准：只读检查读的是给定项目自己的文件（O8，指导 :915-924）。
+- 替换 v15（WP-10）要防止的故障：部署命令返回 0 而文件没换（指导 :1376）；合流后只读检查的逐台结果与 v15 不一致；
+  报告被下一次运行冲掉（O12）；Spine 跳板选到不合格的候选、或一台 Leaf 下的 IB 被拆到几台 Spine；强制改密或部分写入后
+  换一台跳板重放不确定的写入；回退时找不到原来的 v15 文件。成功标准：第 7～14 步的预期都成立（指导 5.6 :1416）。
+- 涉及的模块和状态边界：`infiniband/bringup/xdr-initial-setup/initial-setup.py`（入口 `_guarded_main`、`main`，逐台
+  `execute_ib_task`，跳板 `prepare_routed_ib_tasks`，汇总 `print_initial_setup_summary`）；`tools/credentials_fd.py`、
+  `tools/device_identity.py`（fd 跳板表）；`tools/operator_identity.py`（root 运行时）。状态边界：运行锁
+  `/tmp/http-ib-bringup.runtime.lock`（与升级脚本共用）；运行目录的 `xdr-initial-setup-logs/`（报告、`devices-*`、快照、
+  目标缓存）；项目目录（只读）；OOB Leaf、Spine 只读，IB 只在 `--apply` 时写；现场 v15 文件（保留，回退用）。
 
 ### 前置条件与输入
 
@@ -398,6 +411,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 口令由操作员当场输入到生成 JSON 的进程里，不写进文件和 shell 历史。
 - `--project-dir`：AIR 上有经 setup 生成的激活项目；最好另有一个经 setup 生成、当前没有激活的项目，
   它的 `ib.csv` 与 `02-devices_config.csv` 不同（指导 :935-936）。
+- 替换与 V15 REAL 01～04：服务器上有现场 v15 文件 `initial-setup-20261019-v15_oob-spine.py` 和它最近一次的报告、
+  `devices-*` 目录；隔离的测试设备：Leaf 上有目标 VLAN 的 SVI 和 IPv4 的一组（REAL 01），Leaf 上没有这个 SVI、上联两台
+  登记为 `eth_jump` 的 Spine 的一组（REAL 02），实验网里可以制造不合格候选的端口（REAL 03），一台要求强制改密的 IB
+  （REAL 04）；真实的 CSV MAC 和 P2P；项目 global 里有真实的 IB 目标哈希；可靠的私有日志空间。
+- 所需权限：部署、回退和第 1、3～14 步由项目属主（操作员）执行；第 2 步核 environ 要在 root shell（`sudo -s`）或与被核进程
+  同 uid 的 shell 里做；`--apply`、强制改密和第 12、13 步的故障注入要 owner 单独授权、只用隔离设备；prod 上的部署和写操作
+  由现场人员执行，验证 AI 只读核对（owner 11-06「默认：AIR 可以写，prod 只读」，指导 :1426）。
+- 执行顺序：先第 7、8 步（部署），再第 9 步、第 1～6 步、第 10～13 步，最后第 14 步（回退）。步骤编号沿用已有的第 1～6 步，
+  别处按编号引用。
 
 ### 步骤
 
@@ -409,11 +431,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
    3. 可读性：对清单里每个 pid 执行 `test -r /proc/<pid>/environ && tr '\0' '\n' < /proc/<pid>/environ | grep -c .`，记录是否可读和非空行数；列清单后已退出的 pid（`/proc/<pid>` 已不存在）记「已退出」，不算「无法核」，并重新取一次清单、对新出现的 pid 再核；仍在运行却不可读或行数为 0 的 pid 记为「无法核」，本步不通过，不得把它的计数当作 0（指导 :718）。
    4. 阳性对照：对每个 pid 用同一核法核它自己 environ 里 `PATH=` 那一行的值，计数须 ≥1：
       `V=$(tr '\0' '\n' < /proc/<pid>/environ | sed -n 's/^PATH=//p'); [ -n "$V" ] && printf '%s\n' "$V" | grep -c -F -f - <(tr '\0' '\n' < /proc/<pid>/environ); unset V`
-      （对照值不是口令；用 `PATH=` 是因为口令哈希核验子进程的环境只有 PATH、LC_ALL、LANG、PYTHONDONTWRITEBYTECODE，没有 HOME（`infiniband/bringup/xdr-initial-setup/initial-setup.py::verify_password_hash`）；计数为 0 或取不到值说明核法或 pid 有误，本步不通过；指导 :718）。
+      （对照值不是口令；用 `PATH=` 是因为口令哈希核验子进程的环境只有 PATH、LC_ALL、LANG、PYTHONDONTWRITEBYTECODE，没有 HOME（`infiniband/bringup/xdr-initial-setup/initial-setup.py::verify_password_hash`）；第 3 项核过之后才退出的 pid（`/proc/<pid>` 已不存在）记「已退出」，不算不通过；仍在运行的 pid 计数为 0 或取不到值，说明核法或 pid 有误，本步不通过；指导 :718）。
    5. 对 fd 里的每个口令（按 JSON 里的键编号记录，不记值）对清单里每个 pid 核一次：
       `IFS= read -rs P; if [ -n "$P" ]; then printf '%s\n' "$P" | grep -c -F -f - <(tr '\0' '\n' < /proc/<pid>/environ); else echo skipped-empty; fi; unset P`
-      （`IFS=` 保留首尾空白，`read -s` 隐藏输入，`printf`、`[`、`echo` 是 shell 内建命令，口令只经管道进 `grep` 的标准输入，不进任何进程的参数、文件和输出；空值不核，记为跳过；指导 :718；R-012 设计 :346）。
-   6. 证据字段：执行核对的用户；进程清单（pid、ppid、args）；每个 pid 的可读性与非空行数（或「已退出」）；每个 pid 的阳性对照计数；每个口令编号对每个 pid 的计数或「跳过（空值）」（指导 :718）。
+      （`IFS=` 保留首尾空白，`read -s` 隐藏输入，`printf`、`[`、`echo` 是 shell 内建命令，口令只经管道进 `grep` 的标准输入，不进任何进程的参数、文件和输出；空值不核，记为跳过；核之前 pid 已退出（`/proc/<pid>` 已不存在）的记「已退出」，不算不通过；指导 :718；R-012 设计 :346）。
+   6. 证据字段：执行核对的用户；进程清单（pid、ppid、args）；每个 pid 的可读性与非空行数（或「已退出」）；每个 pid 的阳性对照计数（或「已退出」）；每个口令编号对每个 pid 的计数、「跳过（空值）」或「已退出」（指导 :718）。
+   7. 待 AIR 核实的两点（推断：本机是 macOS，没有 `/proc`，落地代理也不能 sudo，这两点没有实测；指导 :718，R-275）：
+      第 1 项「root shell 里读得到 environ、写成 `sudo tr … < /proc/<pid>/environ` 读不到」；第 3～5 项「列清单后退出的 pid
+      记「已退出」」。AIR 上实测与本卡不符时，按实测改卡并在证据里写明。
 3. 结束后检查报告和 `summary.json`（指导 :718）。
 4. `--project-dir` 只读检查（指导 :955，WP-8）：在一个与项目无关的新建空目录里运行
    `python3 <代码树>/infiniband/bringup/xdr-initial-setup/initial-setup.py --project-dir <项目>`（不带 `--apply`），
@@ -423,6 +448,35 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
    文件名和指纹，与 `sha256sum <项目>/01-global.yaml` 和 `ssh-keygen -l -E sha256 -f <项目>/<名字>.pub` 对照（指导 :922、:926）。
 6. 对激活项目，再从脚本目录不带 `--project-dir` 跑一次只读检查，比较两次 cache 的 `global_sha256` 和公钥的名字、指纹
    （指导 :937；`tools/project_contract.py::TRACKED_SETUP_BRIDGES`）。
+7. 部署前（替换现场 v15，指导 5.5 部署方式第 1 步 :1374）：只读确认没有 initial-setup 或升级在跑：`ls -l /tmp/http-ib-bringup.runtime.lock`，
+   存在时用 `fuser -v /tmp/http-ib-bringup.runtime.lock`（或 `lsof`）看有没有进程开着它；不用 `flock -n` 探测（锁文件不存在时 flock 会新建它，
+   `infiniband/bringup/xdr-initial-setup/initial-setup.py::_runtime_instance_guard`）。记下现场 v15 文件的路径和 `sha256sum`，保留它、不删；
+   归档 v15 最近一次的报告和 `devices-*` 目录（含 `summary.json`）。
+8. 部署与部署后核对（指导 5.5 部署方式第 2～4 步 :1375-1377）：照常用 sync 或上传包部署整棵代码树，不只拷这一个文件。部署命令返回 0 不算证据：
+   在服务器上对 `/var/www/html/infiniband/bringup/xdr-initial-setup/initial-setup.py` 执行 `sha256sum`，与发布包里的值比对；再在这个目录
+   执行 `python3 initial-setup.py --version` 和 `python3 initial-setup.py --help`。
+9. 只读检查与 v15 对比、报告文件名（指导 :1377、5.6 :1416；O12）：从脚本目录对一两台已配置的设备跑只读检查（不带 `--apply`），把
+   `summary.json` 的逐台 `outcome`、`category`、`stage_status` 与第 7 步归档的 v15 `summary.json` 对比；紧接着再跑一次同样的只读检查，
+   记下两次终端开头的 `Report:` 行，以及 `ls -l xdr-initial-setup-logs/` 里的 `initial-setup-report-*.log` 和 `devices-*`。
+10. V15 REAL 01 原有三层 Leaf 路径（指导 :1068；`infiniband/bringup/xdr-initial-setup/initial-setup.py::prepare_routed_ib_tasks`）：
+    Leaf 上目标 VLAN 有正确的 SVI 和 IPv4。先只读检查，核对没有登录无关的 Spine；再经单独授权，对一台确有缺项的设备做一次 `--apply`
+    （交互确认，或 `--apply --yes`），核对阶段顺序 Initial → Network → IPv4 就绪 → Infra Services → 公钥 → 管理服务器直连
+    （`infiniband/bringup/xdr-initial-setup/initial-setup.py::execute_ib_task`；指导 5.6 :1416）。
+11. V15 REAL 02 二层 Leaf 和双 Spine（指导 :1068；`infiniband/bringup/xdr-initial-setup/initial-setup.py::choose_oob_spine`）：Leaf 上没有
+    目标 VLAN 的 SVI；两台 Spine 都在 CSV 里登记为 `eth_jump`，各有这个 VLAN 自己的 SVI、IPv4 和 IPv6 link-local，`vlan-v0` 只作网关；
+    VLAN 已在上下联放行，LLDP 指向正确的 Spine。先只读运行，核对只用这台 Leaf 的 UP LLDP 邻居里的候选、一台 Leaf 只选一台 Spine、
+    同一 Leaf 下的 IB 不拆开；Leaf 物理端口和 CSV MAC 在登录 IB 之前通过；缺 ND 时核对按 EUI-64 推出的候选
+    （`infiniband/bringup/xdr-initial-setup/initial-setup.py::_spine_neighbor`）。经单独批准的 `--apply` 之后，核对管理服务器直连
+    IB 的 eth0、eth0 失败才测 eth1（`infiniband/bringup/xdr-initial-setup/initial-setup.py::run_management_direct_checks`）。
+12. V15 REAL 03 候选不合格和同 Leaf 多 VLAN（指导 :1068；`infiniband/bringup/xdr-initial-setup/initial-setup.py::lldp_spine_candidates`）：
+    只在授权的实验环境准备没有 IPv4、没有 IPv6、VLAN 不对、LLDP 不对的 Spine 候选，不在生产上制造管理故障。逐项核对不合格的候选
+    不被选中；只在 CSV 里、不在 LLDP 里的 Spine 不连接；同一台 Leaf 要上移的全部 VLAN 必须由一台 Spine 覆盖；一台候选不可达而另一台
+    合格时，Leaf 的失败数不被无关 Spine 的失败带上；没有共同合格的 Spine 时明确 SKIP；一台 IB 缺 MAC 不挡其余目标。
+13. V15 REAL 04 强制改密和部分写入后故障（指导 :1068；`infiniband/bringup/xdr-initial-setup/initial-setup.py::inspect_ib_device`）：用一台
+    要求强制改密的测试 IB、项目真实的目标哈希和管理公钥，没有别的写入者。走 Spine 路径核对：改密前的首次改动确认、改密后用新连接
+    读回、公钥核对（`infiniband/bringup/xdr-initial-setup/initial-setup.py::run_key_stage`）。只在另行批准的实验中模拟会话中断。
+14. 回退到 v15（指导 5.5 回退 :1379）：先结算全部任务、归档现场事实；按第 7 步确认运行锁空闲，不删锁；以项目属主身份、不加 sudo，
+    在同一目录显式运行保留的 v15 文件（`python3 initial-setup-20261019-v15_oob-spine.py …`），不带 `--project-dir`，从脚本目录跑一次只读检查。
 
 ### 预期结果
 
@@ -438,18 +492,54 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - 激活项目上，给 `--project-dir` 与从脚本目录不给的两次运行，`global_sha256` 和公钥的名字、指纹都相同（指导 :937）。
 - 项目根上没有非空 `*.pub` 时，报告有 `WARNING: no usable *.pub keys found; no IB public key will be installed.`，
   不装公钥，也不因此拒绝（指导 :938）。
+- 第 7 步：锁文件不存在，或存在但没有进程开着它；v15 文件的 sha256 是
+  `fce81cc8ce1378461111f49dc8496797b9662b755dea9d6bdb6d72b29c207422`（指导 :1374）。
+- 第 8 步：部署后的 sha256 与发布包里的相同；`--version` 打印本版版本串（`http-v3.1.3`）、以 0 退出
+  （`infiniband/bringup/xdr-initial-setup/initial-setup.py::_REPOSITORY_REVISION`；指导 5.6 :1416）；`--help` 里没有「Desktop review copy」（指导 :1377）。
+- 第 9 步：逐台结果与 v15 相同；已知差别按本版的改动解释：只差 Initial 的设备 v15 记 `ALREADY_CONFIGURED`、整次 SUCCESS，本版记
+  `CHECK_ONLY`、整次 INCOMPLETE、以 2 退出（指导 :1072、第 10 节 T20；`infiniband/bringup/xdr-initial-setup/initial-setup.py::execute_ib_task`）；
+  带 fnm 或逗号接口的设备 v15 每次判成要 Network 配置，本版不再这样（I-005；O16）。别的差别逐台记下，交 http dev 判断（指导 5.6 :1416）。
+- 第 9 步：两次只读检查各写一个 `xdr-initial-setup-logs/initial-setup-report-<YYYYmmdd-HHMMSS>.log`（同一秒里第二个带 `-<进程号>`），
+  第一个不被第二次改动；`Report: <完整路径>` 是报告的第一行，也是终端开头打印的路径；每次的 `devices-*` 目录名以同一次报告文件名里的
+  时间戳开头（O12；指导 :1071；`infiniband/bringup/xdr-initial-setup/initial-setup.py::run_prepared_tasks`）。
+- 第 10 步：只读检查时 `spine-jump-routes.json` 里没有这组的 Spine，也没有登录无关 Spine；`--apply` 后这台各阶段按顺序记
+  `VERIFIED` 或 `ALREADY_PRESENT`，`summary.json` 有这台的逐台 `stage_status`，管理服务器直连 PASS（指导 5.6 :1416；
+  `infiniband/bringup/xdr-initial-setup/initial-setup.py::execute_ib_task`）。
+- 第 11 步：每台 Leaf 在 `spine-jump-routes.json` 里恰好一台 Spine，同一 Leaf 下的 IB 都走它；Spine 不在 LLDP 里就不被选；
+  Leaf 端口或 CSV MAC 不通过的 IB 不登录（指导 :1068；`infiniband/bringup/xdr-initial-setup/initial-setup.py::prepare_routed_ib_tasks`）。
+  管理服务器直连先 eth0，eth0 PASS 时 eth1 记 `NOT_NEEDED`（`infiniband/bringup/xdr-initial-setup/initial-setup.py::run_management_direct_checks`）。
+- 第 12 步：不合格的候选都不被选中，报告里逐个写出拒绝原因；这些 IB 零写入、零登录；没有共同合格 Spine 的一组记 SKIP，整次 INCOMPLETE、
+  以 2 退出（指导 :1068；指导表 6-1 第 11 行 :754）。
+- 第 13 步：改密只在首次改动确认之后发生；改密后新连接读回成功、公钥核对通过；模拟中断时不换另一台 Spine 重复不确定的写入，这台记
+  FAILED 并写明要人工核对，其他独立的 IB 照常继续（指导表 6-1 第 1 行 :744；`infiniband/bringup/xdr-initial-setup/initial-setup.py::execute_ib_task`）。
+- 第 14 步：v15 文件仍在原处、sha256 不变，v15 的只读检查成功（指导 5.6 :1416；指导 :1379）。
+- 需要保存的证据（`test_cases/CASE_TEMPLATE.md` 的这一栏；指导 :718、:1073）：
+  - 第 2 步：执行核对的用户、进程清单、每个 pid 的可读性与行数、阳性对照计数和各口令编号的计数（或「已退出」「跳过（空值）」），
+    不保存 environ 内容和口令（指导 :718）；
+  - 第 7～9 步：锁的 `ls -l`、`fuser` 输出，v15 文件和部署后文件的 sha256，`--version`、`--help` 的输出，两次只读检查的 `Report:` 行、
+    `ls -l xdr-initial-setup-logs/` 和 `summary.json`，以及归档的 v15 `summary.json`（指导 :1374-1377）；
+  - 第 10～13 步：入口版本和 sha256、输入身份（CSV、P2P、global 的 sha256）、OOB 快照和 `*.addresses.json`、`spine-jump-routes.json`、
+    每台设备的 JSON（`oob`、`port`、`jump`）、`summary.json`、准确的退出码、不含口令的阶段日志、公钥指纹、写入计数（指导 :1068）；
+  - 第 14 步：回退后 v15 的报告和 `summary.json`、v15 文件的 sha256（指导 :1379）；
+  - 不保存 fd 的 JSON 内容和任何口令（R-012 设计 :346）。
 
 ### 故障注入与清理
 
 - 在隔离设备上演练：fd 里故意缺 `ib_target_password` 并给 `--apply`，应在碰设备之前以 2 退出（O10）。
 - 证据里不保存 JSON 内容；用完关闭终端，不留含口令的文件。
 - `--project-dir` 只读检查不写设备、不改项目文件；运行目录是新建的空目录，结束后整目录归档作证据（指导 :955）。
+- 第 12 步的故障注入只在隔离端口和设备上做，要有带外恢复；做完恢复实验网络，保留原失败证据，不把历史状态改写成成功。
+- 第 13 步的会话中断只在另行批准的实验中做；之后先人工核对实际配置和口令状态，再决定下一步，不盲目重放，不清除 UNKNOWN 和失败记录。
+- 第 10、11 步的 `--apply` 之后按现场批准恢复测试设备；不删其他设备的授权；不在 Leaf、Spine 上建 SVI、装公钥或改 trunk。
+- 回退见第 14 步：部署不删现场的 v15 文件（推断，部署前第 7 步仍要核对一次）；回退时不删运行锁。
+- 重复执行：只读检查可以重复，每次多一个报告和一个 `devices-*` 目录，脚本不自动清理（O12 的已知限制，指导 :1105）。
 
 ### 自动化状态
 
 - [x] 读入合同与 fd 模式工作流已由上列模块覆盖（WP-5）。
 - [x] `--project-dir` 的读法和「输入来源」一行由 `test_initial_setup_project_names_workflow` 覆盖（WP-8）。
-- [ ] AIR 真机核对（NOT RUN）。
+- [x] 每次运行单独的报告文件名和 `devices-*` 的时间戳由 `test_initial_setup_summary_output` 的 `PerRunReportNameTests` 覆盖（WP-10）。
+- [ ] AIR 真机核对（NOT RUN）：第 1～14 步，其中 V15 REAL 01～04 是第 10～13 步。
 
 ## TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001 — initial-setup 严格管理路径测试夹具与私有前置输入
 
@@ -3611,12 +3701,14 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 0. 同步之后（agentOP 报告第 7 节第 9 条；v3.1.3 起项目同步不带开发机属主）：同步前先记录
    `stat -c '%U:%G %a %n' /var/www/html/DAY0-Prepare/<项目>`；从开发机用 `tools/sync-code.py <项目> --host <登录身份>@<服务器> --runtime native`
    （默认 `--sudo`；方式 A 以 `U` 登录，方式 B 以 root 登录）同步一次，保存它的输出（`[SYNC] project:<项目>` 段里逐条的
-   `--itemize-changes` 行），再 `stat -c '%U:%G %a %n' /var/www/html /var/www/html/DAY0-Prepare/<项目>`，并对 itemize 行里 `>f`、`cd`
-   开头（新写或新建）的每个条目 `stat -c '%U:%G %n'`：
-   - 期望：项目目录的属主、属组与同步前相同（方式 A 是 `U`，方式 B 是 root）；`>f`、`cd` 开头的条目是 `root:root`，只改了属性的
+   `--itemize-changes` 行），再 `stat -c '%U:%G %a %n' /var/www/html /var/www/html/DAY0-Prepare/<项目>`，并对 itemize 行里 `>f`、`cd`、`cL`
+   开头（新写的文件、新建的目录、新建或改了指向的符号链接）的每个条目 `stat -c '%U:%G %n'`（不加 `-L`：`cL` 看链接本身，不看它指向的文件）：
+   - 期望：项目目录的属主、属组与同步前相同（方式 A 是 `U`，方式 B 是 root）；`>f`、`cd`、`cL` 开头的条目是 `root:root`，只改了属性的
      （`.` 开头）属主不变。项目 job 不发送 owner/group，接收端是经 `sudo -n rsync` 或 root 登录的 root，沿
      `tools/sync-code.py::main` → `run_job` → `tools/sync-code.py::rsync_command`（项目 job 用 `-rlptDz`）推出（I-058；指导 :2090-2094）。
-   - 证伪条件：项目目录属主变成开发机账户或开发机的 uid，或 `>f`、`cd` 条目带上开发机属主（I-058；指导 :2210）。
+     `cL` 是推断（读码，未实测）：`-rlptDz` 的 `-l` 让链接作为链接传过去，不带 `-o`、`-g`，接收端的 root 进程新建链接，链接本身的属主就是
+     `root:root`；改了指向的链接同样由接收端删掉重建（`tools/sync-code.py::rsync_command`；I-058）。
+   - 证伪条件：项目目录属主变成开发机账户或开发机的 uid，或 `>f`、`cd`、`cL` 条目带上开发机属主（I-058；指导 :2210）。
    - 新项目子步（隔离副本）：`U` 登录、默认 `--sudo` 同步 `<新项目A>` 后，`stat -c '%U:%G %n'` 显示目录是 `U:<U 主组>`，同步输出有
      一行 `[OWNER]`；root 登录同步 `<新项目B>` 后目录是 `root:root`。沿 `tools/sync-code.py::main` → `tools/sync-code.py::ensure_remote_directories`
      推出：目录原来不存在时，`mkdir -p` 之后经 sudo 执行 `chown "$SUDO_UID:$(id -g -- "$SUDO_USER")"` 并打印 `[OWNER]`；不经 sudo 时由
@@ -3626,8 +3718,14 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
      `tools/operator_identity.py::resolve_operator` 按项目目录属主判出操作员后打印这一行（问题文档 I-006 操作员即项目目录属主；I-058；指导 :2211）。
 1. `U` 直接运行 `/usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
    在加锁之前退出，提示「Linux 管理服务器上 load 需要 root：请用 sudo 运行」并给出完整的 sudo 命令（WP-5）；
-   `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件改成 `U` 打不开时（隔离副本上
-   临时 `chmod 000`）报「无法打开部署锁 …（没有权限）」并带底层原因，做完恢复模式（WP-5，四类中至少这两类）。
+   `--dry-run` 不要求 root。加锁失败另做两次：另一个终端持有部署锁时报「另一个 load…」；锁文件异常：以 root 给
+   `/var/www/html/.deployment.lock`（跑过一次 load 后就有）临时多建一个硬链接（`ln /var/www/html/.deployment.lock /var/www/html/.deployment.lock.extra`，
+   `stat -c '%h %n'` 看到链接数 2），再用 sudo 跑同样的 load，在加锁时停下，报「部署锁文件异常（须是单链接普通文件，继承的锁描述符须有效）：
+   deployment lock must have exactly one hard link」，做完 `rm /var/www/html/.deployment.lock.extra`、`stat` 回到 1（WP-5，四类中至少这两类；
+   v3.1.3 指导 :2221「卡第 1 步改为「锁文件多一个硬链接」」：U 不加 sudo 在加锁前就被拒，root 不受 `chmod 000` 限制，原写法在 Linux 上做不出来）。
+   沿 `DAY0-Prepare/11-load.py::main`（先 `_require_root_for_load`，非 dry-run 才加锁）→ `DAY0-Prepare/11-load.py::acquire_deployment_lock`
+   → `tools/deployment_lock.py::deployment_lock` → `tools/deployment_lock.py::_validate_regular_fd`（单链接检查）推出：这个异常不带底层 `OSError`，
+   落在「部署锁文件异常」那一类（读码；报错原文取自这两处源码，实际输出未实测）。
 2. 把项目目录本身 `chmod 0700`（O9 只把项目目录本身固定为 0755；子目录 0700 只收紧、不会被改，也没有 `[PERM]` 行），再把项目里
    一个不属于 root 私有状态的普通子目录 `chmod 0775`（看「其余只去组和其他人写」），然后
    `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
