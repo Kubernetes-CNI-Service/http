@@ -458,7 +458,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>841</strong> 个受维护文件</span>
+          <span><strong>851</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -715,7 +715,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 492 个文件</summary>
+          <summary><code>test_cases/</code> — 502 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1025,15 +1025,19 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_initial_setup_authorized_key_quoted_options.py"><td><code>test_cases/test_initial_setup_authorized_key_quoted_options.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PUBLIC generated-shell regression; no real HOME/SSH/network is used。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_authorized_key_shell_workflow.py"><td><code>test_cases/test_initial_setup_authorized_key_shell_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Generated-shell key-install contracts with original independent expectations。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_bare_expiry_readonly.py"><td><code>test_cases/test_initial_setup_bare_expiry_readonly.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Bare expiry is not a current-password challenge; independent tests-first。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_base_and_subset.py"><td><code>test_cases/test_initial_setup_base_and_subset.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: initial-setup&#x27;s Initial/Network stages accept a configuration that contains the。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_cache_admission_mode_auto_workflow.py"><td><code>test_cases/test_initial_setup_cache_admission_mode_auto_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Manual mode-auto uses each actual cache admission, not a stale first one。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_cache_admission_output.py"><td><code>test_cases/test_initial_setup_cache_admission_output.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Private per-call cache admission output contract; tests-first, not run。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_credentials_fd_workflow.py"><td><code>test_cases/test_initial_setup_credentials_fd_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: initial-setup --credentials-fd reads passwords through tools/credentials_fd.py。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_direct_retry.py"><td><code>test_cases/test_initial_setup_direct_retry.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: bounded IPv4 readiness and direct read-only SSH retry in initial-setup (v3.1.3 WP-7)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_eui64_fallback.py"><td><code>test_cases/test_initial_setup_eui64_fallback.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: FDB-derived EUI-64 link-local fallback when ND has not learned the IB (v3.1.3 WP-7)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_explicit_consumer_context.py"><td><code>test_cases/test_initial_setup_explicit_consumer_context.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Explicit Services/KEY/IPv4 context contracts; tests-first NOT READY。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_external_contract_workflow.py"><td><code>test_cases/test_initial_setup_external_contract_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v3.1.3 WP-3 workflow: the merged initial-setup keeps its external library contract。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_handoff_transport.py"><td><code>test_cases/test_initial_setup_handoff_transport.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Initial-setup handoff transport packet: PUBLIC fixtures, no device/network or hash KAT。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_handoff_transport_workflow.py"><td><code>test_cases/test_initial_setup_handoff_transport_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PUBLIC real-reader data handoff into canonical initial-setup transport。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_ib_phase_protocol.py"><td><code>test_cases/test_initial_setup_ib_phase_protocol.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent typed inner-IB phase protocol: O-only tests-first, NOT RUN。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_initial_closed_facts.py"><td><code>test_cases/test_initial_setup_initial_closed_facts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent Initial closed-fact contracts, additive tests first。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_jump_vlan_login.py"><td><code>test_cases/test_initial_setup_jump_vlan_login.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: an eth_jump&#x27;s login address comes from eth0, else from its single VLAN SVI (v15)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_key_receipt_consumer.py"><td><code>test_cases/test_initial_setup_key_receipt_consumer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Tests-first canonical key receipt consumption at the existing stage API。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_key_receipt_workflow.py"><td><code>test_cases/test_initial_setup_key_receipt_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real C2/P1 -&gt; stage -&gt; SSH carrier/PTY -&gt; generated key shell -&gt; receipt。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_main_caller_precommit.py"><td><code>test_cases/test_initial_setup_main_caller_precommit.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent present-global manual MAIN caller contracts; O tests-first。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1045,13 +1049,19 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_initial_setup_network_diagnostics.py"><td><code>test_cases/test_initial_setup_network_diagnostics.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent PUBLIC Network diagnostics: pure gates and actual MAIN workflow。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_ntp_membership.py"><td><code>test_cases/test_initial_setup_ntp_membership.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent original NTP membership literals; no transport or device calls。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_nvos_argv.py"><td><code>test_cases/test_initial_setup_nvos_argv.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent closed NVOS argv literals; no transport, process or device call。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_offline_main.py"><td><code>test_cases/test_initial_setup_offline_main.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: initial-setup&#x27;s real offline main flow (inputs, cache, snapshots, stages, summary)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_oob_credentials.py"><td><code>test_cases/test_initial_setup_oob_credentials.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: OOB credentials are key-first then one shared hidden password; IB target password policy。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_oob_spine.py"><td><code>test_cases/test_initial_setup_oob_spine.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct tests: v15 OOB Spine candidate selection, kept on the merged initial-setup。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_oob_spine_main.py"><td><code>test_cases/test_initial_setup_oob_spine_main.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v15 OOB Spine routing and the real main() over it, kept on the merged initial-setup。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_pending_diff.py"><td><code>test_cases/test_initial_setup_pending_diff.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Pending-diff status/frame/ownership literals through real run_on_ib gates。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_pty_cleanup.py"><td><code>test_cases/test_initial_setup_pty_cleanup.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>O-only tests-first TEXT; not executed by its author。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_selfcontained_neutral.py"><td><code>test_cases/test_initial_setup_selfcontained_neutral.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Self-contained neutral authority: tests first; no actor/native admission。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_strict_stage_skeleton.py"><td><code>test_cases/test_initial_setup_strict_stage_skeleton.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: the strict branch (management-server task with the project global) runs the v15 stages。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_summary_output.py"><td><code>test_cases/test_initial_setup_summary_output.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: initial-setup&#x27;s operator output — compact console vs full report, the seven-module。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_target_credentials_workflow.py"><td><code>test_cases/test_initial_setup_target_credentials_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>MAIN/AUTO target credential workflow: O-only tests-first, NOT RUN。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_target_outcome_summary.py"><td><code>test_cases/test_initial_setup_target_outcome_summary.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I15 canonical fixture v3 draft; not executed or approved for W adoption。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_target_password_policy.py"><td><code>test_cases/test_initial_setup_target_password_policy.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Required external KAT; independent target credential policy tests-first。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_worker_queue.py"><td><code>test_cases/test_initial_setup_worker_queue.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: initial-setup&#x27;s global worker queue, real worker processes and per-device isolation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_inventory_subset.py"><td><code>test_cases/test_inventory_subset.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract of tools/inventory_subset.py: &lt;network&gt;.csv against 02-devices_config.csv (v3.1.1 M4)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_issue0007_role_link_contract.py"><td><code>test_cases/test_issue0007_role_link_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ISSUE-0007: role templates must not impose a link FEC or MTU。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_issue0007_role_link_workflow.py"><td><code>test_cases/test_issue0007_role_link_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ISSUE-0007 generation through the real Cumulus YAML publisher。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1491,7 +1501,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>661</strong> 个脚本型文件</span>
+          <span><strong>671</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -2618,7 +2628,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 468 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 478 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -7749,6 +7759,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_bare_expiry_readonly</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_initial_setup_base_and_subset.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_base_and_subset.py</code> — Direct: initial-setup&#x27;s Initial/Network stages accept a configuration that contains the。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: initial-setup&#x27;s Initial/Network stages accept a configuration that contains the。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_base_and_subset</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_base_and_subset</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_initial_setup_cache_admission_mode_auto_workflow.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_cache_admission_mode_auto_workflow.py</code> — Manual mode-auto uses each actual cache admission, not a stale first one。</summary>
           <div class="script-body"><dl>
@@ -7802,6 +7830,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_credentials_fd_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_direct_retry.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_direct_retry.py</code> — Direct: bounded IPv4 readiness and direct read-only SSH retry in initial-setup (v3.1.3 WP-7)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: bounded IPv4 readiness and direct read-only SSH retry in initial-setup (v3.1.3 WP-7)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_direct_retry</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_direct_retry</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_eui64_fallback.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_eui64_fallback.py</code> — Direct: FDB-derived EUI-64 link-local fallback when ND has not learned the IB (v3.1.3 WP-7)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: FDB-derived EUI-64 link-local fallback when ND has not learned the IB (v3.1.3 WP-7)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_eui64_fallback</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_eui64_fallback</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_initial_setup_explicit_consumer_context.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_explicit_consumer_context.py</code> — Explicit Services/KEY/IPv4 context contracts; tests-first NOT READY。</summary>
@@ -7910,6 +7974,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_initial_closed_facts</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_jump_vlan_login.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_jump_vlan_login.py</code> — Direct: an eth_jump&#x27;s login address comes from eth0, else from its single VLAN SVI (v15)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: an eth_jump&#x27;s login address comes from eth0, else from its single VLAN SVI (v15)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_jump_vlan_login</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_jump_vlan_login</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_initial_setup_key_receipt_consumer.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_key_receipt_consumer.py</code> — Tests-first canonical key receipt consumption at the existing stage API。</summary>
@@ -8109,6 +8191,78 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_nvos_argv</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_initial_setup_offline_main.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_offline_main.py</code> — Direct: initial-setup&#x27;s real offline main flow (inputs, cache, snapshots, stages, summary)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: initial-setup&#x27;s real offline main flow (inputs, cache, snapshots, stages, summary)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_offline_main</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_offline_main</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_oob_credentials.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_oob_credentials.py</code> — Direct: OOB credentials are key-first then one shared hidden password; IB target password policy。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: OOB credentials are key-first then one shared hidden password; IB target password policy。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_oob_credentials</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_oob_credentials</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_oob_spine.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_oob_spine.py</code> — Direct tests: v15 OOB Spine candidate selection, kept on the merged initial-setup。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct tests: v15 OOB Spine candidate selection, kept on the merged initial-setup。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_oob_spine</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_oob_spine</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_oob_spine_main.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_oob_spine_main.py</code> — v15 OOB Spine routing and the real main() over it, kept on the merged initial-setup。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>v15 OOB Spine routing and the real main() over it, kept on the merged initial-setup。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_oob_spine_main</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_oob_spine_main</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_initial_setup_pending_diff.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_pending_diff.py</code> — Pending-diff status/frame/ownership literals through real run_on_ib gates。</summary>
           <div class="script-body"><dl>
@@ -8181,6 +8335,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_strict_stage_skeleton</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_initial_setup_summary_output.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_summary_output.py</code> — Direct: initial-setup&#x27;s operator output — compact console vs full report, the seven-module。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: initial-setup&#x27;s operator output — compact console vs full report, the seven-module。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_summary_output</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_summary_output</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_initial_setup_target_credentials_workflow.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_target_credentials_workflow.py</code> — MAIN/AUTO target credential workflow: O-only tests-first, NOT RUN。</summary>
           <div class="script-body"><dl>
@@ -8234,6 +8406,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_target_password_policy</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_worker_queue.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_worker_queue.py</code> — Direct: initial-setup&#x27;s global worker queue, real worker processes and per-device isolation。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Direct: initial-setup&#x27;s global worker queue, real worker processes and per-device isolation。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_worker_queue</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_worker_queue</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_inventory_subset.py" class="script-reference">
           <summary><code>test_cases/test_inventory_subset.py</code> — Direct contract of tools/inventory_subset.py: &lt;network&gt;.csv against 02-devices_config.csv (v3.1.1 M4)。</summary>

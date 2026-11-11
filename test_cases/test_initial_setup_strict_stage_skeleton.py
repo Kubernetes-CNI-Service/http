@@ -972,6 +972,131 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
                 with self.assertRaises(app.SetupError):
                     app._ib_project_value(other, user="admin")
 
+    # -- FX3: every IB authentication session is one counted IB SSH attempt -------------------------
+    def fx3_observe(self, outcomes, entry, *, target):
+        """Call entry(policy) with record_metric observed (not replaced); return (events, result).
+
+        Each IB session answers the next outcome ("accept", "reject" or "transport"): the DEV phase
+        session is _execute_ib_phase, a plain session is interactive_run (run_on_ib stays real).
+        The project authority and the policy return `target`; log is silenced.  A SetupError the
+        entry raises is returned as its result.
+        """
+        app = self.app
+        events, script = [], list(outcomes)
+        real_record = app.record_metric
+
+        def record(name):
+            events.append(("metric", name))
+            return real_record(name)
+
+        def answer(text=None):
+            outcome = script.pop(0)
+            if text is None:
+                if outcome == "accept":
+                    return app.SessionResult("nv set system hostname nvos\n", 0)
+                if outcome == "reject":
+                    raise app.IBAuthenticationError("PUBLIC synthetic rejection")
+                raise app.SetupError("PUBLIC synthetic phase transport failure")
+            if outcome == "accept":
+                nonce = FRAME_RE.search(text).group(1)
+                return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\nnv set system hostname nvos\n"
+                                         f"__HTTP_IB_END_{nonce}__=0\n", 0)
+            if outcome == "reject":
+                return app.SessionResult("", 255, ib_authentication_rejected=True)
+            return app.SessionResult("ssh: connect to host fe80::12 port 22: Network is unreachable\n", 255)
+
+        def phase(*_args, **kwargs):
+            events.append(("phase", kwargs.get("_phase_operation")))
+            return answer()
+
+        def transport(command, _responder, _timeout, **_kwargs):
+            events.append(("run", "ib"))
+            return answer(" ".join(command))
+
+        policy = mock.Mock(spec=["password"])
+        policy.password.return_value = target
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(app, "record_metric", side_effect=record))
+            stack.enter_context(mock.patch.object(app, "_execute_ib_phase", side_effect=phase))
+            stack.enter_context(mock.patch.object(app, "interactive_run", side_effect=transport))
+            stack.enter_context(mock.patch.object(app, "_ib_project_value", return_value=target))
+            stack.enter_context(mock.patch.object(app, "log"))
+            try:
+                return events, entry(policy)
+            except app.SetupError as error:
+                return events, error
+
+    def fx3_endpoints(self) -> tuple:
+        app = self.app
+        ib = app.Device(host(1), "ib", "192.0.2.12", "192.0.2.12/24", "192.0.2.1", "02:00:00:00:00:12", "", "")
+        jump = app.Device("example-oob-leaf01.example.test", "eth_jump", "198.51.100.10", "", "", "", "", "")
+        return (app.Target(ib, jump, "swp1", "eth0"), app.Neighbor("fe80::12", "ib-mgmt1000", "02:00:00:00:00:12"),
+                "cumulus", secret("oob"), "admin")
+
+    def test_strict_authentication_read_counts_each_ib_session_before_it_starts(self) -> None:
+        # FX3 (v3.1.3 integration fix; WP-7 review B "FX3 修法" item 1).  Expectation sources, not the
+        # implementation: v15 counts each IB SSH session once, before it starts and whatever its
+        # result (参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py:2494-2495:
+        # record_metric("ib_ssh_attempts"), then interactive_run); each credential the IB
+        # authentication readback tries is one such session (v15 :494-496 the initial password,
+        # :505-507 the project target); P3c map :120 (run_on_ib keeps v15's record_metric) and :219
+        # (record_metric: take v15's counting), guide :419 (the run_on_ib merge keeps v15's counter),
+        # all at tag guide-v3.1.3-approved-r302.  The strict read is a DEV phase session (map :129),
+        # so its own branch counts it.  Only the phase session, the project authority and log are
+        # replaced.
+        app = self.app
+        initial, target = secret("initial"), secret("target")
+        metric, phase = ("metric", "ib_ssh_attempts"), ("phase", "auth-probe-readonly")
+        exhausted, transport = app._IB_CREDENTIALS_EXHAUSTED, "PUBLIC synthetic phase transport failure"
+        names = set()
+        for case, outcomes, password, expected, ending in (
+                ("accepted", ["accept"], initial, [metric, phase], initial),
+                ("rejected-then-target-accepted", ["reject", "accept"], initial, [metric, phase] * 2, target),
+                ("initial-equals-target-rejected", ["reject"], target, [metric, phase], exhausted),
+                ("transport-failure", ["transport"], initial, [metric, phase], transport)):
+            with self.subTest(case=case):
+                events, result = self.fx3_observe(
+                    outcomes, lambda policy: app._authenticate_ib_read(
+                        *self.fx3_endpoints(), password, 5, local=False, _password_policy=policy,
+                        strict=True), target=target)
+                names.update(name for kind, name in events if kind == "metric")
+                self.assertEqual(expected, events)
+                self.assertEqual(ending, result.current_password if isinstance(result, app._IBLogin)
+                                 else str(result))
+        with self.subTest(case="counter-name"):
+            self.assertEqual({"ib_ssh_attempts"}, names)
+
+    def test_fx3_controls_count_each_run_on_ib_session_once(self) -> None:
+        # FX3 control group (WP-7 review B C1, C2): green before and after FX3.  Same sources as the
+        # test above (v15 :2494-2495: one count per IB SSH session, before it starts).
+        # C1: the non-strict authentication read is one v15 password-only run_on_ib session per
+        #     credential (v15 :494-496, :505-507); run_on_ib stays real, interactive_run answers.
+        # C2: the strict T18 read, the password change and the fresh read after it are run_on_ib
+        #     phase sessions (v15 :515-517, :530-533, :538-540; map :120), each counted once.
+        app = self.app
+        initial, target = secret("initial"), secret("target")
+        metric, run = ("metric", "ib_ssh_attempts"), ("run", "ib")
+        for case, outcomes, expected in (
+                ("C1-accepted", ["accept"], [metric, run]),
+                ("C1-rejected-then-target-accepted", ["reject", "accept"], [metric, run] * 2),
+                ("C1-both-rejected", ["reject", "reject"], [metric, run] * 2),
+                ("C1-transport-failure", ["transport"], [metric, run])):
+            with self.subTest(case=case):
+                events, _result = self.fx3_observe(
+                    outcomes, lambda policy: app._authenticate_ib_read(
+                        *self.fx3_endpoints(), initial, 5, local=False, _password_policy=policy,
+                        strict=False), target=target)
+                self.assertEqual(expected, events)
+        for operation, allow in (("auth-probe-readonly", False), ("password-change", True),
+                                 ("post-change-read", False)):
+            with self.subTest(case="C2-" + operation):
+                events, _result = self.fx3_observe(
+                    ["accept"], lambda policy: app.run_on_ib(
+                        *self.fx3_endpoints(), initial, 5, ["nv", "config", "show", "-o", "commands"],
+                        local=False, allow_password_change=allow, ib_new_password=target if allow else None,
+                        _phase_operation=operation, _password_policy=policy), target=target)
+                self.assertEqual([metric, ("phase", operation)], events)
+
 
 if __name__ == "__main__":
     unittest.main()

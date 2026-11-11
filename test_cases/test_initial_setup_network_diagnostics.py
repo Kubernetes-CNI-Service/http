@@ -443,9 +443,26 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
                 self.assertEqual([], observed["constructors"],
                                  "a --force conflict is refused before the setter constructor")
                 report = result["stdout"].lower()
-                self.assertTrue("conflict" in report and field in report
-                                and "unknown" in report,
+                # 删: `and "unknown" in report` (04 Q-043 (a), default at expiry under the owner 11-08
+                # rule; owner Q-035 (a) item 2).  Its only match was the summary line "No IB switch
+                # login was attempted. The current IB configuration remains unknown.", printed
+                # although the strict authentication read had logged in (FX3).  Pinned instead by
+                # test_initial_setup_offline_main.py:572@eb5ead8ca681803efd58261687dd0f5d72c0bdc8 and
+                # test_initial_setup_strict_stage_skeleton.py:1036@eb5ead8ca681803efd58261687dd0f5d72c0bdc8,
+                # and here by the "no ib switch login" check below.
+                # Tightened (06 FX3-02): conflict and field only in the conflict Reason line (the
+                # summary legend always names "hostname").  Expected text from v15
+                # 参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py :4455 ("  Reason: "),
+                # :2885 ("Network conflict; manual resolution required: "), :2876 and :2883
+                # ("<field>: expected ..., found ...").
+                prefix = "reason: network conflict; manual resolution required: "
+                self.assertTrue(any(line.strip().startswith(prefix) and field + ": expected " in line
+                                    for line in report.splitlines()),
                                 "fixed PUBLIC field conflict must preserve original report contract")
+                # FX3: this run logged in to the IB switch, so the summary does not say no login was
+                # attempted (v15 :5341-5342: printed only when the run's ib_ssh_attempts total is 0).
+                self.assertTrue("no ib switch login was attempted" not in report,
+                                "the conflict run logged in to the IB switch; the summary must not deny it")
                 diagnostic = "\n".join(line for line in report.splitlines()
                                        if "management network" in line)
                 self.assertTrue(not any(raw in diagnostic for raw in

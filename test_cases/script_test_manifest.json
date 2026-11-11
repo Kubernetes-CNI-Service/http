@@ -213,7 +213,17 @@
         "test_cases.test_initial_setup_external_contract_workflow",
         "test_cases.test_credentials_fd",
         "test_cases.test_initial_setup_credentials_fd_workflow",
-        "test_cases.test_initial_setup_strict_stage_skeleton"
+        "test_cases.test_initial_setup_strict_stage_skeleton",
+        "test_cases.test_initial_setup_oob_credentials",
+        "test_cases.test_initial_setup_jump_vlan_login",
+        "test_cases.test_initial_setup_direct_retry",
+        "test_cases.test_initial_setup_eui64_fallback",
+        "test_cases.test_initial_setup_base_and_subset",
+        "test_cases.test_initial_setup_worker_queue",
+        "test_cases.test_initial_setup_summary_output",
+        "test_cases.test_initial_setup_offline_main",
+        "test_cases.test_initial_setup_oob_spine",
+        "test_cases.test_initial_setup_oob_spine_main"
       ]
     },
     {
@@ -2391,6 +2401,24 @@
       ],
       "tests": [
         "test_cases.test_initial_setup_strict_stage_skeleton"
+      ]
+    },
+    {
+      "id": "initial_setup_v15_functions_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_oob_credentials",
+        "test_cases.test_initial_setup_jump_vlan_login",
+        "test_cases.test_initial_setup_direct_retry",
+        "test_cases.test_initial_setup_eui64_fallback",
+        "test_cases.test_initial_setup_base_and_subset",
+        "test_cases.test_initial_setup_worker_queue",
+        "test_cases.test_initial_setup_summary_output",
+        "test_cases.test_initial_setup_offline_main",
+        "test_cases.test_initial_setup_oob_spine",
+        "test_cases.test_initial_setup_oob_spine_main"
       ]
     }
   ],

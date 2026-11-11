@@ -2664,6 +2664,7 @@ def _authenticate_ib_read(target, neighbor, eth_user, ethernet_password, ib_user
         rejected = False
         try:
             if strict:
+                record_metric("ib_ssh_attempts")
                 result = _execute_ib_phase(
                     target, neighbor, eth_user, ethernet_password, ib_user, password, timeout,
                     command, local=local, _phase_operation="auth-probe-readonly",
