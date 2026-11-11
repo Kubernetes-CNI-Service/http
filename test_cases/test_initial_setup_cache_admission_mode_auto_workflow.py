@@ -501,7 +501,7 @@ class CacheAdmissionModeAutoWorkflowTests(unittest.TestCase):
                             and f["caller"]["selector"][0]["target"] is False
                             and f["caller"]["timeline"] == ["selector-return"],
                             "MATCH did not reach actual INITIAL readonly selection")
-            # Owner Q-035 (a) (v15 CURRENT-CONTRACT.md:59): no pending-diff read in check-only.
+            # P3c map D32d :284 (E8, 04 Q-039; v15 CURRENT-CONTRACT.md:59): no pending-diff read in check-only.
             self.assertTrue(observed["diff"] is None,
                             "the readonly report read a pending diff")
             self.assertTrue(not result["hashes"] and "TARGET" not in result["prompts"]

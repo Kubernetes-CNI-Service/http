@@ -969,7 +969,8 @@ def _source_bound_load_report_path(
         # 2026-11-08 v3.1.1 RV4: 11-load.py changed with RV4 (review 5 A1: a non-link activate-project stops load before any write; A4: live direct-text links and real escapes report their own causes) (was a87a56a59530be9fc285dfdfe62e16b150e95695f0a2ee00d67c381dacdda691); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 RV5+RV6: 11-load.py changed with RV5 (review 4 B1: candidate B accepts R-014's two user-link inputs by their target's bytes) and RV6 (splitter inventory binding of a user-linked 02) (was 9a5e054a8956150e67bab0effe3b6546c4817870eb27ae4a668338b2b6e1c2d5); the structural path was checked on the current files before re-pinning.
         # 2026-11-09 v3.1.2 WP-14: 11-load.py changed with v3.1.2: M3 49c0b59, W9 2157f3e, L57 9deceb9, W9 D4 d25f867, W6 2376d74, BF-9 38826e4 (I-048 restore-pending marker), c-16 bd92eea (plain-user dry-run listing); guide 1231: re-pinned once after c-7 and BF-9 (was e37ffdb9a38cca3abf9094bf4d402025037268f7e21ba776c17b9318b8a723b4); the structural path was checked on the current files before re-pinning.
-        (load_tree, "1301807668e5076e6c1e8e45cbdd94c1bfa5125bf62b0407022a75e96efeda2b"),
+        # 2026-11-11 v3.1.3 WP-13 (written by m1a/repin_quiesce_load.py): 11-load.py changed only in the --validation-only help string (06 D1b-J, WP-6 bcdcfef041b529fb9cad9442659707f7e4fa71ba, integrated in D1core cc42c6b5e6e2e5d9241a2020b7e8aa5370f07643; arguments and pass-through unchanged; with the v3.1.2 help text put back the file is byte-equal to v3.1.2 and gives the old pin) (was 1301807668e5076e6c1e8e45cbdd94c1bfa5125bf62b0407022a75e96efeda2b); the structural path was checked on the current files before re-pinning.
+        (load_tree, "c46a9a9b913f00dc06b4ac74343ff05ce99360fb2ba6f7c7492717b11de4e4e7"),
         # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 WP-17: tools/generation_report.py changed with WP-9b (610e348: _public_key accepts a published key only through DAY0-Prepare/activate-project, R-016 3.2) (was bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 RV3: tools/generation_report.py changed with RV3 (review 3 A3: _public_key names a missing DAY0-Prepare/activate-project before the old 'another project or role' text) (was 0e1a49f0a3cc0f784ac4d2eaee2362bef572d18ed9a87b8c91cc061f6fea9819); the structural path was checked on the current files before re-pinning.
@@ -1272,6 +1273,19 @@ def _mutation_destination(
             and len(call.args) == 5 and not call.keywords
             and not any(isinstance(arg, ast.Starred) for arg in call.args)):
         return call.args[3]
+    if (name == "replace" and isinstance(call.func, ast.Attribute) and len(call.args) >= 2
+            and (isinstance(call.func.value, ast.JoinedStr)
+                 or (isinstance(call.func.value, ast.Constant)
+                     and isinstance(call.func.value.value, str))
+                 or (isinstance(call.func.value, ast.Call)
+                     and isinstance(call.func.value.func, ast.Name)
+                     and call.func.value.func.id == "str"))):
+        # v3.1.3 WP-13 item 5: str.replace(old, new[, count]) on a receiver that is written as a
+        # str (a str(...) call, a str constant or an f-string) substitutes text and names no
+        # destination; Path.replace/Path.rename take one target, os.replace/os.rename are
+        # matched above.  First seen at initial-setup.py run_management_direct_checks, which
+        # redacts a credential from an error message (v15 :3095).
+        return None
     if name in {"replace", "rename"} and isinstance(call.func, ast.Attribute):
         return _argument(call, 0, "target")
     if name in {"copy", "copy2", "copyfile", "copytree", "move"}:
@@ -5946,6 +5960,30 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
              if classification == "QUIESCE"},
         )
 
+    def test_mutation_destination_ignores_only_text_replace_on_str_receivers(self) -> None:
+        """Only the receiver form tells a text substitution from a two-argument file replace."""
+        # v3.1.3 WP-13 item 5 (guide :1261; P2 decided by http dev on the independent review
+        # wp13-review.noindex/review.md, sha256
+        # 93ada1b96e7405b601a109d3c7cbc96df072682cb5eb9334ef2406e9c9153b9d, finding mid-1).
+        # infiniband/bringup/xdr-initial-setup/initial-setup.py run_management_direct_checks
+        # redacts a credential with str(exc).replace(credentials[key], "<redacted>") (v15 :3095);
+        # the earlier rule read that as Path.replace(target=credentials[key]) and named main and
+        # run_prepared_tasks as unclassified governed writers.  The exact file-replace and
+        # str.replace rows live in test_mutation_destination_covers_supported_file_mutation_apis
+        # (guide-side review low-3); this method keeps what that table cannot state.
+        # Two positional arguments on a receiver not written as a str stay mutations (an unbound
+        # Path.replace, an os module held in an attribute); the destination the rule picks for
+        # them is not pinned here, only that they are not dropped.
+        for source in ("Path.replace(src, dst)", "self._os.replace(src, dst)"):
+            with self.subTest(file_replace=source):
+                self.assertIsNotNone(_mutation_destination(ast.parse(source, mode="eval").body))
+        # End to end through the discovery the governed-writer census uses.
+        self.assertEqual({"main"}, literal_governed_mutation_sinks(ast.parse(
+            "from pathlib import Path\n\n\ndef main(x):\n"
+            "    Path(str(x)).replace('01-global.yaml')\n"), "example.py"))
+        self.assertEqual(set(), literal_governed_mutation_sinks(ast.parse(
+            "def main(x):\n    return str(x).replace('01-global.yaml', 'y')\n"), "example.py"))
+
     def test_import_merge_new_exemption_never_overwrites_governed_authority(self) -> None:
         importer = load_module(
             "mwq_import_merge_new", "tools/import-from-download.py",
@@ -6199,6 +6237,12 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             ("source.replace(target=destination)", "destination"),
             ("source.rename(destination)", "destination"),
             ("source.rename(target=destination)", "destination"),
+            # v3.1.3 WP-13 item 5 (N1): file replaces next to the str.replace rows below.
+            ("os.replace(source, destination)", "destination"),
+            ("os.rename(source, destination)", "destination"),
+            ("Path(source).replace(destination)", "destination"),
+            ("Path(str(source)).replace(destination)", "destination"),
+            ("Path(str(source)).rename(destination)", "destination"),
             ("os.replace(src=source, dst=destination)", "destination"),
             ("os.replace(source, dst=destination)", "destination"),
             ("os.rename(src=source, dst=destination)", "destination"),
@@ -6236,6 +6280,14 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             ("destination.open('rb')", None),
             ("destination.open(mode='r')", None),
             ("destination.open()", None),
+            # v3.1.3 WP-13 item 5 (N1; guide :1261; review wp13-review.noindex/review.md mid-1,
+            # guide-side review low-3): a .replace on a receiver written as a str substitutes text
+            # and names no destination (initial-setup.py run_management_direct_checks redacts a
+            # credential this way, v15 :3095).
+            ("str(error).replace(secret, '<redacted>')", None),
+            ("'text'.replace(old, new)", None),
+            ("f'{text}'.replace(old, new)", None),
+            ("str(error).replace(old, new, 1)", None),
         )
         for expression, expected in cases:
             with self.subTest(expression=expression):

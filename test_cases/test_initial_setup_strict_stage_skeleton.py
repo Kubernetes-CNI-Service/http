@@ -636,7 +636,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
     # -- a-10 --------------------------------------------------------------------------------------
     def test_ipv4_readiness_has_one_wait_and_retry_loop(self) -> None:
         # Guide 2.3 :204 ("verify_ipv4_login 的「3 次、每次先等 10 秒」，不另加第二套"); P3c map 2.3
-        # verify_ipv4_login :126; owner Q-035 (a).
+        # verify_ipv4_login :126; D1a2 report 4.3 V1 (basis guide :204; not an owner 04 item).
         with self.subTest(case="one-loop-in-source"):
             tree = ast.parse(INITIAL.read_text(encoding="utf-8"))
             function = next(node for node in tree.body
@@ -794,7 +794,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- Services wrapper --------------------------------------------------------------------------
     def test_strict_service_verification_failure_is_reported_as_partial_writes(self) -> None:
-        # Owner Q-035 (a); CURRENT-CONTRACT.md:60 ("单设备失败隔离，已完成阶段事实保留") and P3c map 2.3
+        # S3, 04 Q-039; CURRENT-CONTRACT.md:60 ("单设备失败隔离，已完成阶段事实保留") and P3c map 2.3
         # run_service_stage :121 ("v15 的 IBConfigurationStageUncertain 包装保留").
         target = secret("target")
         with tempfile.TemporaryDirectory(prefix="strict-services-") as folder:

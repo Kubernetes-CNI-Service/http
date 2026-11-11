@@ -691,21 +691,29 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 if isinstance(call.func, ast.Name) and call.func.id in callers:
                     callers[call.func.id].add(function.name)
 
+        # v3.1.3 WP-13 (guide :1256-1259; O14 default :267: update to the predicted sets, never
+        # widen to any caller): the three sets are the prediction written before the merged file
+        # was read (v313 predicted-sets.md, sha256
+        # f2685a7ab4cb825374a4f1319785e3e492a923d34b81e7b33555a4a8f6b0e5e8, sections 1a-1c, one
+        # source row per member; P3c map section 9 item 7 predicts the same sets), and equal the
+        # merged sets at bf1ae87f01bf5df8270f7b8536d0883e01979a0e.  Changes from v3.1.2:
+        # install_oob_management_key retired with --auto (O3; map :74); v15's final management
+        # direct check verify_management_direct_ssh (map :235) calls ib_command_argv itself and
+        # interactive_run through its nested attempt_once.
         self.assertEqual(
-            {"run_on_ethernet", "nested_ssh_command", "verify_ipv4_login",
-             "install_oob_management_key"},
+            {"nested_ssh_command", "run_on_ethernet", "verify_ipv4_login"},
             callers["outer_ssh_command"],
         )
         self.assertEqual(
-            {"run_on_ethernet", "run_on_ib", "verify_ipv4_login",
-             "install_oob_management_key", "_execute_ib_phase"},
+            {"_execute_ib_phase", "attempt_once", "run_on_ethernet", "run_on_ib",
+             "verify_ipv4_login", "verify_management_direct_ssh"},
             callers["interactive_run"],
         )
         self.assertEqual(
             {
-                "nested_ssh_command", "verify_ipv4_login", "_service_profile",
-                "desired_service_commands", "key_install_command",
-                "_validate_cache_profile", "_run_authorized_ib_command",
+                "_run_authorized_ib_command", "_service_profile", "_validate_cache_profile",
+                "desired_service_commands", "key_install_command", "nested_ssh_command",
+                "verify_ipv4_login", "verify_management_direct_ssh",
             },
             callers["ib_command_argv"],
             "every NVOS dispatch boundary must reuse the closed typed enforcer",
@@ -923,17 +931,29 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 raise RuntimeError("FIXTURE HOLD: genuine native KAT prerequisite unavailable") from None
 
         tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))
-        incoming = {
-            function.name
-            for function in ast.walk(tree)
-            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
-            for call in ast.walk(function)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
-            and call.func.id == "_run_authorized_ib_command"
-        }
+
+        def incoming(callee):
+            return {
+                function.name
+                for function in ast.walk(tree)
+                if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+                for call in ast.walk(function)
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == callee
+            }
+
+        # v3.1.3 WP-13 (guide :1256-1259, O14): the predicted callers (v313 predicted-sets.md,
+        # sha256 f2685a7ab4cb825374a4f1319785e3e492a923d34b81e7b33555a4a8f6b0e5e8, section 2) are
+        # execute_ib_task and the three stage functions; main's strict auto (D32c) retired with
+        # --auto (O3) and its strict manual branch (D32d) became execute_ib_task (map :284).
+        # They reach the authorized helper through _stage_ib_command, the one switch point added
+        # by D1a2 (06 D1a2-08; D1a2 report 1.2; map D32d :284 and section 9 item 1): strict
+        # tasks go to _run_authorized_ib_command, any other task to run_on_ib.  Both levels stay
+        # closed.
+        self.assertEqual({"_stage_ib_command"}, incoming("_run_authorized_ib_command"))
         self.assertEqual(
-            {"run_initial_stage", "run_service_stage", "run_key_stage", "main"},
-            incoming,
+            {"execute_ib_task", "run_initial_stage", "run_key_stage", "run_service_stage"},
+            incoming("_stage_ib_command"),
         )
         real_enforcer = app.ib_command_argv
         real_ib = app.run_on_ib

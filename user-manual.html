@@ -14065,7 +14065,8 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
             以 U 身份重新执行再做事；root 运行 load、unload 时代表 U（读 U 的 key，项目里新建的文件交给 U，清理 U 的 crontab）。
             其他普通用户 V 直接运行或经 sudo 运行都会被拒绝，提示写明项目属于谁、当前是谁；13-unload、02-unsetup 经 sudo 运行时在入口拒绝，什么都不动。例外：V 不加 sudo 运行 02-unsetup 或 <code>13-unload.py --dry-run</code> 时只多打印一行身份说明，其余与 v3.1.1 相同。</li>
           <li>root 运行 initial-setup 时（v3.1.3 起），入口在运行锁之前用 <code>runuser</code> 以项目属主 U 起子进程并等它结束，按子进程的退出码退出；
-            其他普通用户运行 U 的项目在入口拒绝、以 2 退出。</li>
+            其他普通用户运行 U 的项目在入口拒绝、以 2 退出；U 本人不加 sudo 运行照常。只在管理服务器上随代码树部署的那份判身份，OOB Leaf 本地运行不判；
+            退出码、Ctrl-C 和已知限制见下面「<a href="#v2-initial-setup">IB 交换机初始配置：initial-setup</a>」。</li>
           <li>单独运行的 <code>01-a-setup.py</code> 被 sudo 或 root 运行时同样按项目属主判身份：其他用户经 sudo 在入口拒绝、什么都不动；代表 U 时由
             U 的身份按 U 的家目录准备 <code>laptop.pub</code>（U 没有 key 时只提示 U 执行 <code>ssh-keygen</code>），本次在项目里新建的条目交给 U；
             不加 sudo 运行与 v3.1.2 相同；管理服务器上切项目仍经 load。</li>
@@ -14076,6 +14077,113 @@ sudo python3 DAY0-Prepare/11-load.py DAY0-Prepare/&lt;project&gt; \
           <code>management public key mismatch</code> 停下，不会替你换），再用 initial-setup 下发到交换机；交换机换好之前，root 起的采集和
           监控仍可用 root 的 key 作后备。真机核对见 <code>test_cases/REAL_ENVIRONMENT.md</code> 的
           <code>TC-REAL-I006-OPERATOR-LOAD-001</code>、<code>TC-REAL-I006-OPERATOR-REEXEC-001</code>。</p>
+      </div>
+
+      <div class="callout">
+        <h3 id="v2-initial-setup" data-nav-title="IB 初始配置 initial-setup">IB 交换机初始配置：initial-setup（v3.1.3，D1）</h3>
+        <p><code>infiniband/bringup/xdr-initial-setup/initial-setup.py</code> 让新装的 NVOS IB 交换机第一次可以被管理：按项目的 CSV 和 P2P 找到每台 IB 接在哪台
+          Ethernet OOB Leaf 的哪个口，经这台 Leaf（或 Leaf 上联的 Spine）登录 IB，完成 Initial、管理口地址和网关、主机名、DNS/NTP/时区和公钥，最后从管理服务器直连核对。
+          v3.1.3 起它以现场 v15 为底，并入了仓库版的项目口令核对、管理网核验等功能。它要 import 仓库 <code>tools/</code> 下的模块，只能随整棵代码树部署（sync 或上传包），
+          不能只拷这一个文件（OOB Leaf 本地运行见本节最后）。它和 <code>upgrade.py</code>、<code>upgrade2.py</code> 共用运行锁 <code>/tmp/http-ib-bringup.runtime.lock</code>，
+          锁被占时什么都不做、以 75 退出；锁文件是常驻的空文件，不要删除它来「解锁」。完整说明见 <code>infiniband/bringup/xdr-initial-setup/README.md</code>。</p>
+        <pre><code>cd /var/www/html/infiniband/bringup/xdr-initial-setup
+python3 initial-setup.py --generate-json   # 只解析 CSV、P2P，生成并校验目标 JSON，不访问设备
+python3 initial-setup.py                   # 只读在线检查：缺的命令以 WOULD APPLY: 打在设备日志里
+python3 initial-setup.py --apply           # 到第一台真正要改的 IB 时确认一次；--yes 表示预先确认</code></pre>
+        <p><strong>逐台流程（v15 的行为）</strong>每台要用到的 Ethernet 先用公钥试一次（<code>BatchMode</code>，最多 5 秒），公钥被拒的才要口令，先问
+          「是否全部使用同一个口令 [Y/n]」，回车或 y 只输一次，n 则逐台输入。NVOS 初始密码先读环境变量（默认 <code>NVOS_INITIAL_PASSWORD</code>），没有时要求终端、
+          隐藏输入，5 秒内没有输完一整行或直接回车就用 NVOS 的出厂默认值（见 README「口令」）。先采集全部 OOB 快照，再把可以登录的 IB 放进一个全局队列：worker 数是
+          <code>min(--max-workers, ceil(可登录的 IB 数 / 16))</code>，最多 16；每台 IB 从头到尾由一个 worker 做完，期限是 <code>--task-timeout</code>（默认 1800 秒，
+          不含等操作员输入的时间）。一台 IB 失败只停这一台，其余 IB 照常做完（日志 <code>other IB tasks remain eligible</code>），失败的设备不自动重放不确定的写入。
+          结束时打印英文 Summary（01 OVERVIEW 到 07 EVIDENCE &amp; NEXT ACTIONS 七个模块），并写出本次的 <code>summary.json</code>。</p>
+        <table><thead><tr><th>退出码</th><th>意思</th></tr></thead><tbody>
+          <tr><td>0</td><td>SUCCESS：全部 IB 完成要求的设置并通过管理服务器直连核对；<code>--version</code>、<code>--help</code>、<code>--plan</code>、<code>--generate-json</code> 正常结束也是 0</td></tr>
+          <tr><td>1</td><td>FAILED：脚本或公共流程出错（运行中项目输入被改、worker 异常、批次停止、操作员拒绝首次改动确认等）</td></tr>
+          <tr><td>2</td><td>入口错误（参数、输入校验、<code>--credentials-fd</code> 缺键或不合法、身份拒绝、运行锁以外的守卫错误），或 INCOMPLETE：正常跑完但还有设备没做完——某台失败或跳过、只读检查发现要配置、CSV 里有 IB 没有 P2P 管理链路、没有做管理服务器直连核对；两种意思按报告和 <code>summary.json</code> 的逐台结果区分</td></tr>
+          <tr><td>75</td><td>运行锁被占（另一个 initial-setup 或升级在跑），什么都没做</td></tr>
+          <tr><td>128+n</td><td>root 运行、切到项目属主执行时，子进程被信号 n 结束</td></tr>
+        </tbody></table>
+        <p>Ctrl-C 按的时机不同，结果也不同：执行阶段按下，整次停下、FAILED、以 1 退出；在 NVOS 初始密码或 IB 目标密码的提示处按下，以 2 退出；在 OOB 快照阶段按下，进程被 SIGINT 结束
+          （root 运行时父进程以 130 退出）。只读检查里一台设备只差 Initial（auto-save、ZTP config-save 没都开，或 ZTP 没关）也算要配置：这台记 <code>CHECK_ONLY</code>，
+          整次 INCOMPLETE、以 2 退出，要看这台设备日志里 Initial 阶段的 <code>WOULD APPLY:</code> 行才知道缺的是 Initial。</p>
+        <p><strong>以 root 或 sudo 运行（I-006）</strong>只在仓库布局下（管理服务器上随代码树部署的那份）判身份，<code>--help</code>、<code>--version</code> 不判。
+          进运行锁之前先认项目：给了 <code>--project-dir</code> 就用它，否则取 <code>DAY0-Prepare/activate-project</code> 指向的项目；没有指针时原样运行，指针无效时以 2 退出。
+          认出项目后按与 load 相同的规则判身份，开头打印一行身份说明（见上面「两种运行方式」）：</p>
+        <table><thead><tr><th>谁在运行</th><th>项目属于普通用户 U</th><th>项目属于 root</th></tr></thead><tbody>
+          <tr><td>普通用户不加 sudo 直接运行</td><td>是 U 本人时原样运行；别的用户拒绝</td><td>拒绝（提示用 sudo 或以 root 运行）</td></tr>
+          <tr><td>root 直接登录</td><td>切到 U 执行</td><td>以 root 运行</td></tr>
+          <tr><td>U 经 sudo</td><td>切到 U 执行</td><td>以 root 运行</td></tr>
+          <tr><td>别的普通用户 V 经 sudo</td><td>拒绝</td><td>以 root 运行</td></tr>
+        </tbody></table>
+        <p>拒绝都在运行锁之前、以 2 退出，提示写明项目属于谁、当前是谁；sudo 的 <code>SUDO_USER</code>、<code>SUDO_UID</code> 无效（包括在 root 的 shell 里再用 sudo 运行，这时 <code>SUDO_USER</code> 是 root）也拒绝。切到 U 执行时，root 父进程用 <code>runuser</code> 以同一个 Python 解释器重新执行本脚本、参数不变，
+          等它结束并按子进程的退出码退出；Ctrl-C 和 SIGTERM 转发给子进程，父进程不拿运行锁，<code>--credentials-fd</code> 的 fd 原样交给子进程读。已知限制：带给子进程的
+          环境变量以「名字=值」写在 <code>runuser</code> 的命令行参数里，子进程运行的整个期间（<code>runuser</code> 一直在）同机用户用 <code>ps</code> 都能看到；所以 root 运行时，环境里不要有
+          <code>--ib-initial-password-env</code> 指定的变量（默认 <code>NVOS_INITIAL_PASSWORD</code>）或 <code>NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD</code>，初始密码改用交互输入或
+          <code>--credentials-fd</code>（<code>sudo -E</code> 会把这类变量带进来）。切到 U 以后没有 root 的 ssh-agent。</p>
+        <p><strong>各项输入、输出从哪里读（<code>--project-dir</code>）</strong></p>
+        <table><thead><tr><th>项</th><th>不给 <code>--project-dir</code>（默认）</th><th>给了 <code>--project-dir &lt;项目&gt;</code></th></tr></thead><tbody>
+          <tr><td>CSV</td><td>当前目录里找（显式 <code>--ib-csv</code> 照用）</td><td><code>&lt;项目&gt;/ib.csv</code>（不读 <code>02-devices_config.csv</code>）</td></tr>
+          <tr><td>P2P</td><td>当前目录里找（显式 <code>--p2p</code> 照用）</td><td><code>&lt;项目&gt;/p2p.xlsx</code>；没有时取项目根唯一的 <code>.xlsx</code></td></tr>
+          <tr><td>global</td><td>脚本所在目录的 <code>01-global.yaml</code>（链接，指向当前激活的项目）</td><td><code>&lt;项目&gt;/01-global.yaml</code></td></tr>
+          <tr><td>公钥</td><td>脚本所在目录 <code>publickey/</code> 下的非空 <code>*.pub</code>（当前激活项目的公钥）</td><td><code>&lt;项目&gt;</code> 根上的非空 <code>*.pub</code>（例如 <code>laptop.pub</code>、<code>mgmt-server.pub</code>），空文件跳过</td></tr>
+          <tr><td>中性默认值</td><td>脚本所在目录的 <code>infra-neutral.conf</code></td><td><code>&lt;项目&gt;/infiniband/bringup/xdr-initial-setup/infra-neutral.conf</code>（setup 写出）</td></tr>
+          <tr><td>报告、以太网快照、目标缓存</td><td>当前目录下的 <code>xdr-initial-setup-logs/</code>（显式参数照用）</td><td>同左，仍按当前目录</td></tr>
+        </tbody></table>
+        <p>给了 <code>--project-dir</code> 时只按项目自己的固定文件名读，不经脚本旁边只指向当前激活项目的 <code>01-global.yaml</code>、<code>publickey</code> 链接，所以也能检查没有激活的项目；
+          项目根上一个非空 <code>*.pub</code> 都没有时，报告里打一行 WARNING，不装公钥，也不因此拒绝运行。报告开头的 <code>Input sources:</code> 一行写明 CSV、P2P 来自哪个目录，
+          global、公钥、中性默认值来自哪个目录；两者不同时只提示、不拒绝。现场从脚本目录运行时，当前目录就是脚本所在目录，所有输入、输出都落在当前激活的项目里
+          （<code>xdr-initial-setup-logs</code> 经链接落在 <code>&lt;项目&gt;/99-output-ib_nvl/bringup/xdr-initial-setup-logs/</code>）。没有 global 时也能 <code>--apply</code>：
+          Infra Services 阶段记 SKIP，其余照做；IB 要求强制改密时因为没有可核对的目标密码而拒绝这台。</p>
+        <p><strong>报告文件名</strong>默认每次运行写一个新报告 <code>xdr-initial-setup-logs/initial-setup-report-&lt;YYYYmmdd-HHMMSS&gt;.log</code>，不覆盖以前的报告；同一秒里文件名已存在时
+          在时间戳后加 <code>-&lt;进程号&gt;</code>。报告第一行是 <code>Report: &lt;完整路径&gt;</code>，终端开头也打印这一行。同一目录里的
+          <code>devices-&lt;YYYYmmdd-HHMMSS&gt;-&lt;随机后缀&gt;/</code> 是本次的证据目录，时间戳与报告文件名里的相同，里面有每台 IB 的设备日志 <code>&lt;IB 主机名&gt;.log</code>、
+          结构化记录 <code>&lt;IB 主机名&gt;.json</code> 和整次的 <code>summary.json</code>（权限 0600）。显式 <code>--report &lt;路径&gt;</code> 照这个路径写（已存在的文件会被覆盖，
+          证据目录的时间戳取本次运行开始的时间）。报告越积越多，脚本不自动清理；日志含内部拓扑和配置，按私有资料归档。</p>
+        <p><strong>经管道传口令：<code>--credentials-fd N</code></strong>一站式 bringup 等调用方从继承的管道 fd N 交给 initial-setup 一个 JSON 对象（UTF-8，不超过 64 KiB），
+          读完立即关闭；读入由 <code>tools/credentials_fd.py</code> 在入口完成一次，在碰任何设备（包括 OOB 公钥探测）之前。</p>
+        <table><thead><tr><th>键</th><th>值</th><th>缺省时</th></tr></thead><tbody>
+          <tr><td><code>jump_passwords</code></td><td>对象：跳板交换机主机名 → 口令（<code>eth_jump</code>、<code>eth</code> 类 OOB Leaf，Spine 跳板也用这张表；主机名按短名、不分大小写比较，同一短名出现两次以 2 退出）</td><td>表里没有某台需要口令的跳板时，这台照常先试一次公钥，公钥不通就不拿任何口令登录它：接在它下面的 IB 记 SKIPPED，其余照做，整次 INCOMPLETE、以 2 退出</td></tr>
+          <tr><td><code>nvos_initial_password</code></td><td>字符串：NVOS 初始密码</td><td>用 NVOS 的出厂默认值</td></tr>
+          <tr><td><code>ib_target_password</code></td><td>字符串：IB 目标密码，仍按项目 <code>01-global.yaml</code> 的哈希核对</td><td>给了 <code>--apply</code> 时以 2 退出；只读检查不需要</td></tr>
+        </tbody></table>
+        <p>只取上表的键，多余的键忽略；值必须是非空字符串（<code>jump_passwords</code> 是这样的对象）。fd 模式下不提问：不调隐藏输入，也不读 <code>NVOS_INITIAL_PASSWORD</code> 等环境变量；
+          给了 <code>--apply</code> 就必须同时给 <code>--yes</code>，否则在入口以 2 退出；<code>ib_target_password</code> 在入口按目标密码的形状检查（8～128 个可打印 ASCII 字符），
+          有没有 global 都查，不合格以 2 退出，提示里不带口令的值。入口缺键、JSON 不合法、fd 不可读都以 2 退出；口令被拒的跳板或 IB 只影响对应的设备，不再提问，整次 INCOMPLETE、
+          以 2 退出，按 <code>summary.json</code> 的逐台结果看是哪几台。口令不经 argv、环境变量或文件，报告、<code>summary.json</code> 和设备日志里都没有。隐藏参数
+          <code>--ethernet-password</code> 仍然存在，一给就以 2 退出并提示不要把口令放进 argv。</p>
+        <p><strong><code>--auto</code>、<code>--credentials-file</code> 已退役</strong>v3.1.3 起（owner 2026-11-02，统一改用一站式 bringup）再给这两个参数，脚本按未知参数以 2 退出，
+          不建运行锁、不写报告；脚本不再安装 cron，也不再写 <code>auto.env</code>。只有用过 DEV 版 <code>--auto</code> 的服务器才有残留（现场的 v15 一进来就拒绝 <code>--auto</code>）：
+          残留的 cron 行部署后每 10 分钟以参数错误退出、往 <code>auto-cron.log</code> 追加报错，明文 <code>auto.env</code> 一直留着，所以要清理一次，先删 cron 行，再删文件
+          （反过来，<code>02-unsetup.py</code> 会因为三个状态文件都不在而不碰 cron 行）。下面的 <code>&lt;状态目录&gt;</code> 是 <code>xdr-initial-setup-logs</code>，经链接落在
+          <code>&lt;项目&gt;/99-output-ib_nvl/bringup/xdr-initial-setup-logs</code>：</p>
+        <ol>
+          <li>只读普查，只看行数和元数据，不用 <code>cat</code>、<code>less</code>、<code>head</code>、<code>cp</code> 碰 <code>auto.env</code>；以 root 查操作员的，<code>crontab</code> 加 <code>-u &lt;操作员&gt;</code>：
+            <pre><code>crontab -l 2&gt;/dev/null | grep -c -F '# http-v3-req10c-auto'
+crontab -l 2&gt;/dev/null | grep -c -E 'initial-setup\.py --auto --apply --yes --credentials-file'
+find &lt;状态目录&gt; -maxdepth 1 \( -name auto.env -o -name 'auto-*' -o -name auto.lock \) -printf '%p %u %m %s\n'</code></pre></li>
+          <li>确认没有轮次在跑：<code>&lt;状态目录&gt;/auto.lock</code> 存在时用 <code>fuser -v</code> 或 <code>lsof</code> 只读查看；不要用 <code>flock</code> 探测（锁文件不存在时它会新建一个）。</li>
+          <li>在没有其他同 UID crontab 写者的窗口里删 cron 行，先落盘、核对、再装，不要用 <code>crontab -l | … | crontab -</code> 一步装表（<code>crontab -l</code> 出错时会装进空表，
+            删掉这个用户全部 cron 行）：<code>crontab -l &gt; &lt;备份&gt;</code>，退出码不是 0 就停下（「no crontab」也算没有残留）；用 <code>wc -l &lt; &lt;备份&gt;</code> 数总行数 N，
+            用 <code>grep -c -E '# http-v3-req10c-auto|initial-setup\.py --auto --apply --yes --credentials-file' &lt;备份&gt;</code> 数要删的行数 K；
+            <code>grep -v -E '&lt;同上&gt;' &lt;备份&gt; &gt; &lt;新表&gt;</code>，退出码 1 只表示没有剩下的行，退出码 2 才是出错、停下；核对 <code>wc -l &lt; &lt;新表&gt;</code> 等于 N − K，不等就停下；
+            <code>crontab &lt;新表&gt;</code>，再确认两种行的计数为 0、总行数为 N − K；<code>&lt;备份&gt;</code> 按 0600 保留在操作员自己的目录里，出问题时 <code>crontab &lt;备份&gt;</code> 恢复。
+            root 下清操作员的，每条 <code>crontab</code> 都加 <code>-u &lt;操作员&gt;</code>；当年用 sudo 跑过 <code>--auto</code> 的，root 自己的 crontab 也照做一遍。</li>
+          <li>删文件：<code>auto.env</code> 用 <code>shred -u</code>；<code>auto-watch.state</code>、<code>auto-terminal.json</code>、<code>auto-crontab.lock</code>、<code>auto.lock</code> 用 <code>rm -f</code>；
+            <code>auto-cron.log</code> 按现场习惯保留或归档。</li>
+          <li>留证据：前后的计数、<code>find -printf</code> 的元数据、<code>&lt;备份&gt;</code> 的路径；不保存 <code>auto.env</code> 的内容。</li>
+        </ol>
+        <p><code>02-unsetup.py</code> 仍保留旧 watch 的清理（保留到 K6r）：在指针还指着当年那个项目时运行，它删掉当前用户（root 代表操作员时为操作员）crontab 里本项目的 auto 行和
+          <code>auto.env</code>、<code>auto-watch.state</code>、<code>auto-terminal.json</code>；它只看当前链接的项目，不删 <code>auto-crontab.lock</code>、<code>auto.lock</code>、<code>auto-cron.log</code>，
+          也不碰 root 自己的 crontab；其余情况按上面的手工步骤处理。现场执行与留证按 <code>test_cases/REAL_ENVIRONMENT.md</code> 的 <code>TC-REAL-D1-AUTO-RESIDUE-001</code>。</p>
+        <p><strong>在 OOB Leaf 上本地运行（<code>--execution-mode ethernet</code>）</strong>Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存（版本 5）要先在管理服务器上生成，
+          缺缓存或缓存校验不过直接报错。按下面的同目录布局拷文件，<code>tools/</code> 下不放 <code>__init__.py</code>，也不放 <code>project_contract.py</code>、<code>operator_identity.py</code>：</p>
+        <pre><code>&lt;目录&gt;/initial-setup.py
+&lt;目录&gt;/tools/credentials_fd.py      Leaf 上用 --credentials-fd 时
+&lt;目录&gt;/tools/device_identity.py     用 --credentials-fd 且 fd 里有 jump_passwords 时</code></pre>
+        <p>不用 <code>--credentials-fd</code> 时只要 <code>initial-setup.py</code> 一个文件（本版设备名比较仍是 v15 的后缀匹配，没有换成 <code>tools/device_identity.py</code> 的规则，
+          所以只有上面这种情况要带它）。<code>&lt;目录&gt;/tools/</code> 存在时脚本按这个布局 import；同时又在仓库布局里、或两种布局都不成立而运行又要用到 tools 模块时，以 2 退出并写出
+          两种布局各要的文件，不猜；目录里缺用到的模块时以 2 退出，提示里写出缺的文件路径。Leaf 上本地运行不认项目、不判身份，也不做管理服务器直连核对（这一项记
+          <code>DIRECT_SSH_NOT_TESTED</code>，整次 INCOMPLETE、以 2 结束），要到管理服务器上再跑一次只读检查，才算确认管理服务器能直连。</p>
       </div>
 
       <div class="callout">
@@ -14257,7 +14365,7 @@ sudo python3 -B DAY0-Prepare/13-unload.py DAY0-Prepare/&lt;project&gt; --yes
 
 # 若之后确认要删除 setup 管理的项目链接，仍应先 dry-run：
 sudo python3 -B DAY0-Prepare/02-unsetup.py DAY0-Prepare/&lt;project&gt; --dry-run</code></pre>
-          <p><strong>成功判据</strong>unload 只停止并回收当前项目拥有的 Apache/DHCP/monitor/runtime publication；保留范围与 dry-run 一致；项目数据、download archive 和共享大制品仍存在，最终 status 不再声称项目处于 active 服务状态。13-unload 和 02-unsetup 开头各打印一行身份说明（操作员是项目目录的属主；Docker 容器里不打印）；其他用户经 sudo 运行时在入口拒绝，什么都不动；以 sudo 或 root 运行而项目属于普通用户时，02-unsetup 清理的是该操作员 crontab 里 initial-setup 的 auto 任务（<code>crontab -u &lt;操作员&gt;</code>），不是 root 的 crontab。</p>
+          <p><strong>成功判据</strong>unload 只停止并回收当前项目拥有的 Apache/DHCP/monitor/runtime publication；保留范围与 dry-run 一致；项目数据、download archive 和共享大制品仍存在，最终 status 不再声称项目处于 active 服务状态。13-unload 和 02-unsetup 开头各打印一行身份说明（操作员是项目目录的属主；Docker 容器里不打印）；其他用户经 sudo 运行时在入口拒绝，什么都不动；以 sudo 或 root 运行而项目属于普通用户时，02-unsetup 清理的是该操作员 crontab 里 initial-setup 的 auto 任务（<code>crontab -u &lt;操作员&gt;</code>），不是 root 的 crontab。这是旧 <code>--auto</code> watch 的残留清理（保留到 K6r）：<code>--auto</code> 已随 v3.1.3 退役，02-unsetup 只处理指针还指着的那个项目，其余残留按「<a href="#v2-initial-setup">IB 交换机初始配置：initial-setup</a>」里的手工步骤清理。</p>
           <p><strong>失败处理</strong>项目、DHCP、URL prefix、软链接或 receipt 身份不匹配时立即停止，不使用 <code>--force-dhcp</code> 越过不明配置。备份未验证时不继续。基础设施和软件包清理由操作员另行审阅 unsetup/teardown 提示。客户端 infra 回滚（<code>deploy_infra.py --teardown</code>）要在 <code>13-unload.py</code> 和 <code>02-unsetup.py</code> 之前做：unsetup 删掉指针 <code>DAY0-Prepare/activate-project</code> 后 <code>infra/logs</code> 悬空，deploy_infra.py 没有日志目录可写，会拒绝运行。以 root 运行而身份核对不通过时（例如 sudo 的发起人不是项目属主，或经 sudo 而项目属主在 passwd 里查不到），13-unload 在确认之前、02-unsetup 在停止 monitor 之前以 1 退出，什么都不动（<code>--dry-run</code> 同样），按提示切换到项目属主、由 root 直接登录或 chown 项目目录后重新运行；root 直接登录而项目属主在 passwd 里查不到时，13-unload 和它调用的 02-unsetup 各多打一条 WARN（带 <code>sudo chown</code> 提示；直接运行 02-unsetup 时是一条），其余与 v3.1.1 相同。</p>
           <p><strong>下一步</strong>保留服务器上的数据直到客户确认；需要重新部署时从 Runbook 5 完整 load，而不是手工恢复单个链接或服务。</p>
         </div>

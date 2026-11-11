@@ -26,11 +26,11 @@ def report(names=NAMES):
     return data
 
 
-MANY_NAMES=tuple(f'ew-spine{number:03d}.aus04.gs1.nsw.sharonai.au' for number in range(1,10))
+MANY_NAMES=tuple(f'ew-spine{number:03d}.pod01.dc1.lab.example.com' for number in range(1,10))
 FOUR_PER_LINE=(
-    'ew-spine001.aus04.gs1.nsw.sharonai.au, ew-spine002.aus04.gs1.nsw.sharonai.au, ew-spine003.aus04.gs1.nsw.sharonai.au, ew-spine004.aus04.gs1.nsw.sharonai.au',
-    'ew-spine005.aus04.gs1.nsw.sharonai.au, ew-spine006.aus04.gs1.nsw.sharonai.au, ew-spine007.aus04.gs1.nsw.sharonai.au, ew-spine008.aus04.gs1.nsw.sharonai.au',
-    'ew-spine009.aus04.gs1.nsw.sharonai.au',
+    'ew-spine001.pod01.dc1.lab.example.com, ew-spine002.pod01.dc1.lab.example.com, ew-spine003.pod01.dc1.lab.example.com, ew-spine004.pod01.dc1.lab.example.com',
+    'ew-spine005.pod01.dc1.lab.example.com, ew-spine006.pod01.dc1.lab.example.com, ew-spine007.pod01.dc1.lab.example.com, ew-spine008.pod01.dc1.lab.example.com',
+    'ew-spine009.pod01.dc1.lab.example.com',
 )
 
 
@@ -131,7 +131,7 @@ class CompactSummaryDirectTests(unittest.TestCase):
 
     def test_download_measurement_is_one_line_with_http_and_curl_status(self):
         data=report()
-        name='ew-leaf001.aus04.gs1.nsw.sharonai.au'
+        name='ew-leaf001.pod01.dc1.lab.example.com'
         data['os_downloads']=[dict(hostname=name,stage='os-0003',measurement=dict(attempt=1,
             bytes_downloaded=2966461709,elapsed_seconds=270.936,average_bytes_per_second=10950000,
             http_status=200,curl_exit=0))]

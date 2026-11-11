@@ -83,9 +83,9 @@ Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经
   link 不是 up、type 不是 eth 时照旧拒绝。
 - 算作与管理口无关的接口：`eth2` 以上、`ethA-B`（A≥2）、`swp`/`ibp`/`bond`/`vlan` 加数字的各写法、`lo`，
   以及 `fnm<数字>`。**接口普查之前只认 fnm**：别的陌生接口名（例如 `ib0`）和越过 eth1 的范围（例如
-  `eth0-2`）仍然让这台设备的读回不合格，这台设备失败，在网络阶段之前拒绝：已配置的设备不做任何改动；
-  未配置的设备（主机名为空或 `NVOS`、没有地址和网关）在 `--apply` 时已经跑过 Initial，Initial 的两项设置
-  （auto-save、ZTP config-save）已写入并保存，网络和之后的阶段不做。只读检查不写设备。
+  `eth0-2`）仍然让这台设备的读回不合格，这台设备失败，在任何网络写入之前拒绝：已配置的设备不做任何改动；
+  未配置的设备（主机名为空或 `NVOS`、没有地址和网关）和带 `--force` 补缺的部分配置设备，在 `--apply` 时已经跑过 Initial，
+  Initial 的两项设置（auto-save、ZTP config-save）已写入并保存，网络和之后的阶段不做。只读检查不写设备。
 - 报错文字不变；报告和设备日志里另有一行
   `LOCATION: readback line <行号>, interface <接口名>, setting <设置项>`，只写行号、接口名和设置项，
   不写地址等值。行号按设备返回的原始读回计算。
@@ -329,15 +329,15 @@ Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在�
 | U 经 sudo | 切到 U 执行 | 以 root 运行 |
 | 别的普通用户 V 经 sudo | 拒绝 | 以 root 运行 |
 
-- 拒绝都在运行锁之前、以 2 退出，提示写明项目属于谁、当前是谁和可行的办法；sudo 的 `SUDO_USER`、`SUDO_UID` 无效，或项目
-  属主在 passwd 里查不到，也拒绝。
+- 拒绝都在运行锁之前、以 2 退出，提示写明项目属于谁、当前是谁和可行的办法；sudo 的 `SUDO_USER`、`SUDO_UID` 无效（包括在 root
+  的 shell 里再用 sudo 运行：这时 `SUDO_USER` 是 root），或项目属主在 passwd 里查不到，也拒绝。
 - 切到 U 执行：root 父进程用 `runuser -u U -- env -i …` 以同一个 Python 解释器重新执行本脚本、参数不变，并等它结束，
   按子进程的退出码退出（子进程被信号结束时是 128+信号号）；Ctrl-C 和 SIGTERM 转发给子进程。父进程不拿运行锁。
 - 子进程的环境只有这些：父进程环境里有的 `PATH`、`LANG`、`LC_ALL`、`TERM`；`--ib-initial-password-env` 指定的变量
   （默认 `NVOS_INITIAL_PASSWORD`），加 `--factory-default-admin` 时另有 `NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD`（父进程环境
   里有才带）；`HOME`（U 在 passwd 里的家目录）、`USER`、`LOGNAME`（都是 U）；标记变量 `HTTP_ZTP_ROOT_PARENT=1`
-  （子进程据此不再切换）。`--credentials-fd` 的 fd 原样交给子进程读。
-- **已知限制**：上面这些环境变量是以 `名字=值` 写在 `runuser` 的命令行参数里的，切换期间同机用户用 `ps` 能看到。所以 root
+  （兜底标记：子进程以 U 运行，本来就不会再切换；它也传给子进程起的全部后代）。`--credentials-fd` 的 fd 原样交给子进程读。
+- **已知限制**：上面这些环境变量是以 `名字=值` 写在 `runuser` 的命令行参数里的，子进程运行的整个期间（`runuser` 一直在）同机用户用 `ps` 都能看到。所以 root
   运行时，环境里不要有 `--ib-initial-password-env` 指定的变量（默认 `NVOS_INITIAL_PASSWORD`）或
   `NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD`，初始密码改用交互输入或 `--credentials-fd`。经 sudo 运行时 sudo 默认会清掉这类
   变量，`sudo -E` 或 `sudo 变量名=…` 会把它们带进来。本版不改这一点。
@@ -400,7 +400,7 @@ cron 行部署后每 10 分钟以参数错误退出、往 `auto-cron.log` 追加
 | 128+n | root 运行、切到项目属主执行时，子进程被信号 n 结束 |
 
 2 有两种意思（入口错误、执行中有设备没做完），按报告和 `summary.json` 的逐台结果区分。Ctrl-C 按的时机不同，结果也不同：
-执行阶段按下，整次停下、FAILED、以 1 退出；在口令提示处按下，以 2 退出；在 OOB 快照阶段按下，进程被 SIGINT 结束
+执行阶段按下，整次停下、FAILED、以 1 退出；在 NVOS 初始密码或 IB 目标密码的提示处按下，以 2 退出；在 OOB 快照阶段按下，进程被 SIGINT 结束
 （root 运行时父进程以 130 退出）。
 
 ## 输出

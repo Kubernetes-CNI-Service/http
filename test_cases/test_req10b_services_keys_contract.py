@@ -275,32 +275,77 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
             args = self.initial.parse_args()
         self.assertTrue(args.force)
 
-    def test_leaf_program_remains_single_file_and_stdlib_only(self) -> None:
+    def test_leaf_program_imports_only_fixed_tools_modules_inside_functions(self) -> None:
+        # v3.1.3 guide WP-13 :1249-1254 (O5 default (d), guide :258; the import form is WP-5's
+        # O5 section :656-674).  Renamed from test_leaf_program_remains_single_file_and_stdlib_only,
+        # which refused yaml/importlib/openpyxl at any level and every sys.path append/insert/extend:
+        # O5 adds one sys.path insert and function-level `import tools.<module>` (guide :1233).  This
+        # pins the written form only; the runtime layout choice (Leaf imports no yaml,
+        # tools.project_contract or tools.operator_identity; an unclear layout is refused) is pinned
+        # by WP-9's LeafLayoutImportTests (guide :1254).
+        from test_cases.test_ibsw225_http_initializer_guard_protocol import _is_standard_library
+
         tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
-        imports = {
-            alias.name.split(".", 1)[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
+        # Guide :1251 (= O5 :258, WP-5 :665): the seven package names.
+        allowed_tools = {
+            "tools.operator_identity", "tools.project_contract", "tools.device_identity",
+            "tools.credentials_fd", "tools.inventory_subset", "tools.hostname_ranges",
+            "tools.login_path",
         }
-        imports.update(
-            node.module.split(".", 1)[0]
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module
-        )
-        self.assertFalse({"yaml", "importlib", "openpyxl"} & imports)
-        self.assertFalse(
-            any(
-                isinstance(node, ast.Attribute)
-                and isinstance(node.value, ast.Attribute)
-                and isinstance(node.value.value, ast.Name)
-                and node.value.value.id == "sys"
-                and node.value.attr == "path"
-                and node.attr in {"append", "insert", "extend"}
-                for node in ast.walk(tree)
-            ),
-            "the leaf script must not add local module lookup paths",
-        )
+        # Guide :1250: top level standard library only, the same caliber as
+        # test_ibsw225_http_initializer_guard_protocol signature_and_portability.
+        top_level = set()
+        for statement in tree.body:
+            if isinstance(statement, ast.Import):
+                top_level.update(alias.name.split(".", 1)[0] for alias in statement.names)
+            elif isinstance(statement, ast.ImportFrom):
+                top_level.add((statement.module or "").split(".", 1)[0])
+        self.assertEqual(set(), {root for root in top_level if not _is_standard_library(root)})
+        # Guide :1251: any other import is `import tools.<module>` of the seven, inside a
+        # function; flat `import device_identity`, `from tools import ...` and relative imports
+        # are refused.
+        in_functions = {
+            node
+            for function in ast.walk(tree)
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+            for node in ast.walk(function)
+        }
+        roots = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = ["." * node.level + (node.module or "")]
+            else:
+                continue
+            for name in names:
+                root = name.split(".", 1)[0]
+                roots.add(root)
+                if _is_standard_library(root):
+                    continue
+                with self.subTest(line=node.lineno, name=name):
+                    self.assertIsInstance(node, ast.Import)
+                    self.assertIn(name, allowed_tools)
+                    self.assertIn(node, in_functions)
+        # Guide :1252: yaml, openpyxl and importlib stay refused at every level.
+        self.assertFalse({"yaml", "importlib", "openpyxl"} & roots)
+        # Guide :1253: the only sys.path append/insert/extend is one insert in _import_tools.
+        path_changes = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Attribute)
+            and isinstance(node.value.value, ast.Name)
+            and node.value.value.id == "sys"
+            and node.value.attr == "path"
+            and node.attr in {"append", "insert", "extend"}
+        ]
+        owners = [node for node in tree.body
+                  if isinstance(node, ast.FunctionDef) and node.name == "_import_tools"]
+        self.assertEqual(1, len(owners), "one module-level _import_tools")
+        self.assertEqual(["insert"], [node.attr for node in path_changes],
+                         "exactly one sys.path change, an insert")
+        self.assertIn(path_changes[0], set(ast.walk(owners[0])),
+                      "the sys.path insert is inside _import_tools")
 
     def test_bounded_global_subset_rejects_excessive_nesting(self) -> None:
         source = "\n".join("  " * level + f"level{level}:" for level in range(72)) + "\n"
