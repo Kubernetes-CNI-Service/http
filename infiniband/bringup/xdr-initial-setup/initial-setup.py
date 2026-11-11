@@ -212,11 +212,67 @@ def _guarded_main():
         # Pure syntax rejection does not read inputs/passwords/create the lock.
         parse_args()
     try:
+        child_code = _run_as_operator_if_root(requests_help)
+    except SetupError as exc:
+        # Before the guard and main: no report is open yet.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if child_code is not None:
+        return child_code
+    try:
         with _runtime_instance_guard():
             return _standalone_main_with_report_cleanup()
     except _InstanceGuardError as exc:
         print(f"{exc.code}: {exc}", file=sys.stderr)
         return 75 if exc.code == "ALREADY_RUNNING" else 2
+
+
+def _run_as_operator_if_root(requests_help):
+    """I-006 (guide WP-9): root runs this entry again as the project's operator and waits for it.
+
+    Help never computes an identity.  Only the repository layout has a project tree (O5): a Leaf
+    directory or a desktop copy runs unchanged.  The project is --project-dir as given, else the one
+    DAY0-Prepare/activate-project selects; none means unchanged, an invalid pointer raises.  The rule
+    is tools/operator_identity.py's: a refusal raises SetupError (exit 2 before the guard); root acting
+    for another operator starts `runuser -u <operator> -- env -i ...` with the initial-password
+    variable kept and the --credentials-fd fd passed, takes no guard itself and returns the child's
+    exit code.  Otherwise prints the identity line and returns None: this process runs.
+    """
+    if requests_help:
+        return None
+    # The repository layout of _import_tools: exactly <repo>/tools/device_identity.py, no Leaf tools/.
+    script = _SELF_SOURCE_PATH
+    repository = script.parents[3] if len(script.parents) > 3 else None
+    if (repository is None or not (repository / "tools" / "device_identity.py").is_file()
+            or (script.parent / "tools").is_dir()):
+        return None
+    args = parse_args()
+    project = args.project_dir
+    if project is None:
+        project_contract = _import_tools("tools.project_contract")
+        try:
+            project = project_contract.active_project_dir(repository)
+        except project_contract.ActiveProjectPointerError as error:
+            raise SetupError(str(error)) from None
+        if project is None:
+            return None
+    operator_identity = _import_tools("tools.operator_identity")
+    identity = operator_identity.resolve_operator(project)
+    if identity.refusal is not None:
+        raise SetupError(identity.refusal)
+    print(identity.banner, file=sys.stderr)
+    if not operator_identity.needs_reexec(identity):
+        return None
+    keep = [args.ib_initial_password_env]
+    if args.factory_default_admin:
+        keep.append("NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD")
+    code = operator_identity.run_as_operator(
+        identity.operator, script, sys.argv[1:], keep=keep,
+        pass_fds=() if args.credentials_fd is None else (args.credentials_fd,))
+    # The operator's run has ended: 0, 1 FAILED, 2 (entry error or INCOMPLETE), 75 busy, 128+n on
+    # signal n.  This version only exits with it; H4 (v3.1.10) adds the root-side hosts write here,
+    # and a partial success is 2 too (guide WP-9 step 5).
+    return code
 
 
 _PROGRESS_HEARTBEAT_SECONDS = 30
@@ -1800,7 +1856,8 @@ def _neutral_services(tool: Path) -> dict[str, str]:
     return values
 
 
-def _service_profile(tool: Path) -> Optional[dict[str, object]]:
+def _service_profile(tool: Path, *, neutral_dir: Optional[Path] = None) -> Optional[dict[str, object]]:
+    """The cached services from <tool>/01-global.yaml; neutral_dir holds infra-neutral.conf (None: tool)."""
     global_path = tool / "01-global.yaml"
     if not global_path.is_file():
         return None
@@ -1812,7 +1869,7 @@ def _service_profile(tool: Path) -> Optional[dict[str, object]]:
     system = merged.get("system")
     if not isinstance(system, dict):
         raise SetupError("01-global.yaml IB system must be a mapping")
-    neutral = _neutral_services(tool)
+    neutral = _neutral_services(tool if neutral_dir is None else neutral_dir)
     output: dict[str, object] = {}
     for key, field, fallback in (
         ("dns", "server", "DNS"), ("ntp", "server", "NTP"),
@@ -1917,21 +1974,24 @@ class _CacheInputSnapshot:
     def is_file(self, path):
         return str(path) in self.images
 
-    def public_keys(self, tool):
-        directory = tool / "publickey"
+    def public_keys(self, tool, public_key_dir=None):
+        directory = tool / "publickey" if public_key_dir is None else public_key_dir
         return sorted(Path(name) for name in self.images
                       if Path(name).parent == directory and Path(name).name.endswith(".pub"))
 
 
 def _public_key_profile(tool: Path, *, validate_with_ssh_keygen: bool = True,
-                        input_snapshot: Optional[_CacheInputSnapshot] = None
+                        input_snapshot: Optional[_CacheInputSnapshot] = None,
+                        public_key_dir: Optional[Path] = None
                         ) -> list[dict[str, str]]:
-    directory = tool / "publickey"
+    """The *.pub keys in public_key_dir (None: <tool>/publickey); empty files are skipped."""
+    directory = tool / "publickey" if public_key_dir is None else public_key_dir
     if input_snapshot is None and not directory.is_dir():
         return []
     result: list[dict[str, str]] = []
     validator: Optional[str] = None
-    paths = input_snapshot.public_keys(tool) if input_snapshot is not None else sorted(directory.glob("*.pub"))
+    paths = (input_snapshot.public_keys(tool, public_key_dir) if input_snapshot is not None
+             else sorted(directory.glob("*.pub")))
     for path in paths:
         try:
             source = (input_snapshot.read(path).decode("utf-8") if input_snapshot is not None
@@ -2110,7 +2170,8 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                       validate_public_keys_with_ssh_keygen: bool = False,
                       allow_baked_missing_global: bool = False,
                       input_snapshot=None,
-                      _admission_out=None
+                      _admission_out=None,
+                      public_key_dir: Optional[Path] = None
                       ) -> Optional[tuple[int, list[Target]]]:
     if _admission_out is not None and (
         type(_admission_out) is not dict or _admission_out
@@ -2165,9 +2226,10 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                     return None
             elif payload["global"] is not None and not allow_baked_missing_global:
                 return None
-            source_dir = public_key_tool / "publickey"
+            source_dir = public_key_tool / "publickey" if public_key_dir is None else public_key_dir
             source_available = captured is not None or source_dir.is_dir()
-            paths = captured.public_keys(public_key_tool) if captured is not None else source_dir.glob("*.pub")
+            paths = (captured.public_keys(public_key_tool, public_key_dir) if captured is not None
+                     else source_dir.glob("*.pub"))
             if source_available and any(
                 mtime_ns(path) > mtime_ns(cache_path)
                 for path in paths
@@ -2178,6 +2240,7 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                     public_key_tool,
                     validate_with_ssh_keygen=validate_public_keys_with_ssh_keygen,
                     input_snapshot=captured,
+                    public_key_dir=public_key_dir,
                 ) != payload["public_keys"]:
                     return None
         targets = [
@@ -3585,7 +3648,9 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
             and type(result.exit_code) is int and result.exit_code == 1
             and not _NETWORK_FAILURE.search(result.output)
         ):
-            pending = extract_command_output(result.output, marker, expected_exit_code=1)
+            # I-005: the pending diff passes the same readback entry before the owned check.
+            pending = _split_comma_interface_lines(
+                extract_command_output(result.output, marker, expected_exit_code=1))
             if not _validate_owned_pending(target.ib, pending):
                 raise SetupError("pending diff returned 1 without verifiable owned changes")
             result.output = pending
@@ -3618,6 +3683,7 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
         error.report_summary = f"{exc}; device output withheld"
         raise error from None
     if ib_command == ["nv", "config", "diff", "-o", "commands"]:
+        result.output = _split_comma_interface_lines(result.output)
         _validate_owned_pending(target.ib, result.output)
     return result
 
@@ -3801,6 +3867,67 @@ def initial_configuration_commands() -> list[list[str]]:
     ]
 
 
+def _split_comma_interface_lines(readback: str) -> str:
+    """The NVUE readback entry (I-005): one line per member of `nv set interface A,B,... <rest>`.
+
+    NVUE merges interfaces with the same setting into one comma line (`eth0-1,fnm1 link state
+    up`).  Only such lines change, once, here (guide WP-12, criterion 2); every other line, a
+    lone `eth0-1` line included, is kept byte for byte.  Members are not judged here: the
+    management Network readback refuses an unqualified one.
+    """
+    lines = readback.split("\n")
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"(\s*nv\s+set\s+interface\s+)([^\s,'\"\\]+(?:,[^\s,'\"\\]+)+)(\s.*)?",
+                             line, re.S)
+        if match is not None:
+            prefix, members, rest = match.group(1), match.group(2), match.group(3) or ""
+            lines[index] = "\n".join(prefix + member + rest for member in members.split(","))
+    return "\n".join(lines)
+
+
+def _management_selector_ports(selector: str) -> Optional[tuple[str, ...]]:
+    """The reserved ports an interface selector names; () when unrelated, None when unqualified.
+
+    This is a read-only disjointness proof, not a range expander: unknown aliases or groups
+    might include the reserved management ports.  `fnm<N>` is unrelated (I-005 O16).
+    """
+    if selector in {"eth0", "eth1"}:
+        return (selector,)
+    if selector == "eth0-1":
+        return ("eth0", "eth1")
+    eth_range = re.fullmatch(r"eth([0-9]+)-([0-9]+)", selector)
+    if eth_range is not None:
+        lower, upper = (int(value) for value in eth_range.groups())
+        return () if 2 <= lower <= upper else None
+    if (re.fullmatch(r"eth(?:[2-9]|[1-9][0-9]+)", selector) is not None
+            or re.fullmatch(r"(?:swp|ibp|bond|vlan)[0-9]+(?:s[0-9]+)?", selector) is not None
+            or re.fullmatch(r"(?:swp|ibp|bond|vlan)[0-9]+-[0-9]+", selector) is not None
+            or re.fullmatch(r"fnm[0-9]+", selector) is not None
+            or selector == "lo"):
+        return ()
+    return None
+
+
+def _management_selector_location(readback: str) -> Optional[tuple[int, str, str]]:
+    """(readback line, member, setting) of the first unqualified interface member, else None.
+
+    I-005 O15: the management Network errors keep their fixed text; the caller that caught
+    one prints this as a separate line.  The line counts the readback as the device returned
+    it, before comma lines are split; the setting names the field, never its value.
+    """
+    for number, line in enumerate(readback.splitlines(), 1):
+        for piece in _split_comma_interface_lines(line).split("\n"):
+            try:
+                tokens = shlex.split(piece)
+            except ValueError:
+                continue  # malformed quoting is refused by the readback; it names no member
+            if (tokens[:3] == ["nv", "set", "interface"] and len(tokens) > 3
+                    and _management_selector_ports(tokens[3]) is None):
+                field = tokens[4:6] if tokens[4:5] in (["ipv4"], ["link"]) else tokens[4:5]
+                return number, tokens[3], " ".join(field)
+    return None
+
+
 def _management_ports_ready(current: str) -> bool:
     """Both reserved ports are link-up and typed eth, read from actual NVUE tokens.
 
@@ -3847,24 +3974,10 @@ def _management_network_facts(current: str) -> tuple[DeviceState, frozenset[str]
                 continue
             if len(tokens) < 4:
                 raise SetupError("invalid management Network interface fact")
-            selector = tokens[3]
-            if selector in {"eth0", "eth1", "eth0-1"}:
-                ports = ("eth0", "eth1") if selector == "eth0-1" else (selector,)
-            else:
-                # This is a read-only disjointness proof, not a range expander.
-                # Unknown aliases/groups might include reserved management ports.
-                disjoint = (
-                    re.fullmatch(r"eth(?:[2-9]|[1-9][0-9]+)", selector) is not None
-                    or re.fullmatch(r"(?:swp|ibp|bond|vlan)[0-9]+(?:s[0-9]+)?", selector) is not None
-                    or re.fullmatch(r"(?:swp|ibp|bond|vlan)[0-9]+-[0-9]+", selector) is not None
-                    or selector == "lo"
-                )
-                eth_range = re.fullmatch(r"eth([0-9]+)-([0-9]+)", selector)
-                if eth_range is not None:
-                    lower, upper = (int(value) for value in eth_range.groups())
-                    disjoint = 2 <= lower <= upper
-                if not disjoint:
-                    raise SetupError("management Network selector is not qualified")
+            ports = _management_selector_ports(tokens[3])
+            if ports is None:
+                raise SetupError("management Network selector is not qualified")
+            if not ports:
                 continue
             field = tokens[4:]
             if not field or field == ["link"] or field == ["ipv4"]:
@@ -4694,7 +4807,7 @@ def verify_management_direct_ssh(device: Device, interface: str, user: str,
             max(connect_timeout * 3, 15))
     result = readonly_direct_ssh_retry("direct password-only IPv4 SSH", address, timeout,
                                       "direct_ssh_attempts", attempt_once, secrets=(password,))
-    output = extract_command_output(result.output, marker)
+    output = _split_comma_interface_lines(extract_command_output(result.output, marker))
     verify_state(device, parse_nvue_state(output))
 
 
@@ -5350,7 +5463,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--version", action="version", version=_REPOSITORY_REVISION,
                         help="print the repository revision of this script without reading project inputs")
-    parser.add_argument("--project-dir", type=Path, help="project/input directory; default: current working directory")
+    parser.add_argument("--project-dir", type=Path,
+                        help=("read this project by its own names: ib.csv, p2p.xlsx (or its one *.xlsx), "
+                              "01-global.yaml, the non-empty *.pub at its root and "
+                              "infiniband/bringup/xdr-initial-setup/infra-neutral.conf; outputs stay under the "
+                              "current directory (default: CSV and P2P from the current directory, global, keys "
+                              "and neutral defaults from this script's directory)"))
     parser.add_argument(
         "--ib-csv", type=Path,
         help="device CSV (default: discover CSV in current directory)",
@@ -5718,6 +5836,7 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
     stages = result_record["stage_status"]
     stage = "authentication"
     credential = None
+    readback = ""
     base_verified = False
     strict_cache = getattr(args, "_strict_cache", None)
     strict = strict_cache is not None and policy is not None and not task.local
@@ -5754,7 +5873,11 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
             log("  BLOCKED: initial IB password change required; read-only mode made no change.")
             return result_record
         stages[stage] = "VERIFIED"
-        state = parse_nvue_state(current.output)
+        # I-005: each Network readback enters here once; comma interface lines are split and
+        # every later consumer reads `body`.  `readback` keeps the device text for the location.
+        readback = current.output
+        body = _split_comma_interface_lines(readback)
+        state = parse_nvue_state(body)
         log(f"  Current: hostname={state.hostname or 'unset'} "
             f"eth0={','.join(state.eth0_addresses) or 'unset'} "
             f"eth1={','.join(state.eth1_addresses) or 'unset'}")
@@ -5766,11 +5889,12 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         stage = "initial"
         stages[stage] = "RUNNING"
         initial_details = {}
-        body, authorized = run_initial_stage(
+        readback, authorized = run_initial_stage(
             target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
             args.connect_timeout, current.output, local=task.local,
             apply=args.apply, authorized=authorized, policy=policy, details=initial_details,
             **stage_context)
+        body = _split_comma_interface_lines(readback)
         stages[stage] = "VERIFIED" if args.apply else "CHECKED"
         state = parse_nvue_state(body)
         needs_base = base_stage_needed(target.ib, state, args.force)
@@ -5799,10 +5923,11 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                                   credential, args.connect_timeout, command, local=task.local,
                                   strict=strict, policy=policy)
                 log(f"  BASE OK [{index}/{len(commands)}]")
-            body = _stage_ib_command(target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-                                     credential, args.connect_timeout,
-                                     ["nv", "config", "show", "-o", "commands"], local=task.local,
-                                     strict=strict, policy=policy).output
+            readback = _stage_ib_command(target, neighbor, args.eth_user, task.ethernet_password,
+                                         args.ib_user, credential, args.connect_timeout,
+                                         ["nv", "config", "show", "-o", "commands"], local=task.local,
+                                         strict=strict, policy=policy).output
+            body = _split_comma_interface_lines(readback)
             state = parse_nvue_state(body)
         verify_state(target.ib, state)
         if needs_base:
@@ -5872,6 +5997,16 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         stages[stage] = "FAILED"
         result_record["reason"] = _authorized_failure_text(exc)
         log(f"  ERROR: {_authorized_failure_text(exc)}")
+        # I-005 O15: a management Network error keeps its fixed text; where an unqualified
+        # interface member sits (line, name, setting; never a value) is a separate line.
+        if str(exc) in ("management Network readback is UNKNOWN",
+                        "management Network setter plan is not qualified",
+                        "management Network post-configuration verification failed; "
+                        "device state is UNKNOWN"):
+            location = _management_selector_location(readback)
+            if location is not None:
+                number, member, setting = location
+                log(f"  LOCATION: readback line {number}, interface {member}, setting {setting or '-'}")
         log("  DEVICE STOP: no further writes or automatic replay; other IB tasks remain eligible.")
     # Keep the final direct probe inside this task, rather than a serial tail.
     if base_verified and credential is not None and not result_record["batch_error"]:
@@ -7020,12 +7155,13 @@ def main(*, method_cycle=None) -> int:
             raise SetupError("--credentials-fd with --apply also needs --yes: fd mode never asks "
                              "for the first-change confirmation")
         jump_password_for = lambda hostname: jump_table.get(jump_key(hostname))  # noqa: E731
+    project = None
     if args.project_dir is not None:
         project = args.project_dir.expanduser().resolve(strict=True)
         if not project.is_dir():
             raise SetupError("--project-dir must be a directory")
         if args.ib_csv is None:
-            args.ib_csv = project / "02-devices_config.csv"
+            args.ib_csv = project / "ib.csv"  # the project's own IB inventory, never 02 (O8; v3.1.1 AP-c)
         if args.p2p is None:
             preferred = project / "p2p.xlsx"
             candidates = [path for path in sorted(project.glob("*.xlsx"))
@@ -7089,19 +7225,26 @@ def main(*, method_cycle=None) -> int:
             raise SetupError(
                 f"cannot create output directory {output_parent}: {exc}"
             ) from exc
-    # global, public keys and the neutral defaults: the managed tool root, else
-    # --project-dir (WP-8 refines its reading), else this script's directory
-    # (O8 table 8-1; CSV, P2P and outputs stay relative to the current directory).
-    tool = (method_cycle.tool_input_root if method_cycle is not None
-            else args.project_dir.expanduser().resolve() if args.project_dir
-            else Path(__file__).resolve().parent)
+    # global, public keys and the neutral defaults (O8 table 8-1): the managed tool root, else the
+    # project's own fixed names under --project-dir (<project>/01-global.yaml, the non-empty *.pub at its
+    # root and the infra-neutral.conf setup writes; read directly, never through the bridges beside this
+    # script, which reach only the active project), else this script's directory.  CSV, P2P and outputs
+    # keep their own bases.  The default and managed calls keep their arguments.
+    if method_cycle is None and project is not None:
+        tool = project
+        key_option = {"public_key_dir": project}
+        neutral_option = {"neutral_dir": project / "infiniband" / "bringup" / "xdr-initial-setup"}
+    else:
+        tool = method_cycle.tool_input_root if method_cycle is not None else Path(__file__).resolve().parent
+        key_option, neutral_option = {}, {}
+    key_dir = key_option.get("public_key_dir", tool / "publickey")
     if args.generate_json:
         ib_devices, eth_devices = load_devices(ib_csv_path)
         links = parse_p2p(p2p_path)
         validate_p2p_links(links)
         targets = build_targets(links, ib_devices, eth_devices)
-        services = _service_profile(tool)
-        public_keys = _public_key_profile(tool)
+        services = _service_profile(tool, **neutral_option)
+        public_keys = _public_key_profile(tool, **key_option)
         global_file = tool / "01-global.yaml"
         save_target_cache(
             cache_path, ib_csv_path, p2p_path, len(ib_devices), targets,
@@ -7126,10 +7269,19 @@ def main(*, method_cycle=None) -> int:
     log(f"Script: {Path(__file__).resolve()} ({_REPOSITORY_REVISION})")
     log(f"Input CSV: {ib_csv_path}")
     log(f"Input P2P: {p2p_path}")
+    # O8 (guide :913): where the device inputs and the project settings come from, as given (the
+    # current directory, --ib-csv/--p2p, --project-dir); different directories are reported, not refused.
+    csv_dir, p2p_dir = (Path.cwd() if value is None else value.expanduser().absolute().parent.resolve()
+                        for value in (args.ib_csv, args.p2p))
+    device_dirs = (f"CSV and P2P from {csv_dir}" if csv_dir == p2p_dir
+                   else f"CSV from {csv_dir}, P2P from {p2p_dir}")
+    log(f"Input sources: {device_dirs}; global, public keys and neutral defaults from {tool}"
+        + ("" if {csv_dir, p2p_dir} == {tool}
+           else " (different directories: check they hold the same project; the run goes on)"))
     source_inputs_available = (
         args.execution_mode in {"management", "ethernet"}
         or (args.execution_mode == "auto" and (
-            (tool / "publickey").is_dir() or (tool / "01-global.yaml").is_file()
+            key_dir.is_dir() or (tool / "01-global.yaml").is_file()
         ))
     )
     authority_paths = [ib_csv_path, p2p_path, _SELF_SOURCE_PATH]
@@ -7147,6 +7299,7 @@ def main(*, method_cycle=None) -> int:
         validate_public_keys_with_ssh_keygen=args.execution_mode == "management",
         allow_baked_missing_global=args.execution_mode != "management",
         **({"_admission_out": cache_admission_out} if cache_observe_profile else {}),
+        **key_option,
     )
     if cached is not None and args.execution_mode == "auto":
         # A disconnected Ethernet leaf legitimately has neither project link.
@@ -7162,6 +7315,7 @@ def main(*, method_cycle=None) -> int:
                 validate_public_keys_with_ssh_keygen=True,
                 allow_baked_missing_global=False,
                 **({"_admission_out": cache_admission_out} if cache_observe_profile else {}),
+                **key_option,
             )
     if cached is not None:
         ib_candidate_count, targets = cached
@@ -7179,8 +7333,8 @@ def main(*, method_cycle=None) -> int:
         validate_p2p_links(links)
         targets = build_targets(links, ib_devices, eth_devices)
         ib_candidate_count = len(ib_devices)
-        services = _service_profile(tool)
-        public_keys = _public_key_profile(tool)
+        services = _service_profile(tool, **neutral_option)
+        public_keys = _public_key_profile(tool, **key_option)
         global_file = tool / "01-global.yaml"
         cache_generated_candidate = (
             _cache_profile_snapshot(services, public_keys)
@@ -7196,7 +7350,7 @@ def main(*, method_cycle=None) -> int:
     cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
     services = cache_payload["services"]
     public_keys = cache_payload["public_keys"]
-    log(f"Public-key input: {tool / 'publickey'}; usable entries={len(public_keys)}")
+    log(f"Public-key input: {key_dir}; usable entries={len(public_keys)}")
     for entry in public_keys:
         log(f"  Queued IB public key: {entry['name']} {entry['fingerprint']}")
     if not public_keys:

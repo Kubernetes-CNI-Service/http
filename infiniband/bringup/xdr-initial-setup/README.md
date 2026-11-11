@@ -66,6 +66,23 @@ P2P、bridge FDB 和 neighbor 表定位尚未初始化的 NVOS IB 交换机，�
 IPv4 SSH 验证失败，脚本会停止配置后续 IB，避免扩大影响。脚本最后汇总 configured、
 skipped 和 failed；存在失败时退出码为 1，输入或启动错误时退出码为 2。
 
+### NVUE 逗号合并的接口和 fnm 接口（I-005）
+
+`nv config show -o commands` 会把设置相同的接口合成一行、用逗号连接，例如
+`nv set interface eth0-1,fnm1 link state up`。脚本读回配置时先把这类行拆成每个接口一行
+（`eth0-1 …`、`fnm1 …`），之后的检查、补缺、核验和待提交检查都只看拆开后的行；不带逗号的行
+原样保留，包括单独的 `eth0-1` 行。
+
+- `eth0`、`eth1`、`eth0-1` 照常记录 link、type、地址和网关；写在逗号行里也按同样的规则检查，
+  link 不是 up、type 不是 eth 时照旧拒绝。
+- 算作与管理口无关的接口：`eth2` 以上、`ethA-B`（A≥2）、`swp`/`ibp`/`bond`/`vlan` 加数字的各写法、`lo`，
+  以及 `fnm<数字>`。**接口普查之前只认 fnm**：别的陌生接口名（例如 `ib0`）和越过 eth1 的范围（例如
+  `eth0-2`）仍然让这台设备的读回不合格，设备失败、不做任何改动。
+- 报错文字不变；报告和设备日志里另有一行
+  `LOCATION: readback line <行号>, interface <接口名>, setting <设置项>`，只写行号、接口名和设置项，
+  不写地址等值。行号按设备返回的原始读回计算。
+- 不修改设备上的 fnm 配置。
+
 ## 输入文件
 
 ### ib.csv
@@ -104,6 +121,36 @@ hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw
 LLDPq 中的纯数字 Ethernet 端口（例如 `15`）自动转换为 Cumulus 接口名 `swp15`。
 同一物理链路正向/反向重复、端点连接自身，或同一设备端口连接多个不同对端都会使输入
 校验失败。
+
+### 各项输入从哪里读：`--project-dir`
+
+| 项 | 不给 `--project-dir`（默认） | 给了 `--project-dir <项目>` |
+|---|---|---|
+| CSV | 当前目录里找（显式 `--ib-csv` 照用） | `<项目>/ib.csv`（不读 `02-devices_config.csv`） |
+| P2P | 当前目录里找（显式 `--p2p` 照用） | `<项目>/p2p.xlsx`；没有时取项目根唯一的 `.xlsx` |
+| global | 脚本所在目录的 `01-global.yaml`（链接，指向当前激活的项目） | `<项目>/01-global.yaml` |
+| 公钥 | 脚本所在目录 `publickey/` 下的非空 `*.pub`（当前激活项目的公钥） | `<项目>` 根上的非空 `*.pub`（例如 `laptop.pub`、`mgmt-server.pub`），空文件跳过 |
+| 中性默认值 | 脚本所在目录的 `infra-neutral.conf` | `<项目>/infiniband/bringup/xdr-initial-setup/infra-neutral.conf`（setup 写出） |
+| 报告、以太网快照、目标缓存 | 当前目录下的 `xdr-initial-setup-logs/`（显式参数照用） | 同左，仍按当前目录 |
+
+- 给了 `--project-dir` 时只按项目自己的固定文件名读，不经脚本旁边的 `01-global.yaml`、`publickey`
+  链接（它们只指向当前激活的项目），所以也能检查没有激活的项目。项目根上一个非空 `*.pub` 都没有时，
+  报告里打一行 WARNING，不装公钥，也不因此拒绝运行。
+- 报告开头的 `Input sources:` 一行写明 CSV、P2P 来自哪个目录，global、公钥、中性默认值来自哪个目录；
+  两者不同时这一行会注明，但只是提示，不拒绝运行。
+- 现场从脚本目录运行时，当前目录就是脚本所在目录，所有输入、输出都落在当前激活的项目里。
+
+### 设备名怎样对应
+
+CSV 和 P2P 里的设备名按下面的规则对应（v15 的规则）：
+
+- 先按全名比较：去掉首尾空白和结尾的 `.`，不分大小写；
+- 全名对不上时，接受一边以 `-<另一边>` 结尾、并且恰好只有一台这样的设备（后缀匹配，例如 P2P 的名字带
+  站点前缀）；有多台或没有都算对不上；
+- IB 端对不上时跳过这条链路并打 WARNING；Ethernet 端对不上时整次失败。
+
+本版 initial-setup 仍有后缀匹配：名字比较普查里只靠后缀对上的端点不为 0，所以没有换成
+`tools/device_identity.py` 按短名比较、不做后缀匹配的规则；什么时候换，等改 P2P 的名字或 G14-1 的别名表。
 
 ## 使用方法
 
@@ -253,6 +300,22 @@ python3 initial-setup.py --execution-mode ethernet \
 ```
 
 `--execution-mode auto` 只判断执行位置（本地 Ethernet 还是管理服务器）。
+
+### 以 root 或 sudo 运行（I-006）
+
+从仓库运行时，进运行锁之前先认项目：给了 `--project-dir` 就用它，否则取
+`DAY0-Prepare/activate-project` 指向的项目；没有指针时原样运行，指针无效时报错、以 2 退出。
+认出项目后按 `tools/operator_identity.py`（与 load 相同的规则）判身份，并在 stderr 打印一行
+身份说明，例如 `操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行`：
+
+- 被 root 运行（直接登录或经 sudo）、项目属于普通用户 U 时，会切到项目属主 U 执行：root 父进程用
+  `runuser -u U` 起子进程并等它结束，按子进程的退出码退出（子进程被信号结束时是 128+信号号）。
+  子进程的环境只保留 PATH、LANG、LC_ALL、TERM 和 `--ib-initial-password-env` 指定的变量
+  （`--factory-default-admin` 时另有 `NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD`），HOME 取 U 在
+  passwd 里的家目录；`--credentials-fd` 的 fd 原样交给子进程读。父进程不拿运行锁。
+- 别的用户直接运行或经 sudo 运行 U 的项目：在运行锁之前拒绝、以 2 退出，提示项目属于谁、当前是谁
+  和可行的办法。项目属于 root 时以 root 执行。
+- OOB Leaf 上的同目录布局和桌面拷贝不认项目，也不判身份。
 
 ### 旧 `--auto` 定时任务的移除步骤
 

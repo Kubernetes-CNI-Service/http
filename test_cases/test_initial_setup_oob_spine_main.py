@@ -26,7 +26,8 @@ Fixture rewrites (guide :835 and :765 class 4; no assertion was relaxed):
 - main() is called in-process (never _guarded_main or a `__main__` subprocess), HOME points into the
   temporary project, time.sleep is patched (verify_ipv4_login waits 10 s, guide :173).
 - No empty `<project>/publickey/` (guide :835: v3.1.1 layout; 0 keys either way).
-- `infra-neutral.conf` sits at the tool root, not `infra/` (O6, guide :259: DEV local read).
+- `infra-neutral.conf` sits where --project-dir reads it, `<project>/infiniband/bringup/xdr-initial-setup/`,
+  not `infra/` (O6, guide :259: DEV local read; WP-8 table 8-1, :923).
 - v15 imported `test_desktop_initial_setup` for its global and password; local equivalents here:
   the global carries a synthetic hash and the IB target is assembled at run time (public audit), and
   ProjectPasswordPolicy.password/matches are patched as v15 did.
@@ -371,9 +372,11 @@ class OobSpineMainTests(unittest.TestCase):
         target_password = secret("ib-target")
         with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack:
             root = Path(directory)
-            # O6 (guide :259): the neutral defaults are read from the tool root (DEV local read).
-            (root / "infra-neutral.conf").write_text(
-                "DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
+            # O6 (guide :259): one local neutral file (DEV local read), under --project-dir the
+            # project's infiniband/bringup/xdr-initial-setup/ one (WP-8 table 8-1, :923).
+            neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+            neutral.parent.mkdir(parents=True, exist_ok=True)
+            neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
             (root / "01-global.yaml").write_text(global_text())
             devices = []
             with (root / "ib.csv").open("w", newline="") as stream:

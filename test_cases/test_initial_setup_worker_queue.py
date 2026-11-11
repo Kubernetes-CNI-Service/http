@@ -403,8 +403,11 @@ class WorkerQueueTests(unittest.TestCase):
             p2p_path = root / "p2p.dot"
             p2p_path.write_text("".join(f'"{name}":"eth0" -- "{JUMP}":"swp{number}"\n'
                                         for number, name in enumerate(names, 1)))
-            # O6 (guide :259): the neutral service defaults are read from <tool>/infra-neutral.conf.
-            (root / "infra-neutral.conf").write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
+            # O6 (guide :259): the neutral service defaults are one local infra-neutral.conf, under
+            # --project-dir the project's infiniband/bringup/xdr-initial-setup/ one (WP-8 table 8-1, :923).
+            neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+            neutral.parent.mkdir(parents=True, exist_ok=True)
+            neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
             home = root / "home"
             home.mkdir()
             argv = [str(INITIAL), "--project-dir", str(root), "--ib-csv", str(csv_path),
@@ -540,6 +543,26 @@ class WorkerQueueTests(unittest.TestCase):
         self.assertEqual(keys, ["example-ib001"])
         self.assertIn("not-attempted=1", output)
         self.assertIn("BATCH STOP", output)
+
+    # -- v3.1.3 WP-11: R-011 TEST-tracker acceptance gap (guide :1124, :1126) ----------------------
+    # I21 (TEST tracker 参考/TEST问题跟踪/user-test-issue-tracker.md:3714 "重复任务拒绝"): the same IB
+    # (host names compared case-insensitively) queued twice is refused before any task starts.
+    # v15 run_prepared_tasks :4398-4400 (参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py).
+    def test_r011_i21_duplicate_ib_task_is_refused_before_any_task_starts(self):
+        tasks = lifecycle_tasks(2)
+        first = tasks[0]
+        tasks.append(app.PreparedIBTask(
+            app.Target(replace(first.target.ib, hostname="EXAMPLE-IB001"), first.target.ethernet,
+                       "swp2", "eth0"), first.neighbor, "", False))
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(app, "execute_ib_task",
+                             side_effect=AssertionError("no task may start")) as execute, \
+                patch.object(app, "log", lambda message="": None):
+            args = SimpleNamespace(max_workers=16, task_timeout=20, report=Path(directory) / "report.log",
+                                   apply=False, yes=False)
+            with self.assertRaisesRegex(app.SetupError, "duplicate IB tasks"):
+                app.run_prepared_tasks(tasks, args, None, FACTORY, None, [], None)
+        execute.assert_not_called()
 
 
 if __name__ == "__main__":

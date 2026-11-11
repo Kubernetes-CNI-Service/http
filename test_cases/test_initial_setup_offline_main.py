@@ -4,6 +4,9 @@ What: the CLI help, --plan and --generate-json need no device; --max-workers 17 
 any output; and the real main() of a read-only management run, with only SSH replaced, keeps
 snapshots, IB selection counts, the worker count, failure isolation, direct-SSH retries, the FDB
 EUI-64 candidate, the read-only password-expiry block and the compact console versus full report.
+RefusalExitCodeTests (v3.1.3 guide WP-9 :1025-1026, N18): an operator who refuses the first-change
+confirmation ends the whole run FAILED with exit 1 and no device write (问题文档 I-050, R-012 design
+:589, v3.1.2 guide :1431).
 
 Expectation sources (not derived from the implementation):
 - The v15 delivered test test_desktop_initial_setup.py::OfflineMainWorkflowTests (:1465-1779);
@@ -21,7 +24,8 @@ Fixture rewrites (guide :835, class 4 of :765; no assertion is weakened):
   takes the fixed runtime lock, guide :835, :1338); external commands, PTY and exec still fail
   closed;
 - HOME is a temporary directory; no empty <project>/publickey/ (guide :835); the neutral service
-  defaults sit at the project root (O6, guide :259);
+  defaults sit where --project-dir reads them, <project>/infiniband/bringup/xdr-initial-setup/
+  (O6, guide :259; WP-8 table 8-1, :923);
 - a management run with a project global takes the merged strict path: the fake transport answers
   the IB authentication read as a DEV phase session through the real _IBPhase observer and the
   real responder (modelled on test_initial_setup_strict_stage_skeleton.py, not imported);
@@ -119,9 +123,12 @@ class OfflineMainTests(unittest.TestCase):
     """Real input/cache/snapshot/stage/summary flow, with SSH only replaced."""
 
     def create_project(self, root: Path, count: int = 1) -> list:
-        # O6 (guide :259): the neutral defaults are read from <tool>/infra-neutral.conf; no empty
-        # publickey/ directory (guide :835).
-        (root / "infra-neutral.conf").write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
+        # O6 (guide :259): the neutral defaults are read from one local infra-neutral.conf, under
+        # --project-dir the project's infiniband/bringup/xdr-initial-setup/ one (WP-8 table 8-1, :923);
+        # no empty publickey/ directory (guide :835).
+        neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+        neutral.parent.mkdir(parents=True, exist_ok=True)
+        neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
         (root / "01-global.yaml").write_text(global_text())
         with (root / "ib.csv").open("w", newline="") as handle:
             writer = csv.writer(handle)
@@ -577,6 +584,94 @@ class OfflineMainTests(unittest.TestCase):
         self.assertEqual(self.workflow_sessions, (17, 34))
         with self.subTest(case="seventeen-devices-sessions"):
             self.assertEqual(total(evidence), self.workflow_sessions[1])
+
+
+class RefusalExitCodeTests(unittest.TestCase):
+    """N18 pinned through the real main(): only SSH, the clock and the terminal are replaced."""
+
+    def test_refusing_first_change_exits_nonzero_without_writes(self):
+        # 问题文档 I-050 (former N18) 「拒绝 → 非 0」 (its default before the move: non-zero, e.g. 1);
+        # R-012 design :589; v3.1.2 guide :1431; v15 RuntimeCoordinator.authorize :4109-4118 and
+        # main :5875 (FAILED = 1); guide table 6-1 row 10 (P1: without a global --apply is allowed).
+        writes, reads, prompts = [], [], []
+
+        def ethernet(device, user, password, command, timeout, **kwargs):
+            answers = {
+                ("hostname",): JUMP + "\n",
+                ("nv", "show", "interface"): "swp1 up up\n",
+                ("ip", "-d", "link", "show"): (
+                    "1: swp1: <UP> mtu 1500 master br_default\n40: br_default: <UP> mtu 1500\n"
+                    "    bridge forward_delay 1500 vlan_filtering 1\n"
+                    "41: ib-mgmt1000@br_default: <UP> mtu 1500 master oob\n"
+                    "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n"),
+                ("bridge", "fdb", "show"): "02:00:00:00:00:0a dev swp1 vlan 1000 master br_default\n",
+                ("ip", "neighbor"): "fe80::a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\n",
+                ("ip", "-j", "address", "show"): json.dumps([{
+                    "ifname": "ib-mgmt1000", "flags": ["BROADCAST", "MULTICAST", "UP"], "operstate": "UP",
+                    "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24, "scope": "global"},
+                                  {"family": "inet6", "local": "fe80::1", "prefixlen": 64, "scope": "link"}]}]),
+                ("ifquery", "ib-mgmt1000"): "iface ib-mgmt1000\n    vrf oob\n",
+            }
+            if tuple(command) not in answers:
+                raise AssertionError("Unexpected OOB command: " + repr(command))
+            return answers[tuple(command)]
+
+        def transport(argv, responder, timeout, **kwargs):
+            text = " ".join(argv)
+            frame = FRAME_RE.search(text)
+            nested = re.search(r"admin@\[?(fe80::[0-9a-f:]+)", text)
+            if (frame is None or nested is None
+                    or not ("nv show system ztp" in text or "nv config show -o commands" in text)):
+                writes.append(text)
+                raise AssertionError("Unexpected device command: " + text)
+            reads.append(text)
+            if responder(f"admin@{nested.group(1)}'s password: ") != FACTORY:
+                raise AssertionError("the IB read must answer with the selected IB credential")
+            # An unconfigured device: only the factory defaults, ZTP still decides.
+            payload = ("service enabled\nstatus in-progress\n" if "nv show system ztp" in text
+                       else "nv set system hostname nvos\nnv set service lldp state enabled\n")
+            nonce = frame.group(1)
+            return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{payload}__HTTP_IB_END_{nonce}__=0\n", 0)
+
+        def answer(prompt=""):
+            prompts.append(prompt)
+            return "n"
+
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
+            root = Path(directory)
+            home = root / "home"
+            home.mkdir()
+            argv = OfflineMainTests.create_project(self, root) + ["--apply"]
+            (root / "01-global.yaml").unlink()
+            stack.enter_context(patch.object(sys, "argv", argv))
+            stack.enter_context(patch.object(app, "REPORT_HANDLE", None))
+            stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
+            stack.enter_context(patch.object(Path, "home", return_value=home))
+            stack.enter_context(patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(patch.object(app, "run_on_ethernet", side_effect=ethernet))
+            stack.enter_context(patch.object(app, "interactive_run", side_effect=transport))
+            stack.enter_context(patch.object(app.subprocess, "run",
+                                             side_effect=AssertionError("External commands forbidden")))
+            stack.enter_context(patch.object(app.time, "sleep", return_value=None))   # guide :173
+            stack.enter_context(patch.object(app, "resolve_initial_ib_password", return_value=FACTORY))
+            stack.enter_context(patch.object(getpass, "getpass",
+                                             side_effect=AssertionError("No password prompt expected")))
+            stack.enter_context(patch.object(builtins, "input", side_effect=answer))
+            console = stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(redirect_stderr(io.StringIO()))
+            try:
+                code = app.main()
+            finally:
+                if app.REPORT_HANDLE is not None:
+                    app.REPORT_HANDLE.close()
+            summaries = list(root.glob("devices-*/summary.json"))
+            self.assertEqual(1, len(summaries))
+            evidence = json.loads(summaries[0].read_text())
+        self.assertTrue(reads, "fixture check: the device was read before the confirmation")
+        self.assertEqual(1, len(prompts), "the first-change confirmation was asked once\n" + console.getvalue())
+        self.assertEqual("FAILED", evidence["result"])
+        self.assertEqual(1, code)
+        self.assertEqual([], writes)
 
 
 if __name__ == "__main__":

@@ -100,8 +100,10 @@ class _World:
                 writer.writerow([host, "eth_jump", address, "", "", ""])
         (root / "p2p.dot").write_text("".join(
             f'"{host}":"eth0" -- "{jump}":"swp1"\n' for host, _a, _m, jump in IBS), encoding="utf-8")
-        (root / "infra-neutral.conf").write_text(
-            "DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n", encoding="utf-8")
+        # WP-8 table 8-1 (guide :923): --project-dir reads the project's own neutral defaults here.
+        neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+        neutral.parent.mkdir(parents=True, exist_ok=True)
+        neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n", encoding="utf-8")
         if global_text:
             (root / "01-global.yaml").write_text(global_text, encoding="utf-8")
         self.devices = {host: app.Device(host, "ib", address, address + "/24", "192.0.2.1", mac, "", "")

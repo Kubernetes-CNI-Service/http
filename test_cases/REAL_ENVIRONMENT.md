@@ -375,12 +375,13 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - Case ID：`TC-REAL-D1-INITIAL-SETUP-MERGED-001`。
 - 名称：合流后的 initial-setup 部署到 AIR、替换现场 v15 后的真机核对。
 - 类型：real-environment。
-- 对应需求：I-020（以 v15 为底合流，owner 2026-11-06）；R-012 设计 §8.3 `--credentials-fd`（WP-5）。
-  本卡由 WP-3、WP-5、WP-8、WP-10 共同填写（指导 5.3 :1344）；目前只有 WP-5 的 `--credentials-fd` 一节，
-  部署后的 sha256 与 `--version`、只读检查与 v15 对比、`--apply`、`summary.json`、报告文件名、`--project-dir`、
+- 对应需求：I-020（以 v15 为底合流，owner 2026-11-06）；R-012 设计 §8.3 `--credentials-fd`（WP-5）；
+  O8 `--project-dir` 按 v3.1.1 的布局读（WP-8，指导 :955）。
+  本卡由 WP-3、WP-5、WP-8、WP-10 共同填写（指导 5.3 :1344）；目前有 WP-5 的 `--credentials-fd` 和 WP-8 的
+  `--project-dir` 两节，部署后的 sha256 与 `--version`、只读检查与 v15 对比、`--apply`、`summary.json`、报告文件名、
   V15 REAL 01～04 并入、回退到 v15 由后续工作包补。
 - 自动化文件与测试方法：`test_credentials_fd`（读入合同）；`test_initial_setup_credentials_fd_workflow`（真实 main、
-  假 SSH/PTY 传输）。
+  假 SSH/PTY 传输）；`test_initial_setup_project_names_workflow`（真实 setup 生成项目、真实 main，`--plan` 与只读检查）。
 - 适用平台：management-server（AIR）。
 - 状态：**NOT RUN / REAL_ENV REQUIRED**
 
@@ -388,11 +389,15 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 
 - 要防止的故障：口令出现在 `ps` 输出、`/proc/<pid>/environ`、报告或 `summary.json` 里；fd 模式下仍然提问。
 - 成功标准：只读检查照常完成，上述位置都看不到口令（R-012 设计 :346；指导 :718）。
+- `--project-dir`（WP-8）要防止的故障：给了 `--project-dir` 仍经脚本旁的链接读到激活项目的 global、公钥，
+  或读 `02-devices_config.csv`、`<项目>/publickey/`；成功标准：只读检查读的是给定项目自己的文件（O8，指导 :915-924）。
 
 ### 前置条件与输入
 
 - AIR 上已部署合流后的代码树（`tools/credentials_fd.py` 随整棵树部署）；有一组可只读登录的跳板和 IB。
 - 口令由操作员当场输入到生成 JSON 的进程里，不写进文件和 shell 历史。
+- `--project-dir`：AIR 上有经 setup 生成的激活项目；最好另有一个经 setup 生成、当前没有激活的项目，
+  它的 `ib.csv` 与 `02-devices_config.csv` 不同（指导 :935-936）。
 
 ### 步骤
 
@@ -410,6 +415,14 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
       （`IFS=` 保留首尾空白，`read -s` 隐藏输入，`printf`、`[`、`echo` 是 shell 内建命令，口令只经管道进 `grep` 的标准输入，不进任何进程的参数、文件和输出；空值不核，记为跳过；指导 :718；R-012 设计 :346）。
    6. 证据字段：执行核对的用户；进程清单（pid、ppid、args）；每个 pid 的可读性与非空行数（或「已退出」）；每个 pid 的阳性对照计数；每个口令编号对每个 pid 的计数或「跳过（空值）」（指导 :718）。
 3. 结束后检查报告和 `summary.json`（指导 :718）。
+4. `--project-dir` 只读检查（指导 :955，WP-8）：在一个与项目无关的新建空目录里运行
+   `python3 <代码树>/infiniband/bringup/xdr-initial-setup/initial-setup.py --project-dir <项目>`（不带 `--apply`），
+   先对激活项目、再对没有激活的项目各跑一次。
+5. 每次记录报告开头的 `Input CSV:`、`Input P2P:`、`Input sources:`、`Public-key input:` 四行，以及报告和
+   `initial-setup-targets.json` 所在的目录；把 cache 里的 `global`、`cache_authority.global_sha256`、`public_keys` 的
+   文件名和指纹，与 `sha256sum <项目>/01-global.yaml` 和 `ssh-keygen -l -E sha256 -f <项目>/<名字>.pub` 对照（指导 :922、:926）。
+6. 对激活项目，再从脚本目录不带 `--project-dir` 跑一次只读检查，比较两次 cache 的 `global_sha256` 和公钥的名字、指纹
+   （指导 :937；`tools/project_contract.py::TRACKED_SETUP_BRIDGES`）。
 
 ### 预期结果
 
@@ -417,15 +430,25 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
 - `ps` 的参数里只有 `--credentials-fd <数字>`，没有口令（R-012 设计 :346；指导 :718）。
 - 第 2 步清单里每个未退出的 pid 的 environ 都可读、非空行数 ≥1，阳性对照计数都 ≥1；每个非空口令对每个 pid 的计数都是 0；报告、`summary.json` 里都看不到口令（R-012 设计 :346；指导 :718）。
 - 口令都被接受时，只读检查的逐台结果与同一批设备用交互方式检查时相同；退出码按 O10（指导 :263）：入口缺键 2，执行中被拒或 INCOMPLETE 也是 2。
+- `--project-dir <项目>`：`Input CSV:` 是 `<项目>/ib.csv`（它是到 `02-devices_config.csv` 的默认链接时显示解析后的路径），
+  `Input P2P:` 是 `<项目>/p2p.xlsx` 解析后的工作簿；cache 的 `global` 是 `<项目>/01-global.yaml`，`global_sha256` 等于它的
+  sha256；公钥是 `<项目>` 根上非空 `*.pub` 的名字和指纹，空文件不在内（O8，指导 :922）。
+- 报告、快照、cache 都在运行目录的 `xdr-initial-setup-logs/` 下，项目目录里没有多出文件（指导 :924）。
+- `Input sources:` 一行写出 CSV、P2P 的目录和 global、公钥、中性默认值的目录；两者不同时注明，照常运行（指导 :913）。
+- 激活项目上，给 `--project-dir` 与从脚本目录不给的两次运行，`global_sha256` 和公钥的名字、指纹都相同（指导 :937）。
+- 项目根上没有非空 `*.pub` 时，报告有 `WARNING: no usable *.pub keys found; no IB public key will be installed.`，
+  不装公钥，也不因此拒绝（指导 :938）。
 
 ### 故障注入与清理
 
 - 在隔离设备上演练：fd 里故意缺 `ib_target_password` 并给 `--apply`，应在碰设备之前以 2 退出（O10）。
 - 证据里不保存 JSON 内容；用完关闭终端，不留含口令的文件。
+- `--project-dir` 只读检查不写设备、不改项目文件；运行目录是新建的空目录，结束后整目录归档作证据（指导 :955）。
 
 ### 自动化状态
 
 - [x] 读入合同与 fd 模式工作流已由上列模块覆盖（WP-5）。
+- [x] `--project-dir` 的读法和「输入来源」一行由 `test_initial_setup_project_names_workflow` 覆盖（WP-8）。
 - [ ] AIR 真机核对（NOT RUN）。
 
 ## TC-REAL-G1-REQ10BC-STRICT-FIXTURE-001 — initial-setup 严格管理路径测试夹具与私有前置输入
@@ -1385,14 +1408,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   full-suite attestation、upload archive、installer、目标 OS/架构与初始服务/网络状态。
 - 步骤：Mac 只执行配置准备和全量测试；Ubuntu VM 分别验证 Native 与 Docker；可直连服务器分别
   验证 Native、Docker 在线 build、Docker 预构建；中转链路用同一 upload archive 和外部 installer
-  重复上述三种后端。每轮只能选择一个生命周期，Docker 成功 deploy 后不得重复 load。
+  重复上述三种后端（REQ16；`DAY0-Prepare/11-load.py::resolve_host_role`、`tools/tar-for-upload.py::build_relay_bundle`、
+  `infra/docker/deploy.sh::build_image`、`infra/docker/deploy.sh::verify_preloaded_image`）。每轮只能选择一个生命周期，Docker 成功
+  deploy 后不得重复 load（`DAY0-Prepare/11-load.py::service_runtime_backend`、`infra/docker/deploy.sh::run_load`）。
 - 预期与证据：保存每轮 source manifest、archive/installer/image 摘要、完整 image/container ID、
-  release/activation、服务、HTTP/DHCP 与命令时间线。Mac 不得启动 Apache/DHCP；VM 的 NAT 管理口
-  不得成为 listener；中转不得手工解压或把 sync-code 当作离线增量包。另保存一次 macOS sender
+  release/activation、服务、HTTP/DHCP 与命令时间线（证据的产生处：`tools/_package_common.py::write_deployment_source_manifest`、
+  `tools/deploy-upload-archive.py::main`、`infra/docker/deploy.sh::show_status`）。Mac 不得启动 Apache/DHCP；VM 的 NAT 管理口
+  不得成为 listener；中转不得手工解压或把 sync-code 当作离线增量包（REQ16；`DAY0-Prepare/11-load.py::resolve_host_role`、
+  `infra/docker/activate.py::project_http_listener_ips`、`tools/deploy-upload-archive.py::deploy_archive`）。另保存一次 macOS sender
   到 Ubuntu rsync 3.2.x receiver 的 Docker sync argv 与最终 owner：sender 不得协商 `-o/-g`，
   receiver 命令不得含 `--chown`、`--usermap` 或 `--groupmap`；同一 deployment lock 的 commit
   阶段必须仅把 source manifest 精确登记的对象及 manifest 本身收敛为 `root:root`，远端额外文件
-  owner 不变。Native 对照轮次：代码 job 保持原 owner/group 传输合同；项目 job 与 Docker 一样不发送 owner/group（I-058）。
+  owner 不变（`tools/sync-code.py::rsync_command`、`tools/deployment_prewrite_guard.py::finalize_source_update`）。Native 对照轮次：代码 job 保持原 owner/group 传输合同；项目 job 与 Docker 一样不发送 owner/group（I-058）。
 - 清理与风险：所有服务、容器、地址和 adapter 直通仅在隔离环境操作；按对应 unload/down 和宿主
   网络恢复流程回到初始状态。任何组合缺少证据不得借用另一组合的 PASS。
 
@@ -3398,13 +3425,16 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 自动化文件与测试方法：`test_cases/test_upgrade_operator_reexec.py`（`UpgradeReexecEntryTests`、
   `InlineReexecParityTests`）、`test_cases/test_upgrade_operator_reexec_workflow.py`（`UpgradeReexecWorkflowTests`）、
   `test_cases/test_operator_identity.py`；cron.sh 的是 `test_cases/test_cron_operator_identity.py`、
-  `test_cases/test_cron_operator_identity_workflow.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、passwd），
-  `runuser` 用记录替身。
+  `test_cases/test_cron_operator_identity_workflow.py`；initial-setup 的是 `test_cases/test_initial_setup_operator_reexec.py`
+  （`InitialSetupOperatorReexecTests`、`LeafLayoutImportTests`）、`test_cases/test_initial_setup_operator_reexec_workflow.py`
+  和 `test_cases/test_initial_setup_offline_main.py` 的 `RefusalExitCodeTests`。本机不能切换 uid：这些测试只替换身份规则的
+  输入（euid、passwd），`runuser` 用记录替身。
 - 覆盖范围：
   - `infiniband/bringup/xdr-upgrade/upgrade.py`、`upgrade2.py`：本卡第 1～6 步（WP-10）。
   - `ethernet/monitor/cron.sh`：交互登录的 root 运行（降权）、sudo 运行（降权）、root crontab（不降权）、worker 跑的
     （root，用操作员的 key），以及操作员直接运行，见第 8 步（WP-11，agentW11 报告第 6 节）。
-  - `initial-setup`：随 D1（v3.1.3），本卡不做。
+  - `infiniband/bringup/xdr-initial-setup/initial-setup.py`：被 root 运行时以子进程等待方式降为项目属主（v3.1.3 D1），
+    见第 9 步（v3.1.3 指导 WP-9 :1042-1047）。
 - 适用平台：
 
 | 平台 | 怎么跑 |
@@ -3423,7 +3453,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `/tmp/http-ib-bringup.runtime.lock`；`runuser`、PAM、sudo 的环境变量。
 - 成功标准：root 的运行只切换一次，切换后进程的 uid、gid、附加组、`HOME`、`USER`、`LOGNAME` 都是操作员的；
   只有白名单变量（`PATH`、`LANG`、`LC_ALL`、`TERM`）被带过去；密码提示出现在原终端；退出码与操作员那次运行一致；
-  项目里新出现的文件属于操作员。
+  项目里新出现的文件属于操作员（设计 §4.3；v3.1.2 指导 WP-10）。
 
 ### 前置条件与输入
 
@@ -3437,56 +3467,77 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 步骤
 
 1. 方式 A：`U` 登录，`sudo python3 -B infiniband/bringup/xdr-upgrade/upgrade.py --inspect-only --devices <一台>`。
-   在另一个终端用 `ps -o user,group,supgrp,args -p <pid>` 看切换后的进程；需要密码时看提示出现在哪个终端。
-2. 方式 B：root 直接登录，在操作员能进的目录里执行同一条命令。
-3. 混用：`U` 不加 sudo 跑一次，再用方式 A、方式 B 各跑一次，确认三次的身份说明行里操作员都是 `U`。
-4. `upgrade2.py --project <项目> --plan` 重复第 1～3 步。
+   在另一个终端用 `ps -o user,group,supgrp,args -p <pid>` 看切换后的进程；需要密码时看提示出现在哪个终端（v3.1.2 指导 WP-10）。
+2. 方式 B：root 直接登录，在操作员能进的目录里执行同一条命令（v3.1.2 指导 WP-10）。
+3. 混用：`U` 不加 sudo 跑一次，再用方式 A、方式 B 各跑一次，确认三次的身份说明行里操作员都是 `U`（I-006 :352；v3.1.2 指导 WP-10）。
+4. `upgrade2.py --project <项目> --plan` 重复第 1～3 步（v3.1.2 指导 WP-10）。
 5. 拒绝：`V` 直接运行、`V` 经 sudo 运行（`U` 的项目），各一次；把指针临时改成普通文件后 root 运行一次（只在隔离副本上做），
-   然后恢复指针。
-6. 带标记：root 执行 `HTTP_ZTP_ROOT_PARENT=1 python3 -B …/upgrade.py --inspect-only …`，确认不切换（以 root 运行）。
+   然后恢复指针（I-006 :351；v3.1.2 指导 :510-511、:516，WP-10）。
+6. 带标记：root 执行 `HTTP_ZTP_ROOT_PARENT=1 python3 -B …/upgrade.py --inspect-only …`，确认不切换（以 root 运行；v3.1.2 已定 2，v3.1.2 指导 WP-4）。
 7. 补充推断（指导第 7 节第 3 条）：`sudo python3 -c 'from pathlib import Path; print(Path.home())'`；
    `runuser -u U -- env -i PATH="$PATH" HOME=/home/U python3 -c 'import os; print(os.listdir("/proc/self/fd"))' 3</dev/null`
-   看 fd 3 是否还在；以 root 运行 OpenSSH 时默认身份文件取哪个家目录。
+   看 fd 3 是否还在；以 root 运行 OpenSSH 时默认身份文件取哪个家目录（v3.1.2 指导 :1455）。
 8. cron.sh（WP-11；agentW11 报告第 6 节的 9 条，本卡第 8.1～8.9 步）：
    1. 交互 root（方式 A，项目属于 `U`）：root 在终端执行 `bash /var/www/html/infiniband/monitor/cron.sh --type ib`。
       证据：stderr 有 `[IDENTITY] 操作员：U…；当前：root 直接运行 → …`；`ps -o user,pid,ppid,args` 显示 cron.sh 以 `U` 运行，
-      没有残留的 root 进程；`/proc/<pid>/environ` 里只有白名单里的变量名；出现「非 root 运行只采集」；`monitor.html` 的 mtime 不变。
+      没有残留的 root 进程；`/proc/<pid>/environ` 里只有白名单里的变量名；出现「非 root 运行只采集」；`monitor.html` 的 mtime 不变（v3.1.2 指导 WP-11）。
    2. sudo：`U` 执行 `sudo bash …/cron.sh`，结果同第 8.1 步；`V` 执行同一命令被拒绝，提示项目属于 `U`、当前是
-      `root 经 sudo（发起人 V）`，退出码非 0，`cron.lock` 不变。
+      `root 经 sudo（发起人 V）`，退出码非 0，`cron.lock` 不变（v3.1.2 指导 WP-11）。
    3. root crontab：在 root 的 crontab 里临时加一行 `bash …/cron.sh >> …/cronjob.log 2>&1`。证据：以 root 运行；ssh 命令行带
-      `-i /home/U/.ssh/id_ed25519`；页面刷新。清理：删掉这一行。
+      `-i /home/U/.ssh/id_ed25519`；页面刷新。清理：删掉这一行（v3.1.2 指导 WP-11）。
    4. worker（页面「采集」）：cron.sh 的 `/proc/<pid>/environ` 里有 `HTTP_ZTP_ROOT_PARENT=1`；`/proc/<pid>/fd` 里能看到 worker
-      交过来的 fd；以 root 运行；用操作员的 key；采集结果 accepted。
-   5. 12-ztp-monitor 交接（native）：cronjob.log 的 `[ZTP-HANDOFF]` 段里，`[IDENTITY]` 行显示 root 父进程或 sudo 发起人。
+      交过来的 fd；以 root 运行；用操作员的 key；采集结果 accepted（v3.1.2 指导 WP-11）。
+   5. 12-ztp-monitor 交接（native）：cronjob.log 的 `[ZTP-HANDOFF]` 段里，`[IDENTITY]` 行显示 root 父进程或 sudo 发起人（v3.1.2 指导 WP-11）。
    6. 操作员直接运行：只采集。load 预建过 `cron.lock` 时能拿到锁，没预建时报「无法打开采集锁…Permission denied」；
-      终端输出里没有 `tee` 报错。
-   7. 方式 B（项目属于 root）：root 运行不降权，页面照常刷新（本机测不了）。
-   8. 迁移期：交换机只认 root 的 key 时，worker 和 crontab 仍能登录（root 的 key 作后备）；只认 `U` 的 key 时也能登录。
-   9. Docker（现场有的话）：只读核对，没有 `[IDENTITY]` 行，行为与 v3.1.1 一致。
+      终端输出里没有 `tee` 报错（v3.1.2 指导 WP-11）。
+   7. 方式 B（项目属于 root）：root 运行不降权，页面照常刷新（本机测不了；v3.1.2 指导 WP-11）。
+   8. 迁移期：交换机只认 root 的 key 时，worker 和 crontab 仍能登录（root 的 key 作后备）；只认 `U` 的 key 时也能登录（v3.1.2 指导 WP-11）。
+   9. Docker（现场有的话）：只读核对，没有 `[IDENTITY]` 行，行为与 v3.1.1 一致（v3.1.2 指导 WP-11）。
 
    平台：22.04 AIR 全部做；24.04 prod 由现场人员执行，AI 只读核对；26.04 pending。不碰 `/etc/hosts`，不改 eth_jump。
+9. initial-setup（v3.1.3 D1，WP-9；项目经 `DAY0-Prepare/activate-project` 选中、属于 `U`）：
+   1. 交互登录的 root、`U` 加 `sudo` 各跑一次只读检查
+      `python3 -B /var/www/html/infiniband/bringup/xdr-initial-setup/initial-setup.py --execution-mode management`：stderr 的身份说明行
+      写「以 U 执行」；运行中在另一个终端用 `ps -o user,pid,ppid,args` 看到子进程属主是 `U`、父进程是 root，运行锁由 `U` 的子进程
+      持有；同时记下 `runuser` 那一行的参数里有没有口令环境变量的值（只记有或没有，不记值）（v3.1.3 指导 :1043；沿
+      `initial-setup.py::_guarded_main` → `initial-setup.py::_run_as_operator_if_root` → `tools/operator_identity.py::run_as_operator` 推出）。
+      为了核对口令变量会不会出现在 `runuser` 的参数里，另做两次只读检查，先放一个假的口令变量（假值不得是真实口令）：root 直接登录时
+      `export NVOS_INITIAL_PASSWORD=<假值>` 后跑一次；`U` 用 `sudo NVOS_INITIAL_PASSWORD=<假值> python3 -B …/initial-setup.py
+      --execution-mode management` 再跑一次。运行期间在另一个终端反复执行 `ps -o pid,ppid,user,args`，看 `runuser` 那一行：只记假值
+      「有没有」出现和看到的时刻（`runuser` 是否一直留到子进程结束），不记值；做完 `unset NVOS_INITIAL_PASSWORD`（owner 2026-11-11 选 (a)，
+      本版不改 M6、发布说明写已知限制，`设计/版本计划/04-待owner答复.md:53`；`tools/operator_identity.py::reexec_command`）。
+   2. 降权后的口令提示仍是隐藏输入；root 直接登录时终端设备属于 root，记录子进程能否打开 `/dev/tty`、提示出现在哪个终端
+      （v3.1.3 指导 :1044，待实测）。
+   3. 终端上按一次 Ctrl-C，分三个时机各做一次：执行阶段（设备命令进行中）父进程以 1 退出；口令提示处以 2 退出；快照阶段父进程
+      以 130 退出。三种都只取消一次、没有残留进程、没有写到一半的设备（v3.1.3 指导 :1045；表 6-1 第 11 行，指导 :754）。
+   4. 用管道 fd 给 `--credentials-fd`（JSON 对象由操作员在终端输入，不进命令历史）：降权后子进程仍能读到，只读检查照常进行
+      （v3.1.3 指导 :1046；fd 经 `pass_fds` 交给子进程，指导 :987）。
+   5. 在 AIR 上对一台待配置的 IB 跑 `--apply`，首次改动确认回答 `n`：整次 FAILED，父进程以 1 退出，设备没有写入（N18；v3.1.3
+      指导 :1047）。
 
 ### 预期结果
 
 - 正向结果：第 1、2、4 步 root 的那次运行只出现一次 `runuser`；工作进程打印一行身份说明，含「以 U 执行」；
   进程属主是 `U`，附加组是 `U` 的；只有白名单环境变量；`SSH_AUTH_SOCK` 不在（用 ssh-agent 的操作员会失去 agent，
   已知限制）；交互密码提示出现在原终端；运行锁由 `U` 的进程持有；退出码与 `U` 直接运行同一命令时相同；
-  项目里新文件属主是 `U`。第 3 步三次的操作员都是 `U`。第 6 步不切换。第 8 步各小项的预期写在各小项里。
+  项目里新文件属主是 `U`。第 3 步三次的操作员都是 `U`。第 6 步不切换。第 8、9 步各小项的预期写在各小项里（设计 §4.3；v3.1.2 指导 WP-10、WP-11；v3.1.3 指导 WP-9）。
 - 拒绝/失败结果：第 5 步退出码 2，提示写明项目属于 `U`、当前是 `V`（或 `root 经 sudo（发起人 V）`）和可行的办法；
-  指针无效时提示含 `activate-project`，什么都不做。
-- 不允许发生的副作用：切换前读 key、问密码、拿运行锁或切换 venv；切换两次；root 属主的新文件出现在项目里。
+  指针无效时提示含 `activate-project`，什么都不做（I-006 :351；v3.1.2 指导 :510-511、:516）。
+- 不允许发生的副作用：切换前读 key、问密码、拿运行锁或切换 venv；切换两次；root 属主的新文件出现在项目里（v3.1.2 指导 :1427；设计 §4.3）。
 - 需要保存的证据：每次运行记录 `id`、`SUDO_USER`、子进程的 uid/gid/附加组、`HOME`/`USER`/`LOGNAME`、环境变量名单
-  （只记名字，不记值）、继承 fd 清单、交互密码提示是否在原终端、退出码、项目里新文件的属主；终端全文。不记录任何秘密。
+  （只记名字，不记值）、继承 fd 清单、交互密码提示是否在原终端、退出码、项目里新文件的属主；终端全文（v3.1.2 指导 WP-10）。不记录任何秘密。
 
 ### 故障注入与清理
 
 - 故障注入：在 root 不可进入给 `U` 的目录（例如 `/root`）里运行，记录相对路径参数是否失效（推断会失效，README 已写
   先 `cd`）；等待方式（D1 起才有生产调用方）的 Ctrl-C：终端的 SIGINT 会同时到达父子进程，父进程再转发一次，子进程
-  可能收到两次（推断），由 D1 在 AIR 上验证并写回本卡。
+  可能收到两次（推断），由 D1 在 AIR 上验证并写回本卡（initial-setup 见第 9 步第 3 小步）。
 - 清理/回滚验证：删掉测试加的 crontab 行；恢复临时改动的指针；不碰 `/etc/hosts`；不删除运行锁文件。
 - 重复执行与幂等性：同一命令重复运行，切换次数和身份说明行不变。
 - 风险：`runuser` 的 PAM 设置可能改 `HOME`、`USER`、`LOGNAME` 或资源限制；fd 是否穿过 `runuser`；方式 B 下子进程能否
-  打开 `/dev/tty`；「由 root 父进程启动」标记会被所有后代继承，带标记的 root 后代去跑 upgrade 时不会降权（推断，概率低）。
+  打开 `/dev/tty`；「由 root 父进程启动」标记会被所有后代继承，带标记的 root 后代去跑 upgrade 时不会降权（推断，概率低）；root 运行 initial-setup 时，
+  `--ib-initial-password-env` 指定的变量以 `NAME=值` 写在 `runuser … env -i` 的参数里（`tools/operator_identity.py::reexec_command`），
+  `runuser` 在子进程运行期间留在进程表里时同机用户可用 `ps` 看到（推断，第 9 步第 1 小步核对）。
 
 ### 自动化状态
 
@@ -3513,12 +3564,13 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `LoadCrossScriptOwnershipWorkflowTests`、`SyncThenLoadOperatorWorkflowTests`（I-058：真实的项目 job 在本机目录之间回放，
   接收端属主按 rsync(1) 建模，再跑真实的 load））、`test_deployment_writer_lock.py` 的 I-058 两条 direct 测试，以及各包的 direct 测试 `test_load_operator_contract.py`、
   `test_load_permission_repair_contract.py`（WP-6）、`test_unsetup_operator_crontab.py`、`test_collection_lock_owner.py`、
-  `test_operator_peripheral_contract.py`。本机不能切换 uid：这些测试只替换身份规则的输入（euid、sudo 环境、passwd、项目属主），
+  `test_operator_peripheral_contract.py`，单独运行的 setup 是 `test_setup_operator_identity.py`、
+  `test_setup_operator_identity_workflow.py`（v3.1.3 指导第 8 节）。本机不能切换 uid：这些测试只替换身份规则的输入（euid、sudo 环境、passwd、项目属主），
   `fchown`、`runuser`、`crontab` 都用记录替身；真实的 uid 切换、属主改正和 crontab 只能在本卡验证。
-- 覆盖范围：`DAY0-Prepare/11-load.py`、`01-a-setup.py`（load 进程内的模板补齐）、`13-unload.py`、`02-unsetup.py`、
+- 覆盖范围：`DAY0-Prepare/11-load.py`、`01-a-setup.py`（load 进程内的模板补齐）、单独运行的 `01-a-setup.py`（v3.1.3 指导第 8 节）、`13-unload.py`、`02-unsetup.py`、
   `12-ztp-monitor.py`（load 起的常驻进程）、`infra/deploy_infra.py`、`infra/infra-setup.py`、`tools/collect-ztp-diagnostics.py`、
   `monitor/switch-collection-worker.py` 与三个 `cron.lock`；`tools/sync-code.py`（第 0、7 步：项目同步后的属主，I-058）；upgrade、upgrade2、cron.sh 的降权见
-  `TC-REAL-I006-OPERATOR-REEXEC-001`；initial-setup 随 D1（v3.1.3），本卡不做，v3.1.2 期间 initial-setup 仍由项目属主不加 sudo 运行。
+  `TC-REAL-I006-OPERATOR-REEXEC-001`，initial-setup 被 root 运行时的降权见该卡第 9 步（v3.1.3 指导 WP-9）。
 - 适用平台：
 
 | 平台 | 怎么跑 |
@@ -3536,7 +3588,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   新建条目交接、权限改正（`[PERM]`）和三个 `cron.lock` 预建；02-unsetup 的 `crontab -u`、`auto-crontab.lock`；项目内 root 私有
   状态（agentOP 报告 4.4 的 12 类，11-load `ROOT_PRIVATE_PROJECT_STATE`）；`/var/www/html/.deployment.lock`。
 - 成功标准：方式 A 跑完项目除 root 私有状态外都属于 `U`（组是 `U` 的 passwd 主组），key 从 `U` 的家目录读，crontab 在 `U`
-  名下；方式 B 全程 root，没有 `runuser`，key 是 `/root/.ssh` 的；混用时每一步的身份说明行里操作员都是 `U`。
+  名下；方式 B 全程 root，没有 `runuser`，key 是 `/root/.ssh` 的；混用时每一步的身份说明行里操作员都是 `U`（I-006 方案第 1～4 条；设计 §4.2～§4.6）。
 
 ### 前置条件与输入
 
@@ -3579,7 +3631,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 2. 把项目目录本身 `chmod 0700`（O9 只把项目目录本身固定为 0755；子目录 0700 只收紧、不会被改，也没有 `[PERM]` 行），再把项目里
    一个不属于 root 私有状态的普通子目录 `chmod 0775`（看「其余只去组和其他人写」），然后
    `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/11-load.py <项目>/ --host-role=management-server`：
-   - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
+   - stdout 有一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」（I-006 方案第 1 条；v3.1.2 指导 WP-5）；
    - O8 已定为改合同：权限改正在 HTTP 闸门之前进行，项目目录和其余要改的条目逐项打印
      `[PERM] <路径> <原属主:组 原模式> -> <新属主:组 新模式>`，结尾有汇总，然后通过闸门；那个子目录有一行 `… 0775 -> … 0755`；
    - 紧接着再跑一次 load。两次之间不触发任何采集：不在页面点采集、不开连续采集；第二次 load 之前查
@@ -3592,21 +3644,21 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
      - 闸门前那次没有逐项的 `[PERM]` 行，汇总写改正 0 项（幂等，设计 §4.6）；
      - release 交接那次会逐项列出这次 load 由 root 新提交的 release 成员（例如 `99-output-ztp/current-release.json`、
        `99-output-<网络>/<release>/` 下的清单和配置、提交后的 DHCP 发布文件，`0:0 <模式> -> U:<U 主组> <模式>`），属于预期：
-       发布提交由 root 建文件、不在提交时 fchown，交接那次才把它们交给 `U`（推断，读码）；
+       发布提交由 root 建文件、不在提交时 fchown，交接那次才把它们交给 `U`（推断，读码；v3.1.2 指导 :722，WP-6）；
      - load 结束时那次只列 release 交接之后 root 新写进项目的文件（例如重启 ZTP 监控时 load 重写的 `99-output-ztp/ztp-monitor.pid`，
-       推断），没有别的逐项行；
+       推断），没有别的逐项行（v3.1.2 指导 WP-6）；
      - 证伪条件：闸门前那次在第二次 load 仍有逐项行，或结束时那次列出交接之后没有被 root 新写或重写的条目，说明改正不幂等或交接漏改，是缺陷，
        记录证据后停下；release 交接那次在第二次 load 没有任何逐项行，说明「release 成员每次由 root 新建」这条推断不成立，
-       按实测改本卡；
-   - 在 chmod 之后、本步正式 load 之前先跑这两次 dry-run：`sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 也逐项列出同样的 `[PERM]` 行、不改（c-16）。排在正式 load 之后跑时改正已做完，两次都是 0 项，不能作为 c-16 的证据（审核 k-1）；
+       按实测改本卡（设计 §4.6；v3.1.2 指导 WP-6）；
+   - 在 chmod 之后、本步正式 load 之前先跑这两次 dry-run：`sudo … --dry-run` 只列出 `[PERM]` 行、不改（汇总写「只列出，没有改动」）；`U` 不加 sudo 的 `--dry-run` 也逐项列出同样的 `[PERM]` 行、不改（c-16）。排在正式 load 之后跑时改正已做完，两次都是 0 项，不能作为 c-16 的证据（审核 k-1；v3.1.2 指导 WP-6）；
    - 在隔离副本里放一个属于 `V` 的文件再跑：load 列出全部第三方属主条目（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，
-     `stat` 前后不变；恢复后继续（agentW6 报告第 9 节 ④）；
+     `stat` 前后不变；恢复后继续（agentW6 报告第 9 节 ④；I-006 方案第 7 条，v3.1.2 指导 WP-6）；
    - 跑完：项目除 root 私有状态外都属于 `U`、组是 `U` 的主组；`cre.json`、`auto.env` 一类 0600 文件仍是 0600；
-     本次新建的条目（模板补齐、`laptop.pub` 占位、新项目目录本身）有 `[OWNER]` 汇总行且属于 `U`；
+     本次新建的条目（模板补齐、`laptop.pub` 占位、新项目目录本身）有 `[OWNER]` 汇总行且属于 `U`（I-006 方案第 4 条；v3.1.2 指导 WP-5、WP-6）；
    - key 从 `U` 的 passwd 家目录读（`/home/U/.ssh`，不是 `/root/.ssh`）；临时把 `U` 的 `id_ed25519` 改名后重跑：load 停下并打印
-     让 `U` 不加 sudo 执行的 `ssh-keygen -t ed25519 …` 命令，什么都不生成；改回后继续；
+     让 `U` 不加 sudo 执行的 `ssh-keygen -t ed25519 …` 命令，什么都不生成；改回后继续（I-006 方案第 1、3 条；v3.1.2 指导 :614-615）；
    - 在隔离副本上把 `mgmt-server.pub` 临时换回 root 的公钥再跑一次：load 停在「management public key mismatch」，key 不被替换；
-     恢复后继续。
+     恢复后继续（设计 §4.5；`DAY0-Prepare/11-load.py::prepare_pubkeys`）。
 3. 第 2 步的 load 准备公钥期间，在另一个终端执行 `touch ~U/.ssh` 并在 `~U/.ssh` 里新建一个无关文件：load 不中止（WP-7，I-014）；
    改 `id_ed25519.pub` 的内容则照旧中止（只在隔离副本上做，做完恢复）。
 4. `stat -c '%U:%G %a %n' /var/www/html/{ethernet,infiniband,nvlink}/monitor/cron.lock`：三把锁都属于 `U`，新建的是 0600，
@@ -3615,48 +3667,66 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 5. 属主核对（`stat -c '%U:%G %a %n'`）：
    - `99-output-infra` 下 load 期间新写的 `deploy_infra-*.log`、`infra-setup-*.log` 属于 `U:<U 的主组>`（WP-12）；
    - `99-output-ztp/<时间戳>/`、`.collection-attribution.json`、`.ztp-monitor-watch-state.json`、`.ztp-completion-handoff.json`
-     属于 `U`；
+     属于 `U`（v3.1.2 指导 WP-12）；
    - 仍属于 root 的 root 私有状态：`99-output-ztp/manual-config-sync`、`99-output-ztp/configuration-methods`（含 `.authority`）、
      `99-output-ztp/.ztp-monitor.pid.lock`、`99-output-ztp/..collection-attribution.json.lock`、`99-output-ztp/generations`、
      `99-output-ztp/rollback-receipts`、`99-output-ztp/ztp-monitor.control`（`root:www-data 0664`）、`99-output-backup`、
-     `99-output-dhcp/.load-dhcp-candidate-*`、项目根下的 `.load-inventory-*` 和 `.99-output-backup.retention*`；
+     `99-output-dhcp/.load-dhcp-candidate-*`、项目根下的 `.load-inventory-*` 和 `.99-output-backup.retention*`
+     （`DAY0-Prepare/11-load.py::ROOT_PRIVATE_PROJECT_STATE`；v3.1.2 指导 WP-6）；
    - monitor 日志的第一行有身份说明行；`ps -o args` 里 monitor 的命令不带 `-i`（load 不传），它登录交换机用的是
-     `/home/U/.ssh/id_ed25519`（在设备上用 `last` 或 ssh 日志看登录 key 的指纹）；
+     `/home/U/.ssh/id_ed25519`（在设备上用 `last` 或 ssh 日志看登录 key 的指纹；v3.1.2 指导 WP-12）；
    - `sudo python3 tools/collect-ztp-diagnostics.py -p <项目> --prod --host <设备>`：stdout 有身份说明行，默认用 `U` 的
-     key 和 known_hosts 登录；在一个没装 PyYAML 的环境里跑同一命令，stderr 有一行「无法判定操作员（模块缺失：…）」，仍生成诊断包。
+     key 和 known_hosts 登录；在一个没装 PyYAML 的环境里跑同一命令，stderr 有一行「无法判定操作员（模块缺失：…）」，仍生成诊断包（v3.1.2 指导 WP-12）。
 6. `U` 执行 `sudo python3 -B /var/www/html/DAY0-Prepare/13-unload.py DAY0-Prepare/<项目> --yes`（WP-8）：
-   - 13-unload、02-unsetup 各打印一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」；
+   - 13-unload、02-unsetup 各打印一行身份说明「操作员：U（项目目录属主）；当前：root 经 sudo（发起人 U）→ 项目侧以 U 执行」
+     （v3.1.2 指导 WP-8）；
    - 拆除成功；`U` 的 crontab 里带 `# http-v3-req10c-auto` 的行没了、其他行逐字保留；root 的 crontab 前后逐字相同；
-     `auto.env`、`auto-watch.state`、`auto-terminal.json` 删除；`auto-crontab.lock` 存在、属主 `U`、0600；
-   - 在第 2 步改正之后，unload 撤销配置权威仍成功（`manual-config-sync`、`configuration-methods` 未被改正交给 `U`）。
+     `auto.env`、`auto-watch.state`、`auto-terminal.json` 删除；`auto-crontab.lock` 存在、属主 `U`、0600（v3.1.2 指导 WP-8）；
+   - 在第 2 步改正之后，unload 撤销配置权威仍成功（`manual-config-sync`、`configuration-methods` 未被改正交给 `U`；v3.1.2 指导 WP-6、WP-8）。
 7. 方式 B（root 直接登录）在一个属于 root 的项目副本上，把第 2、4、6 步各走一遍：身份说明行是「操作员：root（项目目录属主）；
    当前：root 直接运行 → 以 root 执行」；没有 `runuser`；key 从 `/root/.ssh` 读；三把锁属于 root；crontab 是 root 自己的
    （`crontab -l`，不带 `-u`）。混用：方式 A 的 sudo load → root 登录运行 upgrade → `U` 不加 sudo 运行 upgrade → root 登录
    unload，四步的身份说明行里操作员都是 `U`，root 的 unload 清的是 `U` 的 crontab（upgrade 的细节见
-   `TC-REAL-I006-OPERATOR-REEXEC-001`）。方式 B 的属主检查（owner 2026-11-09 同意，04 Q-017）：在这个 root 的项目副本里把一个文件
+   `TC-REAL-I006-OPERATOR-REEXEC-001`）。方式 B 的属主检查（owner 2026-11-09 同意，v3.1.2 的决定，`设计/版本计划/04-待owner答复.md:25`）：在这个 root 的项目副本里把一个文件
    `chown U`，先以 root 跑 load 加 `--dry-run`：列出这一项（路径、实际和期望的 uid:gid、`sudo chown` 命令）后停下，什么都不改；
    不带 `--dry-run` 再跑一次结果相同；按提示 chown 回 root 后重跑通过。同步之后（I-058）：root 登录、用 `tools/sync-code.py` 把这个 root 的
    项目副本同步一次，再以 root 跑 load 加 `--dry-run`：身份说明行是「操作员：root（项目目录属主）；当前：root 直接运行 → 以 root 执行」，
    没有「项目权限检查停止」。项目 job 不带开发机属主，项目目录仍属 root、同步写的条目是 root:root，`11-load.py` 闸门前的
    `repair_project_permissions` 只见到 root 属主（`tools/sync-code.py::rsync_command`；指导 :2212）。
-8. 拒绝（owner 2026-11-09「Q-006 选 (b)」）：`V` 经 sudo 对 `U` 的项目运行 13-unload，有、没有 REQ10C watch 各一次，再直接 `sudo` 运行 02-unsetup：都以 1 退出，`[ERROR]` 点名 `U` 与 `V`；
+8. 拒绝（owner 2026-11-09 选 (b)，v3.1.2 的决定，`设计/版本计划/04-待owner答复.md:13`；v3.1.2 指导 :2214）：`V` 经 sudo 对 `U` 的项目运行 13-unload，有、没有 REQ10C watch 各一次，再直接 `sudo` 运行 02-unsetup：都以 1 退出，`[ERROR]` 点名 `U` 与 `V`；
    monitor、服务、DHCP 文件、`U` 的 crontab、状态文件、指针和链接都不动（运行前后对照服务状态、`/etc/dhcp` 下 load 管理的文件、`sudo crontab -u U -l`、状态目录和指针）。
-   `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。
+   `V` 经 sudo 运行 load：在任何写之前拒绝，提示项目属于 `U`、sudo 发起人是 `V`。`V` 经 sudo 单独运行
+   `01-a-setup.py --host-role workstation <项目>`：以 1 退出，`[ERROR]` 点名 `U` 与 `V`，指针、链接、项目前后不变（v3.1.3 指导 :1969；
+   沿 `01-a-setup.py::main` → `01-a-setup.py::_main_locked` → `01-a-setup.py::_setup_operator` 推出）。
 9. Docker（现场有的话，只读核对）：容器内的 load、unload、monitor、diagnostics 没有身份说明行，三把锁与 `/root/.ssh` 的用法和文件属主与
    v3.1.1 相同；容器内 unload 一个属主 uid 不在容器 passwd 里、没有 REQ10C 状态的项目，结果与 v3.1.1 相同（成功），没有身份说明行、没有 WARN。
+10. 单独运行的 setup（v3.1.3 指导第 8 节 :1970），在当前活动项目的隔离副本上做（第 4 步不切换）：
+    1. `laptop.pub` 保持笔记本的 key，`U` 执行 `sudo /usr/bin/python3 /var/www/html/DAY0-Prepare/01-a-setup.py --host-role workstation <项目>`：
+       身份说明行「…→ 项目侧以 U 执行」；第 2 步以 1 退出，报错里的 `source=` 在 `/home/U/.ssh/` 下而不是 `/root/.ssh/`；没有切换；
+       `ls -ln /root/.ssh` 前后相同（v3.1.3 指导 :1971；沿 `01-a-setup.py::_main_locked` → `01-a-setup.py::_prepare_laptop_public_key`
+       → `tools/operator_identity.py::run_as_operator` 推出）。
+    2. 把 `laptop.pub` 换成指向项目里一份副本的用户链接（R-014 第 3 条），删掉项目里的 `infiniband/bringup/xdr-initial-setup/` 和一个
+       模板条目后再跑：成功；有 `[OWNER]` 行；这两项重新出现并属于 `U:<U 主组>`；`find <项目> -user root` 只剩本卡第 5 步列的
+       root 私有状态（v3.1.3 指导 :1972；I-006 方案第 4、5 条）。
+    3. 临时把 `U` 的 `id_ed25519*` 改名、`laptop.pub` 恢复成空的普通文件后再跑：以 1 退出，打印让 `U` 不加 sudo 执行的 `ssh-keygen`
+       命令；`/home/U/.ssh`、`/root/.ssh` 都没有新文件（v3.1.3 指导 :1973；D1S-O4 (a)）。
+    4. root 直接登录重复第 1 小步；在方式 B（root 的项目）副本上跑一次：「以 root 执行」，没有 `runuser`，`source=` 在 `/root/.ssh/` 下
+       （v3.1.3 指导 :1974）。
+    - 清理：恢复 `laptop.pub`、`U` 的 key 名字和删掉的条目，`stat` 快照与第 0 步前一致。风险：低，只动隔离副本和 `U` 自己的 key 名字
+      （v3.1.3 指导 :1975）。
 
 ### 预期结果
 
 - 正向结果：见各步。方式 A 结束时，除第 5 步列出的 root 私有状态外，项目里的条目都属于 `U`；第 2 步的第二次 load 在闸门前那次
-  改正没有改动，release 交接和结束时那两次的逐项行按第 2 步判读。
+  改正没有改动，release 交接和结束时那两次的逐项行按第 2 步判读（I-006 方案第 4 条；设计 §4.6）。
 - 拒绝/失败结果：第 1 步在加锁之前以非 0 退出；第 0 步项目目录或同步新写的条目带上开发机账户或开发机 uid 是缺陷，记录证据后停下
   （I-058）；用 v3.1.2 及更早的 sync-code 同步过、项目目录属主已是 passwd 里查不到的 uid 的服务器，load 照旧拒绝并给出
   `sudo chown` 提示（`tools/operator_identity.py::resolve_operator`），按用户手册里 I-058 的迁移步骤只改目录本身后再继续；第 2 步遇到第三方（`V`）属主时列出全部
   第三方属主条目后停下，什么都不改；第 8 步按所列退出码和提示。
 - 不允许发生的副作用：替 root 生成 key；改动 root 私有状态的属主或模式；跟随项目里的链接改到项目外；
-  动 `V` 或 root 的 crontab；碰 `/etc/hosts`；改 eth_jump。
+  动 `V` 或 root 的 crontab；碰 `/etc/hosts`；改 eth_jump（I-006 方案第 3、4 条；v3.1.2 指导 WP-6、WP-8）。
 - 需要保存的证据：脱敏的命令输出（身份说明行、`[PERM]` 汇总、`[OWNER]` 汇总、拒绝提示）、`id`、各步的属主列表
-  （`stat -c '%U:%G %a %n'`）、`crontab -u U -l` 与 `crontab -l` 的脱敏结果、monitor 登录用 key 的指纹。不记录任何秘密。
+  （`stat -c '%U:%G %a %n'`）、`crontab -u U -l` 与 `crontab -l` 的脱敏结果、monitor 登录用 key 的指纹（v3.1.2 指导 WP-13）。不记录任何秘密。
 
 ### 故障注入与清理
 
@@ -3682,4 +3752,70 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 第二段（WP-6 合入后）：方式 A 用例补「load 的改正指向 U」，加 `test_sudo_unload_after_repair_still_withdraws_config_authorities`；
   逐项的 direct 测试在 `test_cases/test_load_permission_repair_contract.py`。
 - [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-I005-COMMA-INTERFACE-001 — 带 fnm 接口或 NVUE 逗号合并接口的 IB：initial-setup 只读检查与 selector 普查
+
+### 基本信息
+
+- Case ID：`TC-REAL-I005-COMMA-INTERFACE-001`。
+- 名称：对样本 A（`eth0-1,fnm1` 逗号行加 `fnm1 type fnm`）和样本 B（同一位置是 `eth0-1` 单独一行、没有 fnm1）
+  结构的设备各跑一次 initial-setup 只读检查，并只读普查全部 IB 的 `nv set interface` selector 名字。
+- 类型：real-environment / scenario（真 NVOS 的 `nv config show -o commands` 输出）。状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：问题文档 I-005（:158-216）；v3.1.3 详细工作指导 WP-12（:1142-1224），第 3 节 O15、O16。
+- 自动化文件与测试方法：`test_cases/test_initial_setup_comma_interfaces.py`（`CommaInterfaceSelectorTests`）、
+  `test_cases/test_initial_setup_comma_interfaces_workflow.py`（`CommaInterfaceMainWorkflowTests`）。本机只用问题文档
+  样本结构的文本和自有 SSH 对端模型，不碰真机。
+- 适用平台：
+
+| 平台 | 怎么跑 |
+|---|---|
+| AIR（NVOS 模拟器） | 只读检查；模拟器有 fnm 接口时再跑一次 `--apply`（有没有 fnm 接口不确定） |
+| prod | 由现场人员执行，验证 AI 只读核对输出（owner 11-06「AIR 可以写，prod 只读」）；只做只读检查和普查 |
+
+### 风险与目标
+
+- 要防止的故障：带 fnm 接口或逗号合并接口的设备被判成管理网读回不合格、或每次都要求 base 配置；陌生接口名被放过；
+  报错丢掉位置，或把地址带进报告。
+- 涉及的模块和状态边界：`initial-setup.py` 的读回入口 `_split_comma_interface_lines`、选择器规则
+  `_management_selector_ports`、定位 `_management_selector_location` 和 `execute_ib_task` 的网络阶段；设备配置只读。
+- 成功标准：两台的逐台结果都是不需要 base 配置、待补为空；普查给出全部 selector 名字和计数（指导 :1210）。
+
+### 前置条件与输入
+
+- 合流后的版本（v3.1.3 起）的正式 full proof；项目的 `ib.csv`、P2P 和 `01-global.yaml` 已就绪，`--generate-json` 通过。
+- 样本 A、B 结构的设备各一台（问题文档 :182-194）。
+- 所需权限：只读登录 IB；prod 由现场人员执行。
+- 初始状态：记录两台设备 `nv config show -o commands` 里 `nv set interface` 行的 selector（只记名字，不记值）。
+
+### 步骤
+
+1. 对包含这两台设备的项目执行一次只读检查 `python3 initial-setup.py`（不带 `--apply`）（指导 :1209）。
+2. 只读普查全部 IB 的 selector 名字（指导 :1209，O16）：在每台 IB 上执行
+   `nv config show -o commands | awk '$1=="nv" && $2=="set" && $3=="interface" {print $4}' | tr ',' '\n' | sort | uniq -c`，
+   只留名字和计数，不保存配置的其他内容。
+3. 只在 AIR、且 NVOS 模拟器有 fnm 接口时，对样本 A 结构的设备再跑一次 `--apply`（指导 :1211）。
+
+### 预期结果
+
+- 正向结果：两台的逐台结果相同，网络阶段都是已存在（`base=ALREADY_PRESENT`），没有网络命令的 `WOULD APPLY` 或 `PLAN` 行，
+  待补为空（指导 :1210，问题文档 :211）。
+- 拒绝/失败结果：普查之外的陌生接口名仍让该台失败，报错还是固定文字，报告里另有一行
+  `LOCATION: readback line <行号>, interface <名字>, setting <设置项>`，不带地址（O15，问题文档 :212）。
+- 不允许发生的副作用：设备配置不变（问题文档 :207）；只读检查不执行 `nv set`、`nv config apply`、`nv config save`
+  （`infiniband/bringup/xdr-initial-setup/initial-setup.py::execute_ib_task`）。
+- 需要保存的证据：两台的报告和 `summary.json` 里这两台的逐台结果；普查出的名字和计数（指导 :1210）。
+
+### 故障注入与清理
+
+- 清理/回滚验证：无，只读（指导 :1211）。
+- 风险：低，不改设备配置（问题文档 :207）。普查之前只认 fnm；`ib0` 一类名字现在也不认，遇到会被拒（指导 :1220）。
+- 重复执行与幂等性：只读，重复执行结果相同。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_initial_setup_comma_interfaces.py` 与 `test_cases/test_initial_setup_comma_interfaces_workflow.py`。
+- [x] 修复前能够稳定失败（RED 提交上红在预期断言上）。
+- [x] 修复后通过。
+- [ ] 已纳入全量 discovery（manifest 和分片车道在集成时按本包的 manifest spec 登记）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。

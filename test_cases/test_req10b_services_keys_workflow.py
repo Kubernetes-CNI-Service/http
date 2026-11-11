@@ -816,6 +816,63 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 self.assertFalse(cache.parent.exists(), "admission must precede report/cache writes")
                 self.assertFalse((root / "99-output-ztp").exists())
 
+    def test_wp8_managed_tool_root_ignores_a_forwarded_project_dir(self):
+        """v3.1.3 WP-8 (guide :912; WP-8b, review 中 1): the managed path keeps its tool root under --project-dir.
+
+        managed_initial_main forwards the operator's initial-setup arguments unchanged
+        (config_sync_authority.py :1634-1636), so --project-dir can reach main(method_cycle=...).  Guide :912
+        「受管路径（`method_cycle` 非空）不在表里，仍取 `tool_input_root`」: with a decoy project D whose global,
+        key and neutral defaults all differ, the cache, the report's input-sources line (:913) and the
+        public-key input still come from the managed tool root, and no file under D is opened.  The run stops
+        at the OOB password prompt (a device boundary), after the cache and the report header exist.
+        """
+        authority = load_script("wp8_managed_project_dir_authority", ROOT / "ztp/config_sync_authority.py")
+        stop = "fixture: stop at the OOB password prompt"
+        with tempfile.TemporaryDirectory(prefix="wp8-managed-project-dir-") as directory:
+            base = Path(directory).resolve()
+            root, tool, global_path, csv_path, p2p, _, cache, laptop, management = self.fixture(str(base / "project"))
+            csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
+                .replace("203.0.113.1,,,,\n", "203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n")
+                .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+            decoy = base / "decoy"
+            (decoy / "infiniband/bringup/xdr-initial-setup").mkdir(parents=True)
+            (decoy / "01-global.yaml").write_text(GLOBAL.replace("203.0.113.53", "198.51.100.99"), encoding="utf-8")
+            (decoy / "decoy.pub").write_text(public_key(19, "decoy"), encoding="ascii")
+            (decoy / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf").write_text(
+                "DNS=198.51.100.98\nNTP=time.decoy.example.test\nTIMEZONE=Asia/Tokyo\n", encoding="ascii")
+            cycle = authority.ManagedInitialMethodCycle(root, self.initial)
+            opened = []
+            original_open = Path.open
+
+            def record_open(path, *args, **kwargs):
+                opened.append(Path(os.path.realpath(path)))
+                return original_open(path, *args, **kwargs)
+
+            # Any refusal is caught here so that what was opened is judged first; the stop text is checked last.
+            with self.assertRaises((self.initial.SetupError, authority.AuthorityError, ValueError)) as stopped, \
+                    mock.patch.object(Path, "open", record_open), \
+                    mock.patch.object(self.initial, "prompt_ethernet_passwords",
+                                      side_effect=self.initial.SetupError(stop)):
+                self.run_initial(tool, csv_path, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
+                                 "--project-dir", str(decoy), method_cycle=cycle)
+            self.assertEqual([], sorted(str(path) for path in opened if path.is_relative_to(decoy)),
+                             ":912: no file of the --project-dir project is opened on the managed path")
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+            self.assertEqual(str(global_path.resolve()), payload["global"])
+            self.assertEqual(hashlib.sha256(global_path.read_bytes()).hexdigest(),
+                             payload["cache_authority"]["global_sha256"])
+            self.assertEqual({key: list(value) if isinstance(value, tuple) else value
+                              for key, value in EXPECTED_IB.items()}, payload["services"])
+            self.assertEqual([("laptop.pub", fingerprint(laptop)), ("mgmt-server.pub", fingerprint(management))],
+                             [(entry["name"], entry["fingerprint"]) for entry in payload["public_keys"]])
+            report = (cache.parent / "report.log").read_text(encoding="utf-8").splitlines()
+            sources = [line for line in report if line.startswith("Input sources: ")]
+            self.assertEqual(1, len(sources), ":913: one input-sources line")
+            self.assertIn(f"; global, public keys and neutral defaults from {tool} ", sources[0] + " ")
+            self.assertNotIn(str(decoy), sources[0])
+            self.assertIn(f"Public-key input: {tool / 'publickey'}; usable entries=2", report)
+            self.assertEqual(stop, str(stopped.exception), "the run got past the cache and the report header")
+
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
                     cache: Path, *extra: str, method_cycle=None, managed_entry=None, managed_tool_inputs=None,
                     managed_strict=None) -> int:

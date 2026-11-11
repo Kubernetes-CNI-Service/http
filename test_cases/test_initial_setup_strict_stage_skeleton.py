@@ -186,8 +186,10 @@ class _World:
                 writer.writerow([device.jump, "eth_jump", device.jump_ip, "", "", ""])
         (root / "p2p.dot").write_text("".join(
             f'"{device.hostname}":"eth0" -- "{device.jump}":"swp1"\n' for device in devices), encoding="utf-8")
-        (root / "infra-neutral.conf").write_text(
-            "DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n", encoding="utf-8")
+        # WP-8 table 8-1 (guide :923): --project-dir reads the project's own neutral defaults here.
+        neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
+        neutral.parent.mkdir(parents=True, exist_ok=True)
+        neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n", encoding="utf-8")
         if global_file:
             # Assembled so no credential literal appears in the source (public audit).
             global_hash = "$" + "6$PUBLICsalt$" + "A" * 86
@@ -891,9 +893,8 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
         with self.subTest(case="strict-apply"), tempfile.TemporaryDirectory(prefix="strict-helper-") as folder:
             world = self.world(Path(folder), [_Device(1, password=target, lines=lines)])
-            (world.root / "publickey").mkdir()
-            (world.root / "publickey" / "laptop.pub").write_text(public_key_line(7, "PUBLIC-laptop"),
-                                                                 encoding="ascii")
+            # WP-8 table 8-1 (guide :922, :835): --project-dir takes the non-empty *.pub at the project root.
+            (world.root / "laptop.pub").write_text(public_key_line(7, "PUBLIC-laptop"), encoding="ascii")
             helper = mock.Mock(wraps=app._run_authorized_ib_command)
             code, err = self.run_main(
                 world, world.argv("--apply", "--yes"), self.credentials(world, initial=target, target=target),

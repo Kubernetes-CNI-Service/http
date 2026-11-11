@@ -223,7 +223,14 @@
         "test_cases.test_initial_setup_summary_output",
         "test_cases.test_initial_setup_offline_main",
         "test_cases.test_initial_setup_oob_spine",
-        "test_cases.test_initial_setup_oob_spine_main"
+        "test_cases.test_initial_setup_oob_spine_main",
+        "test_cases.test_initial_setup_project_names_workflow",
+        "test_cases.test_initial_setup_operator_reexec",
+        "test_cases.test_initial_setup_operator_reexec_workflow",
+        "test_cases.test_setup_operator_identity",
+        "test_cases.test_setup_operator_identity_workflow",
+        "test_cases.test_initial_setup_comma_interfaces",
+        "test_cases.test_initial_setup_comma_interfaces_workflow"
       ]
     },
     {
@@ -1063,7 +1070,8 @@
         "test_cases.test_collection_lock_owner",
         "test_cases.test_load_operator_contract",
         "test_cases.test_load_permission_repair_contract",
-        "test_cases.test_req22_setup_contract"
+        "test_cases.test_req22_setup_contract",
+        "test_cases.test_setup_operator_identity"
       ]
     },
     {
@@ -2419,6 +2427,24 @@
         "test_cases.test_initial_setup_offline_main",
         "test_cases.test_initial_setup_oob_spine",
         "test_cases.test_initial_setup_oob_spine_main"
+      ]
+    },
+    {
+      "id": "initial_setup_operator_reexec_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_operator_reexec"
+      ]
+    },
+    {
+      "id": "initial_setup_comma_interfaces_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_comma_interfaces"
       ]
     }
   ],
@@ -4211,6 +4237,51 @@
       ],
       "tests": [
         "test_cases.test_initial_setup_credentials_fd_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_project_inputs_and_names",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/device_identity.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_project_names_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_operator_reexec",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/operator_identity.py",
+        "tools/project_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_operator_reexec_workflow"
+      ]
+    },
+    {
+      "id": "setup_operator_identity_standalone",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/11-load.py",
+        "tools/operator_identity.py",
+        "tools/ssh_key_preparation.py"
+      ],
+      "tests": [
+        "test_cases.test_setup_operator_identity_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_c2_p1_comma_interfaces",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_comma_interfaces_workflow"
       ]
     }
   ],

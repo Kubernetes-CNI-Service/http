@@ -32,6 +32,10 @@ ethernet/eth.csv → ../DAY0-Prepare/activate-project/02-devices_config.csv；�
 
 链接规则（R-014 第 1、2 条，R-016 §4.3）：已有的链接直接替换，不询问，并打印旧目标 → 新目标；
 同名位置是真实文件或目录时只报错、计数，不删；补齐模板和准备输出时，不往项目里指向项目外的链接里写。
+
+被 sudo 或 root 运行时同 load 按项目属主判身份（I-006）：其他用户经 sudo 在入口拒绝、什么都不动；代表 U 时由 U 的
+身份按 U 的家目录准备 laptop.pub（U 没有 key 时只提示 U 执行 ssh-keygen），本次在项目里新建的条目交给 U；不加 sudo
+运行与 v3.1.2 相同；管理服务器上切项目仍经 load。
 """
 
 import argparse
@@ -109,7 +113,7 @@ from _package_common import (
     read_project_input_links,
     select_project_p2p_source,
 )
-from ztp_service_runtime import RuntimeContractError, stop_native_ztp_monitors
+from ztp_service_runtime import RUNTIME_BACKEND_ENV, RuntimeContractError, stop_native_ztp_monitors
 import ssh_key_preparation as ssh_keys
 ZTP          = os.path.normpath(os.path.join(HERE, "..", "ztp"))
 TEMPLATE_DIR = os.path.join(HERE, "template")                # DAY0-Prepare/template/
@@ -160,6 +164,7 @@ _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
 _CONFIRM_PROJECT_SWITCH = False  # --confirm-project-switch：-y/--yes 的跨项目切换确认，load 使用
+_OPERATOR = None  # root 代表项目属主时 _setup_operator 的 Resolution（I-006）；其余 None，load 进程内也是 None
 
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
 MAX_DISCOVERY_METADATA_BYTES = 4 * 1024 * 1024
@@ -654,12 +659,29 @@ def _analyzer_output_pairs(proj_dir):
 MANAGEMENT_PUBKEY_MARKER = ".management-pubkeys"
 
 
-def _prepare_laptop_public_key(proj_dir):
-    """Select the local public key and atomically bind this project's laptop.pub."""
+def _prepare_laptop_public_key(proj_dir, *, generate=True):
+    """Select the local public key and atomically bind this project's laptop.pub.
+
+    Root acting for the project's operator (_OPERATOR, I-006) leaves this to the operator's own child
+    process (--_prepare-laptop-key), which reads the operator's passwd home and never generates a key
+    (generate=False; v3.1.3 guide 8.4 #3-4, D1S-O1/O4).
+    """
     if os.path.islink(os.path.join(proj_dir, "laptop.pub")):
         # R-014 第 2、3 条：用户自己的 laptop.pub 链接已在 setup 入口按真实文件校验；
         # 不换成本机 ~/.ssh 的 key，也不顺着链接写。
         print("  [SKIP] laptop.pub 是用户链接，按链接目标使用")
+        return
+    if _OPERATOR is not None:
+        operator = _OPERATOR.operator
+        if _DRY_RUN:
+            print(_c(CYAN, f"  [DRY] 将以 {operator.name} 的身份准备 laptop.pub（读 {operator.home}/.ssh）"))
+            return
+        import operator_identity
+        code = operator_identity.run_as_operator(
+            operator, os.path.realpath(__file__), ["--_prepare-laptop-key", os.path.realpath(proj_dir)])
+        if code != 0:
+            print(_c(RED, f"  [ERROR] 以 {operator.name} 的身份准备 laptop.pub 失败（退出码 {code}）"))
+            raise SystemExit(1)
         return
     ssh_dir = Path.home() / ".ssh"
     try:
@@ -670,11 +692,34 @@ def _prepare_laptop_public_key(proj_dir):
                 return
             print(_c(CYAN, f"  [DRY] 将准备 laptop.pub ← {selected}"))
             return
-        selected = ssh_keys.ensure_public_key(ssh_dir, comment="operator@laptop")
+        if generate:
+            selected = ssh_keys.ensure_public_key(ssh_dir, comment="operator@laptop")
+        else:
+            selected = ssh_keys.select_public_key(ssh_dir)
+            if selected is None:
+                print(_c(RED, "  [ERROR] 没有 SSH 公钥：请不加 sudo 执行 ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519，"
+                              "再重跑 setup；setup 没有生成任何 key"))
+                raise SystemExit(1)
         ssh_keys.prepare_project_public_key(Path(proj_dir), "laptop.pub", selected)
     except ssh_keys.SshKeyPreparationError as exc:
         print(_c(RED, f"  [ERROR] 本机 laptop.pub 准备失败：{exc}"))
         raise SystemExit(1) from exc
+
+
+def _laptop_key_child(argv, *, euid=None, environ=None):
+    """--_prepare-laptop-key <project>: the operator's child of a root setup prepares laptop.pub (I-006).
+
+    Only for a non-root process a root parent started (operator_identity.ROOT_PARENT_MARKER); anything
+    else exits 2 without writing.  No key in the operator's ~/.ssh exits 1 with the ssh-keygen hint.
+    """
+    import operator_identity
+    environ = os.environ if environ is None else environ
+    euid = os.geteuid() if euid is None else euid
+    if operator_identity.ROOT_PARENT_MARKER not in environ or euid == 0 or len(argv) != 1:
+        print(_c(RED, "[ERROR] --_prepare-laptop-key 只供 root 运行的 setup 以项目属主身份调用"))
+        return 2
+    _prepare_laptop_public_key(argv[0], generate=False)
+    return 0
 
 
 def _require_delegated_laptop_public_key(proj_dir):
@@ -4678,8 +4723,60 @@ def _parse_args(argv=None):
     return args
 
 
+def _setup_operator(proj_dir, *, server_delegated, euid=None, environ=None, getpwuid=None, getpwnam=None,
+                    stat=None):
+    """I-006 for a standalone setup (v3.1.3 guide 8.2, 8.4 #1): None runs as before, else a Resolution or "refuse".
+
+    load's server-delegated child, the supervisor (Docker) backend and every non-root run are unchanged and
+    never import operator_identity.  A root run prints operator_identity's identity line; a refusal prints
+    [ERROR] and returns "refuse"; root acting for the project's operator returns the represent Resolution.
+    The keyword inputs pass through to operator_identity.resolve_operator (tests play root through them).
+    """
+    environ = os.environ if environ is None else environ
+    if server_delegated or environ.get(RUNTIME_BACKEND_ENV, "systemd") != "systemd":
+        return None
+    if (os.geteuid() if euid is None else euid) != 0:
+        return None
+    import operator_identity
+    identity = operator_identity.resolve_operator(proj_dir, euid=euid, environ=environ, getpwuid=getpwuid,
+                                                  getpwnam=getpwnam, stat=stat)
+    print(identity.banner)
+    if identity.refusal is not None:
+        print(_c(RED, f"[ERROR] {identity.refusal}"))
+        return "refuse"
+    return identity if identity.action == "represent" else None
+
+
+def _project_entry_names(proj_dir):
+    """Project-relative names of everything under proj_dir, links not followed; empty when it is absent."""
+    names = set()
+    for current, directories, files in os.walk(proj_dir):
+        relative = os.path.relpath(current, proj_dir)
+        names.update(name if relative == "." else os.path.join(relative, name) for name in (*directories, *files))
+    return names
+
+
+def _load_module():
+    """Load 11-load.py once (its name has hyphens) for its operator handover, as its _setup_module loads setup."""
+    import importlib.util
+    path = os.path.join(HERE, "11-load.py")
+    name = f"_http_setup_load_{abs(hash(os.path.realpath(path)))}"
+    module = sys.modules.get(name)
+    if module is None:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def _hand_to_operator(proj_dir, names):
+    """Hand ``names`` (created this run) to the operator with v3.1.2 load's one implementation (O11 ②④)."""
+    _load_module()._hand_new_entries_to_operator(Path(proj_dir), sorted(names), _OPERATOR)
+
+
 def _main_locked(args):
-    global _P2P_FILE
+    global _P2P_FILE, _OPERATOR
     _P2P_FILE = args.p2p_file
 
     proj = args.project
@@ -4702,6 +4799,14 @@ def _main_locked(args):
     if os.path.lexists(proj_dir) and not stat.S_ISDIR(os.lstat(proj_dir).st_mode):
         print(_c(RED, f"[ERROR] 项目必须是 DAY0-Prepare 下的真实目录，不能是链接或文件：{proj_dir}"))
         return 2
+    # I-006 (v3.1.3 guide 8.4 #2): the identity is decided once, under the deployment lock, before any write.
+    operator = _setup_operator(proj_dir, server_delegated=getattr(args, "_server_delegated", False))
+    if operator == "refuse":
+        return 1
+    _OPERATOR = operator
+    # Root acting for the operator: what this run creates in the project goes to the operator (8.4 #5).
+    handing = _OPERATOR is not None and not _DRY_RUN
+    existing = _project_entry_names(proj_dir) if handing else set()
     if not os.path.isdir(proj_dir):
         if not getattr(args, "create", False):
             print(_c(
@@ -4710,27 +4815,33 @@ def _main_locked(args):
                 "请核对拼写，或显式使用 --create 只初始化新项目",
             ))
             return 1
-        if _DRY_RUN:
-            print(_c(CYAN, f"  [DRY] mkdir {proj_dir}"))
-        else:
-            os.makedirs(proj_dir, exist_ok=False)
-            print(_c(GREEN, f"[MKDIR] 项目目录已创建：{proj_dir}"))
-        _initialize_project_from_template(proj_dir)
-        _prepare_laptop_public_key(proj_dir)
-        if _DRY_RUN:
-            print(_c(
-                CYAN,
-                "[DRY] 实际 --create 将初始化项目后退出，不会激活或切换任何链接",
-            ))
-        else:
-            print(_c(
-                GREEN,
-                f"[CREATED] 项目已创建但未激活：{proj_dir}",
-            ))
-            print(_c(
-                CYAN,
-                "请补齐并验证项目输入，然后不带 --create 再次运行 01-a-setup.py。",
-            ))
+        try:
+            if _DRY_RUN:
+                print(_c(CYAN, f"  [DRY] mkdir {proj_dir}"))
+            else:
+                os.makedirs(proj_dir, exist_ok=False)
+                print(_c(GREEN, f"[MKDIR] 项目目录已创建：{proj_dir}"))
+                if handing:
+                    _hand_to_operator(proj_dir, [""])   # so the operator's child can write in it
+            _initialize_project_from_template(proj_dir)
+            _prepare_laptop_public_key(proj_dir)
+            if _DRY_RUN:
+                print(_c(
+                    CYAN,
+                    "[DRY] 实际 --create 将初始化项目后退出，不会激活或切换任何链接",
+                ))
+            else:
+                print(_c(
+                    GREEN,
+                    f"[CREATED] 项目已创建但未激活：{proj_dir}",
+                ))
+                print(_c(
+                    CYAN,
+                    "请补齐并验证项目输入，然后不带 --create 再次运行 01-a-setup.py。",
+                ))
+        finally:
+            if handing:
+                _hand_to_operator(proj_dir, _project_entry_names(proj_dir) - existing)
         return 0
     if getattr(args, "create", False):
         print(_c(
@@ -4749,10 +4860,14 @@ def _main_locked(args):
         raise _TargetInvalid(str(exc)) from exc
     if not _DRY_RUN and args.host_role == "management-server":
         stop_native_ztp_monitors(HTTP_BASE)
-    if getattr(args, "_server_delegated", False):
-        setup(proj_dir, server_delegated=True)
-    else:
-        setup(proj_dir)
+    try:
+        if getattr(args, "_server_delegated", False):
+            setup(proj_dir, server_delegated=True)
+        else:
+            setup(proj_dir)
+    finally:
+        if handing:
+            _hand_to_operator(proj_dir, _project_entry_names(proj_dir) - existing)
     return 0
 
 
@@ -4823,4 +4938,7 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    # Private child entry of a root setup acting for the project's operator (I-006); not an option of main.
+    if sys.argv[1:2] == ["--_prepare-laptop-key"]:
+        raise SystemExit(_laptop_key_child(sys.argv[2:]))
     raise SystemExit(main())

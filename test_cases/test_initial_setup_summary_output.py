@@ -265,7 +265,7 @@ class SummaryOutputTests(unittest.TestCase):
                  "status": "PASS", "detail": "synthetic direct success"}]
         with patch.object(app, "log"), patch.object(app.time, "sleep"), \
              patch.object(app, "inspect_ib_device", return_value=(state, PASSWORD, True)), \
-             patch.object(app, "run_initial_stage", return_value=(state, True)), \
+             patch.object(app, "run_initial_stage", return_value=(state.output, True)), \
              patch.object(app, "parse_nvue_state", return_value=SimpleNamespace(hostname=t.ib.hostname, eth0_addresses=(), eth1_addresses=())), \
              patch.object(app, "base_stage_needed", return_value=False), \
              patch.object(app, "verify_state"), \

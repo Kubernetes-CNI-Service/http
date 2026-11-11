@@ -509,6 +509,106 @@ class DirectRetryTests(unittest.TestCase):
         self.assertEqual(calls, 3)
         self.assertEqual(waits, [(3,)])
 
+    # =============================================================================================
+    # v3.1.3 WP-11: R-011 TEST-tracker acceptance gaps (guide :1124, :1126).  Expectations: TEST
+    # tracker 参考/TEST问题跟踪/user-test-issue-tracker.md at the cited lines; the v15 lines
+    # (参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py) show the behaviour exists.
+    # =============================================================================================
+
+    # I24 (tracker :4147): refused, reset and closed connections, an unreachable network and a
+    # banner timeout are retried like the other transient failures, on both direct checks.
+    # v15 readonly_direct_ssh_retry :2997-2999 (transient set), :3023-3029 (wait and retry).
+    def test_r011_i24_refused_reset_closed_and_unreachable_connections_are_retried(self):
+        for text in ("ssh: connect to host 192.0.2.10 port 22: Connection refused",
+                     "kex_exchange_identification: read: Connection reset by peer",
+                     "Connection closed by 192.0.2.10 port 22",
+                     "ssh: connect to host 192.0.2.10 port 22: Network is unreachable",
+                     "Connection timed out during banner exchange"):
+            with self.subTest(check="password", text=text), \
+                    patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
+                    patch.object(app, "interactive_run",
+                                 side_effect=[app.SessionResult(text + "\n", 255), self.direct_success()]) as run, \
+                    patch.object(app.time, "sleep") as wait:
+                self.direct_verify()
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual([call.args for call in wait.call_args_list], [(3,)])
+            with self.subTest(check="public-key", text=text):
+                error, calls, waits = self.key_probe([subprocess.CompletedProcess([], 255, "", text),
+                                                      subprocess.CompletedProcess([], 0, "", "")])
+                self.assertEqual(error, "")
+                self.assertEqual(calls, 3)
+                self.assertEqual(waits, [(3,)])
+
+    # I24 (tracker :4145-4146, :4150-4151): the password check never offers a key and the key
+    # check offers only the given key (no password); host-key checking stays on; each connected
+    # session keeps its own 15 s limit apart from the 3 s connect timeout.  v15
+    # verify_management_direct_ssh :3047-3058, verify_management_key_possession :3746-3757.
+    def test_r011_i24_password_check_offers_no_key_and_key_check_offers_only_its_key(self):
+        with patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
+                patch.object(app, "interactive_run", return_value=self.direct_success()) as run, \
+                patch.object(app.time, "sleep"):
+            self.direct_verify()
+        argv, session_limit = run.call_args.args[0], run.call_args.args[2]
+        for option in ("PubkeyAuthentication=no", "PreferredAuthentications=password,keyboard-interactive",
+                       "StrictHostKeyChecking=accept-new", "ConnectTimeout=3"):
+            with self.subTest(check="password", option=option):
+                self.assertIn(option, argv)
+        self.assertEqual(session_limit, 15)
+        self.assertFalse(any(item.startswith("UserKnownHostsFile") or item == "StrictHostKeyChecking=no"
+                             for item in argv))
+
+        with tempfile.TemporaryDirectory() as directory:
+            private_key = Path(directory) / "id_ed25519"
+            private_key.write_text("synthetic fixture")
+            with patch.object(app, "_public_key_fingerprint", return_value="SHA256:fixture"), \
+                    patch.object(app.subprocess, "run",
+                                 side_effect=[subprocess.CompletedProcess([], 0, "fixture", ""),
+                                              subprocess.CompletedProcess([], 0, "", "")]) as local, \
+                    patch.object(app.time, "sleep"):
+                app.verify_management_key_possession(target(), "admin", {"fingerprint": "SHA256:fixture"},
+                                                     private_key, 10)
+            probe = local.call_args_list[1]
+            argv = probe.args[0]
+            self.assertEqual(argv[argv.index("-i") + 1], str(private_key))
+            for option in ("IdentitiesOnly=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no",
+                           "PreferredAuthentications=publickey", "StrictHostKeyChecking=accept-new",
+                           "ConnectTimeout=3"):
+                with self.subTest(check="public-key", option=option):
+                    self.assertIn(option, argv)
+            self.assertEqual(probe.kwargs["timeout"], 15)
+            self.assertFalse(any(item.startswith("UserKnownHostsFile") or item == "StrictHostKeyChecking=no"
+                                 for item in argv))
+
+    # I24 (tracker :4154): the full report keeps every attempt number, the connect timeout, each
+    # wait and the real (redacted) failure text; the final reason names the bound and the delay.
+    # v15 readonly_direct_ssh_retry :3003 (attempt line), :3015 (redacted detail),
+    # :3025 (failure line), :3028 (wait line), :3030-3032 (final reason).
+    def test_r011_i24_report_keeps_each_attempt_timeout_wait_and_redacted_detail(self):
+        failure = app.SessionResult("ssh: connect to host 192.0.2.10 port 22: No route to host\n"
+                                    "echoed " + IB_CREDENTIAL + "\n", 255)
+        report = []
+        with patch.object(app, "interactive_run", return_value=failure), \
+                patch.object(app.time, "sleep"), \
+                patch.object(app, "report_detail", side_effect=lambda message="", **_: report.append(message)):
+            with self.assertRaises(app.SetupError) as raised:
+                self.direct_verify()
+        text = "\n".join(report)
+        for attempt in (1, 2, 3):
+            with self.subTest(attempt=attempt):
+                starts = [line for line in report if f"[{attempt}/3]:" in line]
+                self.assertEqual(len(starts), 1, text)
+                self.assertIn("192.0.2.10", starts[0])
+                self.assertIn("connect-timeout=3s", starts[0])
+                failures = [line for line in report if f"[{attempt}/3] temporary connection failure" in line]
+                self.assertEqual(len(failures), 1, text)
+                self.assertIn("No route to host", failures[0])
+                self.assertIn("<redacted>", failures[0])
+        self.assertEqual(sum("waiting 3s" in line for line in report), 2)
+        for part in ("after 3 attempts", "connect-timeout=3s", "retry-delay=3s", "No route to host"):
+            with self.subTest(final=part):
+                self.assertIn(part, str(raised.exception))
+        self.assertNotIn(IB_CREDENTIAL, text + str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

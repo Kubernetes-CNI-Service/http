@@ -238,6 +238,53 @@ class Eui64FallbackTests(unittest.TestCase):
         self.assertEqual(len(ready), 1)
         self.assertEqual(ready[0].neighbor.interface, "swp6")
 
+    # -- v3.1.3 WP-11: R-011 TEST-tracker acceptance gaps (guide :1124, :1126) ---------------------
+    # Expectations: TEST tracker 参考/TEST问题跟踪/user-test-issue-tracker.md at the cited lines; the
+    # v15 lines (参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py) show the behaviour
+    # already exists (guide :1124).  No I22 strengthening (guide :1134).
+
+    # I22 (tracker :3867-3868): a bridged port whose dynamic FDB entry carries no VLAN gives no
+    # candidate (no guessed PVID or bridge L3 interface) and no VRF query.  v15
+    # derived_neighbor_for_port :2315-2321 (refusal at :2320).
+    def test_r011_i22_bridged_fdb_entry_without_vlan_gets_no_guessed_pvid(self):
+        ready, records, _, queries = self.prepare(fdb=self.MAC + " dev swp6 master br_default\n")
+        self.assertEqual(ready, [])
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(queries, 0)
+
+    # I22 (tracker :3875-3876): one [FALLBACK] line marks the address as a derived candidate and
+    # names the MAC, the IPv6 candidate, the actual egress interface and the VRF, without claiming
+    # success.  v15 prepare_ready_ib_tasks :4708-4711.
+    def test_r011_i22_fallback_line_names_mac_candidate_egress_and_vrf(self):
+        _, _, output, _ = self.prepare()
+        lines = [line for line in output.splitlines() if line.startswith("[FALLBACK]")]
+        self.assertEqual(len(lines), 1, output)
+        for part in ("example-ib001", "ND missing", self.MAC, "candidate " + self.IPV6,
+                     "dev ib-oob", "vrf oob", "still required"):
+            with self.subTest(part=part):
+                self.assertIn(part, lines[0])
+
+    # I22 (tracker :3877): each device log says source=ND or source=FDB_EUI64_CANDIDATE.  v15
+    # execute_ib_task :4174.  The IB login is stopped right after that line (no device I/O).
+    def test_r011_i22_device_log_marks_nd_or_fdb_candidate_source(self):
+        args = SimpleNamespace(eth_user="cumulus", ib_user="admin", connect_timeout=5, apply=False,
+                               force=False, execution_mode="management")
+        for address, source in (("fe80::1234", "ND"), (self.IPV6, "FDB_EUI64_CANDIDATE")):
+            task = app.PreparedIBTask(target(), app.Neighbor(address, "ib-oob", self.MAC, "oob", source),
+                                      "", False)
+            messages = []
+            with self.subTest(source=source), \
+                    patch.object(app, "inspect_ib_device",
+                                 side_effect=app.SetupError("synthetic stop after the path line")), \
+                    patch.object(app, "interactive_run", side_effect=AssertionError("no IB SSH")), \
+                    patch.object(app, "log", lambda message="": messages.append(message)):
+                record = app.execute_ib_task(task, args, None, "admin", None, [], None)
+                self.assertEqual(record["outcome"], "FAILED")  # fixture check: stopped at login
+                paths = [line for line in messages if "IB IPv6 path:" in line]
+                self.assertEqual(len(paths), 1, messages)
+                self.assertIn(address, paths[0])
+                self.assertIn("source=" + source, paths[0])
+
 
 if __name__ == "__main__":
     unittest.main()
