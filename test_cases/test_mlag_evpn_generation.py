@@ -185,6 +185,7 @@ def prepare_schema_v1_collision_generator(root: Path) -> tuple[Path, Path, Path]
         template_dir / "90-c2-generate_configs.py",
     )
     shutil.copy2(ROOT / "tools/project_contract.py", tools_dir)
+    shutil.copy2(ROOT / "tools/project_pointer.py", tools_dir)
     shutil.copy2(ROOT / "ztp/nvue_normalizer.py", root / "ztp")
     shutil.copy2(
         ROOT / "ztp/config/cumulus/d-hostname2mac.py",

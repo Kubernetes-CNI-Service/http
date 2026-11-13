@@ -458,7 +458,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>858</strong> 个受维护文件</span>
+          <span><strong>882</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -576,7 +576,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-infiniband" data-nav-title="infiniband/ 文件" class="catalog-group">
-          <summary><code>infiniband/</code> — 30 个文件</summary>
+          <summary><code>infiniband/</code> — 31 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="infiniband/bringup/ndr/OS-CPLD-upgrade.sh"><td><code>infiniband/bringup/ndr/OS-CPLD-upgrade.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Guarded MLNX-OS image/CPLD upgrade for an explicit, validated switch list。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/ndr/README.md"><td><code>infiniband/bringup/ndr/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：NDR bringup 工具。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
@@ -587,6 +587,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py"><td><code>infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UFM setup/upgrade entry: reads only this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/01-global.yaml"><td><code>infiniband/bringup/xdr-initial-setup/01-global.yaml</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../01-global.yaml。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/README.md"><td><code>infiniband/bringup/xdr-initial-setup/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：XDR IB 交换机初始配置。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
+            <tr data-file-path="infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh"><td><code>infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Explicit manual preparation; never invoked by load/initial-setup/UFM。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/infra-neutral.conf"><td><code>infiniband/bringup/xdr-initial-setup/infra-neutral.conf</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>InfiniBand 采集、分析、初始化与升级使用的声明式配置或模板；由所属模块校验后消费，不能脱离对应事务随意覆盖。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/initial-setup.py"><td><code>infiniband/bringup/xdr-initial-setup/initial-setup.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Initialize NVOS management through Ethernet OOB switches。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/publickey"><td><code>infiniband/bringup/xdr-initial-setup/publickey</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../publickey。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -715,7 +716,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 509 个文件</summary>
+          <summary><code>test_cases/</code> — 530 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -762,7 +763,9 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/ibsw3_scp_cpld_test_isolation.py"><td><code>test_cases/ibsw3_scp_cpld_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw3_scp_request_test_isolation.py"><td><code>test_cases/ibsw3_scp_request_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw3_scp_test_isolation.py"><td><code>test_cases/ibsw3_scp_test_isolation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Test-only, fixed-roster one-whole child isolation; no production authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/ibsw_upgrade_runtime_fixture.py"><td><code>test_cases/ibsw_upgrade_runtime_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Owned-file, fake-I/O fixture for real upgrade entry + IB adapter + fleet engine。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/ibsw_v2_switch_sim.py"><td><code>test_cases/ibsw_v2_switch_sim.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Local simulated NVOS IB switches for the v2 upgrade tests (test support, not a test module)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/initial_setup_jump_fixture.py"><td><code>test_cases/initial_setup_jump_fixture.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>D34-O8: replace only the new master factory in pre-existing main fixtures。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/issue_tracker_template.py"><td><code>test_cases/issue_tracker_template.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Standard online Issue Tracker template (owner 2026-10-23) and an in-memory Sheets service for tests。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/linux_runtime_lock_model.py"><td><code>test_cases/linux_runtime_lock_model.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Explicit Linux-manager test port; never native Linux evidence on Darwin。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/module_loader.py"><td><code>test_cases/module_loader.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared source loader: remove only helper-owned paths, not module authority。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -896,6 +899,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_finished_project_import.py"><td><code>test_cases/test_finished_project_import.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for reviewing and publishing V3 finished bundles。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_finished_project_lifecycle.py"><td><code>test_cases/test_finished_project_lifecycle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow contracts for finished-record import and deployment isolation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_finished_project_rehydrate.py"><td><code>test_cases/test_finished_project_rehydrate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contract for explicit finished-record rehydration。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_fleet_canary_routes.py"><td><code>test_cases/test_fleet_canary_routes.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-017/R-007 literal route, gate and append expectations, independent of selection implementation。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_fleet_distribution.py"><td><code>test_cases/test_fleet_distribution.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): package distribution (owner 2026-10-23, review 15.6-15.8)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_fleet_engine.py"><td><code>test_cases/test_fleet_engine.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet engine (IB upgrade v2; reusable for nvl-sw): the main loop with a simulated fleet。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_fleet_link.py"><td><code>test_cases/test_fleet_link.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Fleet jobs (IB upgrade v2): ztp-server egress speed decides the OS distribution mode (owner 2026-10-23)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1003,6 +1007,14 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_ibsw3_source_inverse_fixture_portability.py"><td><code>test_cases/test_ibsw3_source_inverse_fixture_portability.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent local DATA fixtures; no ambient private SOURCE packet required。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw3_stdin_owned_cpld_protocol.py"><td><code>test_cases/test_ibsw3_stdin_owned_cpld_protocol.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UNRUN one protocol whole; request/companion bindings are synthetic DATA。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw3_transfer_method_selector.py"><td><code>test_cases/test_ibsw3_transfer_method_selector.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UNRUN: fixed nonsecret selector/prepare chain + real local Python/PTY。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_canary_routes_workflow.py"><td><code>test_cases/test_ibsw_upgrade_canary_routes_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-017 real five-device Engine/LiveOps/component/owned-runner routes, then record reuse。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_connection_drops.py"><td><code>test_cases/test_ibsw_upgrade_connection_drops.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-A3/I-016: exact channel/SFTP disconnects, never authentication subclasses。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_connection_drops_workflow.py"><td><code>test_cases/test_ibsw_upgrade_connection_drops_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-A3/I-016: real Engine -&gt; LiveOps -&gt; v1 key reader through a local SFTP failure。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_entry_runtime.py"><td><code>test_cases/test_ibsw_upgrade_entry_runtime.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-A2 entry/runtime contract: independent literal expectations from r511 a–m。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_layout_independence.py"><td><code>test_cases/test_ibsw_upgrade_layout_independence.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>R-015 / v3.1.4 WP-A1: v2 uses shared templates, not the v1 bundle。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_layout_independence_workflow.py"><td><code>test_cases/test_ibsw_upgrade_layout_independence_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>R-015: a real v2 plan against simulated switches with no v1-only sources。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_project_inventory_workflow.py"><td><code>test_cases/test_ibsw_upgrade_project_inventory_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>R-016/R-007: real entry, project pointer, inventory comparator and fleet engine。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ibsw_upgrade_runtime_lock_workflow.py"><td><code>test_cases/test_ibsw_upgrade_runtime_lock_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-014: real entry -&gt; IB family -&gt; fleet engine while owned inputs change。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw_upgrade_usability.py"><td><code>test_cases/test_ibsw_upgrade_usability.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct operator-usability contracts for the IB upgrade entry; no device IO。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw_upgrade_usability_workflow.py"><td><code>test_cases/test_ibsw_upgrade_usability_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real entry workflows for the IB upgrade usability changes; device IO simulated。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ibsw_v2_device.py"><td><code>test_cases/test_ibsw_v2_device.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>IB adapter of the v2 upgrade (owner 2026-10-23; review 15.2, 15.3, 15.5, 15.10, 15.13)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1037,8 +1049,14 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_initial_setup_external_contract_workflow.py"><td><code>test_cases/test_initial_setup_external_contract_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>v3.1.3 WP-3 workflow: the merged initial-setup keeps its external library contract。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_handoff_transport.py"><td><code>test_cases/test_initial_setup_handoff_transport.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Initial-setup handoff transport packet: PUBLIC fixtures, no device/network or hash KAT。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_handoff_transport_workflow.py"><td><code>test_cases/test_initial_setup_handoff_transport_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>PUBLIC real-reader data handoff into canonical initial-setup transport。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_host_key_refresh.py"><td><code>test_cases/test_initial_setup_host_key_refresh.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP4 entry loading only; WP5 adds jump mutation and selector contracts here。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_host_key_refresh_workflow.py"><td><code>test_cases/test_initial_setup_host_key_refresh_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-3 real authority loader -&gt; initial readiness -&gt; unique HostKeyChange parser。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_ib_phase_protocol.py"><td><code>test_cases/test_initial_setup_ib_phase_protocol.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent typed inner-IB phase protocol: O-only tests-first, NOT RUN。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_initial_closed_facts.py"><td><code>test_cases/test_initial_setup_initial_closed_facts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent Initial closed-fact contracts, additive tests first。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_ipv4_readiness.py"><td><code>test_cases/test_initial_setup_ipv4_readiness.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-3 independent IPv4 readiness policy/probe contracts, guide r504 :630-683。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_jump_gate.py"><td><code>test_cases/test_initial_setup_jump_gate.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-2 independent contracts, guide r494 :517-587/K1-K5/D34-O10-O12。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_jump_sessions.py"><td><code>test_cases/test_initial_setup_jump_sessions.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-1 / I-013 direct contracts: fake SSH only; guide r494 :417–507/K2/K9。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_initial_setup_jump_unreachable_workflow.py"><td><code>test_cases/test_initial_setup_jump_unreachable_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP-2 real C2 reader -&gt; real P1 cache -&gt; real MAIN, fake owned SSH/clock。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_jump_vlan_login.py"><td><code>test_cases/test_initial_setup_jump_vlan_login.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct: an eth_jump&#x27;s login address comes from eth0, else from its single VLAN SVI (v15)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_key_receipt_consumer.py"><td><code>test_cases/test_initial_setup_key_receipt_consumer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Tests-first canonical key receipt consumption at the existing stage API。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_initial_setup_key_receipt_workflow.py"><td><code>test_cases/test_initial_setup_key_receipt_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Real C2/P1 -&gt; stage -&gt; SSH carrier/PTY -&gt; generated key shell -&gt; receipt。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1085,6 +1103,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_load_permission_repair_contract.py"><td><code>test_cases/test_load_permission_repair_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>I-006 WP-6 (v3.1.2 M6): load checks and repairs the project&#x27;s permissions for its operator。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_load_release_transaction.py"><td><code>test_cases/test_load_release_transaction.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Unified release validation, DHCP installation, and rollback transactions。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_log_rotation.py"><td><code>test_cases/test_log_rotation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Log rotation (owner 2026-10-22): whoever writes a log rotates it, with one shared module,。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_login_path.py"><td><code>test_cases/test_login_path.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>WP3 parser and WP4 local editor/refresh contracts, r508 K7 and items 1-8。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_manual_applied_config.py"><td><code>test_cases/test_manual_applied_config.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Runtime NVUE normalization and manual ZTP preview/confirm comparisons。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_mlag_evpn_generation.py"><td><code>test_cases/test_mlag_evpn_generation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>MLAG versus EVPN multihoming generation and publication contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_module_loader_contract.py"><td><code>test_cases/test_module_loader_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent exact-source and fresh-namespace contracts for test imports。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1134,6 +1153,8 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_project_image_bundle.py"><td><code>test_cases/test_project_image_bundle.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct and workflow contracts for the optional one-project Docker image。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_project_image_owned_guard.py"><td><code>test_cases/test_project_image_owned_guard.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent owned-image fixture input, runtime and source-context contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_project_link_inputs_workflow.py"><td><code>test_cases/test_project_link_inputs_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>R-014 第 3 条 workflow：项目输入可以是用户链接，打包和同步把链接内容作为普通文件带走。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_project_pointer_contract.py"><td><code>test_cases/test_project_pointer_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>r539/Q067 independent stdlib pointer, restore, FD and legacy-hook contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_project_pointer_entry_workflow.py"><td><code>test_cases/test_project_pointer_entry_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Q067/r539: real default-pointer bootstrap before identity and runtime selection。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_clean_clone_contract.py"><td><code>test_cases/test_public_clean_clone_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for public/private docs and clean-checkout governance。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_clean_clone_workflow.py"><td><code>test_cases/test_public_clean_clone_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow proof for the public test surface in a private-doc-free checkout。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_public_project_fixture_contract.py"><td><code>test_cases/test_public_project_fixture_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the sanitized project fixture used by public tests。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1188,6 +1209,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_terminal_l2_stp_generation.py"><td><code>test_cases/test_terminal_l2_stp_generation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Terminal-facing layer-2 STP generation and workflow contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_test_case_repository.py"><td><code>test_cases/test_test_case_repository.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Contracts for the canonical, extensible test-case repository。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_topology_consistency.py"><td><code>test_cases/test_topology_consistency.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Cross-consumer inventory and LLDP identity contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_troot_checkscript_env_control.py"><td><code>test_cases/test_troot_checkscript_env_control.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>RV31-92 carrier control: observe the real helper, never start its child。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ubuntu24_host.py"><td><code>test_cases/test_ubuntu24_host.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct tests for infra/ubuntu24_host.py; device output fixtures are verbatim from ufm-manual.log。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_collection_archive_retrieval.py"><td><code>test_cases/test_ufm_collection_archive_retrieval.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>D-70 exact-name retrieval rejects weak identity and incomplete archives。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_collection_contract.py"><td><code>test_cases/test_ufm_collection_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>D-70 UFM collection artifact contract on synthetic local inputs only。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1229,7 +1251,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-tools" data-nav-title="tools/ 文件" class="catalog-group">
-          <summary><code>tools/</code> — 117 个文件</summary>
+          <summary><code>tools/</code> — 119 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="tools/_package_common.py"><td><code>tools/_package_common.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Internal shared archive implementation for tar-for-upload/download。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/collect-ztp-diagnostics.py"><td><code>tools/collect-ztp-diagnostics.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Create a bounded, redacted support bundle for the ZTP management stack。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1324,11 +1346,13 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="tools/lldp-analyze-tool/analyze_lldp.py"><td><code>tools/lldp-analyze-tool/analyze_lldp.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Compare expected LLDPq DOT links with the latest Ethernet collection archive。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/lldp-analyze-tool/build_report.py"><td><code>tools/lldp-analyze-tool/build_report.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Render a normalized LLDP validation payload as an XLSX workbook。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/log_rotation.py"><td><code>tools/log_rotation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Size-based log rotation shared by every script that writes a log (owner 2026-10-22: whoever writes a。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/login_path.py"><td><code>tools/login_path.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Pure SSH host-key change facts; callers own transport and any later edits。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/operator_identity.py"><td><code>tools/operator_identity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Operator identity on the management server: who owns the project, who may run, how root re-runs as them (I-006)。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/package-project-image.py"><td><code>tools/package-project-image.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build or install one immutable, project-specific HTTP ZTP Docker image。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/package-shared-artifacts.py"><td><code>tools/package-shared-artifacts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Build one independent, project-derived shared-artifact transport bundle。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/password-update.py"><td><code>tools/password-update.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Safely rotate Cumulus and NVOS password hashes in a project global YAML。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/project_contract.py"><td><code>tools/project_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared deployment-project schema and transfer exclusion contract。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="tools/project_pointer.py"><td><code>tools/project_pointer.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Read-only project pointer and local restore eligibility, without optional SDKs。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/rehydrate-finished.py"><td><code>tools/rehydrate-finished.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Materialize one verified finished record as a new DAY0 project。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/ssh_key_preparation.py"><td><code>tools/ssh_key_preparation.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Shared, bounded OpenSSH public-key selection and project publication。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="tools/sync-code.py"><td><code>tools/sync-code.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Incrementally sync local HTTP/ZTP code and one DAY0 project to a host。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -1508,7 +1532,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>678</strong> 个脚本型文件</span>
+          <span><strong>702</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1677,7 +1701,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>sed -n &#x27;1,120p&#x27; ethernet/monitor/sw-link.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
         </details>
-        <h4 id="v2-script-group-infiniband" data-nav-title="infiniband/ 脚本">infiniband/ — 16 个脚本</h4>
+        <h4 id="v2-script-group-infiniband" data-nav-title="infiniband/ 脚本">infiniband/ — 17 个脚本</h4>
         <details data-script-reference="infiniband/bringup/ndr/OS-CPLD-upgrade.sh" class="script-reference">
           <summary><code>infiniband/bringup/ndr/OS-CPLD-upgrade.sh</code> — Guarded MLNX-OS image/CPLD upgrade for an explicit, validated switch list。</summary>
           <div class="script-body"><dl>
@@ -1732,6 +1756,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py --help</code></pre></div>
         </details>
+        <details data-script-reference="infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh" class="script-reference">
+          <summary><code>infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh</code> — Explicit manual preparation; never invoked by load/initial-setup/UFM。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Explicit manual preparation; never invoked by load/initial-setup/UFM。</dd>
+            <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
+            <dt>运行环境：</dt><dd>具备对应 NVIDIA/Mellanox 工具和设备访问的受控 bring-up 主机。</dd>
+            <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
+            <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
+            <dt>语法/调用方式：</dt><dd>bash infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh [options]</dd>
+            <dt>主要参数：</dt><dd>--keys-only, --help, --no-install-recommends, --reference</dd>
+            <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
+            <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
+            <dt>失败恢复：</dt><dd>在第一个失败处停止，保留原日志和 marker；按脚本给出的 NEXT/README 修复后从完整受支持入口重试。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>sed -n &#x27;1,120p&#x27; infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
+        </details>
         <details data-script-reference="infiniband/bringup/xdr-initial-setup/initial-setup.py" class="script-reference">
           <summary><code>infiniband/bringup/xdr-initial-setup/initial-setup.py</code> — Initialize NVOS management through Ethernet OOB switches。</summary>
           <div class="script-body"><dl>
@@ -1741,7 +1783,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B infiniband/bringup/xdr-initial-setup/initial-setup.py [options]</dd>
-            <dt>主要参数：</dt><dd>--version, --project-dir, --ib-csv, --p2p, --eth-user, --oob-spines, --ib-user, --ib-initial-password-env, --factory-default-admin, --connect-timeout, --max-workers, --task-timeout, --plan, --verbose, --apply, --force, --yes, --report, --snapshot-dir, --target-cache, --generate-json, --generate-json-only, --execution-mode, --local-ethernet-hostname, --credentials-fd, --ethernet-password</dd>
+            <dt>主要参数：</dt><dd>--version, --project-dir, --ib-csv, --p2p, --eth-user, --oob-spines, --ib-user, --ib-initial-password-env, --factory-default-admin, --connect-timeout, --max-workers, --task-timeout, --plan, --verbose, --apply, --force, --refresh-host-key, --yes, --report, --snapshot-dir, --target-cache, --generate-json, --generate-json-only, --execution-mode, --local-ethernet-hostname, --credentials-fd, --ethernet-password</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -1849,7 +1891,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B infiniband/bringup/xdr-upgrade/upgrade2.py [options]</dd>
-            <dt>主要参数：</dt><dd>--plan, --upgrade, -y, --yes, --version, --all, -A, --skip-canary, --force, --project, --ib-csv, --global, --devices, --p2p, --package-dir, --local-dir, --known-hosts, --user, --identity, --management-public-key, --password, --method, --mgmt-server, --mgmt-user, --mgmt-port, --scp-known-hosts, --server-link, --in-flight, --check-workers, --upgrade-workers, --probe-workers, --relay-fanout, --relay-transfers, --progress-seconds</dd>
+            <dt>主要参数：</dt><dd>--plan, --upgrade, -y, --yes, --version, --all, -A, --skip-canary, --force, --project, --ib-csv, --global, --devices, --p2p, --package-dir, --inventory-checked, --local-dir, --known-hosts, --user, --identity, --management-public-key, --password, --method, --mgmt-server, --mgmt-user, --mgmt-port, --scp-known-hosts, --server-link, --in-flight, --check-workers, --upgrade-workers, --probe-workers, --relay-fanout, --relay-transfers, --progress-seconds</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -2635,7 +2677,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 485 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 506 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -3068,6 +3110,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.ibsw3_scp_test_isolation</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/ibsw_upgrade_runtime_fixture.py" class="script-reference">
+          <summary><code>test_cases/ibsw_upgrade_runtime_fixture.py</code> — Owned-file, fake-I/O fixture for real upgrade entry + IB adapter + fleet engine。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Owned-file, fake-I/O fixture for real upgrade entry + IB adapter + fleet engine。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.ibsw_upgrade_runtime_fixture</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.ibsw_upgrade_runtime_fixture</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/ibsw_v2_switch_sim.py" class="script-reference">
           <summary><code>test_cases/ibsw_v2_switch_sim.py</code> — Local simulated NVOS IB switches for the v2 upgrade tests (test support, not a test module)。</summary>
           <div class="script-body"><dl>
@@ -3085,6 +3145,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.ibsw_v2_switch_sim</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/initial_setup_jump_fixture.py" class="script-reference">
+          <summary><code>test_cases/initial_setup_jump_fixture.py</code> — D34-O8: replace only the new master factory in pre-existing main fixtures。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>D34-O8: replace only the new master factory in pre-existing main fixtures。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.initial_setup_jump_fixture</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.initial_setup_jump_fixture</code></pre></div>
         </details>
         <details data-script-reference="test_cases/issue_tracker_template.py" class="script-reference">
           <summary><code>test_cases/issue_tracker_template.py</code> — Standard online Issue Tracker template (owner 2026-10-23) and an in-memory Sheets service for tests。</summary>
@@ -5444,6 +5522,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_finished_project_rehydrate</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_fleet_canary_routes.py" class="script-reference">
+          <summary><code>test_cases/test_fleet_canary_routes.py</code> — I-017/R-007 literal route, gate and append expectations, independent of selection implementation。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-017/R-007 literal route, gate and append expectations, independent of selection implementation。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_fleet_canary_routes</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_fleet_canary_routes</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_fleet_distribution.py" class="script-reference">
           <summary><code>test_cases/test_fleet_distribution.py</code> — Fleet jobs (IB upgrade v2): package distribution (owner 2026-10-23, review 15.6-15.8)。</summary>
           <div class="script-body"><dl>
@@ -7370,6 +7466,150 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw3_transfer_method_selector</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_canary_routes_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_canary_routes_workflow.py</code> — I-017 real five-device Engine/LiveOps/component/owned-runner routes, then record reuse。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-017 real five-device Engine/LiveOps/component/owned-runner routes, then record reuse。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_canary_routes_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_canary_routes_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_connection_drops.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_connection_drops.py</code> — WP-A3/I-016: exact channel/SFTP disconnects, never authentication subclasses。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-A3/I-016: exact channel/SFTP disconnects, never authentication subclasses。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_connection_drops</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_connection_drops</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_connection_drops_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_connection_drops_workflow.py</code> — WP-A3/I-016: real Engine -&gt; LiveOps -&gt; v1 key reader through a local SFTP failure。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-A3/I-016: real Engine -&gt; LiveOps -&gt; v1 key reader through a local SFTP failure。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_connection_drops_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_connection_drops_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_entry_runtime.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_entry_runtime.py</code> — WP-A2 entry/runtime contract: independent literal expectations from r511 a–m。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-A2 entry/runtime contract: independent literal expectations from r511 a–m。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_entry_runtime</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_entry_runtime</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_layout_independence.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_layout_independence.py</code> — R-015 / v3.1.4 WP-A1: v2 uses shared templates, not the v1 bundle。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>R-015 / v3.1.4 WP-A1: v2 uses shared templates, not the v1 bundle。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_layout_independence</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_layout_independence</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_layout_independence_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_layout_independence_workflow.py</code> — R-015: a real v2 plan against simulated switches with no v1-only sources。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>R-015: a real v2 plan against simulated switches with no v1-only sources。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_layout_independence_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_layout_independence_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_project_inventory_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_project_inventory_workflow.py</code> — R-016/R-007: real entry, project pointer, inventory comparator and fleet engine。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>R-016/R-007: real entry, project pointer, inventory comparator and fleet engine。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_project_inventory_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_project_inventory_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ibsw_upgrade_runtime_lock_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ibsw_upgrade_runtime_lock_workflow.py</code> — I-014: real entry -&gt; IB family -&gt; fleet engine while owned inputs change。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>I-014: real entry -&gt; IB family -&gt; fleet engine while owned inputs change。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ibsw_upgrade_runtime_lock_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ibsw_upgrade_runtime_lock_workflow</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_ibsw_upgrade_usability.py" class="script-reference">
           <summary><code>test_cases/test_ibsw_upgrade_usability.py</code> — Direct operator-usability contracts for the IB upgrade entry; no device IO。</summary>
           <div class="script-body"><dl>
@@ -7982,6 +8222,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_handoff_transport_workflow</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_initial_setup_host_key_refresh.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_host_key_refresh.py</code> — WP4 entry loading only; WP5 adds jump mutation and selector contracts here。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP4 entry loading only; WP5 adds jump mutation and selector contracts here。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_host_key_refresh</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_host_key_refresh</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_host_key_refresh_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_host_key_refresh_workflow.py</code> — WP-3 real authority loader -&gt; initial readiness -&gt; unique HostKeyChange parser。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-3 real authority loader -&gt; initial readiness -&gt; unique HostKeyChange parser。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_host_key_refresh_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_host_key_refresh_workflow</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_initial_setup_ib_phase_protocol.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_ib_phase_protocol.py</code> — Independent typed inner-IB phase protocol: O-only tests-first, NOT RUN。</summary>
           <div class="script-body"><dl>
@@ -8017,6 +8293,78 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_initial_closed_facts</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_ipv4_readiness.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_ipv4_readiness.py</code> — WP-3 independent IPv4 readiness policy/probe contracts, guide r504 :630-683。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-3 independent IPv4 readiness policy/probe contracts, guide r504 :630-683。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_ipv4_readiness</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_ipv4_readiness</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_jump_gate.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_jump_gate.py</code> — WP-2 independent contracts, guide r494 :517-587/K1-K5/D34-O10-O12。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-2 independent contracts, guide r494 :517-587/K1-K5/D34-O10-O12。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_jump_gate</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_jump_gate</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_jump_sessions.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_jump_sessions.py</code> — WP-1 / I-013 direct contracts: fake SSH only; guide r494 :417–507/K2/K9。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-1 / I-013 direct contracts: fake SSH only; guide r494 :417–507/K2/K9。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_jump_sessions</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_jump_sessions</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_initial_setup_jump_unreachable_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_initial_setup_jump_unreachable_workflow.py</code> — WP-2 real C2 reader -&gt; real P1 cache -&gt; real MAIN, fake owned SSH/clock。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP-2 real C2 reader -&gt; real P1 cache -&gt; real MAIN, fake owned SSH/clock。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_initial_setup_jump_unreachable_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_initial_setup_jump_unreachable_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_initial_setup_jump_vlan_login.py" class="script-reference">
           <summary><code>test_cases/test_initial_setup_jump_vlan_login.py</code> — Direct: an eth_jump&#x27;s login address comes from eth0, else from its single VLAN SVI (v15)。</summary>
@@ -8845,6 +9193,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_log_rotation</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_login_path.py" class="script-reference">
+          <summary><code>test_cases/test_login_path.py</code> — WP3 parser and WP4 local editor/refresh contracts, r508 K7 and items 1-8。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>WP3 parser and WP4 local editor/refresh contracts, r508 K7 and items 1-8。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_login_path</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_login_path</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_manual_applied_config.py" class="script-reference">
           <summary><code>test_cases/test_manual_applied_config.py</code> — Runtime NVUE normalization and manual ZTP preview/confirm comparisons。</summary>
@@ -9727,6 +10093,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_project_link_inputs_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_project_pointer_contract.py" class="script-reference">
+          <summary><code>test_cases/test_project_pointer_contract.py</code> — r539/Q067 independent stdlib pointer, restore, FD and legacy-hook contracts。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>r539/Q067 independent stdlib pointer, restore, FD and legacy-hook contracts。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_project_pointer_contract</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_project_pointer_contract</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_project_pointer_entry_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_project_pointer_entry_workflow.py</code> — Q067/r539: real default-pointer bootstrap before identity and runtime selection。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Q067/r539: real default-pointer bootstrap before identity and runtime selection。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_project_pointer_entry_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_project_pointer_entry_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_public_clean_clone_contract.py" class="script-reference">
           <summary><code>test_cases/test_public_clean_clone_contract.py</code> — Direct contracts for public/private docs and clean-checkout governance。</summary>
@@ -10700,6 +11102,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_topology_consistency</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_troot_checkscript_env_control.py" class="script-reference">
+          <summary><code>test_cases/test_troot_checkscript_env_control.py</code> — RV31-92 carrier control: observe the real helper, never start its child。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>RV31-92 carrier control: observe the real helper, never start its child。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_troot_checkscript_env_control</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_troot_checkscript_env_control</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_ubuntu24_host.py" class="script-reference">
           <summary><code>test_cases/test_ubuntu24_host.py</code> — Direct tests for infra/ubuntu24_host.py; device output fixtures are verbatim from ufm-manual.log。</summary>
           <div class="script-body"><dl>
@@ -11366,7 +11786,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m test_cases.validation_unittest REPORT_PATH</code></pre></div>
         </details>
-        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 108 个脚本</h4>
+        <h4 id="v2-script-group-tools" data-nav-title="tools/ 脚本">tools/ — 110 个脚本</h4>
         <details data-script-reference="tools/_package_common.py" class="script-reference">
           <summary><code>tools/_package_common.py</code> — Internal shared archive implementation for tar-for-upload/download。</summary>
           <div class="script-body"><dl>
@@ -12879,6 +13299,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>python3 -B tools/log_rotation.py --help</code></pre></div>
         </details>
+        <details data-script-reference="tools/login_path.py" class="script-reference">
+          <summary><code>tools/login_path.py</code> — Pure SSH host-key change facts; callers own transport and any later edits。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Pure SSH host-key change facts; callers own transport and any later edits。</dd>
+            <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
+            <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
+            <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
+            <dt>前置条件：</dt><dd>调用者已建立正确 root、权限、锁、输入身份和失败处理；不得绕过上层 preflight。</dd>
+            <dt>语法/调用方式：</dt><dd>由上层 Python 模块导入 tools/login_path.py 中的公开函数/类</dd>
+            <dt>主要参数：</dt><dd>无受支持的独立 CLI。</dd>
+            <dt>输入：</dt><dd>调用者已验证的数据结构、文件描述符或路径；具体 schema 由模块 direct 测试锁定。</dd>
+            <dt>输出/状态：</dt><dd>返回值、受控异常或调用者事务内的状态变化；库自身不构成完整部署。</dd>
+            <dt>成功判据：</dt><dd>调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。</dd>
+            <dt>失败恢复：</dt><dd>让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>rg -n &quot;login_path&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
+        </details>
         <details data-script-reference="tools/operator_identity.py" class="script-reference">
           <summary><code>tools/operator_identity.py</code> — Operator identity on the management server: who owns the project, who may run, how root re-runs as them (I-006)。</summary>
           <div class="script-body"><dl>
@@ -12968,6 +13406,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>rg -n &quot;project_contract&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
+        </details>
+        <details data-script-reference="tools/project_pointer.py" class="script-reference">
+          <summary><code>tools/project_pointer.py</code> — Read-only project pointer and local restore eligibility, without optional SDKs。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Read-only project pointer and local restore eligibility, without optional SDKs。</dd>
+            <dt>是否直接运行：</dt><dd>否；这是共享库/安全边界，由其列出的生产入口导入。</dd>
+            <dt>运行环境：</dt><dd>随所属 Native、Docker、打包、监控或分析流程运行，不单独取得运行权限。</dd>
+            <dt>使用场景：</dt><dd>上层入口需要路径校验、锁、解析、事务、状态投影或分析算法时调用。</dd>
+            <dt>前置条件：</dt><dd>调用者已建立正确 root、权限、锁、输入身份和失败处理；不得绕过上层 preflight。</dd>
+            <dt>语法/调用方式：</dt><dd>由上层 Python 模块导入 tools/project_pointer.py 中的公开函数/类</dd>
+            <dt>主要参数：</dt><dd>无受支持的独立 CLI。</dd>
+            <dt>输入：</dt><dd>调用者已验证的数据结构、文件描述符或路径；具体 schema 由模块 direct 测试锁定。</dd>
+            <dt>输出/状态：</dt><dd>返回值、受控异常或调用者事务内的状态变化；库自身不构成完整部署。</dd>
+            <dt>成功判据：</dt><dd>调用者完成后置校验且整个上层事务提交；单个函数返回不等于部署成功。</dd>
+            <dt>失败恢复：</dt><dd>让异常向上层 fail closed；保留锁、marker 和原始输入证据，不在库外手工补写。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>rg -n &quot;project_pointer&quot; DAY0-Prepare infra monitor tools ztp  # 查找受支持调用者</code></pre></div>
         </details>
         <details data-script-reference="tools/rehydrate-finished.py" class="script-reference">
           <summary><code>tools/rehydrate-finished.py</code> — Materialize one verified finished record as a new DAY0 project。</summary>
@@ -14116,10 +14572,18 @@ python3 initial-setup.py --apply           # 到第一台真正要改的 IB 时�
           <tr><td>别的普通用户 V 经 sudo</td><td>拒绝</td><td>以 root 运行</td></tr>
         </tbody></table>
         <p>拒绝都在运行锁之前、以 2 退出，提示写明项目属于谁、当前是谁；sudo 的 <code>SUDO_USER</code>、<code>SUDO_UID</code> 无效（包括在 root 的 shell 里再用 sudo 运行，这时 <code>SUDO_USER</code> 是 root）也拒绝。切到 U 执行时，root 父进程用 <code>runuser</code> 以同一个 Python 解释器重新执行本脚本、参数不变，
-          等它结束并按子进程的退出码退出；Ctrl-C 和 SIGTERM 转发给子进程，父进程不拿运行锁，<code>--credentials-fd</code> 的 fd 原样交给子进程读。已知限制：带给子进程的
-          环境变量以「名字=值」写在 <code>runuser</code> 的命令行参数里，子进程运行的整个期间（<code>runuser</code> 一直在）同机用户用 <code>ps</code> 都能看到；所以 root 运行时，环境里不要有
-          <code>--ib-initial-password-env</code> 指定的变量（默认 <code>NVOS_INITIAL_PASSWORD</code>）或 <code>NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD</code>，初始密码改用交互输入或
-          <code>--credentials-fd</code>（<code>sudo -E</code> 会把这类变量带进来）。切到 U 以后没有 root 的 ssh-agent。</p>
+          等它结束并按子进程的退出码退出；Ctrl-C 和 SIGTERM 转发给子进程，父进程不拿运行锁，<code>--credentials-fd</code> 的 fd 原样交给子进程读。</p>
+        <p><strong>v3.1.4 M6b：独立环境管道</strong>显式请求且存在的 keep 变量，包括空值和非 ASCII，仍原样到达子进程；值或编码载荷不出现在重新执行链的 argv。
+          共享机制用非阻塞封存管道和固定标准库 bootstrap 恢复环境，不落载荷文件。原 <code>credentials_fd</code> 由业务入口唯一读取并关闭，环境 bootstrap 不预读或关闭业务 FD。
+          passwd 的 HOME/USER/LOGNAME、框架 marker 优先级和无关环境排除不变；普通载荷错误固定无值消息/2，wait 仍转发 INT/TERM、恢复 handler，并保留 128+信号号。
+          Linux runuser/PAM、真实 UID 和终端行为仍 OPEN/NOT RUN，macOS 合成替身不替代现场证据。切到 U 以后仍没有 root 的 ssh-agent。</p>
+        <p><strong>v3.1.4 跳板与 IPv4</strong>同跳板复用 SSH master，按跳板限制最多八台 IB 在途；连续两次跳板不可达后暂停该组 240 秒，最多两轮重排，已经写入的工作不重放。
+          结果区分 <code>FAILED_OOB_JUMP_UNREACHABLE</code> 和跳板认证失败，写入尝试与主机密钥删除另计。Network 实际改动后先等 15 秒，否则立即首探测，之后每 10 秒、最多九次；跑满九次时有改动95秒、无改动80秒，提前就绪等待更少；若每探测耗10秒，总耗时分别约185/170秒，都不是最坏上界。原任务与 PTY 预算不变。</p>
+        <p><strong>factory reset 后主机密钥变化</strong>每次运行都加载 <code>tools.login_path</code>。只读模式只核实并记录 <code>CHECKED_HOST_KEY_REFRESH_PENDING</code>，不删除；
+          <code>--apply</code> 下通过已认证 link-local 链取得新公钥并核实指纹，才按目标地址删除旧记录并重试一次。无法核实或不一致不自动删；显式 <code>--refresh-host-key 'example-ib[01-02]'</code> 仅处理获批手工名单并标明未核实。
+          跳板删除在父进程串行处理；<code>ssh-keygen -R</code> 留下或覆盖 <code>known_hosts.old</code>，远端 inode/权限未采得时不得填造数值。实际 reset、HashKnownHosts、终端和中断行为依现场卡，仍 NOT RUN。</p>
+        <p><strong>人工辅助脚本 HS1</strong><code>helper-prepare-eth-jump.sh</code> 以 0644 随代码分发，用 bash 手工运行；不是 load/initial/UFM 自动流程。
+          只做语法、help 和引用普查，行为未经测试验证；手工准备可能写跳板公钥/PATH、访问 SSH 并新增操作者 known_hosts，需另行审阅授权，不凭文件存在自动执行。</p>
         <p><strong>各项输入、输出从哪里读（<code>--project-dir</code>）</strong></p>
         <table><thead><tr><th>项</th><th>不给 <code>--project-dir</code>（默认）</th><th>给了 <code>--project-dir &lt;项目&gt;</code></th></tr></thead><tbody>
           <tr><td>CSV</td><td>当前目录里找（显式 <code>--ib-csv</code> 照用）</td><td><code>&lt;项目&gt;/ib.csv</code>（不读 <code>02-devices_config.csv</code>）</td></tr>
@@ -14179,9 +14643,11 @@ find &lt;状态目录&gt; -maxdepth 1 \( -name auto.env -o -name 'auto-*' -o -na
           缺缓存或缓存校验不过直接报错。按下面的同目录布局拷文件，<code>tools/</code> 下不放 <code>__init__.py</code>，也不放 <code>project_contract.py</code>、<code>operator_identity.py</code>：</p>
         <pre><code>&lt;目录&gt;/initial-setup.py
 &lt;目录&gt;/tools/credentials_fd.py      Leaf 上用 --credentials-fd 时
-&lt;目录&gt;/tools/device_identity.py     用 --credentials-fd 且 fd 里有 jump_passwords 时</code></pre>
-        <p>不用 <code>--credentials-fd</code> 时只要 <code>initial-setup.py</code> 一个文件（本版设备名比较仍是 v15 的后缀匹配，没有换成 <code>tools/device_identity.py</code> 的规则，
-          所以只有上面这种情况要带它）。<code>&lt;目录&gt;/tools/</code> 存在时脚本按这个布局 import；同时又在仓库布局里、或两种布局都不成立而运行又要用到 tools 模块时，以 2 退出并写出
+&lt;目录&gt;/tools/login_path.py          每次运行必需
+&lt;目录&gt;/tools/hostname_ranges.py     每次运行必需
+&lt;目录&gt;/tools/device_identity.py     每次运行必需</code></pre>
+        <p>即使不用 <code>--credentials-fd</code>，每次运行仍须带上这三个模块，缺少任何一个都在碰设备前以 2 退出并指出缺名。设备名比较的 v15 后缀规则仍按已决排期保留，不因这三个模块的布局要求提前替换。
+          <code>&lt;目录&gt;/tools/</code> 存在时脚本按这个布局 import；同时又在仓库布局里、或两种布局都不成立而运行又要用到 tools 模块时，以 2 退出并写出
           两种布局各要的文件，不猜；目录里缺用到的模块时以 2 退出，提示里写出缺的文件路径。Leaf 上本地运行不认项目、不判身份，也不做管理服务器直连核对（这一项记
           <code>DIRECT_SSH_NOT_TESTED</code>，整次 INCOMPLETE、以 2 结束），要到管理服务器上再跑一次只读检查，才算确认管理服务器能直连。</p>
       </div>
@@ -14194,6 +14660,14 @@ find &lt;状态目录&gt; -maxdepth 1 \( -name auto.env -o -name 'auto-*' -o -na
           <li><code>venv-ibsw-upgrade</code>：<code>upgrade.py</code> 的 SSH 依赖，F01 工具复用，位置 <code>~/.venvs/http/ibsw-upgrade</code>。由运行 <code>upgrade.py</code> 的用户安装。</li>
         </ul>
         <p>root（直接登录或经 <code>sudo</code>）运行 <code>upgrade.py</code>、<code>upgrade2.py</code> 处理别人的项目时，入口在运行锁、venv 切换和任何密码提示之前，先用 <code>runuser</code> 以项目目录属主（操作员）身份重新执行一次，<code>HOME</code> 取自 passwd；所以用的是操作员家目录下的这个 venv 和 <code>~/.ssh</code>。其他普通用户运行别人的项目会被拒绝。规则见 <code>infiniband/bringup/xdr-upgrade/README.md</code>「root 运行时切换到项目属主」。</p>
+        <p><strong>可选 upgrade2.py 的 v3.1.4 边界</strong>v1 仍默认；v2 先按操作员身份，再审核 <code>~/.venvs/http/ibsw-upgrade</code> 或兼容的 <code>~/.venv-upgrade</code> 并至多 exec 一次，不自动安装。
+          显式项目优先，否则用活动项目；有独立 ib.csv 时先与项目 02 清单比较，差异以 2 退出。内部 <code>--inventory-checked</code> 只跳过比较，不跳过输入校验。
+          证据始终在项目下，创建即打印 <code>[RUN] evidence:</code>；没有项目不往代码树输出。缺必经 OS 候选仅阻相应设备，已选固件缺失整批 HOLD。</p>
+        <p>v2 运行中锁私钥、管理公钥和可读 RECORD 的文件元数据，变化后不再启新工作、跟完在途并以 2 结束；缺 RECORD 提示 <code>[LOCK] WARN</code>，不豁免必需密钥。
+          known_hosts 只取启动快照、每个变化路径提示一次，不 HOLD 或重载。75 只表示 <code>ALREADY_RUNNING</code>，其他守卫错误为 2。精确 SDK 断开回探测，认证/主机密钥错误不放宽，确认不明的请求和失败修复上传不重发。</p>
+        <p>路线 canary 健康优先、未覆盖最长路线及 CSV 同长顺序；强制设备只负责健康组未覆盖的独有段。无记录/无强制时全部健康 canary 通过才放行组件，BIOS/CPLD 单代表。
+          项目 <code>xdr-upgrade-v2-logs/canary-routes.jsonl</code> 用九字段绑定起止版本、全部镜像 SHA、run/host/time/canary，仅真实 VERIFIED 追加，AT_TARGET 不作证明，显式 skip 仍须验证。
+          O_APPEND/fsync 写入、坏行忽略、不可读警告且无覆盖、写失败停止；计划只展示覆盖依据。详细输入/锁定/路线与回退边界见 README、V2-DESIGN 和 OPEN/NOT RUN 现场卡。</p>
         <pre><code>cd /var/www/html
 python3 infra/deps.py check
 python3 infra/deps.py install --target venv-cabletracker   # 执行 11-load.py 的同一个用户

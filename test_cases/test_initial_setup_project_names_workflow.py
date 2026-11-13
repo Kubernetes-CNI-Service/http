@@ -56,6 +56,7 @@ import yaml
 
 from test_cases import test_activate_project_workflow as ACTIVATE_WORKFLOW
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples/public-project"
@@ -251,6 +252,12 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         code = refusal = None
         previous = os.getcwd()
         with ExitStack() as stack:
+            # This copied repository owns its real tools namespace only during the run.
+            stack.enter_context(mock.patch.dict(sys.modules))
+            for name in list(sys.modules):
+                if name == "tools" or name.startswith("tools."):
+                    del sys.modules[name]
+            stack.enter_context(mock.patch.object(sys, "path", [str(self.space.http), *sys.path]))
             stack.enter_context(mock.patch.object(sys, "argv", argv))
             stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(home)}))
             stack.enter_context(mock.patch.object(Path, "home", return_value=home))
@@ -261,6 +268,7 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(app, "key_install_command", new=install))
             # Read-only check: SSH replaced at the OOB Leaf; its key login answers, its snapshot does not.
             stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(mock.patch.object(app, "collect_ethernet_interfaces", new=snapshot_unavailable))
             stack.enter_context(redirect_stdout(io.StringIO()))
             stack.enter_context(redirect_stderr(io.StringIO()))

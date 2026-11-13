@@ -696,22 +696,19 @@ def write_shared_artifact_receipt(
     return path
 
 
-# CTMP candidate: retain the macOS system alias and a private effective-gid root.
-# Default adoption still requires the paired layout and full qualification gates.
-_RELEASE_ROOT_ALIAS = ("/tmp", "private/tmp")
-
-def _release_fixture_temporary():
-    """Keep the macOS root-owned alias; never change process TMPDIR."""
-    alias, target = _RELEASE_ROOT_ALIAS
-    try:
-        alias_stat = os.lstat(alias)
-    except FileNotFoundError:
-        return tempfile.TemporaryDirectory()
-    if (not stat.S_ISLNK(alias_stat.st_mode) or alias_stat.st_uid != 0
-            or os.readlink(alias) != target):
-        return tempfile.TemporaryDirectory()
+def _release_fixture_temporary(owned_root):
+    """Consume the runner's independent root; never change process TMPDIR."""
+    root = Path(owned_root)
+    declared = os.environ.get("HTTP_TEST_OWNED_ROOT")
+    if not declared or root != Path(declared) or not root.is_absolute():
+        raise RuntimeError("release fixture requires the explicit owned runner root")
+    root_stat = os.lstat(root)
+    if (root.resolve() != root or not stat.S_ISDIR(root_stat.st_mode)
+            or stat.S_IMODE(root_stat.st_mode) != 0o700
+            or root_stat.st_uid != os.geteuid()):
+        raise RuntimeError("release fixture requires the explicit owned runner root")
     temporary = tempfile.TemporaryDirectory(
-        prefix="http-rt-", suffix=".noindex", dir=alias,
+        prefix="http-rt-", suffix=".noindex", dir=root,
     )
     try:
         os.chown(temporary.name, -1, os.getegid())
@@ -730,35 +727,64 @@ def _release_fixture_temporary():
     return temporary
 
 class ReleaseFixtureRootLayoutTests(unittest.TestCase):
+    def test_runner_root_is_consumed_before_real_transaction_creation(self):
+        """A rejected parent never reaches the real directory factory."""
+        trusted = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        attempted = []
+        fixture = ReleaseTransactionTests("test_pre_mutation_failure_also_reports_exact_full_rerun")
+
+        class ReachedOwnedFactory(Exception):
+            pass
+
+        def boundary(*args, **kwargs):
+            directory = kwargs.get("dir", args[2] if len(args) > 2 else None)
+            attempted.append(directory)
+            self.assertEqual(trusted, Path(directory or ""))
+            raise ReachedOwnedFactory
+
+        try:
+            with mock.patch.object(tempfile, "mkdtemp", side_effect=boundary):
+                with self.assertRaises(ReachedOwnedFactory):
+                    fixture.setUp()
+        finally:
+            fixture.doCleanups()
+        self.assertEqual([trusted], [Path(value) for value in attempted])
+
     def setUp(self):
-        self.alias_stat = SimpleNamespace(st_mode=stat.S_IFLNK | 0o755, st_uid=0)
+        self.owned_root = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        self.alias_stat = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700,
+                                         st_uid=os.geteuid(), st_gid=os.getegid())
         self.private_stat = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700,
                                             st_uid=os.geteuid(), st_gid=os.getegid())
 
     def fake_factory(self, *, result_stat=None, chown_error=None):
-        temporary = SimpleNamespace(name="/tmp/http-rt-independent.noindex",
+        temporary = SimpleNamespace(name=str(self.owned_root / "http-rt-independent.noindex"),
                                     cleanup=mock.Mock())
         calls = mock.Mock(return_value=temporary)
         stats = [self.alias_stat, result_stat or self.private_stat]
-        stack = __import__("contextlib").ExitStack()
-        stack.enter_context(mock.patch.object(sys.modules[__name__].os, "lstat", side_effect=stats))
-        stack.enter_context(mock.patch.object(sys.modules[__name__].os, "readlink", return_value="private/tmp"))
-        stack.enter_context(mock.patch.object(sys.modules[__name__].os, "chown", side_effect=chown_error))
-        stack.enter_context(mock.patch.object(sys.modules[__name__].tempfile, "TemporaryDirectory", calls))
-        return stack, calls, temporary
+        original_lstat = os.lstat
+
+        def controlled_stat(path, *args, **kwargs):
+            if Path(path) == self.owned_root or str(path) == temporary.name:
+                result = stats[0 if Path(path) == self.owned_root else 1]
+                if isinstance(result, BaseException):
+                    raise result
+                return result
+            return original_lstat(path, *args, **kwargs)
+
+        stack = ExitStack()
+        stack.enter_context(mock.patch.object(os, "lstat", side_effect=controlled_stat))
+        stack.enter_context(mock.patch.object(os, "chown", side_effect=chown_error))
+        stack.enter_context(mock.patch.object(tempfile, "TemporaryDirectory", calls))
+        return stack, calls, temporary, stats
 
     def test_native_alias_layout_private_identity_and_real_cleanup(self):
         before = os.environ.get("TMPDIR")
-        alias = Path("/tmp")
-        info = alias.lstat()
-        supported = stat.S_ISLNK(info.st_mode) and info.st_uid == 0 and os.readlink(alias) == "private/tmp"
-        with sys.modules[__name__]._release_fixture_temporary() as name:
+        with _release_fixture_temporary(self.owned_root) as name:
             path = Path(name)
-            if supported:
-                self.assertRegex(str(path), r"^/tmp/http-rt-[^/]+\.noindex$")
-                self.assertEqual("/private" + str(path), os.path.realpath(path))
-            else:
-                self.assertEqual(Path(tempfile.gettempdir()), path.parent)
+            self.assertEqual(self.owned_root, path.parent)
+            self.assertRegex(path.name, r"^http-rt-[^/]+\.noindex$")
+            self.assertEqual(path, path.resolve())
             info = path.lstat()
             self.assertTrue(stat.S_ISDIR(info.st_mode))
             self.assertEqual(0o700, stat.S_IMODE(info.st_mode))
@@ -767,48 +793,52 @@ class ReleaseFixtureRootLayoutTests(unittest.TestCase):
         self.assertEqual(before, os.environ.get("TMPDIR"))
 
     def test_supported_alias_uses_exact_private_factory_arguments(self):
-        stack, factory, temporary = self.fake_factory()
+        stack, factory, temporary, _stats = self.fake_factory()
         with stack:
-            self.assertIs(temporary, sys.modules[__name__]._release_fixture_temporary())
-            factory.assert_called_once_with(prefix="http-rt-", suffix=".noindex", dir="/tmp")
-            sys.modules[__name__].os.chown.assert_called_once_with(temporary.name, -1, os.getegid())
+            self.assertIs(temporary, _release_fixture_temporary(self.owned_root))
+            factory.assert_called_once_with(prefix="http-rt-", suffix=".noindex", dir=self.owned_root)
+            os.chown.assert_called_once_with(temporary.name, -1, os.getegid())
             temporary.cleanup.assert_not_called()
 
     def test_missing_alias_uses_unmodified_fallback(self):
-        marker=object()
-        with mock.patch.object(sys.modules[__name__].os, "lstat", side_effect=FileNotFoundError), mock.patch.object(sys.modules[__name__].tempfile, "TemporaryDirectory", return_value=marker) as factory:
-            self.assertIs(marker, sys.modules[__name__]._release_fixture_temporary())
-            factory.assert_called_once_with()
+        with mock.patch.dict(os.environ), mock.patch.object(tempfile, "TemporaryDirectory") as factory:
+            os.environ.pop("HTTP_TEST_OWNED_ROOT", None)
+            with self.assertRaisesRegex(RuntimeError, "explicit owned runner root"):
+                _release_fixture_temporary(self.owned_root)
+            factory.assert_not_called()
 
     def test_non_alias_wrong_owner_and_target_use_fallback(self):
-        for mode, uid, target in ((stat.S_IFDIR | 0o1777, 0, "private/tmp"),
-                                  (stat.S_IFLNK | 0o755, 501, "private/tmp"),
-                                  (stat.S_IFLNK | 0o755, 0, "unexpected")):
+        for mode, uid, target in ((stat.S_IFREG | 0o700, os.geteuid(), "owned"),
+                                  (stat.S_IFDIR | 0o700, os.geteuid() + 1, "owned"),
+                                  (stat.S_IFDIR | 0o700, os.geteuid(), "unexpected")):
             with self.subTest(mode=mode, uid=uid, target=target):
-                marker=object()
-                with mock.patch.object(sys.modules[__name__].os, "lstat", return_value=SimpleNamespace(st_mode=mode,st_uid=uid)), mock.patch.object(sys.modules[__name__].os, "readlink", return_value=target), mock.patch.object(sys.modules[__name__].tempfile, "TemporaryDirectory", return_value=marker) as factory:
-                    self.assertIs(marker, sys.modules[__name__]._release_fixture_temporary())
-                    factory.assert_called_once_with()
+                self.alias_stat = SimpleNamespace(st_mode=mode, st_uid=uid)
+                stack, factory, _temporary, _stats = self.fake_factory()
+                with stack:
+                    with self.assertRaisesRegex(RuntimeError, "explicit owned runner root"):
+                        _release_fixture_temporary(self.owned_root if target == "owned"
+                                                   else self.owned_root / target)
+                factory.assert_not_called()
 
     def test_alias_stat_permission_error_is_not_silent_fallback(self):
-        with mock.patch.object(sys.modules[__name__].os, "lstat", side_effect=PermissionError("independent alias denial")), mock.patch.object(sys.modules[__name__].tempfile, "TemporaryDirectory") as factory:
+        with mock.patch.object(os, "lstat", side_effect=PermissionError("independent alias denial")), mock.patch.object(tempfile, "TemporaryDirectory") as factory:
             with self.assertRaisesRegex(PermissionError, "independent alias denial"):
-                sys.modules[__name__]._release_fixture_temporary()
+                _release_fixture_temporary(self.owned_root)
             factory.assert_not_called()
 
     def test_chown_error_cleans_the_exact_new_handle_and_propagates(self):
-        stack, factory, temporary = self.fake_factory(chown_error=PermissionError("independent chown denial"))
+        stack, factory, temporary, _stats = self.fake_factory(chown_error=PermissionError("independent chown denial"))
         with stack:
             with self.assertRaisesRegex(PermissionError, "independent chown denial"):
-                sys.modules[__name__]._release_fixture_temporary()
+                _release_fixture_temporary(self.owned_root)
         temporary.cleanup.assert_called_once_with()
 
     def test_root_stat_error_cleans_and_propagates(self):
-        stack, factory, temporary = self.fake_factory()
+        stack, factory, temporary, stats = self.fake_factory()
         with stack:
-            sys.modules[__name__].os.lstat.side_effect=[self.alias_stat,OSError("independent root stat denial")]
+            stats[:] = [self.alias_stat, OSError("independent root stat denial")]
             with self.assertRaisesRegex(OSError, "independent root stat denial"):
-                sys.modules[__name__]._release_fixture_temporary()
+                _release_fixture_temporary(self.owned_root)
         temporary.cleanup.assert_called_once_with()
 
     def test_non_directory_mode_uid_and_gid_are_each_rejected(self):
@@ -818,23 +848,23 @@ class ReleaseFixtureRootLayoutTests(unittest.TestCase):
                              (stat.S_IFDIR|0o700,os.geteuid(),os.getegid()+1)):
             with self.subTest(mode=mode,uid=uid,gid=gid):
                 invalid=SimpleNamespace(st_mode=mode,st_uid=uid,st_gid=gid)
-                stack,factory,temporary=self.fake_factory(result_stat=invalid)
+                stack,factory,temporary,_stats=self.fake_factory(result_stat=invalid)
                 with stack:
                     with self.assertRaisesRegex(RuntimeError,"^release fixture root is not an own private directory"):
-                        sys.modules[__name__]._release_fixture_temporary()
+                        _release_fixture_temporary(self.owned_root)
                 temporary.cleanup.assert_called_once_with()
 
     def test_cleanup_error_is_not_hidden(self):
-        stack,factory,temporary=self.fake_factory(chown_error=PermissionError("independent chown denial"))
+        stack,factory,temporary,_stats=self.fake_factory(chown_error=PermissionError("independent chown denial"))
         temporary.cleanup.side_effect=OSError("independent cleanup denial")
         with stack:
             with self.assertRaisesRegex(OSError,"independent cleanup denial") as raised:
-                sys.modules[__name__]._release_fixture_temporary()
+                _release_fixture_temporary(self.owned_root)
         self.assertIsInstance(raised.exception.__context__,PermissionError)
 
     def test_native_two_roots_are_distinct_and_tmpdir_unchanged(self):
         before=os.environ.get("TMPDIR")
-        with sys.modules[__name__]._release_fixture_temporary() as first, sys.modules[__name__]._release_fixture_temporary() as second:
+        with _release_fixture_temporary(self.owned_root) as first, _release_fixture_temporary(self.owned_root) as second:
             self.assertNotEqual(first,second)
             self.assertTrue(Path(first).is_dir())
             self.assertTrue(Path(second).is_dir())
@@ -842,19 +872,54 @@ class ReleaseFixtureRootLayoutTests(unittest.TestCase):
         self.assertFalse(Path(second).exists())
         self.assertEqual(before,os.environ.get("TMPDIR"))
 
+    def test_two_explicit_space_and_long_roots_preserve_private_children(self):
+        before = os.environ.get("TMPDIR")
+        with tempfile.TemporaryDirectory(prefix="release-root-shapes-", dir=self.owned_root) as directory:
+            roots = [Path(directory) / "root with spaces", Path(directory) / ("long-" + "r" * 120)]
+            children = []
+            for root in roots:
+                root.mkdir(mode=0o700)
+                with mock.patch.dict(os.environ, {"HTTP_TEST_OWNED_ROOT": str(root)}):
+                    with _release_fixture_temporary(root) as name:
+                        child = Path(name)
+                        children.append(child)
+                        self.assertEqual(root, child.parent)
+                        self.assertEqual(child, child.resolve())
+                        info = child.lstat()
+                        self.assertEqual((os.geteuid(), os.getegid(), 0o700),
+                                         (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)))
+                    self.assertFalse(child.exists())
+            self.assertNotEqual(children[0], children[1])
+        self.assertEqual(before, os.environ.get("TMPDIR"))
+
+    def test_declared_root_shape_failures_never_call_any_factory(self):
+        with tempfile.TemporaryDirectory(prefix="release-invalid-roots-", dir=self.owned_root) as directory:
+            base = Path(directory)
+            valid = base / "valid"
+            valid.mkdir(mode=0o700)
+            regular = base / "file"
+            regular.write_bytes(b"PUBLIC root shape\n")
+            link = base / "link"
+            link.symlink_to(valid, target_is_directory=True)
+            public = base / "public-mode"
+            public.mkdir(mode=0o755)
+            public.chmod(0o755)
+            for root in (base / "missing", regular, link, public, valid / ".." / "valid"):
+                with self.subTest(root=str(root)), mock.patch.dict(
+                    os.environ, {"HTTP_TEST_OWNED_ROOT": str(root)},
+                ), mock.patch.object(tempfile, "TemporaryDirectory") as factory:
+                    with self.assertRaises((RuntimeError, FileNotFoundError)):
+                        _release_fixture_temporary(root)
+                    factory.assert_not_called()
+
     def test_actual_release_transaction_setup_uses_factory_and_original_cleanup(self):
         before = os.environ.get("TMPDIR")
         fixture = ReleaseTransactionTests("test_pre_mutation_failure_also_reports_exact_full_rerun")
         fixture.setUp()
         path = fixture.root
         try:
-            alias_stat = os.lstat("/tmp")
-            supported = (stat.S_ISLNK(alias_stat.st_mode) and alias_stat.st_uid == 0
-                         and os.readlink("/tmp") == "private/tmp")
-            if supported:
-                self.assertRegex(str(path), r"^/tmp/http-rt-[^/]+\.noindex$")
-            else:
-                self.assertEqual(Path(tempfile.gettempdir()), path.parent)
+            self.assertEqual(self.owned_root, path.parent)
+            self.assertRegex(path.name, r"^http-rt-[^/]+\.noindex$")
             self.assertTrue(fixture.global_file.is_file())
             self.assertTrue(fixture.p2p_file.is_symlink())
         finally:
@@ -1012,7 +1077,7 @@ class ReleaseTransactionTests(unittest.TestCase):
         root_check = mock.patch.object(LOAD, "_require_root_for_load")
         root_check.start()
         self.addCleanup(root_check.stop)
-        self.temporary = _release_fixture_temporary()
+        self.temporary = _release_fixture_temporary(Path(os.environ.get("HTTP_TEST_OWNED_ROOT", "")))
         self.root = Path(self.temporary.name)
         self.project = self.root / "DAY0-Prepare/demo"
         self.project.mkdir(parents=True)
@@ -2029,6 +2094,7 @@ class ReleaseTransactionTests(unittest.TestCase):
             template_dir / "90-c2-generate_configs.py",
         )
         shutil.copy2(ROOT / "tools/project_contract.py", tools_dir)
+        shutil.copy2(ROOT / "tools/project_pointer.py", tools_dir)
         shutil.copy2(ROOT / "ztp/nvue_normalizer.py", self.ztp)
         shutil.copy2(
             ROOT / "ztp/config/cumulus/d-hostname2mac.py",

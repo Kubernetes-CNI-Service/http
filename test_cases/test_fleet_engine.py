@@ -53,6 +53,7 @@ class Plan:
     needed_steps: dict
     issues: tuple = ()
     rows: tuple = ()
+    start_versions: dict = field(default_factory=lambda: {'os': '1.0', 'fw': 'fw1'})
 
     @property
     def needed(self):
@@ -95,6 +96,14 @@ class FakeFamily(engine.Family):
 
     def canaries(self, component, members):
         return [members[0][0]]
+
+    def segments(self, plan, component, infos):
+        start, result = plan.start_versions.get(component, '1.0'), []
+        for step in self.steps(plan, component, infos):
+            result.append((component, start, step.target_version, tuple(p.file for p in step.packages),
+                           tuple(p.sha256 for p in step.packages)))
+            start = step.target_version
+        return result
 
     def render(self, device, step_plan, *, run_id, switch_dir):
         effect = "NONE" if step_plan.component == "fw" and step_plan.target_version == "cfg" else "REBOOT_EXPECTED"

@@ -315,7 +315,9 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                 else:
                     expected = ["ip", "vrf", "exec", "default", "ssh",
                                 "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
-                                "-o", "LogLevel=ERROR", "admin@203.0.113.2", "true"]
+                                "-o", "LogLevel=ERROR",
+                                "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                                "admin@203.0.113.2", "true"]
                     if nested != expected:
                         raise ValueError("PUBLIC IPv4 inner carrier")
                 if responder.allow_password_change is not False:

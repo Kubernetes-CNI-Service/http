@@ -35,11 +35,13 @@ def isolated_whole(function):
         if _ACTIVE_CHILD_SELECTOR is not None:
             raise RuntimeError('nested native OS whole refused')
         from test_cases.native_os_safe_image import select_image
+        from test_cases.native_cpld_physical_io import owned_test_root
         image = select_image(Path(__file__).resolve().parents[1])
         print('IBSW_NATIVE_OS_COLD_IMAGE=' + str(image), flush=True)
         nonce = secrets.token_hex(16)
         environment = dict(PATH='/usr/bin:/bin', LC_ALL='C',
-            PYTHONDONTWRITEBYTECODE='1', TMPDIR=tempfile.gettempdir())
+            PYTHONDONTWRITEBYTECODE='1', TMPDIR=str(owned_test_root()),
+            HTTP_TEST_OWNED_ROOT=str(owned_test_root()))
         command = (sys.executable, '-B', '-c', _CHILD, str(image), selector, nonce)
         timed_out = False
         # Parent owns this exact Popen only. It never scans descendants/PIDs or

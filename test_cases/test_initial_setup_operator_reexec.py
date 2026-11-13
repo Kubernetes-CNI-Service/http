@@ -45,6 +45,7 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -169,7 +170,9 @@ class InitialSetupOperatorReexecTests(unittest.TestCase):
                     self.assertEqual(1, len(run.started))
                     command, fds = run.started[0]["command"], run.started[0]["pass_fds"]
                     self.assertEqual(["runuser", "-u", U.pw_name, "--", "env", "-i"], command[:6])
-                    self.assertIn(f"{name}={secret('environment')}", command)
+                    # Q-060: the real child workflow proves arrival; argv carries no value.
+                    self.assertNotIn(f"{name}={secret('environment')}", command)
+                    self.assertFalse(any(secret("environment") in item for item in command))
                     self.assertIn(f"HOME={U.pw_dir}", command)
                     self.assertIn(f"{MARKER}=1", command)
                     self.assertEqual(str(INITIAL), command[-len(argv) - 1])
@@ -202,7 +205,9 @@ class InitialSetupOperatorReexecTests(unittest.TestCase):
         self.assertEqual([], trace)
         # Separate processes, recorded by the interpreter's own import trace (-X importtime).
         with tempfile.TemporaryDirectory(prefix="wp9-skip-") as folder:
-            environment = {"PATH": os.defpath, "LC_ALL": "C", "LANG": "C"}
+            environment = {"PATH": os.defpath, "LC_ALL": "C", "LANG": "C", "HOME": folder,
+                           "TMPDIR": os.environ["HTTP_TEST_OWNED_ROOT"],
+                           "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"]}
             for options, stdin in ((["-I", "-S"], ["--_verify-password"]), ([], ["--help"]),
                                    ([], ["-h"]), ([], ["--version"])):
                 with self.subTest(argv=stdin):
@@ -566,6 +571,7 @@ class _MainWorld:
             os.environ.pop(MARKER, None)
             stack.enter_context(mock.patch.object(Path, "home", return_value=home))
             stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(mock.patch.object(app, "run_on_ethernet", side_effect=self.ethernet))
             stack.enter_context(mock.patch.object(app, "interactive_run", side_effect=self.transport))
             stack.enter_context(mock.patch.object(app.subprocess, "run",
@@ -622,7 +628,7 @@ class LeafLayoutImportTests(unittest.TestCase):
                 del sys.modules[name]
             yield
 
-    def leaf(self, folder: Path, *, modules=("device_identity", "credentials_fd")):
+    def leaf(self, folder: Path, *, modules=("device_identity", "credentials_fd", "login_path", "hostname_ranges")):
         script = folder / "initial-setup.py"
         script.write_bytes(INITIAL.read_bytes())
         (folder / "tools").mkdir()
@@ -647,7 +653,9 @@ class LeafLayoutImportTests(unittest.TestCase):
                                          "nvos_initial_password": FACTORY}).encode())
             os.close(writer)
             # The Leaf reads the target cache the management server generated (v15 contract).
-            self.assertEqual(0, world.run_guarded(("--generate-json",)), world.err)
+            with self.fresh_tools(), mock.patch.object(sys, "path", [str(folder), *sys.path]), \
+                    mock.patch.object(app, "_TOOLS_ROOT", None):
+                self.assertEqual(0, world.run_guarded(("--generate-json",)), world.err)
             runs = (("help", ("--help",)), ("check-only", leaf_mode),
                     ("credentials-fd", (*leaf_mode, "--credentials-fd", str(reader))))
             for label, extra in runs:

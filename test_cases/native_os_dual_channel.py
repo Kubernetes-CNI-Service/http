@@ -25,8 +25,9 @@ UNKNOWN_SESSIONS = []
 NATIVE_DIAGNOSTIC_BUDGET = 60.0
 
 def _environment(root):
+    from test_cases.native_cpld_physical_io import owned_test_root
     return dict(PATH='/usr/bin:/bin', HOME=str(root), TMPDIR=str(root),
-                LC_ALL='C', PYTHONDONTWRITEBYTECODE='1')
+                LC_ALL='C', PYTHONDONTWRITEBYTECODE='1', HTTP_TEST_OWNED_ROOT=str(owned_test_root()))
 
 
 def _pairs(pairs):
@@ -74,7 +75,8 @@ def _facts(info):
 
 
 def _root_check(root, expected):
-    if (root.resolve() != root or root.parent != Path('/private/tmp')
+    from test_cases.native_cpld_physical_io import owned_test_root
+    if (root.resolve() != root or root.parent != owned_test_root()
             or not root.name.startswith('native-os-bridge-owned-')):
         raise RuntimeError('native OS own root refused UNKNOWN')
     for name, path in (('root', root), ('switch', root / 'switch')):
@@ -238,6 +240,12 @@ def _finish_children(children, *, cancel, deadline):
 
 
 def _coordinate(image, root, role, nonce, command, root_facts, control_fd, reply_fd, terminal_fd):
+    # The script is launched by absolute filename in a clean interpreter whose
+    # sys.path initially contains image/test_cases, not image. Bind the same
+    # canonical image used by the existing cold command check before importing
+    # the shared stdlib-only root checker. Relay needs no package imports.
+    if str(image) not in sys.path:
+        sys.path.insert(0, str(image))
     deadline = time.monotonic() + NATIVE_DIAGNOSTIC_BUDGET
     children, failures, constructor_shapes, standard_rows = [], [], [], []
     status, expression_finished, finalized = 70, False, False

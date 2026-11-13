@@ -65,7 +65,85 @@ def source_scripts() -> list[Path]:
     return [ROOT / relative for relative in RUNNER.discover_source_scripts(ROOT)]
 
 
+def helper_scripts() -> list[Path]:
+    """Use the manifest's helper glob, without admitting helper-named directories."""
+    helpers = [path for path in source_scripts()
+               if RUNNER.path_matches(path.relative_to(ROOT).as_posix(), ["*/helper-*"])]
+    for path in helpers:
+        if not path.name.startswith("helper-"):
+            raise AssertionError("helper glob matched a directory, not a helper filename: "
+                                 + path.relative_to(ROOT).as_posix())
+    return helpers
+
+
 class AllScriptEntrypointTests(unittest.TestCase):
+    def test_python_help_children_receive_independent_runner_roots(self):
+        trusted = os.environ["HTTP_TEST_OWNED_ROOT"]
+        temporary = os.environ["TMPDIR"]
+        seen = []
+        original_run = subprocess.run
+
+        def boundary(command, **kwargs):
+            if command[-1] != "--help":
+                return original_run(command, **kwargs)
+            environment = kwargs["env"]
+            self.assertEqual(trusted, environment.get("HTTP_TEST_OWNED_ROOT"))
+            self.assertEqual(temporary, environment.get("TMPDIR"))
+            self.assertEqual(15, kwargs["timeout"])
+            seen.append(command)
+            return subprocess.CompletedProcess(command, 0, "usage: PUBLIC fixture\n")
+
+        with mock.patch.object(subprocess, "run", side_effect=boundary):
+            self.test_every_argparse_entrypoint_has_safe_help()
+            argparse_count = len(seen)
+            self.test_manual_python_entrypoints_have_safe_help()
+        self.assertGreaterEqual(argparse_count, 35)
+        self.assertEqual(argparse_count + len(MANUAL_HELP_ENTRYPOINTS), len(seen))
+
+    def test_helper_scripts_have_safe_help(self):
+        helpers = helper_scripts()
+        self.assertTrue(helpers, "at least one helper script must be tracked")
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LC_ALL": "C",
+            "LANG": "C",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+        if "TMPDIR" in os.environ:
+            environment["TMPDIR"] = os.environ["TMPDIR"]
+        failures = []
+        with tempfile.TemporaryDirectory(prefix="helper-help-") as directory:
+            for path in helpers:
+                relative = path.relative_to(ROOT).as_posix()
+                self.assertIn(path.suffix, {".sh", ".py"}, relative)
+                command = (["bash", str(path), "--help"] if path.suffix == ".sh"
+                           else [sys.executable, str(path), "--help"])
+                try:
+                    result = subprocess.run(
+                        command, cwd=Path(directory).resolve(), env=environment,
+                        stdin=subprocess.DEVNULL, text=True, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, timeout=10 if path.suffix == ".sh" else 15,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    failures.append(f"{relative}: --help timed out")
+                    continue
+                if result.returncode:
+                    failures.append(f"{relative}: rc={result.returncode}: {result.stdout[-500:]}")
+                elif "usage:" not in result.stdout.casefold():
+                    failures.append(f"{relative}: --help omitted usage text")
+        self.assertEqual([], failures)
+
+    def test_helper_scripts_are_not_referenced_by_other_scripts(self):
+        scripts = source_scripts()
+        references = []
+        for helper in helper_scripts():
+            name = helper.name.encode("utf-8")
+            for path in scripts:
+                if path != helper and name in path.read_bytes():
+                    references.append((helper.name, path.relative_to(ROOT).as_posix()))
+        self.assertEqual([], references)
+
     def test_public_source_inventory_prunes_known_non_source_trees(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -161,6 +239,8 @@ class AllScriptEntrypointTests(unittest.TestCase):
             "LC_ALL": "C",
             "LANG": "C",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"],
+            "TMPDIR": os.environ["TMPDIR"],
         }
         failures = []
         for path in candidates:
@@ -212,6 +292,8 @@ class AllScriptEntrypointTests(unittest.TestCase):
             "LC_ALL": "C",
             "LANG": "C",
             "PYTHONDONTWRITEBYTECODE": "1",
+            "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"],
+            "TMPDIR": os.environ["TMPDIR"],
         }
         failures = []
         for relative in MANUAL_HELP_ENTRYPOINTS:

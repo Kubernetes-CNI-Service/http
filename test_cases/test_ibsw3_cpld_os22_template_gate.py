@@ -1,6 +1,7 @@
 """NOTRUN CPLD test-image compatibility only; no production/child execution."""
 import hashlib
 import json
+import shlex
 from pathlib import Path
 import tempfile
 import unittest
@@ -73,7 +74,10 @@ class CpldOs22TemplateGateDirectTests(unittest.TestCase):
         self.assertEqual(PROVIDER_SHA, SUBJECT.PROVIDER_PREIMAGE)
         self.assertEqual(OLD_SHA, SUBJECT.TEMPLATE_PREIMAGE, 'do not replace original whole-template pin')
         self.assertEqual(48, len(_EXPECTED_COPY_FILES))
-        self.assertEqual(_EXPECTED_COPY_FILES, SUBJECT.COPY_FILES)
+        self.assertEqual(_EXPECTED_COPY_FILES, SUBJECT.CORE_COPY_FILES)
+        self.assertEqual(_EXPECTED_COPY_FILES + ('tools/project_pointer.py',), SUBJECT.COPY_FILES)
+        self.assertEqual(49, len(SUBJECT.COPY_FILES))
+        self.assertEqual(49, len(set(SUBJECT.COPY_FILES)))
         return root, provider, old, new
 
     def restore(self, provider, template, root):
@@ -87,7 +91,8 @@ class CpldOs22TemplateGateDirectTests(unittest.TestCase):
 
     def test_old_and_exact_os3_template_preserve_actual_bytes_through_prepare_and_io_inverse(self):
         root, provider, old, new = self.inputs()
-        own = Path(tempfile.mkdtemp(prefix='cpld-os3-direct-', dir='/private/tmp')).resolve()
+        from test_cases.native_cpld_physical_io import new_owned_test_directory
+        own = new_owned_test_directory('cpld-os3-direct-')
         print('CPLD_OS3_DIRECT_OWNED_ROOT=' + str(own), flush=True)
         self.assertEqual((provider, old), self.restore(provider, old, own))
         self.assertEqual((provider, new), self.restore(provider, new, own))
@@ -105,19 +110,22 @@ class CpldOs22TemplateGateDirectTests(unittest.TestCase):
         marker = b'# IBSW_BODY_CPLD\n'
         prefix, body = new.split(marker, 1)
         self.assertEqual(4, body.count(b'\nnv '))
-        token = ('\n' + str(image / 'tools/native-cpld-io/private-nv') + ' ').encode()
+        token = ('\n' + shlex.quote(str(image / 'tools/native-cpld-io/private-nv')) + ' ').encode()
         self.assertEqual(prefix + marker + body.replace(b'\nnv ', token), lowered)
         self.assertEqual((provider, new),
             self.restore((image / PROVIDER).read_bytes(), lowered, image))
         metadata = json.loads((image / SUBJECT.METADATA).read_bytes())
-        self.assertEqual(set(_EXPECTED_COPY_FILES), set(metadata['hashes']))
+        self.assertEqual(set(_EXPECTED_COPY_FILES), set(metadata['hashes']) - {'tools/project_pointer.py'})
+        self.assertEqual(set(_EXPECTED_COPY_FILES) | {'tools/project_pointer.py'}, set(metadata['hashes']))
+        self.assertEqual(49, len(metadata['hashes']))
         self.assertEqual(NEW_SHA, metadata['io_lowering']['template_before'])
         self.assertEqual([1, 1, 4], metadata['io_lowering']['replacement_counts'])
         self.assertEqual((image / PROVIDER).read_bytes(), SUBJECT.validate_image(image))
 
     def test_partial_missing_truncated_duplicate_reordered_or_external_template_changes_refuse(self):
         root, provider, old, new = self.inputs()
-        own = Path(tempfile.mkdtemp(prefix='cpld-os3-negative-', dir='/private/tmp')).resolve()
+        from test_cases.native_cpld_physical_io import new_owned_test_directory
+        own = new_owned_test_directory('cpld-os3-negative-')
         print('CPLD_OS3_DIRECT_OWNED_ROOT=' + str(own), flush=True)
         bad = {'prefix': b'# UNREVIEWED\n' + new, 'suffix': new + b'# UNREVIEWED\n',
                'middle': new[:100] + bytes([new[100] ^ 1]) + new[101:],

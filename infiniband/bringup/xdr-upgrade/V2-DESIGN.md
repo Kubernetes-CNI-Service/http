@@ -62,7 +62,7 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
   - 配置导出和 diff；
   - 能力（bash、nohup、python3、curl、scp、sha256sum）；
   - `/home/admin` 剩余空间、各步骤目录、已暂存包的 sha256。
-- 另外从 ztp-server ping 一次：ICMP 已确认全部放通，不通记 FAILED（PING_UNREACHABLE）。
+- 另外从 ztp-server ping 一次：owner 已定默认现场可 ping，额外最小实测已取消；这是运行前提而非本次实测通过，不通仍记 FAILED（PING_UNREACHABLE）。
 - **升级模式**下先用密码会话确认恢复密码可用。管理公钥不在 authorized_keys 里时先写
   `access-bootstrap.json` 再导入，然后用密钥重新登录核对，最后保存 `authorized_keys.before`。
 - **密码校验与输错保护**（2026-10-24 现场日志之后）：
@@ -196,7 +196,7 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 
 ## 8. 证据与并发
 
-- 运行目录 `xdr-upgrade-v2-logs/<UTC>_upgrade-v2_<32hex>/`（`--project` 时在项目的 `99-output-ib_nvl/bringup/` 下）：
+- 运行目录始终为所选项目 `99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<UTC>_upgrade-v2_<32hex>/`；显式 `--project` 优先，否则取当前激活项目，无有效项目以 2 退出。目录创建立即打印 `[RUN] evidence:`，结束保留 `evidence:`：
   - `plan.json`、`packages.json`、`events.jsonl`、`run-report.json`；
   - `devices/<主机>/` 下的 `precheck.json`、`access-*.json`、`authorized_keys.before`、`distribution-*.json`、
     `dispatch.json`、`before-<stage>.commands`、`timeline.jsonl`、`verify-<stage>.json`、`repair-*.json`。
@@ -226,11 +226,23 @@ owner 的判断是：ztp-server 上的并发不是问题，大部分时间花在
 | `--local-dir` | /home/admin | 交换机上的包和步骤目录 |
 | `--progress-seconds` | 30 | 进度块间隔 |
 
-退出码：0 全部完成；3 有未完成；2 HOLD（含预检中密码被拒）或入口的密码 3 次都被拒；75 运行守卫被占用；130 中止。
+退出码：0 全部完成；3 有未完成；2 输入/运行时错误、HOLD（含预检中密码被拒）或入口密码 3 次被拒；75 仅 ALREADY_RUNNING，其他守卫错误为 2；130 中止。
+
+### v3.1.4 的输入、文件与路线边界
+
+入口先操作员身份、固定 venv 审核/一次 exec，再进入共用守卫；输入、清单比对、早期证据、锁定/known_hosts 观察详见 README 的当前 v2 入口说明。
+缺少可选 OS 候选不代表可跳阶段；必经阶段无可读包只阻相应设备，已选择 BIOS/CPLD 缺包整批 HOLD。
+私钥/管理公钥及可 stat 的 venv RECORD 条目锁定，known_hosts 取启动快照只提示变化；缺 RECORD/单条读取失败的例外不适用于必需密钥。
+
+`Family.segments` 提供每组件的起止版本与全部镜像/SHA；`Family.canaries` 返回 None 时由 Engine 处理路线覆盖，返回列表时采用单组件代表策略。
+健康优先，OS 按未覆盖最长路线/CSV 同长顺序；只有记录覆盖和强制独有段采用逐段放行，无记录/无强制时全部健康 canary 通过才放行组件。
+BIOS/CPLD 单代表；AT_TARGET 不形成下发证明，真实 VERIFIED 段才写项目目录父级 `canary-routes.jsonl`，skip 也须实际验证。
+记录九字段/两镜像 SHA、无过期、O_APPEND+fsync、不可读警告/坏行忽略和写失败沿 EvidenceError 的规则见 README，不另造授权或锁。
+SDK 精确基类断开按连接中断回探测；认证/主机密钥类仍拒绝，REQUESTED 后确认不明不误记未下发，修复上传失败不重发。
 
 ## 10. 测试
 
-测试域 `fleet-upgrade-v2` 共 9 个模块，全部在本机运行，不连真机：
+以下九个模块是 2026-10-23 的原始测试域基线；v3.1.4 的新增布局、入口/清单/锁、连接中断及路线 direct/workflow 随最终 manifest 一并登记，当前准确清单以该 manifest 的 `fleet-upgrade-v2` 为准。本段不是新源码全量通过声明，本机模型不连真机：
 
 | 模块 | 内容 |
 |---|---|

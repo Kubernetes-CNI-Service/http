@@ -1108,6 +1108,7 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
         for path in (tools, monitor, ethernet, infiniband, nvlink):
             path.mkdir(parents=True)
         shutil.copy2(ROOT / "tools/project_contract.py", tools / "project_contract.py")
+        shutil.copy2(ROOT / "tools/project_pointer.py", tools / "project_pointer.py")
         # v3.1.2 WP-11: the worker imports the root-parent marker from the operator rule module
         shutil.copy2(ROOT / "tools/operator_identity.py", tools / "operator_identity.py")
         # the worker rotates its own log and cron.sh archives its data dirs through these modules

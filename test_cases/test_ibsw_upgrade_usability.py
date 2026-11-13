@@ -108,6 +108,8 @@ class RuntimeVenvSwitchTests(unittest.TestCase):
     def switch(self, args, *, candidates, version=missing_runtime, flags=None):
         err = io.StringIO()
         environment = {key: value for key, value in os.environ.items() if key != MARKER}
+        from test_cases.native_cpld_physical_io import owned_test_root
+        environment['TMPDIR'] = str(owned_test_root())
         with patch.dict(os.environ, environment, clear=True), \
              patch.object(app.metadata, 'version', side_effect=version), \
              patch.object(app, '_runtime_venv_candidates', return_value=tuple(candidates)), \

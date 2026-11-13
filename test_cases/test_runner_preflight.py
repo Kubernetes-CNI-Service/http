@@ -203,7 +203,7 @@ class PreflightFixture(unittest.TestCase):
         self.write("test_cases/__init__.py", "")
         for relative in ("tools/project_contract.py", "test_cases/run_related_tests.py",
                          "test_cases/test_public_publication_workflow.py",
-                         "requirements-container-top-level.lock"):
+                         "requirements-container-top-level.lock", "tools/project_pointer.py"):
             self.write(relative, (ROOT / relative).read_bytes())
         marker_test = (
             "import os, unittest\nfrom pathlib import Path\n"
@@ -222,7 +222,7 @@ class PreflightFixture(unittest.TestCase):
         self.write("tools/_package_common.py",
                    "def deployment_archive_source_paths(root): return ()\n")
         scripts = {p: p for p in ("tools/project_contract.py", "tools/sync-code.py",
-                                  "infra/docker/activate.py", "tools/_package_common.py")}
+                                  "infra/docker/activate.py", "tools/_package_common.py", "tools/project_pointer.py")}
         manifest = {
             "schema_version": 1, "baseline_tests": [D], "scripts": scripts,
             "test_suites": [

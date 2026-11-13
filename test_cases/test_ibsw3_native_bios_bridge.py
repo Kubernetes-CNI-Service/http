@@ -1,5 +1,6 @@
 """SOURCE ONLY BIOS direct + real native workflow; no test has been run."""
 import hashlib
+import shlex
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,13 +15,17 @@ PACKAGE_SHA = 'd6dae7bf679709c175a9debecedc655878142fefc0a916149592a6f56d6996af'
 
 class NativeBiosBridgeTests(unittest.TestCase):
     def test_bios_two_site_image_inverse_and_step_guard_are_finite(self):
-        self.assertEqual(56, len(GATE.COPY_FILES))
-        self.assertEqual(56, len(set(GATE.COPY_FILES)))
+        self.assertEqual(56, len(GATE.CORE_COPY_FILES))
+        self.assertEqual(56, len(set(GATE.CORE_COPY_FILES)))
+        self.assertEqual(GATE.CORE_COPY_FILES + ('tools/project_pointer.py',), GATE.COPY_FILES)
+        self.assertEqual(57, len(GATE.COPY_FILES))
+        self.assertEqual(57, len(set(GATE.COPY_FILES)))
         self.assertEqual(('test_cases.test_ibsw3_native_bios_bridge.NativeBiosBridgeTests.test_native_bios_real_dispatch_exit93_and_companion_drift_before_send',), ISOLATION.ROSTER)
         source = Path(GATE.__file__).resolve().parents[1]
         provider = GATE._read(source / GATE.PROVIDER)
         template = GATE._read(source / GATE.TEMPLATE)
-        own = Path(tempfile.mkdtemp(prefix='bios-gate-direct-', dir='/private/tmp')).resolve()
+        from test_cases.native_cpld_physical_io import new_owned_test_directory
+        own = new_owned_test_directory('bios-gate-direct-')
         own.chmod(0o700)
         print('IBSW_BIOS_DIRECT_OWNED_ROOT=' + str(own), flush=True)
         private = own / 'tools/native-bios-io'
@@ -32,7 +37,7 @@ class NativeBiosBridgeTests(unittest.TestCase):
         common, os_body, bios_body, cpld_body = GATE._sections(template)
         low_common, low_os, low_bios, low_cpld = GATE._sections(lowered_t)
         self.assertEqual((common, os_body, cpld_body), (low_common, low_os, low_cpld))
-        token = ('\n' + str(private / 'private-nv') + ' ').encode()
+        token = ('\n' + shlex.quote(str(private / 'private-nv')) + ' ').encode()
         self.assertEqual(2, bios_body.count(b'\nnv '))
         self.assertEqual(bios_body.replace(b'\nnv ', token), low_bios)
         self.assertEqual(0, low_bios.count(b'\nnv '))
@@ -41,6 +46,8 @@ class NativeBiosBridgeTests(unittest.TestCase):
         self.assertEqual(19, len(GATE.PRODUCTION_PINS), 'old U19 pins must not be replaced')
         self.assertEqual((4, 2), tuple(len(rows) for rows in GATE._BIOS_REGIONS.values()))
         vector = {p: GATE._read(source / p) for p in GATE.PRODUCTION_PINS}
+        vector['tools/project_pointer.py'] = GATE._read(source / 'tools/project_pointer.py')
+        self.assertEqual(20, len(vector))
         original = GATE._verified_source_vector(vector)
         self.assertEqual('887a3faf2808cfd2107849825cea2a14fe041f9468987249c5bba07c39030f01',
             hashlib.sha256(original['tools/ibsw_upgrade_driver.py']).hexdigest())

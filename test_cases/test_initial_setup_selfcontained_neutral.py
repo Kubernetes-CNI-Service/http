@@ -77,6 +77,12 @@ class _NeutralFixture:
         source_bytes = INITIAL.read_bytes()
         source.write_bytes(source_bytes)
         source.chmod(0o600)
+        # r508 WP4 requires the real three-file Leaf layout for every run,
+        # including generation. Neutral authority and its independent oracles stay local.
+        (tool / "tools").mkdir()
+        for name in ("login_path", "hostname_ranges", "device_identity"):
+            (tool / "tools" / (name + ".py")).write_bytes(
+                (ROOT / "tools" / (name + ".py")).read_bytes())
         if local is not None:
             (tool / "infra-neutral.conf").write_bytes(local)
         (day0 / "ib.csv").write_text(PUBLIC_CSV, encoding="ascii")
@@ -210,6 +216,12 @@ class SelfContainedNeutralWorkflowTests(_NeutralFixture, unittest.TestCase):
                 "--report", str(f["root"] / "out/report.log"),
                 "--snapshot-dir", str(f["root"] / "out/snapshots")]
         with ExitStack() as stack:
+            # A previous repository or copied Leaf must not supply this bundle's tools.
+            stack.enter_context(mock.patch.dict(sys.modules))
+            for name in list(sys.modules):
+                if name == "tools" or name.startswith("tools."):
+                    del sys.modules[name]
+            stack.enter_context(mock.patch.object(sys, "path", [str(f["tool"]), *sys.path]))
             stack.enter_context(mock.patch.dict(os.environ, {
                 "PATH": os.defpath, "LC_ALL": "C", "LANG": "C",
                 "PYTHONDONTWRITEBYTECODE": "1",

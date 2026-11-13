@@ -31,6 +31,7 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -295,6 +296,7 @@ class InitialSetupCredentialsFdWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.dict(os.environ, environment or {}, clear=False))
             stack.enter_context(mock.patch.object(app, "interactive_run", world.transport))
             stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="password"))
+            stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(mock.patch.object(app.subprocess, "run",
                                                   side_effect=AssertionError("external commands forbidden")))
             stack.enter_context(mock.patch.object(app.time, "sleep", return_value=None))

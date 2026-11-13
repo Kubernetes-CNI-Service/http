@@ -2835,7 +2835,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ## TC-REAL-IBSW-V2-001 — IB 交换机升级 v2（upgrade2.py）在真实 ib-sw 与 ztp-server 上运行
 
 - Case ID：`TC-REAL-IBSW-V2-001`；类型：real-environment / destructive / reboot；状态：**OPEN / NOT RUN（v2 未在真机运行）**。
-- 本机先决：测试域 `fleet-upgrade-v2` 的 9 个模块全部通过（速率检测、分发、探测、SSH、主进程、设备端脚本、IB 适配器、IB 流程、入口）。模拟交换机 GREEN 不等于现场验收。
+- 本机先决：当前 manifest 的完整 `fleet-upgrade-v2`、所有相关 direct/workflow、全仓普查及精确 full proof；原九模块是历史基线，不代表 v3.1.4 全部。模拟交换机 GREEN 不等于现场验收。
 - 依据：owner 2026-10-23 的引擎设计（三类 worker、两个探测队列、按 ztp-server 接口速率分发）；2026-10-22/23 CPLD 批量升级中 v1 的全局锁排队（推断，见设计文档第 0 节）。
 - 前置条件：
   - owner 书面授权维护窗口：OS/BIOS 安装和 CPLD 烧写会重启交换机；
@@ -2866,6 +2866,16 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 已安装的版本不回滚；没有升级成功的设备上暂存的镜像保留在 `/home/admin`，重跑时直接复用，需要时手工删除；
   - 第一次 Ctrl-C 只停止新的下发，正在升级的设备继续被跟踪直到有结果；第二次 Ctrl-C 立即退出，在途设备记 UNKNOWN，需要人工确认；
   - 未执行前保持 NOT RUN，不得写 PASS。
+
+### v3.1.4 扩展（仍 OPEN / NOT RUN）
+
+- 前置：原维护窗口/设备回滚/证据条件不减，另绑定当前代码、测试、manifest、Python/平台及正式证明。ICMP 默认现场可 ping，owner 已取消额外最小实测，不将此前提写成新实测通过。
+- 步骤/预期：分别显式项目及活动指针运行，缺项目安全拒绝；运行目录都在项目下且起始打印 `[RUN] evidence:`。独立 ib.csv 与02不一致在凭据/设备/证据前以2拒绝，内部 `--inventory-checked` 不跳输入检查。
+- 核 root→操作员→固定 venv 至多一次 exec→guard 的真实顺序、完整参数和继承FD；裁剪v1布局依旧能用v2，缺选定模板拒绝不借别树。OS备选逐必经阶段校验，缺阶段仅受影响设备 REVIEW_REQUIRED，已选固件缺失整轮 HOLD。
+- CPLD烧录/OS重启的真实断开应回探测，认证/主机密钥失败不放宽；记录 REQUESTED 前后及实际 SDK/平台，确认不明不重发。配置修复上传失败不重发。
+- 在授权AIR维护窗口、仅操作员自有可丢弃 known_hosts 中新增/替换测试记录时，当前快照继续使用、每路径恰好一条英文 KNOWN_HOSTS 提示，不HOLD/重载。私钥/管理公钥/venv被改的HOLD反例只在隔离本机workflow做，不在现场升级中制造凭据故障。
+- 并行初始化或升级已占共用锁时，v2以75/ALREADY_RUNNING拒绝，不删除或变更锁；不安全锁错误为2只在本机受控模型证明。prod的plan也写本地项目证据，须由现场人员获准执行，验证AI只读已有结果。
+- 证据：完整命令/END/退出码、源码/输入/测试/manifest/SDK/平台身份、时间线、前后版本/健康/配置与证据路径；凭据只留布尔核验结论，不留原值。canary跨轮另见 TC-REAL-IBSW-UPGRADE-CANARY-ROUTES-001。
 
 ## TC-REAL-DEPS-ENGINE-IMAGE-001 — 重建镜像，在容器和原生 venv 里验证 CableTracker 引擎依赖
 
@@ -3518,6 +3528,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 ## TC-REAL-I006-OPERATOR-REEXEC-001 — 被 root 运行的 upgrade.py、upgrade2.py（以及 cron.sh）降权为项目属主重新执行
 
+> 版本说明：以下原第1–9步及其风险描述保留v3.1.2/3历史验收合同；v3.1.4的keep值不进argv以本卡新增M6b段为准，不能沿第9.1的旧已知限制判断当前实现。v2输出目录现始终在所选/激活项目，旧平台表“写代码树”是历史行为，不再适用于v3.1.4。
+
 ### 基本信息
 
 - Case ID：`TC-REAL-I006-OPERATOR-REEXEC-001`。
@@ -3642,6 +3654,14 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   打开 `/dev/tty`；「由 root 父进程启动」标记会被所有后代继承，带标记的 root 后代去跑 upgrade 时不会降权（推断，概率低）；root 运行 initial-setup 时，
   `--ib-initial-password-env` 指定的变量以 `NAME=值` 写在 `runuser … env -i` 的参数里（`tools/operator_identity.py::reexec_command`），
   `runuser` 在子进程运行期间留在进程表里时同机用户可用 `ps` 看到（推断，第 9 步第 1 小步核对）。
+
+### v3.1.4 M6b 现场增量（OPEN / NOT RUN）
+
+- 前置/权限：只在届时owner明确批准的隔离Linux本机root/U与终端场景，合成环境输入及独立业务凭据管道，不用真实口令制造反例；先绑定当前源码/测试/manifest/解释器/平台与正式证明。不是本卡文字授权AI连接设备、启停服务或部署。
+- 步骤：按原身份矩阵运行initial真实重新执行链，同时传入显式keep环境和独立 `--credentials-fd`；记录子进程原值相等、唯一业务读/关、两通道均到达的布尔结论及UID/GID/附加组/marker。Linux runuser/PAM须真正保留本次环境reader与原业务FD，不能以macOS替身代替。
+- 预期：原值及其编码载荷均不出现在runuser/重新执行链argv；passwd HOME/USER/LOGNAME、框架marker优先级、无关环境排除保持。空keep的setup/upgrade2/cron不创建额外载荷FD；exec同PID替换无新增等待父，wait原信号转发/handler还原及128+信号号不变。
+- 错误/证据：普通bootstrap错误在业务入口前固定无值消息/2，中断不吞。仅对本轮合成值作“argv无原值/编码值”布尔观察，留命令结构/身份/FD关闭/退出END与终端结论，不保存含值的ps/environ、环境载荷或真实秘密。
+- 清理/风险：只清理本次隔离目录、合成输入和自有子进程，恢复原状态；不删用户key、锁、旧证明或项目资料。PAM可能关闭FD、改变环境或影响终端，必须现场如实留失败/NOT RUN，未达到不得改断言或伪称通过。
 
 ### 自动化状态
 
@@ -3940,3 +3960,58 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复后通过。
 - [ ] 已纳入全量 discovery（manifest 和分片车道在集成时按本包的 manifest spec 登记）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-I004-HOSTKEY-REFRESH-001 — reset后新主机密钥的核实与单目标刷新
+
+- 基本信息：real-environment / destructive，I-004、WP3–5；状态 **OPEN / NOT RUN**。本机自动化见test_login_path、test_initial_setup_host_key_refresh及其真实workflow；不代替现场。
+- 风险与目标：防止把中间人、认证错误或不相关known_hosts行当reset自动删除；reset会丢配置，只在授权AIR隔离设备做，prod由现场人员仅按明确范围只读留证。
+- 前置条件与输入：独立批准的维护窗口、可恢复配置/控制台、当前精确full proof和源码/测试/manifest/平台身份。记跳板HashKnownHosts、known_hosts行数及去目标后的摘要，不留文件或密钥内容。
+- 步骤：分别reset后改回项目密码和保留出厂密码；先只读观察IPv6 link-local/IPv4/管理直连的变化类别，再获准apply核实已认证link-local取回的新指纹并单目标刷新。无法核实的单独手工名单仅按已批 `--refresh-host-key` 处理，不扩其他设备。
+- 预期结果：只读只记录pending/核实结果，不删不重试；apply核实一致后只删目标地址全部旧记录并重试一次；核实不一致拒绝。父进程串行跳板删除，真实指纹只用共同计算器，结构化报告无原告警banner。
+- 证据：OpenSSH warning/CRLF/地址与Offending结构（脱敏）、旧/新指纹核实布尔、删除目标/次数/重试、summary字段；去目标后其余行摘要相同。记录`.old`实际出现/覆盖、inode/权限前后事实，远端未采得不补造数值。
+- 故障注入与清理：仅在另行批准的AIR隔离环境观察删除中断和accept-new并发；中间人/不匹配反例留本机模型，不篡改真实跳板。恢复项目配置；默认ssh-keygen -R的known_hosts.old保留，不自动删备份。
+- 自动化状态：本机合成文件/IPC绿与现场分开；此卡 **OPEN / NOT RUN**，未现场执行不勾通过。
+
+## TC-REAL-I013-JUMP-MULTIPLEX-001 — 多台IB共享跳板master及按跳板并发
+
+- 基本信息：real-environment / scenario，I-013/D4 WP1–2；状态 **OPEN / NOT RUN**，本机test_initial_setup_jump_sessions/jump_gate/真实unreachable workflow不是现场证明。
+- 风险与目标：减少重复登录及限速误判，同时保认证边界和每跳板最多8台在途，不误杀他人SSH进程。
+- 前置条件与输入：授权AIR下同跳板多台IB、控制台与完整源码/测试/manifest/full proof；现场人员记录MaxSessions、原连接和登录计数，不由本卡授权系统配置。
+- 步骤：先授权只读检查，再在AIR维护窗口apply；分别用公钥与密码建立master，观察子进程复用及需要时重建。prod只由现场人员执行已准只读步骤，AI仅核结果。
+- 预期结果：公钥通常1次/密码通常2次登录，每跳板TCP数为1加实际重建；在途不超8，master后台化成功，原设备密码/角色与错误类别不混。
+- 证据：连接数、登录次数、master建立/检查/重建/结束时间及归属；运行结束自己的0700 isj目录和master不残留；不保存口令或私钥。
+- 故障注入与清理：仅关闭本轮可确认归属的master、精确清理本轮目录；不能按宽进程名杀或删旧目录。风险是连接/会话残留；恢复前后现场事实并保日志。
+- 自动化状态：**OPEN / NOT RUN**；master/PTY真实行为尚需现场。
+
+## TC-REAL-I013-JUMP-BLOCKED-001 — 跳板端点暂时不可达的冷却与重排
+
+- 基本信息：real-environment / scenario，I-013/D4 WP2；状态 **OPEN / NOT RUN**。
+- 风险与目标：确定性跳板失败归类、连续2次不可达冷却240秒/最多2轮重排、已经写入不重放；不得改跳板防火墙或其他设备。
+- 前置条件与输入：另行授权的AIR管理服务器隔离出方向规则窗口、root/控制台恢复、指定单一跳板地址及22端口；完整full proof/源码身份，原规则快照。没有这些权限就NOT RUN。
+- 步骤：现场人员临时只丢管理服务器发往目标TCP/22的包，约3分钟后移除；记录已有master挂起/断开/检查结果、组冷却重排和其他组推进。不得在prod执行该注入。
+- 预期结果：受影响设备解封后完成或 FAILED_OOB_JUMP_UNREACHABLE且含跳板；认证错误不归端点不可达，写过的设备不重放，未写设备按已批规则重排，不丢已完成结果。
+- 证据：规则前后列表及一致性、每次失败/冷却/重排时间、writes_attempted与新下发次数、master实际表现；无原始口令。
+- 故障注入与清理：立即删本次精确规则、比对原规则恢复；不得重置整个防火墙。风险是规则误伤或忘清导致失联，只在有控制台的隔离AIR安排。
+- 自动化状态：**OPEN / NOT RUN**；本机假时钟不替现场限流位置实测。
+
+## TC-REAL-I013-IPV4-READINESS-001 — Network完成到IPv4就绪的有界探测
+
+- 基本信息：real-environment，I-013/WP3；状态 **OPEN / NOT RUN**。
+- 风险与目标：容纳普通网络收敛而不重试认证/主机密钥/强制改密/不完整帧错误；不把185秒估算称严格上界。
+- 前置条件与输入：授权AIR可配置IB、维护窗口和恢复配置、当前full proof及源码/测试/manifest/平台，保存Network apply/save/readback完成时间。
+- 步骤：一次确有Network改动的apply、一次无Network改动运行；逐次记录IPv4探测起止/结果。只做既定配置动作，不新增ICMP测量前置。
+- 预期结果：有改动首等15秒、无改动立即首探测，之后每10秒最多9次；跑满九次有改动95秒、无改动80秒，提前就绪等待更少；若每探测10秒总耗时分别约185/170秒，都非最坏上界；原PTY预算/任务截止不变。端点未就绪有界重试，其他致命错误一次停止，外层跳板错误保原类。
+- 证据：原始命令/退出END、每次时间戳与类别、选中凭据角色和master重建；无密码值。现场真实就绪耗时单列，不按本机假时钟推算PASS。
+- 故障注入与清理：不在现场人为制造主机密钥或口令故障；按项目恢复配置，保原证据。风险为既定Network配置写入；readiness查询自身只读但accept-new可按原行为新增主机记录。
+- 自动化状态：**OPEN / NOT RUN**，直接/假时钟/多脚本本机证据分别保留。
+
+## TC-REAL-IBSW-UPGRADE-CANARY-ROUTES-001 — 真实路线首轮验证与同项目次轮覆盖
+
+- 基本信息：real-environment / destructive / reboot，I-017/R-007/WP-A4；状态 **OPEN / NOT RUN**。
+- 风险与目标：证明强制设备只代表健康组未覆盖的独有段、健康全组件门禁及跨轮记录正确；升级可能重启/不可直接回滚，本机SimFleet不替现场。
+- 前置条件与输入：另行批准的AIR维护窗口、可恢复版本/配置/控制台、健康组与一台明确force设备、实际镜像SHA/路线；绑定代码/测试/manifest/SDK/平台/full proof，不在prod写设备。
+- 步骤：首轮获准upgrade，观察健康最长未覆盖路线/CSV同长、强制独有段和BIOS/CPLD单代表；第二轮同项目plan后再获准upgrade。无记录/无强制对照须所有健康canary完成才放行。
+- 预期结果：强制设备失败只挡依赖独有段的设备，不能反挡健康组；AT_TARGET不记通过，真正VERIFIED的每段及skip才追加。第二轮plan只展示已有run/host覆盖，不选择代表；镜像或SHA不同不得套用覆盖。
+- 证据：逐段dispatch/verify时间线、实际代表及阻断依赖、九字段JSONL（不抄真实主机名）、操作员属主/权限、两次运行来源与完整END/退出码；CPLD两个镜像SHA均在身份内。
+- 故障注入与清理：坏行/不可读/记录写失败等只在可丢弃本机模型，不破坏现场证据；设备恢复按独立维护计划，路线文件保留，旧版本不读它但不删除。风险中等且需设备恢复窗口，不把回退代码当固件已回滚。
+- 自动化状态：**OPEN / NOT RUN**；无额外ICMP最小实测要求，默认现场可ping不等于已测。

@@ -40,6 +40,7 @@ UNLOAD = load_script(
 )
 WORKER_FILES = (
     "tools/project_contract.py",
+    "tools/project_pointer.py",
     "tools/log_rotation.py",
     "tools/operator_identity.py",   # WP-11: the worker imports the root-parent marker from it
     "monitor/switch-collection-worker.py",

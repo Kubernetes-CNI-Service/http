@@ -46,6 +46,7 @@ import unittest
 from unittest.mock import patch
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -239,7 +240,16 @@ class WorkerQueueTests(unittest.TestCase):
             finally:
                 with lock:
                     active.value -= 1
-        result, _, _ = run_local_pool(simulated, count=257, timeout=30)
+        # I-013 adds eight in-flight tasks per jump, not a lower global cap.
+        # This existing global-16 contract therefore needs two synthetic jumps;
+        # the separate jump-gate contract independently verifies one jump's eight.
+        tasks = lifecycle_tasks(257)
+        tasks = [replace(task, target=replace(task.target,
+                    ethernet=replace(task.target.ethernet,
+                                     hostname="example-oob-leaf02", login_ip="198.51.100.11")))
+                 if index % 2 else task for index, task in enumerate(tasks)]
+        with patch(__name__ + ".lifecycle_tasks", return_value=tasks):
+            result, _, _ = run_local_pool(simulated, count=257, timeout=30)
         self.assertEqual(result["workers"], 16)
         self.assertEqual(peak.value, 16)
         self.assertEqual(list(hits), [1] * 257)
@@ -496,6 +506,7 @@ class WorkerQueueTests(unittest.TestCase):
             }
             for name, replacement in boundaries.items():
                 stack.enter_context(patch.object(app, name, replacement))
+            stack.enter_context(patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             strict = stack.enter_context(patch.object(app, "_run_authorized_ib_command",
                                                       wraps=app._run_authorized_ib_command))
             try:

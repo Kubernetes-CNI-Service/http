@@ -484,6 +484,7 @@ class IsolationTest(SwitchStatusCase):
         (tree / "monitor/generate-monitor-html.py").symlink_to(ROOT / "monitor/generate-monitor-html.py")
         (tree / "tools").mkdir()
         (tree / "tools/project_contract.py").symlink_to(ROOT / "tools/project_contract.py")
+        (tree / "tools/project_pointer.py").symlink_to(ROOT / "tools/project_pointer.py")
         pointer = tree / "DAY0-Prepare/activate-project"
         pointer.symlink_to(self.project.name)
         archive = self.eth_archive({"leaf-oob-01.info": switch_info("leaf-oob-01", health="Not OK")})

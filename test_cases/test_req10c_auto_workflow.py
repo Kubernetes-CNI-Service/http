@@ -512,6 +512,9 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             p1.mkdir()
             p2_tool.mkdir()
             (p2_tool / "initial-setup.py").write_bytes(INITIAL.read_bytes())
+            (p2_tool / "tools").mkdir()
+            for name in ("device_identity", "hostname_ranges", "login_path"):
+                shutil.copyfile(ROOT / "tools" / (name + ".py"), p2_tool / "tools" / (name + ".py"))
             global_file = p1 / "01-global.yaml"
             global_file.write_text("system:\n  timezone: UTC\n", encoding="ascii")
             csv = base / "ib.csv"
@@ -541,10 +544,16 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             ]
             with mock.patch.object(sys, "argv", argv), \
                  mock.patch.object(self.initial, "__file__", str(p2_tool / "initial-setup.py")), \
+                 mock.patch.object(self.initial, "_TOOLS_ROOT", None), \
+                 mock.patch.object(sys, "path", list(sys.path)), \
+                 mock.patch.dict(sys.modules), \
                  mock.patch.object(self.initial, "_global_yaml_subset") as yaml, \
                  mock.patch.object(self.initial, "load_devices") as parse_csv, \
                  mock.patch.object(self.initial, "collect_ethernet_interfaces") as network, \
                  redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                for name in list(sys.modules):
+                    if name == "tools" or name.startswith("tools."):
+                        del sys.modules[name]
                 try:
                     with self.assertRaises(self.initial.SetupError) as caught:
                         self.initial.main()

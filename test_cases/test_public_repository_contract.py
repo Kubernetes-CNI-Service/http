@@ -556,9 +556,21 @@ class PublicRepositoryAuditContractTest(unittest.TestCase):
         self.assert_rejected(self.audit(), "field-path")
 
     def test_only_tracked_exact_setup_bridge_may_lack_runtime_target(self):
-        contract = load_module(
-            "public_bridge_project_contract", ROOT / "tools/project_contract.py",
-        )
+        with mock.patch.object(sys, "path", [str(ROOT / "tools"), *sys.path]), \
+                mock.patch.dict(sys.modules, clear=False):
+            sys.modules.pop("project_pointer", None)
+            try:
+                contract = load_module(
+                    "public_bridge_project_contract", ROOT / "tools/project_contract.py",
+                )
+            except ModuleNotFoundError as error:
+                if error.name != "project_pointer":
+                    raise
+                self.fail("the actual project contract must load its declared same-source pointer dependency")
+            self.assertEqual(
+                (ROOT / "tools/project_pointer.py").resolve(),
+                Path(contract._project_pointer.__file__).resolve(),
+            )
         self.assertIn(
             ("infiniband/01-global.yaml", "01-global.yaml", "file"),
             contract.SETUP_WORKSPACE_INPUT_MAPPINGS,

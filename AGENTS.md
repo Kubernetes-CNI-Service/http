@@ -10,6 +10,22 @@
 4. 新增生产脚本时，必须同时登记脚本、direct 测试和 workflow/scenario。无映射、映射陈旧、canonical target 改变或测试模块缺失都必须 fail closed，不能以忽略路径的方式绕过。
 5. 不能在本机安全自动化的真机、AIR、Docker、服务切换或破坏性场景，必须按 `test_cases/CASE_TEMPLATE.md` 登记到 `test_cases/REAL_ENVIRONMENT.md`，写明前置条件、证据、清理步骤和风险。
 
+## 辅助脚本的窄例外（owner 2026-11-11，04 Q-046 / R-020）
+
+文件名以 `helper-` 开头、由人手工运行做准备或网络功能验证的小脚本，只有同时满足以下三条才适用本例外：
+
+1. 不被仓库其他脚本调用或导入，自己也不导入仓库模块。
+2. `--help` 在任何动作之前返回，没有副作用。
+3. 只做人工准备或验证，不写仓库或项目里其他脚本要读的文件（项目文件、锁、台账、配置）。
+
+符合条件的辅助脚本不写行为测试，也不按变更合同第 5 条登记真机卡；仍按第 3、4 条逐个登记 manifest scripts，命中共用 test_rule `helper_scripts_direct` 和共用 workflow `helper_scripts_with_initial_setup`（路径模式 `*/helper-*`，workflow 另含真实流程入口）。两者指向 `test_cases.test_all_script_entrypoints`，普查语法、安全 `--help` 和其他生产脚本不引用辅助脚本。`helper-` 前缀不能让不满足三条件的脚本规避正常测试与登记。
+
+owner 原话（2026-11-11）：
+
+- 16:12:03：「你在3.1.4版本的计划表里新增一个需求，把这个脚本放到xdr-initial-setup/下，它只是一个不会被其他脚本调用的小脚本，只是帮助用户准备eth_jump的环境，我们不用给它做任何测试，保证会跟踪版本和upload/sync 一起走」。上述普查和登记仍按随后确定的辅助脚本规则执行。
+- 16:24:30：「我们统一给这类脚本加一个前缀名字吧」。
+- 16:28:07：「helper-（推荐）可以」。
+
 ## 必须执行的验证
 
 开发时运行变更感知测试；runner 会选择已有 direct 与 workflow/scenario 测试，只会在成功后更新批准哈希，不会创建或改写测试断言：

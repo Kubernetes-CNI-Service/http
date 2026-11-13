@@ -531,6 +531,33 @@ def select_inventory_devices(snapshot, pattern=None):
 validate_optional_upgrade = validate_optional_ib_upgrade
 
 
+_SHARED_SCRIPT_ENTRY = 'upgrade2.py'
+
+
+def _shared_script_layout(module_file):
+    """Select v2/shared templates without requiring the legacy v1 bundle."""
+    from pathlib import Path
+    directory = Path(module_file).resolve().parent
+    canonical = directory.parent / 'infiniband/bringup/xdr-upgrade'
+    if directory.name == 'tools' and (canonical / _SHARED_SCRIPT_ENTRY).is_file():
+        if any((directory / name).is_file() for name in (_SHARED_SCRIPT_ENTRY, 'upgrade.py')):
+            raise ValueError('ambiguous fixed runtime layouts')
+        if (canonical / 'ibsw_upgrade_driver.py').is_file():
+            raise ValueError('fixed runtime layout/source disagreement')
+        scripts = canonical
+    elif (directory / _SHARED_SCRIPT_ENTRY).is_file():
+        if directory.name == 'tools' and (canonical / 'upgrade.py').is_file():
+            raise ValueError('ambiguous fixed runtime layouts')
+        scripts = directory
+    else:
+        # Legacy-only layouts retain the original complete v1 integrity check.
+        return _fixed_layout(module_file)
+    if any(not (scripts / name).is_file() for name in
+           ('upgrade-component.sh', 'upgrade-owned-runner.sh')):
+        raise ValueError('incomplete selected shared runtime templates')
+    return scripts
+
+
 def _fixed_layout(module_file):
     """One complete fixed bundle; canonical identity wins over local decoys."""
     from pathlib import Path

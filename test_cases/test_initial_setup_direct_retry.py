@@ -1,6 +1,6 @@
 """Direct: bounded IPv4 readiness and direct read-only SSH retry in initial-setup (v3.1.3 WP-7).
 
-What: verify_ipv4_login (3 probes, 10 s before each, no retry on authentication, host-key or
+What: verify_ipv4_login (r504 WP-3: 9 probes, 15 s then 10 s, no retry on authentication, host-key or
 password-change evidence), verify_management_direct_ssh / run_management_direct_checks (the
 management server reaches the IB directly, eth0 first and eth1 only as a fallback, identity is
 checked) and readonly_direct_ssh_retry with verify_management_key_possession (3 read-only
@@ -16,8 +16,9 @@ Expectation sources (not derived from the implementation):
 - The v15 delivered tests 参考/initial-setup-v15/initial-setup-test-cases/
   test_desktop_initial_setup.py::IPv4ReadinessRetryTests (:513-588),
   ::ManagementServerDirectSSHTests (:591-727) and ::DirectReadonlyRetryTests (:730-903); the file
-  is bound by HANDOFF-SHA256SUMS:27.  Their assertions are kept.  Table 6-1 row 9 (guide :752):
-  the 10 s wait and the 3 attempts are adopted from v15.
+  is bound by HANDOFF-SHA256SUMS:27. Their original IPv4 10 s/3-attempt assertions alone
+  are superseded by approved v3.1.4 r504 WP-3/D34-O8: 15 s first, 10 s interval, 9 probes.
+  Management direct retry and all fatal/error/credential assertions remain unchanged.
 
 Fixture rewrites (public audit, guide :835): synthetic host names (example-ib…, example-oob-leaf…),
 documentation addresses only, credentials assembled at run time.  verify_ipv4_login is called on
@@ -114,12 +115,13 @@ class DirectRetryTests(unittest.TestCase):
     # =============================================================================================
 
     # v15 IPv4ReadinessRetryTests.test_first_success_waits_ten_seconds_and_stops (test_desktop_initial_setup.py:523)
-    def test_first_success_waits_ten_seconds_and_stops(self):
+    def test_first_success_waits_fifteen_seconds_and_stops(self):
         with patch.object(app.time, "sleep") as sleep, \
              patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
              patch.object(app, "interactive_run", return_value=self.ipv4_success()) as run:
             self.ipv4_verify()
-        self.assertEqual([c.args for c in sleep.call_args_list], [(10,)])
+        # r504 WP-3 :631 / D34-O8 replaces only this IPv4 readiness schedule.
+        self.assertEqual([c.args for c in sleep.call_args_list], [(15,)])
         self.assertEqual(run.call_count, 1)
         self.assertNotIn("nv config apply", str(run.call_args.args[0]))
         self.assertNotIn("nv config save", str(run.call_args.args[0]))
@@ -131,18 +133,18 @@ class DirectRetryTests(unittest.TestCase):
              patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
              patch.object(app, "interactive_run", side_effect=[failure, failure, self.ipv4_success()]) as run:
             self.ipv4_verify()
-        self.assertEqual([c.args for c in sleep.call_args_list], [(10,), (10,), (10,)])
+        self.assertEqual([c.args for c in sleep.call_args_list], [(15,), (10,), (10,)])
         self.assertEqual(run.call_count, 3)
 
     # v15 IPv4ReadinessRetryTests.test_all_attempts_fail_without_fourth_wait_or_attempt (test_desktop_initial_setup.py:542)
-    def test_all_attempts_fail_without_fourth_wait_or_attempt(self):
+    def test_all_attempts_fail_without_tenth_wait_or_attempt(self):
         failure = app.SessionResult("ssh: connect: Network is unreachable\n", 255)
         with patch.object(app.time, "sleep") as sleep, \
              patch.object(app, "interactive_run", return_value=failure) as run:
-            with self.assertRaisesRegex(app.SetupError, "after 3 attempts"):
+            with self.assertRaisesRegex(app.SetupError, "after 9 attempts"):
                 self.ipv4_verify()
-        self.assertEqual([c.args for c in sleep.call_args_list], [(10,), (10,), (10,)])
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(15,)] + [(10,)] * 8)
+        self.assertEqual(run.call_count, 9)
 
     # v15 IPv4ReadinessRetryTests.test_explicit_authentication_or_host_key_failure_is_not_retried (test_desktop_initial_setup.py:551)
     def test_explicit_authentication_or_host_key_failure_is_not_retried(self):

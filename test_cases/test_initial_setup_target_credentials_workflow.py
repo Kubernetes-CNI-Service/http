@@ -27,6 +27,7 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 from test_cases.test_initial_setup_target_password_policy import required_external_kat
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -889,6 +890,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(app.os, "execvp", new=execvp))
                 stack.enter_context(mock.patch.object(app.pty, "fork", new=fork))
                 stack.enter_context(mock.patch.object(app, "interactive_run", new=interactive))
+                stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
                 if uncertain:
                     stack.enter_context(mock.patch.object(app.os, "killpg", new=killpg))
                     stack.enter_context(mock.patch.object(app.os, "kill", new=kill))

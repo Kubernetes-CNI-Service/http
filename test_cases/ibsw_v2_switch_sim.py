@@ -54,8 +54,15 @@ NV = '''
         print("                operational\\n--------------  -----------\\nkernel          5.10.0-nvos\\n"
               "build-date      2026-01-01\\nimage           nvos-%s\\nonie            2023.05" % read("version").strip())
     elif args == ["show", "platform", "firmware"]:
-        print("Name   Actual FW        Part Number  FW Source\\n-----  ---------------  -----------  ---------\\n"
-              "BIOS   0ACQF_06.01.003  N/A          default")
+        if read("cpld"):
+            row = "%-7s%-24s%-13s%s"
+            print(row % ("Name", "Actual FW", "Part Number", "FW Source"))
+            print(row % ("-----", "----------------------", "-----------", "---------"))
+            print(row % ("BIOS", "0ACQF_06.01.003", "N/A", "default"))
+            print(row % ("CPLD1", read("cpld").strip(), "N/A", "default"))
+        else:
+            print("Name   Actual FW        Part Number  FW Source\\n-----  ---------------  -----------  ---------\\n"
+                  "BIOS   0ACQF_06.01.003  N/A          default")
     elif args == ["show", "system", "health"]:
         sys.stdout.write(open(os.path.join(state, "health")).read())
     elif args[:2] == ["config", "show"]:
@@ -77,6 +84,16 @@ NV = '''
     elif args[:4] == ["action", "install", "system", "image"]:
         version = re.fullmatch(r"nvos-amd64-([0-9.]+)\\.bin", args[5])[1]
         write("install_target", version)
+        print("Action succeeded")
+    elif args[:4] == ["action", "fetch", "platform", "firmware"]:
+        if not os.path.isfile(args[5][len("file://"):]):
+            sys.exit(1)
+        print("Action succeeded")
+    elif args[:4] == ["action", "install", "platform", "firmware"]:
+        write("cpld-installs", read("cpld-installs") + args[6] + "\\n")
+        if "_REFRESH_" in args[6]:
+            write("cpld_target", re.search(r"(CPLD[0-9]+_REV[0-9]+)", args[6])[1])
+            write("install_target", read("version"))
         print("Action succeeded")
     else:
         sys.exit(2)
@@ -162,6 +179,25 @@ class LocalSwitch:
         self.lock = threading.Lock()
         self.rebooting_until, self.nvue_at, self.pending_version = None, None, None
         self.faults = []                                        # [marker, SshError code, occurrences left]
+        self.sftp_faults, self.sftp_fault_log = [], []
+
+    def fail_sftp(self, method, marker, error, *, inactive=True, reboot=False):
+        """One owned-path SDK/IO fault; not a preclassified production SshError."""
+        with self.lock:
+            self.sftp_faults.append((method, marker, error, inactive, reboot))
+
+    def sftp_fault(self, method, path, transport):
+        with self.lock:
+            for fault in self.sftp_faults:
+                if fault[0] == method and fault[1] in str(path):
+                    self.sftp_faults.remove(fault)
+                    if fault[3]:
+                        transport.active = False
+                    if fault[4]:
+                        self.pending_version = (self.state / "version").read_text()
+                        self.rebooting_until = time.monotonic() + self.down
+                    self.sftp_fault_log.append((method, str(path), type(fault[2]).__name__, transport.active))
+                    raise fault[2]
 
     def fail_command(self, marker, code, *, occurrence=1):
         """The occurrence-th command whose text contains marker raises SshError(code) instead of running."""
@@ -196,6 +232,10 @@ class LocalSwitch:
                 self.rebooting_until = None
                 self._boot(str(uuid.uuid4()))
                 (self.state / "version").write_text(self.pending_version)
+                cpld_target = self.state / "cpld_target"
+                if cpld_target.exists():
+                    (self.state / "cpld").write_text(cpld_target.read_text())
+                    cpld_target.unlink()
                 (self.state / "nvued").write_text("starting")
                 self.nvue_at = now + self.nvue
                 if self.drop_keys_on_reboot:
@@ -250,10 +290,19 @@ class LocalFile:
 class LocalSftp:
     MODES = {"r": "rb", "rb": "rb", "wx": "xb", "w+x": "x+b", "w": "wb"}
 
+    def __init__(self, session=None):
+        self.session = session
+
+    def fault(self, method, path):
+        if self.session is not None:
+            self.session.switch.sftp_fault(method, path, self.session.transport)
+
     def lstat(self, path):
+        self.fault("lstat", path)
         return os.lstat(path)
 
     def open(self, path, mode="r"):
+        self.fault("open", path)
         return LocalFile(open(path, self.MODES[mode]))
 
     def mkdir(self, path, mode=0o777):
@@ -277,10 +326,19 @@ class LocalSftp:
         pass
 
 
+class LocalTransport:
+    def __init__(self):
+        self.active = True
+
+    def is_active(self):
+        return self.active
+
+
 class LocalSession:
     def __init__(self, switch, fleet, method):
         self.switch, self.fleet, self.authentication = switch, fleet, method
-        self._sftp = LocalSftp()
+        self.transport = LocalTransport()
+        self._sftp = LocalSftp(self)
 
     def __enter__(self):
         return self
@@ -312,6 +370,8 @@ class LocalSession:
         env = {"PATH": f"{switch.bin}:/usr/bin:/bin", "IBSW_SYSROOT": str(switch.sysroot), "LC_ALL": "C",
                "FAKE_STATE": str(switch.state), "FAKE_HTTP_ROOT": str(self.fleet.http_root),
                "FAKE_SWITCH_PASSWORD": switch.login_password, "HOME": str(switch.home)}
+        from test_cases.native_cpld_physical_io import owned_test_root
+        env['TMPDIR'] = str(owned_test_root())
         started = time.monotonic()
         try:
             done = subprocess.run(["/bin/bash", "-c", command], input=stdin or b"", capture_output=True, env=env,

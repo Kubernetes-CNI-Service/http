@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRY = ROOT / "infiniband/bringup/xdr-upgrade/upgrade.py"
 TOOLS = ROOT / "tools"
 ENTRY_NAME = "_ibsw225_canonical_cli_source"
-REGISTRY = (
+CORE_REGISTRY = (
     ("project_contract", "project_contract.py"),
     ("_package_common", "_package_common.py"),
     ("ssh_key_preparation", "ssh_key_preparation.py"),
@@ -28,6 +28,7 @@ REGISTRY = (
     ("ibsw_upgrade_access", "ibsw_upgrade_access.py"),
     ("ibsw_upgrade_pipeline", "ibsw_upgrade_pipeline.py"),
 )
+REGISTRY = CORE_REGISTRY + (("project_pointer", "project_pointer.py"),)
 
 def _same_file(module, path, name):
     # This is a fixed test-source identity check, not a hostile-Python sandbox.

@@ -137,6 +137,12 @@
       "symbol": "SSH_RUNTIME_PINS"
     },
     {
+      "kind": "pins",
+      "path": "tools/fleet_ssh.py",
+      "set": "ssh-runtime",
+      "symbol": "SSH_RUNTIME_PINS"
+    },
+    {
       "kind": "import-map",
       "path": "DAY0-Prepare/11-load.py",
       "set": "toplevel-5",
@@ -250,6 +256,12 @@
     {
       "kind": "venv-path",
       "path": "infiniband/bringup/xdr-upgrade/upgrade.py",
+      "symbol": "_RUNTIME_VENV_PATHS",
+      "target": "venv-ibsw-upgrade"
+    },
+    {
+      "kind": "venv-path",
+      "path": "infiniband/bringup/xdr-upgrade/upgrade2.py",
       "symbol": "_RUNTIME_VENV_PATHS",
       "target": "venv-ibsw-upgrade"
     }
@@ -998,6 +1010,7 @@
     "venv-ibsw-upgrade": {
       "consumers": [
         "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py",
         "tools/ufm_bootstrap_auth_adapter.py"
       ],
       "installed_by": "python3 infra/deps.py install --target venv-ibsw-upgrade (each account installs into its own home: upgrade.py run by the operator uses the operator's own venv, installed by the operator without sudo; root only with HOME = root's home, never sudo -E; on the macOS full-proof machine: /usr/bin/python3, as the user who runs the formal load / full proof)",

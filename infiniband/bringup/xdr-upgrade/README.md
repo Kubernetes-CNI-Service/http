@@ -2,9 +2,48 @@
 
 ## v2 入口：upgrade2.py（2026-10-23，与下面的 upgrade.py 并存）
 
-`upgrade2.py` 是新的升级引擎。输入、凭据、金丝雀规则、预检和验证标准与 `upgrade.py` 相同，
-`upgrade.py` 本身不变；只读巡检仍用 `upgrade.py --inspect-only`。真实设备验收 NOT RUN，
+`upgrade2.py` 是可选升级引擎，v1 仍是默认；`upgrade.py` 本身不变，
+只读巡检仍用 `upgrade.py --inspect-only`。v2 有独立的输入、运行时和路线覆盖规则，不能套用 v1 的全部规则。真实设备验收 NOT RUN，
 见 `test_cases/REAL_ENVIRONMENT.md` 的 `TC-REAL-IBSW-V2-001`。
+
+v2 的渲染和 owned runner 不依赖 v1 专用文件：无需 `upgrade.py`、`upgrade.sh`、
+`requirements.txt` 或 v1 的 driver、inputs、pipeline、scp、`_package_common` 模块。
+它仍使用同一套共用模块，以及同一选定脚本目录的 `upgrade-component.sh`、
+`upgrade-owned-runner.sh`；缺入口或选定模板时拒绝，不拿另一目录的模板顶替。
+仅有 v1 入口的旧 canonical/flat 布局仍执行原来的完整性检查；同一脚本目录内 v1/v2 并存不算布局冲突。
+
+### v3.1.4 的入口、输入与运行中变化
+
+- 顺序是 root 操作员身份切换 → 固定 venv 审核及至多一次重新执行 → 共用运行守卫。依次检查
+  `~/.venvs/http/ibsw-upgrade`、`~/.venv-upgrade`，使用固定的八项 SSH 运行时版本和 PyYAML；不自动安装，
+  不读取 v1 的 `requirements.txt` 作为 v2 依赖。保留原解释器参数、脚本参数和继承的业务 FD。
+- `--project` 优先，否则使用当前激活项目；没有项目或指针错误以 2 退出，不把输出写回代码树。
+  有项目 `ib.csv` 就用它，否则用 `02-devices_config.csv`。默认 P2P 是项目 `p2p.xlsx`。
+  先比对独立 `ib.csv` 与项目 02 清单，再解析凭据、联系设备或创建证据；没有独立 ib.csv 不做此比较。
+  差异逐条写 `INVENTORY MISMATCH: <hostname>; <column>; ib.csv=<value>; 02=<value>; <kind>`。
+  内部调用的 `--inventory-checked` 只跳过这次比较，不跳过输入校验或设备选择。
+- 缺失或不可读的可选 OS 候选被排除，但每个必经阶段仍须有可读镜像，不能跨过缺失阶段；仅受影响设备记
+  `REVIEW_REQUIRED / OS_PACKAGE_ROUTE_UNAVAILABLE`。已选择的 BIOS/CPLD 镜像不可读则整轮 HOLD，未选择的不要求。
+- 运行中锁定私钥、管理公钥及 venv RECORD 列出的文件元数据（排除 pycache）；CSV/global/P2P 不锁。
+  缺 RECORD 打 `[LOCK] WARN`，单个 RECORD 条目 stat 失败时不锁该条目；这不豁免必需的私钥/管理公钥。
+  锁定项变化后停止新的传输/升级，在途工作跟踪完，汇总 `INPUT_CHANGED: <路径>`、以 2 退出。
+  适用的 known_hosts 只取启动快照，不锁、不重载；每个发生变化的路径只提示一次
+  `[KNOWN_HOSTS] <path>: modified during the run; this run keeps the snapshot taken at start`，继续本轮。
+- SDK 基类的精确 `SSHException` 断开与 inactive 会话按连接中断回到探测；认证/主机密钥子类不被放宽。
+  REQUESTED 前失败与请求后确认不明保持区分；修复配置上传失败不自动重发。
+
+### canary 与项目路线记录
+
+OS 优先选择预检 PASS 的健康设备，按未覆盖路线长度从长到短、同长按 CSV 顺序；强制放行设备只承担健康组未覆盖的独有段。
+没有历史记录、没有强制设备时，所有健康 canary 均完成该组件才放行其余设备，不能任一成功就放行。
+记录覆盖及强制独有段采用逐段证明，第一跳前所有必需段都须就绪；强制设备失败只挡依赖其独有段的设备。
+BIOS/CPLD 组件只选第一个健康代表（全为强制设备时选第一个），不按不同起点额外增加代表。
+
+默认记录在项目 `99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/canary-routes.jsonl`，无额外锁或过期策略。
+九字段为 `component`、`from_version`、`to_version`、`image_files`、`sha256`、`run_id`、`hostname`、`utc`、`canary`；
+CPLD 同时绑定烧录和刷新镜像及各自 SHA。只有实际下发并 VERIFIED 的段追加，AT_TARGET 不作为通过证明；显式 skip-canary
+仍记录实际已验证段。用 O_APPEND、flush/fsync 追加，旧尾半行只补换行；坏行忽略，不可读提示一次并视为无覆盖，写失败按证据错误停止。
+`--plan` 只说明每段已有记录依据，不选择 canary；实际运行的逐段输出说明记录 run/host、当前代表或明确的 skip。
 
 ```bash
 python3 -B upgrade2.py --project <项目目录>                       # 只出计划，不写交换机
@@ -42,8 +81,8 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
 - **汇总里的「MANAGEMENT KEY REJECTED」**：预检时管理公钥被拒的设备单独列出，只报告。不需要安装的设备公钥不会被改，
   带 `--upgrade` 重跑也补不上，汇总给出 `ssh-copy-id -i <管理公钥> admin@<地址>`；`--plan` 没带 `--password` 时说明没有尝试密码。
 - **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
-- **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开。
-- **退出码**：0 全部完成，3 有未完成的设备，2 整批停止（HOLD）或密码 3 次都被拒，75 另一个升级或初始化正在运行，130 中止。
+- **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开；目录创建后立即打印 `[RUN] evidence: <绝对路径>`，结束仍保留 `evidence:` 行。
+- **退出码**：0 全部完成，3 有未完成的设备，2 输入/运行时错误、HOLD 或密码 3 次都被拒；75 只表示 `ALREADY_RUNNING`，守卫文件不安全等其他守卫错误是 2；130 中止。
 - **root 运行时切到项目属主**（v3.1.2，I-006）：规则与 `upgrade.py` 相同，见下文「root 运行时切换到项目属主」；`upgrade2.py` 直接用 `tools/operator_identity.py`，切换在运行锁之前。
 - **模块分层**（以后 nvl-sw 的配置和升级可以直接复用）：
   - 通用部分：`tools/fleet_engine.py`（主进程、worker 池、证据、进度）、`fleet_probe.py`、`fleet_distribution.py`、

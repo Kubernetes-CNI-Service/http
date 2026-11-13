@@ -10,7 +10,10 @@ import shlex
 import stat
 import tempfile
 
-from test_cases.native_cpld_safe_image import COPY_FILES as BASE_FILES, _read
+from test_cases.native_cpld_safe_image import (
+    COPY_FILES as BASE_FILES, CORE_COPY_FILES as CORE_BASE_FILES,
+    _read, _verify_project_pointer_source)
+from test_cases.native_cpld_physical_io import new_owned_test_directory, owned_test_root
 from test_cases.native_os_stub_sources import executable_sources
 
 PROVIDER = 'tools/ibsw_upgrade_scp.py'
@@ -21,6 +24,7 @@ EXTRA_FILES = tuple('test_cases/' + name for name in (
     'native_os_stub_sources.py', 'native_os_safe_image.py', 'native_os_dual_channel.py',
     'native_os_physical_bridge.py', 'native_os_test_isolation.py',
     'scp_native_os_manager_fixture.py', 'test_ibsw3_native_os_manager_workflow.py'))
+CORE_COPY_FILES = CORE_BASE_FILES + EXTRA_FILES
 COPY_FILES = BASE_FILES + EXTRA_FILES
 # Baseline only. Root must independently review candidate implementation inverse
 # before extending this exact source roster; no adopt-current-hash fallback.
@@ -51,12 +55,14 @@ COPY_FILES = BASE_FILES + EXTRA_FILES
 # are unchanged; of the project_contract names it imported at f741269 only BRINGUP_OUTPUT_SPECS (now derived,
 # same value) and runtime_link_specs (no longer imported) changed, and WP-9b adds active_project_dir,
 # pointer_link_specs and pointer_link_target to ibsw_upgrade_inputs.py.  Compared whole only; no inverse layer.
+# Q067/r539: retain every old whole pin. Only project_contract gains the exact
+# extraction DATA inverse below; current executable dependency binds separately.
 PRODUCTION_PINS = {
     'tools/_package_common.py': '78ac5f337b1cb4c14a99ed7ccdbca69449ac8e8ac81725d222dd46897ad6bc56',
     'tools/project_contract.py': '100c0b0f19b70d46ac89b1be2f82411f894421062c49b7926e7d2efb35b3cefd',
     'tools/ssh_key_preparation.py': '16a383dfff78cfb9410db50d63ae4b25ad885021445ce8567c9a6d95f2a36352',
     'tools/ib_bringup_runtime_guard.py': 'f8f7815ec8438d21749d1a0bda3bf3ae47d485cf40e81e98ddcf594fc447f594',
-    'tools/ibsw_upgrade_contract.py': 'e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',
+    'tools/ibsw_upgrade_contract.py': '35672e60d55c6800838f3d3ee0ae372212f9e0af55136bf8a475b75d8081d887',
     'tools/ibsw_upgrade_inputs.py': '6c83d4eca42e04b5916a1f3a3405305d81a7c4f05cf9ea29c301fbc6a8954de1',
     'tools/ibsw_upgrade_driver.py': '887a3faf2808cfd2107849825cea2a14fe041f9468987249c5bba07c39030f01',
     'tools/ibsw_upgrade_schedule.py': '547f957b99e7df2c8d1dfe682e501a37c31cf03e601f86564135d9bc3a287fb2',
@@ -2235,11 +2241,446 @@ def _restore_native_operator_reexec_layer(payload):
     return original
 
 
+# BEGIN GENERATED UPGRADE LAYOUT LAYER
+# Generated from production diff 50ad1700c5e5675a06c413aa699c7c0e72803289..443982c8dba6f36d88d833a05dfc67f25b3b44a0
+# A1 exact outer inverse; old whole-source pins remain unchanged.
+_UPGRADE_LAYOUT_LAYERS = {'tools/ibsw_upgrade_contract.py': ('e9163ecf5363db5401377d1e044cc36750b0045168d119a9f40bf5dd9d1f616b',
+                                    '35672e60d55c6800838f3d3ee0ae372212f9e0af55136bf8a475b75d8081d887',
+                                    ((25975,
+                                      b'validate_optional_upgrade = validate_optional_ib_upgrade'
+                                      b"\n\n\n_SHARED_SCRIPT_ENTRY = 'upgrade2.py'\n\n\ndef _share"
+                                      b'd_script_layout(module_file):\n    """Select v2/shared te'
+                                      b'mplates without requiring the legacy v1 bundle."""\n    f'
+                                      b'rom pathlib import Path\n    directory = Path(module_file'
+                                      b").resolve().parent\n    canonical = directory.parent / 'i"
+                                      b"nfiniband/bringup/xdr-upgrade'\n    if directory.name == "
+                                      b"'tools' and (canonical / _SHARED_SCRIPT_ENTRY).is_file()"
+                                      b':\n        if any((directory / name).is_file() for name i'
+                                      b"n (_SHARED_SCRIPT_ENTRY, 'upgrade.py')):\n            rai"
+                                      b"se ValueError('ambiguous fixed runtime layouts')\n       "
+                                      b" if (canonical / 'ibsw_upgrade_driver.py').is_file():\n  "
+                                      b"          raise ValueError('fixed runtime layout/source "
+                                      b"disagreement')\n        scripts = canonical\n    elif (dir"
+                                      b'ectory / _SHARED_SCRIPT_ENTRY).is_file():\n        if dir'
+                                      b"ectory.name == 'tools' and (canonical / 'upgrade.py').is"
+                                      b"_file():\n            raise ValueError('ambiguous fixed r"
+                                      b"untime layouts')\n        scripts = directory\n    else:\n "
+                                      b'       # Legacy-only layouts retain the original complet'
+                                      b'e v1 integrity check.\n        return _fixed_layout(modul'
+                                      b'e_file)\n    if any(not (scripts / name).is_file() for na'
+                                      b"me in\n           ('upgrade-component.sh', 'upgrade-owned"
+                                      b"-runner.sh')):\n        raise ValueError('incomplete sele"
+                                      b"cted shared runtime templates')\n    return scripts\n\n"
+                                      b'\ndef _fixed_layout(module_file):\n    """One complete fix'
+                                      b'ed bundle; canonical identity wins over local decoys."""'
+                                      b'\n    from pathlib import Path\n',
+                                      b'validate_optional_upgrade = validate_optional_ib_upgrade'
+                                      b'\n\n\ndef _fixed_layout(module_file):\n    """One comple'
+                                      b'te fixed bundle; canonical identity wins over local deco'
+                                      b'ys."""\n    from pathlib import Path\n'),)),
+ 'tools/ibsw_upgrade_component.py': ('95339d60968b36ccf6139e0349d0e0cdfcd8a0d5829c7039b4e41852c817795d',
+                                     'f90061991606848fdf3f14f9ffe77f45793d0755cb398bd822772ae0d3c0bea8',
+                                     ((683,
+                                       b'from project_contract import normalize_redundancy_mac, v'
+                                       b'alidate_service_endpoint\n\n\nfrom ibsw_upgrade_contrac'
+                                       b't import _fixed_layout, _shared_script_layout\n_MODULE_DI'
+                                       b'R = Path(__file__).resolve().parent\n_TEMPLATE = _shared_'
+                                       b'script_layout(__file__) / "upgrade-component.sh"\n\n\nd'
+                                       b'ef parse_download_results(raw):\n',
+                                       b'from project_contract import normalize_redundancy_mac, v'
+                                       b'alidate_service_endpoint\n\n\nfrom ibsw_upgrade_contrac'
+                                       b't import _fixed_layout\n_MODULE_DIR = Path(__file__).reso'
+                                       b'lve().parent\n_TEMPLATE = _fixed_layout(__file__) / "upgr'
+                                       b'ade-component.sh"\n\n\ndef parse_download_results(raw):'
+                                       b'\n'),
+                                      (11055,
+                                       b"            values['IBSW_SCP_REFRESH_PATH'] = refresh.pa"
+                                       b'th\n    header = "#!/bin/bash\\n# Generated IB NVOS compon'
+                                       b'ent plan artifact; not execution permission.\\n"\n    head'
+                                       b'er += "\\n".join(key + "=" + shlex.quote(value) for key, '
+                                       b'value in values.items()) + "\\n"\n    if _shared_script_la'
+                                       b'yout(__file__) / "upgrade-component.sh" != _TEMPLATE:\n  '
+                                       b'      raise ValueError("fixed component template layout '
+                                       b'changed")\n    template = _TEMPLATE.read_text(encoding="u'
+                                       b'tf-8")\n    # Fixed repository-owned section markers, not'
+                                       b' caller-provided code or eval.\n',
+                                       b"            values['IBSW_SCP_REFRESH_PATH'] = refresh.pa"
+                                       b'th\n    header = "#!/bin/bash\\n# Generated IB NVOS compon'
+                                       b'ent plan artifact; not execution permission.\\n"\n    head'
+                                       b'er += "\\n".join(key + "=" + shlex.quote(value) for key, '
+                                       b'value in values.items()) + "\\n"\n    if _fixed_layout(__f'
+                                       b'ile__) / "upgrade-component.sh" != _TEMPLATE:\n        ra'
+                                       b'ise ValueError("fixed component template layout changed"'
+                                       b')\n    template = _TEMPLATE.read_text(encoding="utf-8")\n '
+                                       b'   # Fixed repository-owned section markers, not caller-'
+                                       b'provided code or eval.\n'))),
+ 'tools/ibsw_upgrade_executor.py': ('6edf4f6655a6b18e137f5447abe36999eddbcf80000a6b1c47dbe771baab022e',
+                                    'd8bada7c8b9ceae773a557b1ddf73c50e670b6361b57dcd56e27a15937e0c81d',
+                                    ((792,
+                                      b')\n\n\nfrom ibsw_upgrade_contract import _fixed_layout, _sh'
+                                      b'ared_script_layout\n_RUNNER = _shared_script_layout(__fil'
+                                      b'e__) / "upgrade-owned-runner.sh"\n\n_OS_COMMAND = "nv show'
+                                      b' system version"\n_UID_COMMAND = "id -u"\n',
+                                      b')\n\n\nfrom ibsw_upgrade_contract import _fixed_layout\n'
+                                      b'_RUNNER = _fixed_layout(__file__) / "upgrade-owned-runne'
+                                      b'r.sh"\n\n_OS_COMMAND = "nv show system version"\n_UID_COMMA'
+                                      b'ND = "id -u"\n'),
+                                     (2401,
+                                      b'        ("IBSW_EXIT_RECORD", posixpath.join(parent, "own'
+                                      b'ed-exit.record")))\n    if any(type(value) is not str or '
+                                      b'any(char in value for char in ("\\n", "\\r", "\\x00")) for '
+                                      b'_key, value in values):\n        raise ValueError("bounde'
+                                      b'd single-line original runner fields required")\n    if _'
+                                      b'shared_script_layout(__file__) / "upgrade-owned-runner.s'
+                                      b'h" != _RUNNER:\n        raise ValueError("fixed owned run'
+                                      b'ner layout changed")\n    body = _RUNNER.read_bytes()\n   '
+                                      b' return ("#!/bin/bash\\n" + "".join(key + "=" + shlex.quo'
+                                      b'te(value) + "\\n" for key, value in values)).encode() + b'
+                                      b'ody\n',
+                                      b'        ("IBSW_EXIT_RECORD", posixpath.join(parent, "own'
+                                      b'ed-exit.record")))\n    if any(type(value) is not str or '
+                                      b'any(char in value for char in ("\\n", "\\r", "\\x00")) for '
+                                      b'_key, value in values):\n        raise ValueError("bounde'
+                                      b'd single-line original runner fields required")\n    if _'
+                                      b'fixed_layout(__file__) / "upgrade-owned-runner.sh" != _R'
+                                      b'UNNER:\n        raise ValueError("fixed owned runner layo'
+                                      b'ut changed")\n    body = _RUNNER.read_bytes()\n    return '
+                                      b'("#!/bin/bash\\n" + "".join(key + "=" + shlex.quote(value'
+                                      b') + "\\n" for key, value in values)).encode() + body\n')))}
+
+
+def _restore_upgrade_layout_layer(relative, payload):
+    """Strip only the complete approved A1 diff, before older source layers."""
+    if type(payload) is not bytes:
+        raise AssertionError('exact source bytes required')
+    before, after, hunks = _UPGRADE_LAYOUT_LAYERS[relative]
+    digest = hashlib.sha256(payload).hexdigest()
+    if digest != after:
+        raise AssertionError('whole A1 integrated source differs')
+    pieces, cursor = [], 0
+    for offset, new, old in hunks:
+        if offset < cursor or payload.count(new) != 1 or payload[offset:offset + len(new)] != new:
+            raise AssertionError('exact A1 integrated span differs')
+        pieces.extend((payload[cursor:offset], old))
+        cursor = offset + len(new)
+    pieces.append(payload[cursor:])
+    original = b''.join(pieces)
+    if hashlib.sha256(original).hexdigest() != before:
+        raise AssertionError('whole previous source differs after A1 inverse')
+    return original
+# END GENERATED UPGRADE LAYOUT LAYER
+
+
+# B/Q067: exact two-hunk extraction outer layer. DATA validation only;
+# never write or execute these reconstructed historical bytes.
+_PROJECT_POINTER_PC_POSTIMAGE = 'b8410d455c55c9664bb3cb873dd9ff690e03cbfbc0f771e1dc76cf7c9b3ef89d'
+_PROJECT_POINTER_EXTRACTION_REGIONS = (
+    (4282, 4282,
+     (
+        b'\n'
+        b'DEFAULT_HTTP_PORT = 80\n'
+        b'\n'
+        b'REHYDRATE_RECEIPT_NAME = ".finished-source.json"\n'
+        b'REHYDRATE_READY_NAME = ".finished-commit.ready"\n'
+        b'REHYDRATE_COMMIT_NAME = ".finished-commit.json"\n'
+        b'_REHYDRATE_RECEIPT_MAX_BYTES = 64 * 1024\n'
+        b'_REHYDRATE_MARKER_MAX_BYTES = 4096\n'
+        b'_REHYDRATE_RECEIPT_KEYS = frozenset({\n'
+        b'    "schema_version", "state", "source_record", "project", "record_id",\n'
+        b'    "content_sha256", "include_history",\n'
+        b'})\n'
+        b'_REHYDRATE_MARKER_KEYS = frozenset({\n'
+        b'    "schema_version", "state", "receipt_sha256", "target_project",\n'
+        b'    "target_dev", "target_ino",\n'
+        b'})\n'
+        b'\n'
+        b'\n'
+        b'def _read_rehydrate_control(directory_fd: int, name: str, limit: int) -> bytes | None:\n'
+        b'    """Read one local restore control without following links or accepting a race."""\n'
+        b'    try:\n'
+        b'        named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n'
+        b'    except FileNotFoundError:\n'
+        b'        return None\n'
+        b'    except OSError as exc:\n'
+        b'        raise ValueError(f"restore control cannot be inspected: {name}") from exc\n'
+        b'    if (\n'
+        b'        not stat.S_ISREG(named.st_mode) or named.st_nlink != 1\n'
+        b'        or not 0 < named.st_size <= limit\n'
+        b'    ):\n'
+        b'        raise ValueError(f"restore control has an unsafe shape: {name}")\n'
+        b'    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)\n'
+        b'    try:\n'
+        b'        descriptor = os.open(name, flags, dir_fd=directory_fd)\n'
+        b'    except OSError as exc:\n'
+        b'        raise ValueError(f"restore control cannot be opened: {name}") from exc\n'
+        b'    try:\n'
+        b'        opened = os.fstat(descriptor)\n'
+        b'        if (\n'
+        b'            not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1\n'
+        b'            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)\n'
+        b'            != (named.st_dev, named.st_ino, named.st_size, named.st_mtime_ns)\n'
+        b'        ):\n'
+        b'            raise ValueError(f"restore control was replaced: {name}")\n'
+        b'        chunks: list[bytes] = []\n'
+        b'        remaining = opened.st_size\n'
+        b'        while remaining:\n'
+        b'            chunk = os.read(descriptor, min(remaining, 65536))\n'
+        b'            if not chunk:\n'
+        b'                break\n'
+        b'            chunks.append(chunk)\n'
+        b'            remaining -= len(chunk)\n'
+        b'        after = os.fstat(descriptor)\n'
+        b'        try:\n'
+        b'            named_after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)\n'
+        b'        except OSError as exc:\n'
+        b'            raise ValueError(f"restore control disappeared: {name}") from exc\n'
+        b'        identity = lambda item: (\n'
+        b'            item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns\n'
+        b'        )\n'
+        b'        if remaining or identity(opened) != identity(after) or identity(opened) != identity(named_after):\n'
+        b'            raise ValueError(f"restore control changed while reading: {name}")\n'
+        b'        return b"".join(chunks)\n'
+        b'    finally:\n'
+        b'        os.close(descriptor)\n'
+        b'\n'
+        b'\n'
+        b'def require_project_eligible(project: Path) -> None:\n'
+        b'    """Reject a restore until its local, inode-bound commit marker is present.\n'
+        b'\n'
+        b'    Ordinary projects predating this protocol have none of its three controls.\n'
+        b'    A copied receipt or marker is not a portable authorization: the finished\n'
+        b'    record is the provenance authority on another host.  Callers must also\n'
+        b'    bind their selected path and recheck before irreversible work.\n'
+        b'    """\n'
+        b'    project = Path(project)\n'
+        b'    # sync-code publishes this workspace-root marker before its first remote\n'
+        b'    # write and clears it only after the final source authority receipt.  A\n'
+        b'    # copied project without local restore controls is still ineligible while\n'
+        b'    # its receiving tree is incomplete.\n'
+        b'    sync_marker = project.parent.parent / ".sync-code-in-progress"\n'
+        b'    try:\n'
+        b'        sync_marker.lstat()\n'
+        b'    except FileNotFoundError:\n'
+        b'        pass\n'
+        b'    except OSError as exc:\n'
+        b'        raise ValueError(f"project sync state cannot be inspected: {sync_marker}") from exc\n'
+        b'    else:\n'
+        b'        raise ValueError(f"project sync is incomplete: {sync_marker}")\n'
+        b'    try:\n'
+        b'        named_project = project.lstat()\n'
+        b'        if not stat.S_ISDIR(named_project.st_mode):\n'
+        b'            raise ValueError(f"project must be a real directory: {project}")\n'
+        b'        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)\n'
+        b'        directory_fd = os.open(project, flags)\n'
+        b'    except OSError as exc:\n'
+        b'        raise ValueError(f"project cannot be inspected: {project}") from exc\n'
+        b'    try:\n'
+        b'        opened_project = os.fstat(directory_fd)\n'
+        b'        if (opened_project.st_dev, opened_project.st_ino) != (\n'
+        b'            named_project.st_dev, named_project.st_ino\n'
+        b'        ):\n'
+        b'            raise ValueError(f"project was replaced: {project}")\n'
+        b'        receipt_bytes = _read_rehydrate_control(\n'
+        b'            directory_fd, REHYDRATE_RECEIPT_NAME, _REHYDRATE_RECEIPT_MAX_BYTES,\n'
+        b'        )\n'
+        b'        ready_bytes = _read_rehydrate_control(\n'
+        b'            directory_fd, REHYDRATE_READY_NAME, _REHYDRATE_MARKER_MAX_BYTES,\n'
+        b'        )\n'
+        b'        marker_bytes = _read_rehydrate_control(\n'
+        b'            directory_fd, REHYDRATE_COMMIT_NAME, _REHYDRATE_MARKER_MAX_BYTES,\n'
+        b'        )\n'
+        b'        if receipt_bytes is None and ready_bytes is None and marker_bytes is None:\n'
+        b'            return\n'
+        b'        if receipt_bytes is None or ready_bytes is not None or marker_bytes is None:\n'
+        b'            raise ValueError(f"restored project has no completed commit: {project}")\n'
+        b'        try:\n'
+        b'            receipt = json.loads(receipt_bytes.decode("ascii"))\n'
+        b'            marker = json.loads(marker_bytes.decode("ascii"))\n'
+        b'        except (UnicodeError, json.JSONDecodeError) as exc:\n'
+        b'            raise ValueError(f"restored project has malformed commit controls: {project}") from exc\n'
+        b'        if (\n'
+        b'            not isinstance(receipt, dict) or set(receipt) != _REHYDRATE_RECEIPT_KEYS\n'
+        b'            or type(receipt["schema_version"]) is not int or receipt["schema_version"] != 1\n'
+        b'            or receipt["state"] != "PREPARED"\n'
+        b'            or not isinstance(receipt["source_record"], str)\n'
+        b'            or not receipt["source_record"].startswith("/")\n'
+        b'            or not isinstance(receipt["project"], str) or not receipt["project"]\n'
+        b'            or not isinstance(receipt["record_id"], str) or not receipt["record_id"]\n'
+        b'            or not isinstance(receipt["content_sha256"], str)\n'
+        b'            or not _COLLECTION_CYCLE_SHA256.fullmatch(receipt["content_sha256"])\n'
+        b'            or type(receipt["include_history"]) is not bool\n'
+        b'        ):\n'
+        b'            raise ValueError(f"restored project has an invalid receipt: {project}")\n'
+        b'        if (\n'
+        b'            not isinstance(marker, dict) or set(marker) != _REHYDRATE_MARKER_KEYS\n'
+        b'            or type(marker["schema_version"]) is not int or marker["schema_version"] != 1\n'
+        b'            or marker["state"] != "COMMITTED"\n'
+        b'            or marker["receipt_sha256"] != hashlib.sha256(receipt_bytes).hexdigest()\n'
+        b'            or marker["target_project"] != project.name\n'
+        b'            or type(marker["target_dev"]) is not int\n'
+        b'            or type(marker["target_ino"]) is not int\n'
+        b'            or (marker["target_dev"], marker["target_ino"])\n'
+        b'            != (opened_project.st_dev, opened_project.st_ino)\n'
+        b'        ):\n'
+        b'            raise ValueError(f"restored project has a mismatched commit marker: {project}")\n'
+        b'        named_after = project.lstat()\n'
+        b'        opened_after = os.fstat(directory_fd)\n'
+        b'        if (\n'
+        b'            (named_after.st_dev, named_after.st_ino)\n'
+        b'            != (opened_project.st_dev, opened_project.st_ino)\n'
+        b'            or (opened_after.st_dev, opened_after.st_ino)\n'
+        b'            != (opened_project.st_dev, opened_project.st_ino)\n'
+        b'        ):\n'
+        b'            raise ValueError(f"project was replaced during commit check: {project}")\n'
+        b'    finally:\n'
+        b'        os.close(directory_fd)\n'
+        b'\n'
+        b'\n'
+        b'@dataclass(frozen=True, order=True)\n'
+     ),
+     (
+        b'\n'
+        b'DEFAULT_HTTP_PORT = 80\n'
+        b'\n'
+        b'if __package__:\n'
+        b'    from . import project_pointer as _project_pointer\n'
+        b'else:\n'
+        b'    import project_pointer as _project_pointer\n'
+        b'\n'
+        b'REHYDRATE_RECEIPT_NAME = _project_pointer.REHYDRATE_RECEIPT_NAME\n'
+        b'REHYDRATE_READY_NAME = _project_pointer.REHYDRATE_READY_NAME\n'
+        b'REHYDRATE_COMMIT_NAME = _project_pointer.REHYDRATE_COMMIT_NAME\n'
+        b'_REHYDRATE_RECEIPT_MAX_BYTES = _project_pointer._REHYDRATE_RECEIPT_MAX_BYTES\n'
+        b'_REHYDRATE_MARKER_MAX_BYTES = _project_pointer._REHYDRATE_MARKER_MAX_BYTES\n'
+        b'_REHYDRATE_RECEIPT_KEYS = _project_pointer._REHYDRATE_RECEIPT_KEYS\n'
+        b'_REHYDRATE_MARKER_KEYS = _project_pointer._REHYDRATE_MARKER_KEYS\n'
+        b'\n'
+        b'\n'
+        b'def _read_rehydrate_control(directory_fd: int, name: str, limit: int) -> bytes | None:\n'
+        b'    """Read one local restore control through the unique standard-library authority."""\n'
+        b'    return _project_pointer._read_rehydrate_control(directory_fd, name, limit)\n'
+        b'\n'
+        b'\n'
+        b'def require_project_eligible(project: Path) -> None:\n'
+        b'    """Keep the legacy current-reader hook while sharing the eligibility algorithm."""\n'
+        b'    return _project_pointer._require_project_eligible(project, _read_rehydrate_control)\n'
+        b'\n'
+        b'\n'
+        b'@dataclass(frozen=True, order=True)\n'
+     ),
+    ),
+    (72022, 65707,
+     (
+        b'PUBLISHED_RUNTIME_FILE_PATHS = (\n'
+        b'    "ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh", "ztp/ztp.json",\n'
+        b')\n'
+        b'# R-016 \xc2\xa72: the one link that changes with the project.\n'
+        b'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\n'
+        b'# R-016 \xc2\xa72, \xc2\xa74.2 \xe7\xbb\x86\xe8\x8a\x82 (R16-19): DAY0-Prepare entries the pointer never selects.\n'
+        b'ACTIVE_PROJECT_EXCLUDED_NAMES = frozenset({"template", "activate-project", "tests", "test_cases", "dumps"})\n'
+        b'\n'
+        b'\n'
+        b'class ActiveProjectPointerError(ValueError):\n'
+        b'    """DAY0-Prepare/activate-project exists but does not select an eligible project (R-016 \xc2\xa72)."""\n'
+        b'\n'
+        b'\n'
+        b'def active_project_dir(http_root: str | os.PathLike[str]) -> Path | None:\n'
+        b'    """The real directory of the project DAY0-Prepare/activate-project selects (R-016 \xc2\xa75.1).\n'
+        b'\n'
+        b'    None when there is no pointer.  The pointer is valid only when it is a link whose text is one plain\n'
+        b'    name, not in ACTIVE_PROJECT_EXCLUDED_NAMES and not starting with ".", DAY0-Prepare/<name> is a real\n'
+        b'    directory by lstat, and require_project_eligible accepts it; otherwise ActiveProjectPointerError names\n'
+        b'    the reason.  Read-only and lock-free: resolve once per run, then read project files through the result.\n'
+        b'    """\n'
+        b'    day0 = Path(http_root) / "DAY0-Prepare"\n'
+        b'    pointer = day0 / "activate-project"\n'
+        b'    try:\n'
+        b'        pointer_mode = pointer.lstat().st_mode\n'
+        b'    except FileNotFoundError:\n'
+        b'        return None\n'
+        b'    if not stat.S_ISLNK(pointer_mode):\n'
+        b'        raise ActiveProjectPointerError(f"{ACTIVE_PROJECT_POINTER} is not a link: {pointer}")\n'
+        b'    name = os.readlink(pointer)\n'
+        b'    if "/" in name or name.startswith(".") or name in ACTIVE_PROJECT_EXCLUDED_NAMES:\n'
+        b'        raise ActiveProjectPointerError(\n'
+        b'            f"{ACTIVE_PROJECT_POINTER} -> {name} is not a project name (one plain name; not "\n'
+        b'            f"{\', \'.join(sorted(ACTIVE_PROJECT_EXCLUDED_NAMES))}; no leading \'.\')"\n'
+        b'        )\n'
+        b'    project = day0 / name\n'
+        b'    try:\n'
+        b'        project_mode = project.lstat().st_mode\n'
+        b'    except FileNotFoundError:\n'
+        b'        raise ActiveProjectPointerError(\n'
+        b'            f"{ACTIVE_PROJECT_POINTER} -> {name}: DAY0-Prepare/{name} does not exist") from None\n'
+        b'    if not stat.S_ISDIR(project_mode):\n'
+        b'        raise ActiveProjectPointerError(\n'
+        b'            f"{ACTIVE_PROJECT_POINTER} -> {name}: DAY0-Prepare/{name} is not a real directory")\n'
+        b'    try:\n'
+        b'        require_project_eligible(project)\n'
+        b'    except ValueError as exc:\n'
+        b'        raise ActiveProjectPointerError(f"{ACTIVE_PROJECT_POINTER} -> {name}: {exc}") from exc\n'
+        b'    return Path(os.path.realpath(project))\n'
+        b'\n'
+        b'\n'
+        b'def _runtime_relative_target(name, project_target, repository_target=None):\n'
+     ),
+     (
+        b'PUBLISHED_RUNTIME_FILE_PATHS = (\n'
+        b'    "ztp/ztp-bootstrap_oob.sh", "ztp/ztp-bootstrap_oobofoob.sh", "ztp/ztp.json",\n'
+        b')\n'
+        b'# R-016: preserve legacy names and per-call eligibility hook.\n'
+        b'ACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n'
+        b'ACTIVE_PROJECT_EXCLUDED_NAMES = _project_pointer.ACTIVE_PROJECT_EXCLUDED_NAMES\n'
+        b'ActiveProjectPointerError = _project_pointer.ActiveProjectPointerError\n'
+        b'\n'
+        b'\n'
+        b'def active_project_dir(http_root: str | os.PathLike[str]) -> Path | None:\n'
+        b'    """Resolve the complete pointer with the legacy module\\\'s current eligibility hook."""\n'
+        b'    return _project_pointer._active_project_dir(http_root, require_project_eligible)\n'
+        b'\n'
+        b'\n'
+        b'def _runtime_relative_target(name, project_target, repository_target=None):\n'
+     ),
+    ),
+)
+
+
+def _restore_project_pointer_layer(payload):
+    before = PRODUCTION_PINS['tools/project_contract.py']
+    if type(payload) is not bytes:
+        raise AssertionError('whole project pointer source bytes required')
+    if _sha(payload) == before:
+        return payload
+    if _sha(payload) != _PROJECT_POINTER_PC_POSTIMAGE:
+        raise AssertionError('whole current project extraction source differs')
+    pieces, cursor, delta = [], 0, 0
+    for old_offset, new_offset, old, new in _PROJECT_POINTER_EXTRACTION_REGIONS:
+        if (new_offset < cursor or old_offset != new_offset + delta
+                or payload.count(new) != 1 or payload[new_offset:new_offset + len(new)] != new):
+            raise AssertionError('unique ordered project extraction inverse required')
+        pieces.extend((payload[cursor:new_offset], old))
+        cursor = new_offset + len(new)
+        delta += len(old) - len(new)
+    pieces.append(payload[cursor:])
+    original = b''.join(pieces)
+    if _sha(original) != before:
+        raise AssertionError('whole previous project source differs after extraction inverse')
+    return original
+
+
 def _native_os_reviewed_source_bytes(files):
     """Preserve baseline19 pins; accept only whole baseline OR exact new layer."""
     if type(files) is not dict or any(path not in files for path in PRODUCTION_PINS):
         raise AssertionError('complete reviewed production source vector required')
     original = dict(files)
+    if _sha(original['tools/project_contract.py']) != PRODUCTION_PINS['tools/project_contract.py']:
+        _verify_project_pointer_source(original)
+        original['tools/project_contract.py'] = _restore_project_pointer_layer(original['tools/project_contract.py'])
+    # A1 is outermost: restore .3 offsets before BIOS/native OS source layers.
+    for path in ('tools/ibsw_upgrade_component.py', 'tools/ibsw_upgrade_executor.py'):
+        raw = original[path]
+        if type(raw) is bytes and b'_shared_script_layout' in raw:
+            original[path] = _restore_upgrade_layout_layer(path, raw)
     original.update(_strip_bios_source_layer({p: original[p] for p in _BIOS_TARGETS}))
     if _sha(original[_NATIVE_DISPLAY_ENTRY]) != PRODUCTION_PINS[_NATIVE_DISPLAY_ENTRY]:
         if any(new in original[_NATIVE_DISPLAY_ENTRY]
@@ -2298,8 +2739,9 @@ def lower_fixed_images(provider, template, image, *, reverse=False):
 def prepare_image(source):
     source = Path(source).resolve()
     original = {name: _read(source / name) for name in COPY_FILES}
+    _verify_project_pointer_source(original)
     _native_os_reviewed_source_bytes(original)  # Validate; copy actual candidate bytes unchanged.
-    image = Path(tempfile.mkdtemp(prefix='native-os-isolated-', dir='/private/tmp')).resolve()
+    image = new_owned_test_directory('native-os-isolated-')
     private = image / 'tools/native-os-io'
     private.mkdir(parents=True, mode=0o700); private.parent.chmod(0o700)
     stub_hashes = {}
@@ -2340,7 +2782,7 @@ def select_image(source):
 def validate_image(image):
     image = Path(image)
     info = image.lstat()
-    if (image.resolve() != image or image.parent != Path('/private/tmp')
+    if (image.resolve() != image or image.parent != owned_test_root()
             or not image.name.startswith('native-os-isolated-')
             or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700
             or info.st_uid != os.geteuid()):
@@ -2359,6 +2801,7 @@ def validate_image(image):
         if _sha(raw) != meta['hashes'][name]:
             raise AssertionError('fixed image source changed')
         files[name] = raw
+    _verify_project_pointer_source(files)
     expected = executable_sources()
     if set(meta['stubs']) != set(expected):
         raise AssertionError('exact private executable roster required')

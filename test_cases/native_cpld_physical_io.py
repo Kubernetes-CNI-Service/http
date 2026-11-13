@@ -11,7 +11,37 @@ import select
 import shlex
 import stat
 import subprocess
+import tempfile
 from types import SimpleNamespace
+
+
+def owned_test_root():
+    """Independent runner input; never infer authority from an image or TMPDIR."""
+    value = os.environ.get('HTTP_TEST_OWNED_ROOT')
+    if not value:
+        raise AssertionError('explicit owned test root refused')
+    root = Path(value)
+    try:
+        info = root.lstat()
+        valid = (root.is_absolute() and root.resolve() == root
+                 and not stat.S_ISLNK(info.st_mode) and stat.S_ISDIR(info.st_mode)
+                 and info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o700)
+    except OSError:
+        valid = False
+    if not valid:
+        raise AssertionError('explicit owned test root refused')
+    return root
+
+
+def new_owned_test_directory(prefix):
+    root = owned_test_root()
+    directory = Path(tempfile.mkdtemp(prefix=prefix, dir=root))
+    info = directory.lstat()
+    if (directory.parent != root or directory.resolve() != directory
+            or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or stat.S_IMODE(info.st_mode) != 0o700):
+        raise AssertionError('new owned test root refused')
+    return directory
 
 
 def lower_fixed_io_images(provider_bytes, template_bytes, ssh, scp, nv):
@@ -104,6 +134,10 @@ class PhysicalSwitchSFTP:
     """
     def __init__(self, switch_root, home_double):
         self.root = Path(switch_root)
+        owned = owned_test_root()
+        if self.root.parent.parent != owned:
+            raise AssertionError('physical switch outside owned test root refused')
+        self.synthetic_ancestors = frozenset(str(path) for path in (owned, *owned.parents))
         info = self.root.lstat()
         if (not self.root.is_absolute() or self.root.resolve() != self.root
                 or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
@@ -146,10 +180,10 @@ class PhysicalSwitchSFTP:
         return None
 
     def lstat(self, name):
-        if name in ('/', '/private', '/private/tmp'):
-            # Explicit target-ancestor IO double. The real host /private/tmp
-            # is 1777, NOT a claimed trusted target ancestor. Production upload
-            # checks remain unchanged; launcher uses actual host identities.
+        if name in self.synthetic_ancestors:
+            # Finite target-ancestor IO double, NOT the host's metadata. Only
+            # the independently declared root and its exact ancestors qualify;
+            # actual flow/switch metadata below it remains unchanged.
             return SimpleNamespace(st_mode=stat.S_IFDIR|0o755, st_uid=0,
                                    st_gid=0, st_size=0, st_mtime=1)
         if name == str(self.root.parent):

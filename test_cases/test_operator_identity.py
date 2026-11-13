@@ -32,10 +32,13 @@ tools/project_contract.py pointer reader together with this module.
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import os
 from pathlib import Path
 import pwd
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -288,7 +291,9 @@ class ReexecTests(unittest.TestCase):
         # Guide WP-4: the caller may add names (D1: the --ib-initial-password-env variable).
         _file, argv = self.exec_argv(keep=("IB_INITIAL_PASSWORD", "NOT_SET_ANYWHERE"))
         _head, assignments, _command = self.split_env(argv)
-        self.assertEqual("fixture-value", assignments["IB_INITIAL_PASSWORD"])
+        # Q-060: keep still reaches the real child (workflow below), but never argv.
+        self.assertNotIn("IB_INITIAL_PASSWORD", assignments)
+        self.assertFalse(any("fixture-value" in item for item in argv))
         self.assertNotIn("NOT_SET_ANYWHERE", assignments)
         self.assertEqual("/home/opuser", assignments["HOME"])
         with self.assertRaises(ValueError):
@@ -397,6 +402,14 @@ class ModuleContractTests(unittest.TestCase):
 
     SOURCE = (TOOLS / "operator_identity.py").read_text(encoding="utf-8")
 
+    def test_transport_bootstrap_alone_disables_bytecode_and_keeps_the_target_interpreter(self):
+        argv = OI.reexec_command(OI.Operator(*U_OPERATOR), "/fixture/entry.py", ["literal argument"],
+                                 environ={"PUBLIC_M6B": "public-input"}, keep=("PUBLIC_M6B",),
+                                 interpreter=("python3", "-B"), env_fds=(123,))
+        index = argv.index(sys.executable)
+        self.assertEqual([sys.executable, "-I", "-S", "-B", "-c"], argv[index:index + 5])
+        self.assertEqual(["python3", "-B", "/fixture/entry.py", "literal argument"], argv[-4:])
+
     def test_library_module_has_docstring_and_no_command_line(self):
         tree = ast.parse(self.SOURCE)
         self.assertTrue(ast.get_docstring(tree))
@@ -412,7 +425,385 @@ class ModuleContractTests(unittest.TestCase):
                 names.update(alias.name.split(".")[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom):
                 names.add(node.module.split(".")[0])
-        self.assertLessEqual(names, {"__future__", "os", "pwd", "signal", "subprocess", "sys", "typing"})
+        self.assertLessEqual(names, {"__future__", "json", "os", "pwd", "signal", "subprocess", "sys", "typing"})
+
+
+class OperatorEnvironmentPipeWorkflowTests(unittest.TestCase):
+    """Q-060 / r515 §9: real exec/wait, original reader, independent public input."""
+
+    def setUp(self):
+        parent = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        self.assertEqual(parent, parent.resolve())
+        self.assertEqual(0o700, parent.stat().st_mode & 0o777)
+        self.holder = tempfile.TemporaryDirectory(prefix="m6b-real-", dir=parent)
+        self.addCleanup(self.holder.cleanup)
+        self.base = Path(self.holder.name)
+        self.home = self.base / "home"
+        self.home.mkdir()
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+
+    def run_transport(self, mode, *, short=False, path_keep=False):
+        # Public synthetic values only; failure diagnostics never print values.
+        values = {
+            "PUBLIC_M6B_VALUE": "-".join(("PUBLIC", "M6B", "literal")),
+            "PUBLIC_M6B_EMPTY": "", "PUBLIC_M6B_SPACE": "a b c",
+            "PUBLIC_M6B_NEWLINE": "first\nsecond", "PUBLIC_M6B_UNICODE": "值-é",
+            "PUBLIC_M6B_SURROGATE": "raw-" + chr(0xDCE9),
+            "LANG": "C.UTF-8", "HOME": "not-the-passwd-home",
+        }
+        if path_keep:
+            values["PATH"] = str(self.bin) + ":/usr/bin:/bin"
+        expected = dict(values, HOME=str(self.home), USER="fixture-op", LOGNAME="fixture-op")
+        if mode == "wait":
+            expected[OI.ROOT_PARENT_MARKER] = "1"
+        payload = {"nvos_initial_password": "-".join(("PUBLIC", "M6B", "business"))}
+        report = self.base / "result.json"
+        record = self.base / "runuser.json"
+        target = self.base / "target.py"
+        target.write_text(
+            "import hashlib,json,os,pathlib,sys\n"
+            + "sys.path.insert(0," + repr(str(TOOLS)) + ")\n"
+            + "import credentials_fd\n"
+            + "data=credentials_fd.read_credentials(int(sys.argv[2]),required=(),optional=('nvos_initial_password',))\n"
+            + "names=" + repr(tuple(expected)) + "\n"
+            + "answer={'env':{name:os.environ.get(name) for name in names},"
+              "'business':hashlib.sha256(json.dumps(data,sort_keys=True).encode()).hexdigest(),"
+              "'args':sys.argv[3:],'unrelated':'PUBLIC_M6B_UNRELATED' in os.environ,"
+              "'missing':'PUBLIC_M6B_MISSING' in os.environ,"
+              "'marker':os.environ.get('HTTP_ZTP_ROOT_PARENT'),"
+              "'pid':os.getpid()}\n"
+            + "pathlib.Path(sys.argv[1]).write_text(json.dumps(answer,ensure_ascii=True))\n"
+            + "raise SystemExit(23)\n", encoding="utf-8")
+        stub = self.bin / "runuser"
+        stub.write_text(
+            "#!" + sys.executable + "\nimport json,os,pathlib,sys\n"
+            + "pathlib.Path(" + repr(str(record)) + ").write_text(json.dumps(sys.argv[1:]))\n"
+            + "assert sys.argv[1:4]==['-u','fixture-op','--']\n"
+            + "os.execv('/usr/bin/env',sys.argv[4:])\n", encoding="utf-8")
+        stub.chmod(0o700)
+        launcher = self.base / "launcher.py"
+        launcher.write_text(
+            "import os,pathlib,sys\n"
+            + "sys.path.insert(0," + repr(str(TOOLS)) + ")\nimport operator_identity as oi\n"
+            + "values=" + repr(values) + "\n"
+            + "environment={'PATH':" + repr(str(self.bin) + ":/usr/bin:/bin")
+            + ",'PUBLIC_M6B_UNRELATED':'excluded',**values}\n"
+            + "operator=oi.Operator('fixture-op',os.getuid(),os.getgid()," + repr(str(self.home)) + ")\n"
+            + "pathlib.Path(" + repr(str(self.base / "driver.pid")) + ").write_text(str(os.getpid()))\n"
+            + ("real_write=os.write\ndef limited(fd,data):\n return real_write(fd,data[:7])\noi.os.write=limited\n" if short else "")
+            + "args=[" + repr(str(report)) + ",sys.argv[1],'literal argument with spaces']\n"
+            + "options=dict(environ=environment,keep=" + repr(tuple(values) + ("PUBLIC_M6B_MISSING",))
+            + (",interpreter=('python3','-B'))\n" if path_keep else ",interpreter=(sys.executable,'-B'))\n")
+            + ("oi.exec_as_operator(operator," + repr(str(target)) + ",args,inherit_fds=(int(sys.argv[1]),),**options)\n"
+               if mode == "exec" else
+               "raise SystemExit(oi.run_as_operator(operator," + repr(str(target))
+               + ",args,pass_fds=(int(sys.argv[1]),),**options))\n"), encoding="utf-8")
+        reader, writer = os.pipe()
+        try:
+            os.write(writer, json.dumps(payload).encode())
+        finally:
+            os.close(writer)
+        try:
+            environment = dict(os.environ, HOME=str(self.home), PATH=str(self.bin) + ":/usr/bin:/bin")
+            done = subprocess.run([sys.executable, "-B", str(launcher), str(reader)],
+                                  env=environment, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  pass_fds=(reader,), timeout=30)
+        finally:
+            os.close(reader)
+        self.assertEqual(23, done.returncode, "real operator chain must keep target exit")
+        self.assertEqual(b"", done.stdout, "no transport value on stdout")
+        self.assertEqual(b"", done.stderr, "no transport value or traceback on stderr")
+        answer = json.loads(report.read_text())
+        self.assertTrue(answer["env"] == expected, "final environment differs from independent input")
+        self.assertFalse(answer["unrelated"], "unrequested environment crossed identity boundary")
+        self.assertFalse(answer["missing"], "absent keep name became an environment entry")
+        self.assertEqual("1" if mode == "wait" else None, answer["marker"])
+        self.assertEqual(["literal argument with spaces"], answer["args"])
+        driver_pid = int((self.base / "driver.pid").read_text())
+        if mode == "exec":
+            self.assertEqual(driver_pid, answer["pid"], "exec must replace the driver without a waiting parent")
+        else:
+            self.assertNotEqual(driver_pid, answer["pid"], "wait keeps its original parent")
+        self.assertEqual(hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(),
+                         answer["business"], "real original business reader changed input")
+        argv = json.loads(record.read_text())
+        for name, value in values.items():
+            if name == "HOME":
+                continue  # Passwd overrides this input; it must not become a payload value.
+            with self.subTest(name=name, mode=mode, short=short):
+                self.assertFalse(any(item.startswith(name + "=") for item in argv),
+                                 "caller keep assignment leaked into runuser argv")
+                if value:
+                    self.assertFalse(any(value in item for item in argv),
+                                     "caller keep value leaked into runuser argv")
+                    encoded = json.dumps(value, ensure_ascii=True)[1:-1]
+                    self.assertFalse(any(encoded in item for item in argv),
+                                     "encoded caller value leaked into runuser argv")
+
+    def test_real_exec_keeps_original_environment_and_business_fd_without_argv_values(self):
+        self.run_transport("exec")
+
+    def test_real_wait_keeps_original_environment_and_business_fd_without_argv_values(self):
+        self.run_transport("wait")
+
+    def test_real_exec_positive_short_writes_keep_the_complete_ordered_payload(self):
+        self.run_transport("exec", short=True)
+
+    def test_real_wait_positive_short_writes_keep_the_complete_ordered_payload(self):
+        self.run_transport("wait", short=True)
+
+    def test_relative_interpreter_and_overlapping_path_keep_preserve_clean_search_semantics(self):
+        for mode in ("exec", "wait"):
+            with self.subTest(mode=mode):
+                self.run_transport(mode, path_keep=True)
+
+    def test_pure_command_without_payload_context_refuses_instead_of_using_argv(self):
+        with self.assertRaises(ValueError):
+            OI.reexec_command(OI.Operator(*U_OPERATOR), "/fixture/entry.py", [],
+                              environ={"PUBLIC_M6B_VALUE": "-".join(("PUBLIC", "M6B", "one"))},
+                              keep=("PUBLIC_M6B_VALUE",))
+
+    def test_actual_bootstrap_ordinary_errors_are_fixed_and_never_start_business(self):
+        cases = {
+            "json": b"public-malformed-input", "decode": b"\xff",
+            "shape": b"[]", "framework": b'{"HOME":"public-not-authorized"}',
+            "restore": b'{"PUBLIC_M6B_ENV":"public\\u0000invalid"}',
+            "read": b'{"PUBLIC_M6B_ENV":"public-valid"}',
+            "exec": b'{"PUBLIC_M6B_ENV":"public-valid"}',
+        }
+        for case, raw in cases.items():
+            with self.subTest(case=case):
+                reader, writer = os.pipe()
+                os.write(writer, raw)
+                os.close(writer)
+                marker = self.base / (case + ".business")
+                target = self.base / (case + ".py")
+                target.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").write_text('bad')\n")
+                interpreter = "m6b-public-absent-executable" if case == "exec" else sys.executable
+                command = [sys.executable, "-I", "-S", "-B", "-c", OI._ENVIRONMENT_BOOTSTRAP,
+                           json.dumps([reader]), json.dumps(["PUBLIC_M6B_ENV"]), interpreter, str(target)]
+                try:
+                    result = subprocess.run(command, env=dict(os.environ, HOME=str(self.home)),
+                                            pass_fds=() if case == "read" else (reader,),
+                                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE, timeout=20)
+                finally:
+                    os.close(reader)
+                self.assertEqual(2, result.returncode, "ordinary bootstrap failure code changed")
+                self.assertEqual(b"", result.stdout)
+                self.assertEqual(b"operator environment transport failed\n", result.stderr,
+                                 "bootstrap must not expose the exception or input")
+                self.assertFalse(marker.exists(), "business entry ran after transport failure")
+
+    def test_actual_bootstrap_keyboardinterrupt_is_not_converted_and_closes_its_reader(self):
+        reader, writer = os.pipe()
+        os.close(writer)
+        report = self.base / "interrupted.json"
+        program = (
+            "import json,os,pathlib,sys\n"
+            + "sys.path.insert(0," + repr(str(TOOLS)) + ")\nimport operator_identity as oi\n"
+            + "descriptor=int(sys.argv[1])\n"
+            + "def interrupt(fd,size):\n raise KeyboardInterrupt\nos.read=interrupt\n"
+            + "sys.argv=['bootstrap',json.dumps([descriptor]),json.dumps(['PUBLIC_M6B_ENV']),'not-started']\n"
+            + "try:\n exec(oi._ENVIRONMENT_BOOTSTRAP)\nexcept KeyboardInterrupt:\n"
+            + " try:\n  os.fstat(descriptor)\n  closed=False\n except OSError:\n  closed=True\n"
+            + " pathlib.Path(" + repr(str(report)) + ").write_text(json.dumps({'closed':closed}))\n"
+            + " raise SystemExit(130)\n")
+        try:
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", program, str(reader)],
+                                    env=dict(os.environ, HOME=str(self.home)), pass_fds=(reader,),
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, timeout=20)
+        finally:
+            os.close(reader)
+        self.assertEqual(130, result.returncode, "KeyboardInterrupt must escape the bootstrap")
+        self.assertTrue(json.loads(report.read_text())["closed"], "interrupted reader stayed open")
+
+    def test_actual_blocked_bootstrap_keeps_sigint_and_sigterm_semantics(self):
+        import time
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(number=number):
+                reader, writer = os.pipe()
+                ready = self.base / ("reading-" + str(number))
+                program = (
+                    "import json,os,pathlib,sys\n"
+                    + "sys.path.insert(0," + repr(str(TOOLS)) + ")\nimport operator_identity as oi\n"
+                    + "descriptor=int(sys.argv[1])\nreal_read=os.read\n"
+                    + "def read(fd,size):\n pathlib.Path(" + repr(str(ready))
+                    + ").write_text('ready')\n return real_read(fd,size)\nos.read=read\n"
+                    + "sys.argv=['bootstrap',json.dumps([descriptor]),json.dumps(['PUBLIC_M6B_ENV']),'not-started']\n"
+                    + "exec(oi._ENVIRONMENT_BOOTSTRAP)\n")
+                child = None
+                try:
+                    child = subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", program, str(reader)],
+                                             env=dict(os.environ, HOME=str(self.home)), pass_fds=(reader,),
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    until = time.monotonic() + 10
+                    while not ready.exists() and child.poll() is None and time.monotonic() < until:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists(), "bootstrap did not reach real pipe read")
+                    child.send_signal(number)
+                    out, err = child.communicate(timeout=10)
+                    self.assertEqual(-number, child.returncode, "signal was changed into ordinary error rc2")
+                    self.assertEqual(b"", out)
+                    self.assertNotIn(b"operator environment transport failed", err)
+                finally:
+                    os.close(reader)
+                    os.close(writer)
+                    if child is not None and child.poll() is None:
+                        child.kill()
+                        child.communicate(timeout=10)
+
+    def test_actual_wait_parent_returns_130_and_143_for_bootstrap_signal_termination(self):
+        import time
+        for number in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=number):
+                ready = self.base / ("wait-ready-" + str(number))
+                target = self.base / ("unreached-" + str(number) + ".py")
+                marker = self.base / ("business-started-" + str(number))
+                target.write_text("from pathlib import Path\nPath(" + repr(str(marker)) + ").touch()\n")
+                stub = self.bin / "runuser"
+                stub.write_text("#!" + sys.executable + "\nimport os,sys\nos.execv('/usr/bin/env',sys.argv[4:])\n")
+                stub.chmod(0o700)
+                setup = ("import os,pathlib,signal\n_real_read=os.read\n"
+                         "def observed_read(fd,size):\n"
+                         " pathlib.Path(" + repr(str(ready)) + ").touch()\n"
+                         " signal.pause()\n return _real_read(fd,size)\n"
+                         "os.read=observed_read\n")
+                driver = ("import sys\nsys.path.insert(0," + repr(str(TOOLS)) + ")\n"
+                          "import operator_identity as oi\n"
+                          "oi._ENVIRONMENT_BOOTSTRAP=" + repr(setup + OI._ENVIRONMENT_BOOTSTRAP) + "\n"
+                          "raise SystemExit(oi.run_as_operator(oi.Operator('fixture-op',501,20,"
+                          + repr(str(self.home)) + ")," + repr(str(target)) + ",[],environ="
+                          + repr({"PATH": str(self.bin) + ":/usr/bin:/bin", "PUBLIC_M6B": "public-value"})
+                          + ",keep=('PUBLIC_M6B',)))\n")
+                child = subprocess.Popen([sys.executable, "-I", "-B", "-c", driver],
+                                         env=dict(os.environ, HOME=str(self.home),
+                                                  PATH=str(self.bin) + ":/usr/bin:/bin"),
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                try:
+                    deadline = time.monotonic() + 15
+                    while not ready.exists() and child.poll() is None and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    if not ready.exists() and child.poll() is not None:
+                        _out, fixture_error = child.communicate(timeout=15)
+                        (Path(os.environ["HTTP_TEST_OWNED_ROOT"]) / ("wait-fixture-" + str(number) + ".stderr")).write_bytes(fixture_error)
+                    self.assertTrue(ready.exists(), "real wait child did not enter bootstrap")
+                    child.send_signal(number)
+                    out, err = child.communicate(timeout=15)
+                    self.assertEqual(128 + number, child.returncode)
+                    self.assertEqual(b"", out)
+                    self.assertNotIn(b"operator environment transport failed", err)
+                    self.assertFalse(marker.exists(), "business started after bootstrap interruption")
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.communicate(timeout=15)
+
+
+class EnvironmentPipeOwnershipTests(unittest.TestCase):
+    """r515 §9.3: only newly created descriptors belong to the carrier."""
+
+    def test_positive_short_write_uses_one_write_per_pipe_and_seals_each_chunk(self):
+        payload = {"PUBLIC_M6B": "independent-" * 8, "PUBLIC_EMPTY": ""}
+        real_pipe, real_write = os.pipe, os.write
+        pairs, writes, readers = [], [], ()
+
+        def pipe():
+            pair = real_pipe()
+            pairs.append(pair)
+            return pair
+
+        def write(descriptor, data):
+            writes.append((len(pairs), descriptor, os.get_blocking(descriptor)))
+            return real_write(descriptor, data[:7])
+
+        try:
+            with mock.patch.object(OI.os, "pipe", side_effect=pipe), \
+                    mock.patch.object(OI.os, "write", side_effect=write):
+                readers = OI._seal_environment(payload)
+            self.assertGreater(len(pairs), 1)
+            self.assertEqual(tuple(pair[0] for pair in pairs), readers)
+            self.assertEqual(list(range(1, len(pairs) + 1)), [number for number, _fd, _blocking in writes])
+            self.assertTrue(all(not blocking for _number, _fd, blocking in writes))
+            chunks = []
+            for reader in readers:
+                chunks.append(os.read(reader, 65536))
+                self.assertEqual(b"", os.read(reader, 1), "writer was not sealed before the consumer")
+            self.assertEqual(payload, json.loads(b"".join(chunks).decode("ascii")))
+        finally:
+            for reader in readers:
+                os.close(reader)
+
+    def test_every_producer_failure_closes_only_its_pipes_and_never_consumes_business_fd(self):
+        real_pipe, real_write = os.pipe, os.write
+        operator = OI.Operator(*U_OPERATOR)
+        for failure in ("second-pipe", "blocking", "again", "zero", "command", "inherit", "exec", "popen"):
+            with self.subTest(failure=failure):
+                reader, writer = real_pipe()
+                original = b"independent-public-business-input"
+                real_write(writer, original)
+                os.close(writer)
+                made, writes = [], []
+
+                def pipe():
+                    if failure == "second-pipe" and made:
+                        raise OSError("controlled second pipe failure")
+                    pair = real_pipe()
+                    made.extend(pair)
+                    return pair
+
+                def write(fd, data):
+                    writes.append(len(made) // 2)
+                    if failure == "again":
+                        raise BlockingIOError("controlled no progress")
+                    if failure == "zero":
+                        return 0
+                    return real_write(fd, data[:7])
+
+                options = dict(environ={"PUBLIC_M6B": "public-long-input-" * 3}, keep=("PUBLIC_M6B",))
+                try:
+                    with mock.patch.object(OI.os, "pipe", side_effect=pipe), \
+                            mock.patch.object(OI.os, "write", side_effect=write), \
+                            mock.patch.object(OI.os, "execvp", side_effect=OSError("controlled exec failure")), \
+                            mock.patch.object(OI.subprocess, "Popen", side_effect=OSError("controlled spawn failure")):
+                        from contextlib import ExitStack
+                        with ExitStack() as stack:
+                            if failure == "blocking":
+                                stack.enter_context(mock.patch.object(OI.os, "set_blocking", side_effect=OSError("controlled blocking failure")))
+                            if failure == "command":
+                                stack.enter_context(mock.patch.object(OI, "reexec_command", side_effect=ValueError("controlled command failure")))
+                            if failure == "inherit":
+                                stack.enter_context(mock.patch.object(OI.os, "set_inheritable", side_effect=OSError("controlled inherit failure")))
+                            with self.assertRaises((OSError, ValueError)):
+                                if failure == "popen":
+                                    OI.run_as_operator(operator, "/fixture/entry.py", [], pass_fds=(reader,), **options)
+                                else:
+                                    OI.exec_as_operator(operator, "/fixture/entry.py", [], inherit_fds=(reader,), **options)
+                    self.assertTrue(made, "carrier never created an owned pipe")
+                    for fd in made:
+                        with self.assertRaises(OSError):
+                            os.fstat(fd)
+                    self.assertEqual(len(writes), len(set(writes)), "one write per new empty pipe")
+                    self.assertTrue(os.read(reader, 4096) == original, "caller input was consumed or changed")
+                finally:
+                    os.close(reader)
+                    for fd in made:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+
+    def test_absent_or_framework_only_keep_creates_no_carrier(self):
+        for keep, environment in (((), {}), (("PUBLIC_MISSING",), {}),
+                                  (("HOME", "USER", "LOGNAME"), {"HOME": "ignored", "USER": "ignored"})):
+            with self.subTest(keep=keep), mock.patch.object(OI.os, "pipe", side_effect=AssertionError("unneeded pipe")), \
+                    mock.patch.object(OI.os, "execvp", side_effect=_RecordedExec):
+                with self.assertRaises(_RecordedExec):
+                    OI.exec_as_operator(OI.Operator(*U_OPERATOR), "/fixture/entry.py", [],
+                                        keep=keep, environ=environment)
 
 
 class ActiveProjectPointerWorkflowTests(unittest.TestCase):

@@ -7,12 +7,15 @@ import ast
 import collections
 import importlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 import uuid
+from unittest import mock
 
 from tools.project_contract import path_disposition
 
@@ -321,11 +324,23 @@ class TestCaseRepositoryTests(unittest.TestCase):
         self.assertIsNotNone(spec)
         self.assertIsNotNone(spec.loader)
         contract = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = contract
-        try:
-            spec.loader.exec_module(contract)
-        finally:
-            sys.modules.pop(spec.name, None)
+        with mock.patch.object(sys, "path", [str(ROOT / "tools"), *sys.path]), \
+                mock.patch.dict(sys.modules, clear=False):
+            sys.modules.pop("project_pointer", None)
+            sys.modules[spec.name] = contract
+            try:
+                try:
+                    spec.loader.exec_module(contract)
+                except ModuleNotFoundError as error:
+                    if error.name != "project_pointer":
+                        raise
+                    self.fail("the actual deployment contract must load its declared same-source pointer dependency")
+            finally:
+                sys.modules.pop(spec.name, None)
+            self.assertEqual(
+                (ROOT / "tools/project_pointer.py").resolve(),
+                Path(contract._project_pointer.__file__).resolve(),
+            )
         self.assertIsNotNone(
             contract.transfer_exclude_reason("test_cases/test_example.py")
         )
@@ -479,6 +494,178 @@ class TestCaseRepositoryTests(unittest.TestCase):
     @staticmethod
     def _forget_path(declared):
         sys.path[:] = [entry for entry in sys.path if entry != declared]
+
+
+class Version314RegistrationTests(unittest.TestCase):
+    """r521 §5.1/5.2/9.5 and the accepted package specs: mapping, not product revalidation."""
+
+    # Formal public ancestor; its manifest is byte-identical to the private synthesis base.
+    BASE = "50ad1700c5e5675a06c413aa699c7c0e72803289"
+    INITIAL = "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+    DIRECT = {
+        "initial_setup_jump_sessions_direct": ([INITIAL], ["test_initial_setup_jump_sessions"]),
+        "initial_setup_jump_gate_direct": ([INITIAL], ["test_initial_setup_jump_gate"]),
+        "initial_setup_ipv4_readiness_direct": ([INITIAL, "tools/login_path.py"], ["test_initial_setup_ipv4_readiness"]),
+        "login_path_direct": (["tools/login_path.py"], ["test_login_path"]),
+        "initial_setup_host_key_refresh_direct": ([INITIAL], ["test_initial_setup_host_key_refresh"]),
+        "helper_scripts_direct": (["*/helper-*"], ["test_all_script_entrypoints"]),
+    }
+    APPEND_DIRECT = {
+        "ibsw225_entry_render_component_direct": ["test_ibsw_upgrade_layout_independence"],
+        "ibsw_v2_entry_direct": ["test_ibsw_upgrade_entry_runtime"],
+        "fleet_engine_direct": ["test_ibsw_upgrade_entry_runtime", "test_fleet_canary_routes"],
+        "ibsw_v2_device_direct": ["test_ibsw_upgrade_entry_runtime", "test_ibsw_upgrade_connection_drops",
+                                  "test_fleet_canary_routes", "test_troot_checkscript_env_control"],
+        "fleet_ssh_direct": ["test_ibsw_upgrade_connection_drops"],
+    }
+    WORKFLOWS = {
+        "initial_setup_jump_sessions_handoff": (["DAY0-Prepare/01-a-setup.py", INITIAL],
+                                                ["test_initial_setup_jump_sessions"]),
+        "initial_setup_jump_multiplex_and_unreachable": (
+            [INITIAL, "ztp/config/cumulus/template/90-c2-generate_configs.py"],
+            ["test_initial_setup_jump_unreachable_workflow"]),
+        "initial_setup_host_key_refresh": (
+            ["ztp/config_sync_authority.py", INITIAL, "tools/login_path.py",
+             "tools/hostname_ranges.py", "tools/device_identity.py"],
+            ["test_initial_setup_host_key_refresh_workflow"]),
+        "helper_scripts_with_initial_setup": (["*/helper-*", INITIAL], ["test_all_script_entrypoints"]),
+        "ibsw_upgrade_project_inventory": (
+            ["infiniband/bringup/xdr-upgrade/upgrade2.py", "tools/inventory_subset.py",
+             "tools/device_identity.py", "tools/project_contract.py"],
+            ["test_ibsw_upgrade_project_inventory_workflow"]),
+        "operator_identity_sealed_environment_transport": (
+            ["tools/operator_identity.py", "tools/credentials_fd.py"], ["test_operator_identity"]),
+    }
+    APPEND_WORKFLOWS = {
+        "ibsw_v2_upgrade_flow": ["test_ibsw_upgrade_layout_independence_workflow",
+                                "test_ibsw_upgrade_connection_drops_workflow",
+                                "test_ibsw_upgrade_canary_routes_workflow",
+                                "test_ibsw_upgrade_runtime_lock_workflow",
+                                "test_troot_checkscript_env_control"],
+        "ibsw_v2_same_kernel_guard": ["test_ibsw_upgrade_runtime_lock_workflow"],
+    }
+    DEPLOYMENT = ["test_initial_setup_jump_sessions", "test_initial_setup_jump_gate",
+                  "test_initial_setup_jump_unreachable_workflow", "test_initial_setup_ipv4_readiness",
+                  "test_login_path", "test_initial_setup_host_key_refresh",
+                  "test_initial_setup_host_key_refresh_workflow"]
+    FLEET = ["test_ibsw_upgrade_layout_independence", "test_ibsw_upgrade_layout_independence_workflow",
+             "test_ibsw_upgrade_entry_runtime", "test_ibsw_upgrade_project_inventory_workflow",
+             "test_ibsw_upgrade_runtime_lock_workflow", "test_ibsw_upgrade_connection_drops",
+             "test_ibsw_upgrade_connection_drops_workflow", "test_fleet_canary_routes",
+             "test_ibsw_upgrade_canary_routes_workflow", "test_troot_checkscript_env_control"]
+    LANES = {
+        # A6 independently reviewed canonical rows + v3.1.3 timing weights;
+        # retain all five keys so the original alphabetical-order checks stay active.
+        "w0": [],
+        "w1": [name for name in FLEET if name != "test_troot_checkscript_env_control"],
+        "w2": [],
+        "w3": [*DEPLOYMENT, "test_project_pointer_contract", "test_project_pointer_entry_workflow"],
+        "w4": ["test_troot_checkscript_env_control"],
+    }
+
+    def setUp(self):
+        self.manifest = json.loads((CASES / "script_test_manifest.json").read_text(encoding="utf-8"))
+        self.plan = json.loads((CASES / "full_shard_plan.json").read_text(encoding="utf-8"))
+
+    def table(self, name):
+        rows = self.manifest[name]
+        self.assertEqual(len(rows), len({row["id"] for row in rows}), "registration IDs must be unique")
+        return {row["id"]: row for row in rows}
+
+    @staticmethod
+    def names(short_names):
+        return ["test_cases." + name for name in short_names]
+
+    def test_new_production_canonical_paths_and_helper_exception_are_registered(self):
+        # Approved r521 :1252; AGENTS helper exception; filesystem is an independent canonical oracle.
+        for path in ("tools/login_path.py", "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh"):
+            with self.subTest(path=path):
+                self.assertEqual(path, self.manifest["scripts"].get(path))
+                self.assertTrue((ROOT / path).is_file())
+                self.assertEqual(path, (ROOT / path).resolve(strict=True).relative_to(ROOT.resolve()).as_posix())
+        index = subprocess.check_output(["git", "-C", str(ROOT), "ls-files", "-s"], text=True)
+        for line in index.splitlines():
+            metadata, path = line.split("\t", 1)
+            if metadata.split()[0] != "120000" or Path(path).suffix not in {".py", ".sh"}:
+                continue
+            if path_disposition(path) != "production":
+                continue
+            with self.subTest(release_alias=path):
+                canonical = (ROOT / path).resolve(strict=True).relative_to(ROOT.resolve()).as_posix()
+                self.assertEqual(canonical, self.manifest["scripts"].get(path))
+
+    def test_required_direct_rules_cover_actual_paths(self):
+        # r521 :1253/:1256, plus accepted RV92 test-carrier-only additive mapping.
+        rows = self.table("test_rules")
+        for identity, (paths, tests) in self.DIRECT.items():
+            with self.subTest(rule=identity):
+                entry = rows.get(identity, {})
+                self.assertTrue(set(paths) <= set(entry.get("paths", [])), "required direct paths missing")
+                self.assertTrue(set(self.names(tests)) <= set(entry.get("tests", [])), "required direct tests missing")
+        for identity, tests in self.APPEND_DIRECT.items():
+            with self.subTest(existing_rule=identity):
+                self.assertTrue(set(self.names(tests)) <= set(rows.get(identity, {}).get("tests", [])))
+
+    def test_workflow_members_retain_full_real_producer_consumer_union(self):
+        # r521 :1254/:1257/:1258 and original WP3 authority path, never replaced by narrower WP5 list.
+        rows = self.table("workflows")
+        for identity, (members, tests) in self.WORKFLOWS.items():
+            with self.subTest(workflow=identity):
+                entry = rows.get(identity, {})
+                self.assertTrue(set(members) <= set(entry.get("members", [])), "real producer/consumer member missing")
+                self.assertTrue(set(self.names(tests)) <= set(entry.get("tests", [])), "real workflow module missing")
+        for identity, tests in self.APPEND_WORKFLOWS.items():
+            with self.subTest(existing_workflow=identity):
+                self.assertTrue(set(self.names(tests)) <= set(rows.get(identity, {}).get("tests", [])))
+        self.assertIn("tools/credentials_fd.py", rows["initial_setup_operator_reexec"]["members"])
+        dependency_members = rows["deps_table_to_cron_image_and_code_copies"]["members"]
+        self.assertTrue({"infiniband/bringup/xdr-upgrade/upgrade2.py", "tools/fleet_ssh.py"} <= set(dependency_members))
+
+    def test_original_entries_are_retained_without_canonical_or_support_changes(self):
+        # r521 :1259 and each accepted package spec explicitly retain original entries, including v1 driver.
+        raw = subprocess.check_output(["git", "-C", str(ROOT), "show", self.BASE + ":test_cases/script_test_manifest.json"])
+        original = json.loads(raw)
+        for path, canonical in original["scripts"].items():
+            with self.subTest(original_script=path):
+                self.assertEqual(canonical, self.manifest["scripts"].get(path))
+        for name in ("path_rules", "tracked_support"):
+            self.assertEqual(original[name], self.manifest[name])
+        for name in ("test_rules", "workflows", "test_suites"):
+            current = self.table(name)
+            for before in original[name]:
+                with self.subTest(table=name, entry=before["id"]):
+                    self.assertIn(before["id"], current)
+                    after = current[before["id"]]
+                    for field, value in before.items():
+                        if field in {"tests", "members"}:
+                            self.assertEqual(value, after[field][:len(value)], "old ordered entries must remain")
+                        else:
+                            self.assertEqual(value, after[field])
+
+    def test_all_version_modules_belong_their_approved_suites(self):
+        # r521 :1260 supplies the independent literal 16; RV92 adds only its accepted test-control module.
+        rows = self.table("test_suites")
+        for identity, tests in (("deployment-runtime", self.DEPLOYMENT), ("fleet-upgrade-v2", self.FLEET)):
+            self.assertTrue(set(self.names(tests)) <= set(rows[identity]["tests"]))
+            for name in tests:
+                with self.subTest(module=name):
+                    self.assertTrue((CASES / (name + ".py")).is_file())
+
+    def test_new_modules_have_exactly_one_supported_lane(self):
+        # r521 :1272–1275; RV92 follows its original device_scripts consumer's w1, not quiet phase.
+        assignments = collections.defaultdict(list)
+        for lane in [*self.plan["phase_a"], self.plan["phase_b"]]:
+            for unit in lane["units"]:
+                if isinstance(unit, str):
+                    assignments[unit].append(lane["lane"])
+        for lane, tests in self.LANES.items():
+            for name in self.names(tests):
+                with self.subTest(module=name):
+                    self.assertEqual([lane], assignments[name])
+        # Existing COMMON A.6 :1717 says to insert while retaining lane-internal alphabetical order.
+        for lane in self.plan["phase_a"]:
+            if lane["lane"] in self.LANES:
+                self.assertEqual(sorted(lane["units"]), lane["units"], "free lane units must remain sorted")
 
 
 if __name__ == "__main__":

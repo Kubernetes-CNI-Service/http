@@ -33,6 +33,8 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from test_cases.native_cpld_physical_io import owned_test_root
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows is outside the supported test platforms.
@@ -92,7 +94,7 @@ def install_nonlinux_held_link_test_oracle(module) -> None:
     candidate_paths: dict[int, str] = {}
 
     def open_candidate(_directory_descriptor: int, mode: int) -> tuple[int, int]:
-        descriptor, candidate_path = tempfile.mkstemp(prefix="held-key-", dir="/tmp")
+        descriptor, candidate_path = tempfile.mkstemp(prefix="held-key-", dir=owned_test_root())
         os.fchmod(descriptor, mode)
         candidate_paths[descriptor] = candidate_path
         return descriptor, 1
@@ -180,10 +182,8 @@ class DisposableKeyFixture:
 
 class DockerManagementSshKeyDirectTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Keep AF_UNIX defect fixtures below Darwin's short pathname limit and
-        # resolve the platform /var and /tmp aliases before exercising the
-        # canonical component-walk contract.
-        self.temporary = tempfile.TemporaryDirectory(prefix="hk-", dir="/tmp")
+        # The runner independently supplies the canonical private fixture root.
+        self.temporary = tempfile.TemporaryDirectory(prefix="hk-", dir=owned_test_root())
         self.root = Path(self.temporary.name).resolve()
         self.fixture = DisposableKeyFixture(self.root)
         self.host_home = self.root / "host-home"
@@ -191,8 +191,7 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
         self.host_home.mkdir(mode=0o700)
         self.host_home.chmod(0o700)
         self.uid = os.getuid()
-        # Darwin's sticky /private/tmp intentionally gives new children group
-        # 0; bind the expected identity to the actual private fixture root.
+        # Bind expected identity to the actual private fixture root's group.
         self.gid = self.root.stat().st_gid
 
     def tearDown(self) -> None:
@@ -851,30 +850,41 @@ class DockerManagementSshKeyDirectTests(unittest.TestCase):
         def socket_public(_case, directory):
             path = directory / "id_ed25519.pub"
             path.unlink()
-            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            previous_directory = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
             try:
-                listener.bind(os.fspath(path))
-            except PermissionError:
-                listener.close()
-                # The desktop sandbox denies AF_UNIX bind.  Keep the
-                # integration matrix for FIFO and independently exercise the
-                # exact socket-mode rejection rather than vacuously skipping.
-                sample = list((directory / "id_ed25519").stat())
-                sample[stat.ST_MODE] = stat.S_IFSOCK | 0o600
-                with self.assertRaisesRegex(
-                    helper.ManagementKeyError, "regular|socket|special",
-                ):
-                    helper._validate_leaf_metadata(
-                        os.stat_result(sample),
-                        label="synthetic socket",
-                        expected_mode=0o600,
-                        expected_uid=self.uid,
-                        expected_gid=self.gid,
-                    )
-                # Restore a distinct unsafe special object for the whole-tree
-                # zero-write integration path.
-                os.mkfifo(path, 0o644)
-                return None
+                listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                try:
+                    try:
+                        os.chdir(directory)
+                        listener.bind(path.name)
+                    finally:
+                        os.fchdir(previous_directory)
+                except PermissionError:
+                    listener.close()
+                    # The desktop sandbox denies AF_UNIX bind.  Keep the
+                    # integration matrix for FIFO and independently exercise the
+                    # exact socket-mode rejection rather than vacuously skipping.
+                    sample = list((directory / "id_ed25519").stat())
+                    sample[stat.ST_MODE] = stat.S_IFSOCK | 0o600
+                    with self.assertRaisesRegex(
+                        helper.ManagementKeyError, "regular|socket|special",
+                    ):
+                        helper._validate_leaf_metadata(
+                            os.stat_result(sample),
+                            label="synthetic socket",
+                            expected_mode=0o600,
+                            expected_uid=self.uid,
+                            expected_gid=self.gid,
+                        )
+                    # Restore a distinct unsafe special object for the whole-tree
+                    # zero-write integration path.
+                    os.mkfifo(path, 0o644)
+                    return None
+                except BaseException:
+                    listener.close()
+                    raise
+            finally:
+                os.close(previous_directory)
             return listener.close
 
         for label, mutate in (
@@ -2725,6 +2735,7 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
                 (HELPER_PATH, docker_dir / "management_ssh_key.py"),
                 (LOAD_PATH, day0 / "11-load.py"),
                 (ROOT / "tools/project_contract.py", tools_dir / "project_contract.py"),
+                (ROOT / "tools/project_pointer.py", tools_dir / "project_pointer.py"),
                 (ROOT / "tools/deployment_lock.py", tools_dir / "deployment_lock.py"),
                 (ROOT / "tools/ztp_service_runtime.py", tools_dir / "ztp_service_runtime.py"),
             )
@@ -3922,6 +3933,324 @@ class DockerManagementSshKeyWorkflowTests(unittest.TestCase):
         ):
             with self.subTest(real_environment_boundary=boundary):
                 self.assertIn(boundary, real)
+
+class DockerManagementOwnedRootTests(unittest.TestCase):
+    """Observe real carrier factories before any disallowed allocation can occur."""
+
+    def setUp(self) -> None:
+        from test_cases.native_cpld_physical_io import owned_test_root
+
+        self.runner_root = owned_test_root()
+        self.temporary = tempfile.TemporaryDirectory(
+            prefix="docker-root-controls-", dir=self.runner_root,
+        )
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.roots = []
+        for name in ("space root", "long root " + "x" * 100):
+            root = self.root / name
+            root.mkdir(mode=0o700)
+            self.roots.append(root)
+
+    @staticmethod
+    def oracle():
+        module = SimpleNamespace(ManagementKeyError=RuntimeError)
+        # Only the open/close oracle is exercised here; F_GETPATH is never called.
+        with mock.patch.object(sys, "platform", "darwin"), mock.patch.dict(
+            globals(), fcntl=SimpleNamespace(F_GETPATH=123),
+        ):
+            install_nonlinux_held_link_test_oracle(module)
+        return module
+
+    def test_direct_factory_consumes_each_explicit_root_before_allocation(self) -> None:
+        factory = tempfile.TemporaryDirectory
+        for root in self.roots:
+            with self.subTest(root=root.name), mock.patch.dict(
+                os.environ, HTTP_TEST_OWNED_ROOT=os.fspath(root), TMPDIR=os.fspath(root),
+            ):
+                created = []
+
+                def observe(*args, **kwargs):
+                    self.assertEqual(Path(kwargs.get("dir", "")), root)
+                    handle = factory(*args, **kwargs)
+                    created.append(Path(handle.name))
+                    return handle
+
+                case = DockerManagementSshKeyDirectTests("test_cli_has_only_fixed_root_reconcile_and_check_subcommands")
+                try:
+                    with mock.patch.object(tempfile, "TemporaryDirectory", side_effect=observe):
+                        case.setUp()
+                    self.assertEqual(len(created), 1)
+                    self.assertEqual(created[0].parent, root)
+                    self.assertEqual(case.root, created[0])
+                    self.assertEqual(stat.S_IMODE(case.root.stat().st_mode), 0o700)
+                    self.assertEqual(case.uid, os.getuid())
+                    self.assertEqual(case.gid, root.stat().st_gid)
+                finally:
+                    if hasattr(case, "temporary"):
+                        case.temporary.cleanup()
+                self.assertTrue(all(not path.exists() for path in created))
+
+    def test_oracle_factory_consumes_each_explicit_root_before_allocation(self) -> None:
+        factory = tempfile.mkstemp
+        for root in self.roots:
+            with self.subTest(root=root.name), mock.patch.dict(
+                os.environ, HTTP_TEST_OWNED_ROOT=os.fspath(root), TMPDIR=os.fspath(root),
+            ):
+                module, created = self.oracle(), []
+
+                def observe(*args, **kwargs):
+                    self.assertEqual(Path(kwargs.get("dir", "")), root)
+                    descriptor, path = factory(*args, **kwargs)
+                    created.append(Path(path))
+                    return descriptor, path
+
+                descriptor = None
+                try:
+                    with mock.patch.object(tempfile, "mkstemp", side_effect=observe):
+                        descriptor, links = module._open_anonymous_candidate(-1, 0o600)
+                    self.assertEqual(links, 1)
+                    self.assertEqual(len(created), 1)
+                    self.assertEqual(created[0].parent, root)
+                    self.assertEqual(stat.S_IMODE(os.fstat(descriptor).st_mode), 0o600)
+                    self.assertEqual(os.fstat(descriptor).st_nlink, 1)
+                finally:
+                    if descriptor is not None:
+                        module._close_anonymous_candidate(descriptor)
+                self.assertTrue(all(not path.exists() for path in created))
+
+    def _invalid_roots_before_factory(self, consumer) -> None:
+        good = self.roots[0]
+        wrong_mode = self.root / ("wrong-mode-" + consumer)
+        wrong_mode.mkdir(mode=0o755)
+        wrong_mode.chmod(0o755)
+        link = self.root / ("linked-root-" + consumer)
+        link.symlink_to(good, target_is_directory=True)
+        regular = self.root / ("file-root-" + consumer)
+        regular.write_text("public carrier", encoding="ascii")
+        original_lstat = Path.lstat
+        for fault, value in (
+            ("missing", None), ("relative", "relative-root"),
+            ("file", os.fspath(regular)), ("link", os.fspath(link)),
+            ("mode", os.fspath(wrong_mode)), ("uid", os.fspath(good)),
+        ):
+            with self.subTest(consumer=consumer, fault=fault), mock.patch.dict(os.environ):
+                if value is None:
+                    os.environ.pop("HTTP_TEST_OWNED_ROOT", None)
+                else:
+                    os.environ["HTTP_TEST_OWNED_ROOT"] = value
+                calls = []
+
+                def blocked(*args, **kwargs):
+                    calls.append((args, kwargs))
+                    raise AssertionError("unsafe factory blocked before allocation")
+
+                def lstat(path, *args, **kwargs):
+                    info = original_lstat(path, *args, **kwargs)
+                    if fault == "uid" and path == good:
+                        fields = list(info)
+                        fields[stat.ST_UID] = os.geteuid() + 1
+                        return os.stat_result(fields)
+                    return info
+
+                module = self.oracle() if consumer == "oracle" else None
+                factory_name = "mkstemp" if consumer == "oracle" else "TemporaryDirectory"
+                with mock.patch.object(Path, "lstat", autospec=True, side_effect=lstat):
+                    with mock.patch.object(tempfile, factory_name, side_effect=blocked):
+                        with self.assertRaisesRegex(AssertionError, "explicit owned test root refused"):
+                            if module is not None:
+                                module._open_anonymous_candidate(-1, 0o600)
+                            else:
+                                case = DockerManagementSshKeyDirectTests(
+                                    "test_cli_has_only_fixed_root_reconcile_and_check_subcommands",
+                                )
+                                case.setUp()
+                self.assertEqual(calls, [])
+
+    def test_direct_invalid_independent_roots_refuse_before_factory(self) -> None:
+        self._invalid_roots_before_factory("direct")
+
+    def test_oracle_invalid_independent_roots_refuse_before_factory(self) -> None:
+        self._invalid_roots_before_factory("oracle")
+
+    def _leaf_case(self):
+        case = DockerManagementSshKeyDirectTests(
+            "test_every_leaf_mode_link_and_type_defect_is_zero_write",
+        )
+        case.root = self.roots[1]
+        case.fixture = DisposableKeyFixture(case.root)
+        case.host_home = case.root / "host-home"
+        case.service = case.root / "service-ssh"
+        case.uid, case.gid = os.getuid(), case.root.stat().st_gid
+        return case
+
+    def _assert_cwd_restored(self, previous):
+        try:
+            actual = Path.cwd()
+        except FileNotFoundError:
+            self.fail("owned cwd was not restored before fixture cleanup")
+        self.assertEqual(actual, previous)
+
+    def test_long_root_socket_leaf_uses_relative_bind_and_restores_cwd(self) -> None:
+        case, seen = self._leaf_case(), []
+        original_socket, previous = socket.socket, Path.cwd()
+        previous_descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+        owner = self
+
+        class ObservedSocket:
+            def __init__(self, *args, **kwargs):
+                self.real = original_socket(*args, **kwargs)
+                self.closed = False
+
+            def bind(self, path):
+                owner.assertEqual(path, "id_ed25519.pub")
+                owner.assertTrue(Path.cwd().is_relative_to(case.root))
+                seen.append((Path.cwd(), path))
+                return self.real.bind(path)
+
+            def close(self):
+                self.closed = True
+                return self.real.close()
+
+        opened = []
+
+        def make_socket(*args, **kwargs):
+            instance = ObservedSocket(*args, **kwargs)
+            opened.append(instance)
+            return instance
+
+        try:
+            with mock.patch.object(socket, "socket", side_effect=make_socket):
+                case.test_every_leaf_mode_link_and_type_defect_is_zero_write()
+            self.assertEqual(len(seen), 1)
+            self.assertTrue(all(instance.closed for instance in opened))
+            self._assert_cwd_restored(previous)
+        finally:
+            try:
+                for instance in opened:
+                    instance.real.close()
+                self._assert_cwd_restored(previous)
+            finally:
+                os.fchdir(previous_descriptor)
+                os.close(previous_descriptor)
+
+    def test_socket_bind_error_restores_cwd_and_closes_own_socket(self) -> None:
+        case, previous, opened = self._leaf_case(), Path.cwd(), []
+        previous_descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+
+        class BrokenSocket:
+            closed = False
+
+            def bind(self, path):
+                raise RuntimeError("controlled socket bind failure")
+
+            def close(self):
+                self.closed = True
+
+        def make_socket(*args, **kwargs):
+            instance = BrokenSocket()
+            opened.append(instance)
+            return instance
+
+        try:
+            with mock.patch.object(socket, "socket", side_effect=make_socket):
+                with self.assertRaisesRegex(RuntimeError, "controlled socket bind failure"):
+                    case.test_every_leaf_mode_link_and_type_defect_is_zero_write()
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].closed)
+            self._assert_cwd_restored(previous)
+        finally:
+            os.fchdir(previous_descriptor)
+            os.close(previous_descriptor)
+
+    def test_socket_permission_fallback_keeps_real_socket_mode_rejection(self) -> None:
+        case, previous, observed, opened = self._leaf_case(), Path.cwd(), [], []
+        previous_descriptor = os.open(".", os.O_RDONLY | os.O_DIRECTORY)
+        helper = case.helper()
+        validate = helper._validate_leaf_metadata
+
+        def observe(info, **kwargs):
+            if kwargs.get("label") == "synthetic socket":
+                self.assertEqual(stat.S_IFMT(info.st_mode), stat.S_IFSOCK)
+                observed.append(info.st_mode)
+            return validate(info, **kwargs)
+
+        class DeniedSocket:
+            closed = False
+
+            def bind(self, path):
+                raise PermissionError("controlled own socket denial")
+
+            def close(self):
+                self.closed = True
+
+        def make_socket(*args, **kwargs):
+            instance = DeniedSocket()
+            opened.append(instance)
+            return instance
+
+        try:
+            with mock.patch.object(case, "helper", return_value=helper), \
+                 mock.patch.object(helper, "_validate_leaf_metadata", side_effect=observe), \
+                 mock.patch.object(socket, "socket", side_effect=make_socket):
+                case.test_every_leaf_mode_link_and_type_defect_is_zero_write()
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(len(opened), 1)
+            self.assertTrue(opened[0].closed)
+            self._assert_cwd_restored(previous)
+        finally:
+            os.fchdir(previous_descriptor)
+            os.close(previous_descriptor)
+
+    def test_oracle_named_stat_mismatch_refuses_before_link_or_unlink(self) -> None:
+        factory, lstat = tempfile.mkstemp, os.lstat
+        for field in (stat.ST_INO, stat.ST_DEV):
+            with self.subTest(named_field=field), mock.patch.dict(
+                os.environ, HTTP_TEST_OWNED_ROOT=os.fspath(self.root),
+                TMPDIR=os.fspath(self.root),
+            ):
+                module, paths = self.oracle(), []
+
+                def record(*args, **kwargs):
+                    self.assertEqual(Path(kwargs["dir"]), self.root)
+                    descriptor, path = factory(*args, **kwargs)
+                    paths.append(Path(path))
+                    return descriptor, path
+
+                with mock.patch.object(tempfile, "mkstemp", side_effect=record):
+                    descriptor, _ = module._open_anonymous_candidate(-1, 0o600)
+                directory = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+
+                def mismatch(path, *args, **kwargs):
+                    info = lstat(path, *args, **kwargs)
+                    self.assertEqual(Path(path), paths[0])
+                    fields = list(info)
+                    fields[field] += 1
+                    return os.stat_result(fields)
+
+                def held_name(candidate, command, output):
+                    self.assertEqual(candidate, descriptor)
+                    return os.fsencode(paths[0]) + b"\0"
+
+                try:
+                    with mock.patch.dict(
+                        globals(), fcntl=SimpleNamespace(F_GETPATH=123, fcntl=held_name),
+                    ), mock.patch.object(os, "lstat", side_effect=mismatch), \
+                         mock.patch.object(os, "link", side_effect=AssertionError(
+                             "unsafe link blocked before publication",
+                         )) as link, mock.patch.object(os, "unlink", side_effect=AssertionError(
+                             "unsafe unlink blocked before cleanup",
+                         )) as unlink:
+                        with self.assertRaisesRegex(RuntimeError, "rebound candidate"):
+                            module._publish_held_inode(descriptor, directory, "public-target")
+                        self.assertEqual(link.call_count, 0)
+                        self.assertEqual(unlink.call_count, 0)
+                    self.assertTrue(paths[0].is_file())
+                    self.assertFalse((self.root / "public-target").exists())
+                finally:
+                    os.close(directory)
+                    module._close_anonymous_candidate(descriptor)
+                self.assertFalse(paths[0].exists())
 
 if __name__ == "__main__":
     unittest.main()

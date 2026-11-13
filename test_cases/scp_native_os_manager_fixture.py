@@ -90,7 +90,8 @@ def exercise(case, *, two, fault):
     if type(two) is not bool or fault not in (None, 'missing_content', 'wrong_content',
             'record_file_sync', 'record_directory_sync', 'record_writer_close'):
         raise AssertionError('fixed natural OS scenario only')
-    root = Path(tempfile.mkdtemp(prefix='native-os-bridge-owned-', dir='/private/tmp')).resolve()
+    from test_cases.native_cpld_physical_io import new_owned_test_directory
+    root = new_owned_test_directory('native-os-bridge-owned-')
     root.chmod(0o700)
     print('IBSW_NATIVE_OS_FLOW_OWNED_ROOT=' + str(root), flush=True)
     RETAINED_TREES.append(str(root))

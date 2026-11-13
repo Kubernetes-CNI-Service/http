@@ -34,6 +34,7 @@ retries the password, and no switch prechecked after the refusal is offered it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 import hashlib
 import heapq
 import itertools
@@ -49,6 +50,7 @@ import time
 import fleet_distribution as dist
 import fleet_probe as probe
 from fleet_ssh import SshError
+from hostname_ranges import compress
 
 CATEGORIES = (
     ("UPGRADED", "Upgraded and verified"),
@@ -118,6 +120,33 @@ class PackageInfo:
 
 def _identity(item):
     return (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+
+
+@dataclass(frozen=True)
+class LockedFile:
+    """Metadata snapshot only; never reads credential or runtime file contents."""
+    label: str
+    path: str
+    identity: tuple
+
+    @classmethod
+    def read(cls, label, path):
+        return cls(label, str(path), _identity(os.stat(path)))
+
+    def unchanged(self):
+        try:
+            return _identity(os.stat(self.path)) == self.identity
+        except OSError:
+            return False
+
+
+def canary_component_verified(required, verified):
+    """Component-local indices: every required hop actually dispatched and verified.
+
+    A4 can reuse this predicate with a route segment's subset of required indices.
+    Empty proof, AT_TARGET and previous-component proof do not certify a canary.
+    """
+    return bool(required) and set(required).issubset(verified)
 
 
 @dataclass
@@ -193,10 +222,22 @@ class Family:
     def packages(self, selected):      # objects with .file, .path, .url
         raise NotImplementedError
 
+    def optional_package_paths(self, selected):
+        return frozenset()
+
     def steps(self, plan, component, infos):   # [StepPlan] this switch needs for component
         raise NotImplementedError
 
     def canaries(self, component, members):    # members: [(hostname, plan)] -> [hostname]
+        """None selects generic route cover; a list selects one component canary.
+
+        The adapter may validate its route consistency here. Health, record coverage,
+        choice, gates and evidence remain engine decisions.
+        """
+        raise NotImplementedError
+
+    def segments(self, plan, component, infos):
+        """One hashable (component, from, to, image-name tuple, SHA-256 tuple) per step."""
         raise NotImplementedError
 
     def render(self, device, step_plan, *, run_id, switch_dir):   # -> step with .component .stage .effect
@@ -211,6 +252,72 @@ class Family:
 
 class EvidenceError(Exception):
     """A durable evidence write failed; the batch must stop (no write-ahead record, no dispatch)."""
+
+
+class CanaryRoutes:
+    """Project-local, append-only verified route evidence (no expiry or extra lock)."""
+    def __init__(self, path, warn):
+        self.path, self.warn, self.records = Path(path), warn, {}
+
+    @staticmethod
+    def key(row):
+        fields = ('component', 'from_version', 'to_version', 'image_files', 'sha256',
+                  'run_id', 'hostname', 'utc', 'canary')
+        if not isinstance(row, dict) or any(name not in row for name in fields):
+            return None
+        if any(not isinstance(row[name], str) or not row[name]
+               for name in ('component', 'from_version', 'to_version', 'run_id', 'hostname', 'utc')):
+            return None
+        names, hashes = row['image_files'], row['sha256']
+        if (not isinstance(names, list) or not isinstance(hashes, list) or not names or len(names) != len(hashes)
+                or any(not isinstance(v, str) or not v for v in names + hashes)
+                or not isinstance(row['canary'], bool)):
+            return None
+        return (row['component'], row['from_version'], row['to_version'], tuple(names), tuple(hashes))
+
+    def read(self):
+        try:
+            text = self.path.read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError):
+            self.warn('[CANARY ROUTES] unable to read route records; no prior coverage')
+            return
+        for line in text.splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            key = self.key(row)
+            if key is not None:
+                self.records.setdefault(key, row)
+
+    def append(self, segment, *, run_id, hostname, canary):
+        if segment in self.records:
+            return
+        row = dict(component=segment[0], from_version=segment[1], to_version=segment[2],
+                   image_files=list(segment[3]), sha256=list(segment[4]), run_id=run_id,
+                   hostname=hostname, utc=datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                   canary=canary)
+        try:
+            separator = b''
+            try:
+                with self.path.open('rb') as old:
+                    old.seek(0, os.SEEK_END)
+                    if old.tell():
+                        old.seek(-1, os.SEEK_END)
+                        if old.read(1) != b'\n':
+                            separator = b'\n'
+            except FileNotFoundError:
+                pass
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, 'ab') as handle:
+                handle.write(separator + json.dumps(row, sort_keys=True).encode('utf-8') + b'\n')
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as error:
+            raise EvidenceError(f'canary route evidence: {error.strerror}') from None
+        self.records[segment] = row
 
 
 class Evidence:
@@ -301,6 +408,8 @@ class Dev:
     dispatch: dict | None = None
     boot_after: str | None = None
     performed: list = field(default_factory=list)
+    required_steps: set = field(default_factory=set)
+    verified_steps: set = field(default_factory=set)
     completed: set = field(default_factory=set)
     holds_slot: bool = False
     verify_retried: bool = False       # this step already used its one verification retry
@@ -328,12 +437,18 @@ class Session:
 
 class Engine:
     def __init__(self, devices, family, ops, options, evidence, *, out=sys.stderr, clock=time.monotonic,
-                 blocked_inputs=(), service_issues=None):
+                 blocked_inputs=(), service_issues=None, locked_inputs=(), watched_inputs=(), packages_ready=None,
+                 routes_path=None):
         self.family, self.ops, self.options, self.evidence = family, ops, options, evidence
         self.out, self.clock = out, clock
+        self.routes = CanaryRoutes(routes_path if routes_path is not None
+                                   else evidence.root.parent / 'canary-routes.jsonl', self.say)
         self.devs = {device.hostname: Dev(device, index) for index, device in enumerate(devices)}
         self.blocked_inputs = tuple(blocked_inputs)
         self.service_issues = dict(service_issues or {})    # hostname -> reason: read-only precheck, then FAILED
+        self.locked_inputs, self.watched_inputs = tuple(locked_inputs), tuple(watched_inputs)
+        self.packages_ready = packages_ready
+        self.warned_watches = set()
         self.events = queue.Queue()
         self.tracker = probe.ProbeTracker(options.timings)
         self.packages, self.sessions, self.canary_queue = {}, [], []
@@ -403,13 +518,20 @@ class Engine:
         for component in self.family.components:
             self.pools[component] = Pool(component, self.options.upgrade_workers, self.events)
         try:
+            self.routes.read()
             self._load_packages()
+            if self.packages_ready is not None:
+                self.packages_ready(frozenset(self.packages))
             for dev in self.devs.values():
                 self._set(dev, "PRECHECKING")
                 self._submit("check", dev, "precheck", self._precheck_task(dev), priority=2)
             self._pump(lambda: self.outstanding == 0)
             self._print_progress(force=True)
             if plan_only or not self.options.upgrade:
+                for component in self.options.selected:
+                    members = [dev for dev in self.devs.values() if dev.category is None
+                               and self._steps_for(dev, component)]
+                    self._print_route_plan(component, members)
                 for dev in self.devs.values():
                     if dev.category is None:
                         dev.category, dev.reason = "NOT_EXECUTED", "PLAN_ONLY"
@@ -427,6 +549,13 @@ class Engine:
                             ": " + ",".join(remaining) + (" (partly upgraded)" if dev.performed else "")
                     else:
                         dev.category = "UPGRADED" if dev.performed else "AT_TARGET"
+            return self._summary()
+        except Hold as error:
+            self.hold = str(error)
+            self.say(f"[HOLD] {self.hold}; no further transfers or upgrades")
+            for dev in self.devs.values():
+                if dev.category is None:
+                    self._final(dev, "NOT_EXECUTED", self.hold)
             return self._summary()
         except KeyboardInterrupt:
             self.aborted = True
@@ -451,10 +580,13 @@ class Engine:
             pass
 
     def _load_packages(self):
+        optional = self.family.optional_package_paths(self.options.selected)
         for package in self.family.packages(self.options.selected):
             try:
                 self.packages[package.path] = PackageInfo.read(package)
             except OSError as error:
+                if package.path in optional:
+                    continue
                 raise Hold(f"package unreadable: {package.path} ({error.strerror})") from None
         self.evidence.write("packages.json", {path: dict(file=info.file, size=info.size, sha256=info.sha256)
                                               for path, info in self.packages.items()})
@@ -570,6 +702,107 @@ class Engine:
     def _steps_for(self, dev, component):
         return list(self.family.steps(dev.plan, component, self.packages))
 
+    def _route_for(self, dev, component):
+        return tuple(self.family.segments(dev.plan, component, self.packages))
+
+    def _print_route_plan(self, component, members, assignments=None, forced=()):
+        self.say(f'[{component.upper()} CANARY PLAN]')
+        owners = {segment: host for host, segments in (assignments or {}).items() for segment in segments}
+        seen = set()
+        for dev in sorted(members, key=lambda item: item.order):
+            for segment in self._route_for(dev, component):
+                if segment in seen:
+                    continue
+                seen.add(segment)
+                row, owner = self.routes.records.get(segment), owners.get(segment)
+                if row:
+                    source = f"record run={row['run_id']} host={row['hostname']}"
+                elif owner:
+                    source = ('forced-only ' if owner in forced else 'current canary ') + owner
+                elif assignments is None:
+                    source = 'no record'
+                elif self.options.skip_canary:
+                    source = 'explicit skip-canary'
+                else:
+                    source = 'component canary ' + next(iter(assignments))
+                self.say(f"  {segment[1]} -> {segment[2]} {', '.join(segment[3])}: {source}")
+
+    def _select_canaries(self, component, members):
+        # The family validates the complete plan even if existing evidence covers it.
+        policy = self.family.canaries(component, [(dev.host, dev.plan) for dev in members])
+        self.route_mode = policy is None
+        self.phase_routes = {dev.host: self._route_for(dev, component) for dev in members}
+        self.prior_segments = set(self.routes.records)
+        self.proven_segments, self.failed_segments = set(self.prior_segments), set()
+        self.canary_segments, self.canary_indices = {}, {}
+        self.normal_gate_failed, self.canary_failed_any = False, False
+        self.completed_canaries = set()
+        healthy = [dev for dev in members if dev.health['observed'] == 'PASS']
+        forced = [dev for dev in members if dev.health['observed'] != 'PASS']
+        healthy_segments = {s for dev in healthy for s in self.phase_routes[dev.host]}
+        self.forced_only = {s for dev in forced for s in self.phase_routes[dev.host]
+                            if s not in healthy_segments and s not in self.prior_segments}
+        self.exception_hosts = {dev.host for dev in members if
+                                set(self.phase_routes[dev.host]) & (self.prior_segments | self.forced_only)}
+        if not self.options.skip_canary:
+            covered = set(self.prior_segments)
+            if self.route_mode:
+                for group in (healthy, forced):
+                    for dev in sorted(group, key=lambda d: (-len(set(self.phase_routes[d.host]) -
+                                                               self.prior_segments), d.order)):
+                        required = set(self.phase_routes[dev.host]) - covered
+                        if required:
+                            self.canary_segments[dev.host] = required
+                            covered.update(required)
+            else:
+                candidates = [dev for dev in healthy + forced
+                              if set(self.phase_routes[dev.host]) - covered]
+                if candidates:
+                    chosen = candidates[0]
+                    self.canary_segments[chosen.host] = set(self.phase_routes[chosen.host]) - covered
+            for host, segments in self.canary_segments.items():
+                self.canary_indices[host] = {i for i, s in enumerate(self.phase_routes[host]) if s in segments}
+        self.healthy_canaries = set(self.canary_segments) & {dev.host for dev in healthy}
+        self.forced_canaries = set(self.canary_segments) - self.healthy_canaries
+        self.component_proven = self.options.skip_canary or not self.canary_segments
+        return list(self.canary_segments)
+
+    def _route_ready(self, dev):
+        if self.options.skip_canary:
+            return True
+        route = set(self.phase_routes[dev.host])
+        if not self.route_mode:
+            return dev.canary or route.issubset(self.prior_segments) or self.component_proven
+        if dev.host in self.exception_hosts:
+            # A selected canary supplies only its assigned indices. All other needed
+            # segments must already be proven before its very first hop.
+            return (route - self.canary_segments.get(dev.host, set())).issubset(self.proven_segments)
+        return dev.canary or (not self.normal_gate_failed and
+                             self.healthy_canaries.issubset(self.completed_canaries))
+
+    def _block_route_dependents(self):
+        changed = True
+        while changed:
+            changed = False
+            for dev in self.devs.values():
+                if (dev.category is not None or self.phase in dev.completed or dev.state not in WAITING_STATES
+                        or dev.host not in self.phase_routes):
+                    continue
+                required = set(self.phase_routes[dev.host]) - self.canary_segments.get(dev.host, set())
+                blocked = (bool(required & self.failed_segments) if dev.host in self.exception_hosts
+                           else self.normal_gate_failed)
+                if not self.route_mode:
+                    blocked = self.canary_failed_any and not set(self.phase_routes[dev.host]).issubset(self.prior_segments)
+                if blocked:
+                    self._final(dev, 'BLOCKED', 'CANARY_FAILED')
+                    if dev.host in self.canary_queue:
+                        self.canary_queue.remove(dev.host)
+                        self.failed_segments.update(self.canary_segments[dev.host] - self.proven_segments)
+                        changed = True
+                    for session in self.sessions:
+                        if dev.host in session.members:
+                            session.scheduler.drop(dev.host, 'CANARY_FAILED')
+
     def _run_phase(self, component):
         if self.hold or self.stopping:
             return
@@ -580,13 +813,14 @@ class Engine:
             return
         for dev in members:
             dev.steps, dev.step_index, dev.canary = self._steps_for(dev, component), 0, False
-        canaries = [] if self.options.skip_canary else list(
-            self.family.canaries(component, [(dev.host, dev.plan) for dev in members]))
+            dev.required_steps, dev.verified_steps = set(range(len(dev.steps))), set()
+        canaries = self._select_canaries(component, members)
         for name in canaries:
             self.devs[name].canary = True
         self.canary_queue = list(canaries)
         self.canaries_passed, self.phase_blocked = not canaries, False
-        self.say(f"[PHASE {component.upper()}] {len(members)} switch(es); canaries: {', '.join(canaries) or 'none'}")
+        self.say(f"[PHASE {component.upper()}] {len(members)} switch(es); canaries: {', '.join(compress(canaries)) or 'none'}")
+        self._print_route_plan(component, members, self.canary_segments, self.forced_canaries)
         for dev in members:
             dev.need_since = self.clock()
             self._set(dev, "NEED_STAGE", component=component, step=dev.current.key[1:], canary=dev.canary)
@@ -607,6 +841,9 @@ class Engine:
         self._run_timers(now)
         if self.phase in self.family.components:
             self._check_packages()
+            self._check_locked_inputs()
+            self._check_watched_inputs()
+            self._block_route_dependents()
             canary_waiting = self._start_canary_pull(now)
             self._open_sessions(now)
             self._run_sessions(now, starts=not canary_waiting)
@@ -628,13 +865,29 @@ class Engine:
                 self.say(f"[HOLD] {self.hold}; no further transfers or upgrades")
                 return
 
+    def _check_locked_inputs(self):
+        if self.hold:
+            return
+        for info in self.locked_inputs:
+            if not info.unchanged():
+                self.hold = f"INPUT_CHANGED: {info.path}"
+                self.say(f"[HOLD] {self.hold}; no further transfers or upgrades")
+                return
+
+    def _check_watched_inputs(self):
+        for info in self.watched_inputs:
+            if info.path not in self.warned_watches and not info.unchanged():
+                self.warned_watches.add(info.path)
+                self.say(f"[KNOWN_HOSTS] {info.path}: modified during the run; "
+                         "this run keeps the snapshot taken at start")
+
     def _start_canary_pull(self, now):
         """The running canary pulls straight from the ztp-server ahead of everything else.
         Returns True while it waits for the server gate (other server pulls hold back)."""
         if self.stopping or self.hold or self.phase_blocked or not self.canary_queue:
             return False
         dev = self.devs[self.canary_queue[0]]
-        if dev.state != "NEED_STAGE" or dev.category is not None:
+        if dev.state != "NEED_STAGE" or dev.category is not None or not self._route_ready(dev):
             return False
         if not self.gate.available(now):
             return True
@@ -765,7 +1018,7 @@ class Engine:
             if dev.canary:
                 if self.canary_queue and self.canary_queue[0] != dev.host:
                     continue
-            elif not self.canaries_passed:
+            if not self._route_ready(dev):
                 continue
             if self._in_flight() >= self.options.in_flight:
                 return
@@ -900,6 +1153,13 @@ class Engine:
                                        boot_before=dev.dispatch["boot_before"], warnings=dev.warnings)
 
     def _step_done(self, dev, *, performed):
+        if performed and dev.dispatch is not None:
+            dev.verified_steps.add(dev.step_index)
+            self.routes.append(self.phase_routes[dev.host][dev.step_index], run_id=self.options.run_id,
+                               hostname=dev.host, canary=dev.canary)
+            required = self.canary_indices.get(dev.host, set())
+            if dev.canary and canary_component_verified(required, dev.verified_steps):
+                self.proven_segments.update(self.canary_segments[dev.host])
         dev.step_index += 1
         dev.dispatch, dev.step, dev.verify_retried = None, None, False
         if dev.current is not None:
@@ -909,20 +1169,31 @@ class Engine:
         dev.completed.add(self.phase)
         self._set(dev, "READY", component_done=self.phase)
         if dev.canary and self.canary_queue and self.canary_queue[0] == dev.host:
+            required = self.canary_indices[dev.host] if self.route_mode else dev.required_steps
+            if not canary_component_verified(required, dev.verified_steps):
+                dev.reason = "CANARY_NOT_PERFORMED_AND_VERIFIED"
+                self._canary_failed(dev)
+                return
             self.canary_queue.pop(0)
+            self.completed_canaries.add(dev.host)
+            if not self.route_mode:
+                self.component_proven = True
             if not self.canary_queue:
-                self.canaries_passed = True
-                self.say(f"[CANARY {self.phase.upper()}] all canaries passed; releasing the batch")
+                self.canaries_passed = not self.canary_failed_any
+                if self.canaries_passed:
+                    self.say(f"[CANARY {self.phase.upper()}] all canaries passed; releasing the batch")
 
     def _canary_failed(self, dev):
         if not dev.canary:
             return
-        self.say(f"[CANARY {self.phase.upper()}] {dev.host} did not pass ({dev.reason}); the rest of "
-                 f"{self.phase.upper()} is blocked")
-        self.canary_queue, self.phase_blocked = [], True
-        for session in self.sessions:
-            for host in session.members:
-                session.scheduler.drop(host, "CANARY_FAILED")
+        self.canary_failed_any = True
+        self.failed_segments.update(self.canary_segments[dev.host] - self.proven_segments)
+        self.normal_gate_failed |= dev.host in self.healthy_canaries or not self.route_mode
+        if dev.host in self.canary_queue:
+            self.canary_queue.remove(dev.host)
+        self.say(f"[CANARY {self.phase.upper()}] {dev.host} did not pass ({dev.reason}); "
+                 "dependent routes are blocked")
+        self._block_route_dependents()
 
     # ------------------------------------------------------------ events
     def _handle(self, event):

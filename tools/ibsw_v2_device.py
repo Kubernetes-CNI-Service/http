@@ -249,7 +249,7 @@ def cpld_slots(firmware_stdout):
     return tuple(slots)
 
 
-def plan_device(policy, selected, facts):
+def plan_device(policy, selected, facts, *, available=None):
     """Which components this switch needs, like v1's initial data plan (observer.py:385-442)."""
     rows, issues = [], []
     os_path, bios, cpld = (), False, False
@@ -257,12 +257,14 @@ def plan_device(policy, selected, facts):
     rows.append(row)
     if "os" in selected:
         try:
-            os_path = select_os_path(policy, facts.os_version)
+            os_path = select_os_path(policy, facts.os_version, available=available)
             row.update(action="UPGRADE_REQUIRED" if os_path else "AT_TARGET_NO_FLASH",
                        path=[facts.os_version] + [package.version for package in os_path])
-        except ValueError:
+        except ValueError as error:
             row["action"] = "REVIEW_REQUIRED"
-            issues.append(("os", "OS_UPGRADE_PATH_REJECTED"))
+            issues.append(("os", "OS_PACKAGE_ROUTE_UNAVAILABLE" if
+                           str(error) == "OS stage has no available declared package; never skip a stage"
+                           else "OS_UPGRADE_PATH_REJECTED"))
     elif _version(facts.os_version) != policy.final_os:
         issues.append(("os", "OS_FINAL_NOT_REACHED"))
     record = facts.firmware_record
@@ -338,7 +340,14 @@ def read_keys(session, user):
     try:
         payload, exists = _read_keys(session.sftp(), home, uid)
     except AccessHold as error:
+        transport = getattr(session, "transport", None)
+        if transport is not None and not transport.is_active():
+            raise ssh.SshError("COMMAND_INCOMPLETE") from None
         raise _access_error(error) from None
+    except Exception as error:
+        if type(error) is ssh._sdk().SSHException:
+            raise ssh.SshError("COMMAND_INCOMPLETE") from None
+        raise
     return uid, home, payload, exists
 
 
@@ -626,7 +635,12 @@ def repair(session, device, before, after, difference, *, uid, switch_dir, recor
     if query("nv config diff -o commands").strip():
         raise DeviceError("CONFIG_REPAIR_FAILED", "foreign pending change")
     remote = posixpath.join(switch_dir, f".ibsw-v2-repair-{secrets.token_hex(16)}.commands")
-    _upload(session.sftp(), uid, remote, missing)
+    try:
+        _upload(session.sftp(), uid, remote, missing)
+    except Exception as error:
+        if type(error) is ssh._sdk().SSHException:
+            raise ssh.SshError("COMMAND_INCOMPLETE") from None
+        raise
     try:
         query("nv config patch " + shlex.quote(remote))
         pending = query("nv config diff -o commands")
@@ -683,6 +697,11 @@ class LiveOps:
         # URLs were built with http_base. A switch without an origin is never sent to another network's address.
         self.http_origins = None if http_origins is None else dict(http_origins)
         self.http_base = http_base
+        self.available_packages = None
+
+    def bind_available_packages(self, available):
+        """Engine's successful package reads, frozen before any precheck."""
+        self.available_packages = available
 
     def dir_for(self, device):
         """The switch's package/step directory (production: --local-dir, /home/admin)."""
@@ -723,7 +742,7 @@ class LiveOps:
         with session:
             items = run_check(session, "precheck", self.dir_for(device), *staged_names)
         facts = facts_from(items, device)
-        plan = plan_device(self.policy, self.selected, facts)
+        plan = plan_device(self.policy, self.selected, facts, available=self.available_packages)
         observed, code, admitted = health_state(facts.health_record, complete=facts.health_complete,
                                                 force=self.force_health)
         guard = facts.guard()
@@ -775,7 +794,7 @@ class LiveOps:
             guard, where = facts.guard()
             if guard:
                 return dict(state="GUARD", reason=guard, detail=where)
-            plan = plan_device(self.policy, self.selected, facts)
+            plan = plan_device(self.policy, self.selected, facts, available=self.available_packages)
             still = (bool(plan.os_path) and plan.os_path[0].version == step.target_version if step.component == "os"
                      else plan.bios if step.component == "bios" else plan.cpld)
             if not still:
@@ -956,6 +975,9 @@ class IbFamily(fleet_engine.Family):
             wanted += [policy.cpld_burn, policy.cpld_refresh]
         return wanted
 
+    def optional_package_paths(self, selected):
+        return frozenset(package.path for package in self.policy.os) if "os" in selected else frozenset()
+
     def steps(self, plan, component, infos):
         policy, StepPlan = self.policy, fleet_engine.StepPlan
         if component == "os":
@@ -969,13 +991,27 @@ class IbFamily(fleet_engine.Family):
         return []
 
     def canaries(self, component, members):
-        """OS: v1's minimum route cover (schedule.py:18-74); BIOS/CPLD: the first switch in CSV order."""
+        """Validate IB OS routes through v1; engine owns generic cover and healthy choice.
+
+        None denotes route cover, a list denotes a single whole-component canary.
+        """
         if not members:
             return []
         if component == "os":
             rows = [dict(row, hostname=host) for host, plan in members for row in plan.rows if row["component"] == "os"]
-            return list(select_os_canaries(self.policy, rows, [host for host, _plan in members])["canaries"])
+            select_os_canaries(self.policy, rows, [host for host, _plan in members])
+            return None
         return [members[0][0]]
+
+    def segments(self, plan, component, infos):
+        rows = {row['component']: row for row in plan.rows}
+        current = rows[component]['current'] if component in rows else ''
+        result = []
+        for step in self.steps(plan, component, infos):
+            result.append((component, current, step.target_version, tuple(p.file for p in step.packages),
+                           tuple(p.sha256 for p in step.packages)))
+            current = step.target_version
+        return result
 
     def render(self, device, step_plan, *, run_id, switch_dir):
         return render_step(self.policy, device, component=step_plan.component, package_index=step_plan.package_index,

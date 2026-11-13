@@ -13,14 +13,14 @@ import shlex
 import stat
 import tempfile
 
-from test_cases.native_cpld_physical_io import lower_fixed_io_images
+from test_cases.native_cpld_physical_io import lower_fixed_io_images, new_owned_test_directory, owned_test_root
 from test_cases.native_cpld_stub_sources import executable_sources
 
 PROVIDER = 'tools/ibsw_upgrade_scp.py'
 TEMPLATE = 'infiniband/bringup/xdr-upgrade/upgrade-component.sh'
 PROVIDER_PREIMAGE = '685cae25a02fae9cb447528c7a5e57abd3dc459f3247f9b5c5015662af7536d1'
 TEMPLATE_PREIMAGE = 'a2bde38c42ff14cc73ed5c5cbd3859701e93a8193eb78ae67f2bd5575393b502'
-COPY_FILES = (
+CORE_COPY_FILES = (
     'tools/_package_common.py', 'tools/project_contract.py',
     'tools/ssh_key_preparation.py', 'tools/ib_bringup_runtime_guard.py',
     'tools/ibsw_upgrade_contract.py', 'tools/ibsw_upgrade_inputs.py',
@@ -61,12 +61,21 @@ COPY_FILES = (
     'test_cases/native_cpld_safe_image.py',
     'test_cases/test_ibsw3_native_cpld_bridge.py',
 )
+COPY_FILES = CORE_COPY_FILES + ('tools/project_pointer.py',)
+_PROJECT_POINTER_CURRENT_SHA256 = 'aa2c3ad58d383327d32e61376de1cdb32dc7456fdc339650634c209f87ee9419'
 METADATA = 'native-cpld-safe-image.json'
 PREPARED_METADATA = 'native-cpld-io-lowering.json'
 
 
 def _sha(value):
     return hashlib.sha256(value).hexdigest()
+
+
+def _verify_project_pointer_source(files):
+    """Bind the reviewed current dependency, never trust its metadata self-hash alone."""
+    raw = files.get('tools/project_pointer.py')
+    if type(raw) is not bytes or _sha(raw) != _PROJECT_POINTER_CURRENT_SHA256:
+        raise AssertionError('reviewed current project pointer source required')
 
 
 def _read(path, *, mode=None):
@@ -229,13 +238,14 @@ def _restore(provider, template, old_root):
 def prepare_image(source):
     """Copy only literal cohort, lower only 1+1+4 sites, no production imports."""
     source = Path(source).resolve()
-    image = Path(tempfile.mkdtemp(prefix='native-cpld-isolated-', dir='/private/tmp')).resolve()
+    image = new_owned_test_directory('native-cpld-isolated-')
     originals = {}
     for relative in COPY_FILES:
         path = source / relative
         if path.resolve() != path:
             raise AssertionError('fixed copy source symlink refused')
         originals[relative] = _read(path)
+    _verify_project_pointer_source(originals)
     if _sha(originals[PROVIDER]) != PROVIDER_PREIMAGE:
         raise AssertionError('new image requires exact unlowered reviewed provider')
     _template_preimage(originals[TEMPLATE])  # Validate, do not substitute old bytes.
@@ -298,11 +308,13 @@ def _validate_prepared(image):
             or meta['private_image'] != str(image)
             or meta['production_modules_imported'] is not False):
         raise AssertionError('immutable original preparation record required')
+    files = {}
     for relative in COPY_FILES:
         path = image / relative
         if path.resolve() != path:
             raise AssertionError('prepared fixed source symlink refused')
-        _read(path)
+        files[relative] = _read(path)
+    _verify_project_pointer_source(files)
     for name, raw in executable_sources().items():
         path = image / 'tools/native-cpld-io' / name
         if path.resolve() != path or _read(path, mode=0o700) != raw:
@@ -320,7 +332,7 @@ def _validate_prepared(image):
 
 def validate_image(image):
     image = Path(image)
-    if (image.resolve() != image or image.parent != Path('/private/tmp')
+    if (image.resolve() != image or image.parent != owned_test_root()
             or stat.S_IMODE(image.stat().st_mode) != 0o700
             or image.stat().st_uid != os.geteuid()):
         raise AssertionError('exclusive test image identity required')
@@ -333,10 +345,16 @@ def validate_image(image):
             or metadata['schema'] != 1 or metadata['image'] != str(image)
             or set(metadata['hashes']) != set(COPY_FILES)):
         raise AssertionError('fixed complete image metadata required before execution')
+    files = {}
     for relative in COPY_FILES:
         path = image / relative
-        if path.resolve() != path or _sha(_read(path, mode=0o600)) != metadata['hashes'][relative]:
+        if path.resolve() != path:
             raise AssertionError('cold image source identity changed')
+        raw = _read(path, mode=0o600)
+        if _sha(raw) != metadata['hashes'][relative]:
+            raise AssertionError('cold image source identity changed')
+        files[relative] = raw
+    _verify_project_pointer_source(files)
     stubs = executable_sources()
     if set(metadata['stubs']) != set(stubs):
         raise AssertionError('fixed executable stub roster required')

@@ -85,8 +85,12 @@ class NativeOsCanonicalCarrierContractTests(unittest.TestCase):
         isolation = importlib.import_module('test_cases.native_os_test_isolation')
         self.assertEqual(55, len(EXPECTED_COPY55))
         self.assertEqual(55, len(set(EXPECTED_COPY55)))
-        self.assertEqual(EXPECTED_COPY55, safe.COPY_FILES,
+        self.assertEqual(EXPECTED_COPY55, safe.CORE_COPY_FILES,
                          'new canonical OS3 replaces only the private old test path')
+        self.assertEqual(_EXPECTED_COPY_FILES + ('tools/project_pointer.py',)
+                         + EXPECTED_COPY55[len(_EXPECTED_COPY_FILES):], safe.COPY_FILES)
+        self.assertEqual(56, len(safe.COPY_FILES))
+        self.assertEqual(56, len(set(safe.COPY_FILES)))
         self.assertEqual(EXPECTED_ROSTER, isolation.ROSTER,
                          'only the independent single positive plus original negative2')
         root = Path(safe.__file__).resolve().parents[1]

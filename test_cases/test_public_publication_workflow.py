@@ -32,6 +32,8 @@ import zlib
 from types import SimpleNamespace
 from unittest import mock
 
+from test_cases.native_cpld_physical_io import owned_test_root
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SYSTEM_EXECUTABLE_PATH = os.confstr("CS_PATH") or "/usr/bin:/bin"
@@ -2850,6 +2852,7 @@ def _git_run(repository: Path, arguments, *, text=False, check=False,
                 or not re.fullmatch(r"[0-9a-f]{40}", _history_checkout_creation[1])):
             raise AssertionError("invalid public history checkout creation context")
         owner, anchor = _history_checkout_creation
+        trusted_root = owned_test_root()
         private_root = Path(owner.name)
         metadata = private_root.lstat()
         checkout = private_root / "repository"
@@ -2857,7 +2860,7 @@ def _git_run(repository: Path, arguments, *, text=False, check=False,
             "clone", "--quiet", "--no-local", str(ROOT), str(checkout)])
         detach = (repository == checkout and arguments == [
             "checkout", "--quiet", "--detach", anchor])
-        if (private_root.parent != Path("/private/tmp")
+        if (private_root.parent != trusted_root or private_root.resolve() != private_root
                 or not private_root.name.startswith("http-p-v2-history-")
                 or not stat.S_ISDIR(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o700
                 or metadata.st_uid != os.getuid() or text is not True or check is not False
@@ -4156,12 +4159,15 @@ _P_HISTORY_ANCHOR = None
 def _historical_p_checkout(repository: Path, anchor: str) -> Path:
     """Create one private detached checkout of the externally selected V2 P."""
     global _P_HISTORY_TEMP, _P_HISTORY_CHECKOUT, _P_HISTORY_ANCHOR
+    trusted_root = owned_test_root()
     if _P_HISTORY_CHECKOUT is not None:
+        if _P_HISTORY_CHECKOUT.parent.parent != trusted_root:
+            raise AssertionError("public history checkout outside explicit owned root")
         if _P_HISTORY_ANCHOR != anchor:
             raise AssertionError("published V2 authority changed during the test process")
         return _P_HISTORY_CHECKOUT
     _P_HISTORY_TEMP = tempfile.TemporaryDirectory(
-        prefix="http-p-v2-history-", dir="/private/tmp",
+        prefix="http-p-v2-history-", dir=trusted_root,
     )
     checkout = Path(_P_HISTORY_TEMP.name) / "repository"
     cloned = _git_run(
@@ -18393,8 +18399,29 @@ runpy.run_module('unittest', run_name='__main__', alter_sys=True)
 class HistoricalPublicCheckoutCreationTests(unittest.TestCase):
     """New fixture controls; original Pdoc methods/assertions are not replaced."""
 
+    def test_history_creation_consumes_independent_root_before_factory(self):
+        trusted = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        attempted = []
+
+        class ReachedOwnedFactory(Exception):
+            pass
+
+        def boundary(*args, **kwargs):
+            directory = kwargs.get("dir", args[2] if len(args) > 2 else None)
+            attempted.append(directory)
+            self.assertEqual(trusted, Path(directory or ""))
+            raise ReachedOwnedFactory
+
+        with mock.patch.dict(globals(), {
+            "_P_HISTORY_TEMP": None, "_P_HISTORY_CHECKOUT": None,
+            "_P_HISTORY_ANCHOR": None,
+        }), mock.patch.object(tempfile, "mkdtemp", side_effect=boundary):
+            with self.assertRaises(ReachedOwnedFactory):
+                _historical_p_checkout(ROOT, "1" * 40)
+        self.assertEqual([trusted], [Path(value) for value in attempted])
+
     def test_two_exact_history_commands_use_child022_without_parent_change(self):
-        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=owned_test_root())
         previous = os.umask(0o077)
         try:
             checkout = Path(owner.name) / "repository"
@@ -18440,8 +18467,102 @@ class HistoricalPublicCheckoutCreationTests(unittest.TestCase):
             os.umask(previous)
             owner.cleanup()
 
+    def test_creation_pair_rejects_unknown_root_owner_anchor_and_private_metadata(self):
+        trusted = owned_test_root()
+        with tempfile.TemporaryDirectory(prefix="history-pair-fixture-", dir=trusted) as directory:
+            alternate = Path(directory)
+            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=trusted)
+            try:
+                checkout = Path(owner.name) / "repository"
+                anchor = "1" * 40
+                arguments = ["clone", "--quiet", "--no-local", str(ROOT), str(checkout)]
+                for label, context, environment, invalid_metadata in (
+                    ("unknown-root", (owner, anchor), {"HTTP_TEST_OWNED_ROOT": str(alternate)}, None),
+                    ("wrong-owner", (object(), anchor), {}, None),
+                    ("wrong-anchor", (owner, "not-an-anchor"), {}, None),
+                    ("wrong-uid", (owner, anchor), {}, SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=os.getuid()+1)),
+                    ("public-mode", (owner, anchor), {}, SimpleNamespace(st_mode=stat.S_IFDIR | 0o755, st_uid=os.getuid())),
+                    ("link-mode", (owner, anchor), {}, SimpleNamespace(st_mode=stat.S_IFLNK | 0o700, st_uid=os.getuid())),
+                ):
+                    original_lstat = Path.lstat
+
+                    def metadata(path):
+                        if invalid_metadata is not None and path == Path(owner.name):
+                            return invalid_metadata
+                        return original_lstat(path)
+
+                    with self.subTest(case=label), mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner}), \
+                            mock.patch.dict(os.environ, environment), \
+                            mock.patch.object(Path, "lstat", metadata), \
+                            mock.patch.object(subprocess, "run") as delegated:
+                        with self.assertRaisesRegex(AssertionError, "public history checkout creation"):
+                            _git_run(ROOT, arguments, text=True, _history_checkout_creation=context)
+                        delegated.assert_not_called()
+            finally:
+                owner.cleanup()
+
+    def test_creation_pair_requires_exact_registered_owner_object(self):
+        root = owned_test_root()
+        registered = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=root)
+        unregistered = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=root)
+        try:
+            checkout = Path(unregistered.name) / "repository"
+            arguments = ["clone", "--quiet", "--no-local", str(ROOT), str(checkout)]
+            with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": registered}), \
+                    mock.patch.object(subprocess, "run") as delegated:
+                with self.assertRaisesRegex(AssertionError, "invalid public history checkout creation context"):
+                    _git_run(ROOT, arguments, text=True,
+                             _history_checkout_creation=(unregistered, "1" * 40))
+                delegated.assert_not_called()
+        finally:
+            try:
+                unregistered.cleanup()
+            finally:
+                registered.cleanup()
+
+    def test_history_creation_uses_two_independent_space_and_long_roots(self):
+        trusted = owned_test_root()
+        before = os.environ.get("TMPDIR")
+        with tempfile.TemporaryDirectory(prefix="history-root-shapes-", dir=trusted) as directory:
+            roots = [Path(directory) / "root with spaces", Path(directory) / ("long-" + "p" * 120)]
+            observed = []
+            for root in roots:
+                root.mkdir(mode=0o700)
+                class ReachedOwnedGit(Exception):
+                    pass
+                owner = None
+                try:
+                    with mock.patch.dict(os.environ, {"HTTP_TEST_OWNED_ROOT": str(root)}), \
+                            mock.patch.dict(globals(), {"_P_HISTORY_TEMP": None,
+                                "_P_HISTORY_CHECKOUT": None, "_P_HISTORY_ANCHOR": None}), \
+                            mock.patch.object(sys.modules[__name__], "_git_run", side_effect=ReachedOwnedGit):
+                        with self.assertRaises(ReachedOwnedGit):
+                            _historical_p_checkout(ROOT, "1" * 40)
+                        owner = _P_HISTORY_TEMP
+                        child = Path(owner.name)
+                        observed.append(child)
+                        self.assertEqual(root, child.parent)
+                        self.assertEqual(child, child.resolve())
+                        info = child.lstat()
+                        self.assertEqual((os.getuid(), 0o700), (info.st_uid, stat.S_IMODE(info.st_mode)))
+                finally:
+                    if owner is not None:
+                        owner.cleanup()
+                self.assertFalse(child.exists())
+            self.assertNotEqual(observed[0], observed[1])
+        self.assertEqual(before, os.environ.get("TMPDIR"))
+
+    def test_history_missing_root_is_rejected_before_factory(self):
+        with mock.patch.dict(os.environ), mock.patch.dict(globals(), {
+            "_P_HISTORY_TEMP": None, "_P_HISTORY_CHECKOUT": None, "_P_HISTORY_ANCHOR": None,
+        }), mock.patch.object(tempfile, "mkdtemp") as factory:
+            os.environ.pop("HTTP_TEST_OWNED_ROOT", None)
+            with self.assertRaisesRegex(AssertionError, "explicit owned test root refused"):
+                _historical_p_checkout(ROOT, "1" * 40)
+            factory.assert_not_called()
+
     def test_creation_context_rejects_other_git_and_default_status_stays_original(self):
-        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+        owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=owned_test_root())
         try:
             with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner}):
                 for arguments in (["add", "--", "literal"], ["commit", "-m", "literal"],
@@ -18498,8 +18619,8 @@ class HistoricalPublicCheckoutCreationTests(unittest.TestCase):
         outer = None
         owner = None
         try:
-            outer = tempfile.TemporaryDirectory(prefix="http-p-public-mode-fixture-", dir="/private/tmp")
-            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+            outer = tempfile.TemporaryDirectory(prefix="http-p-public-mode-fixture-", dir=owned_test_root())
+            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=owned_test_root())
             source = Path(outer.name) / "source"
             source.mkdir(mode=0o700)
             regular = source / "plain.txt"
@@ -18569,7 +18690,7 @@ class HistoricalPythonReplayCreationTests(unittest.TestCase):
     def test_only_historical_replay_uses_child022_and_keeps_parent_private(self):
         previous = os.umask(0o077)
         try:
-            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir="/private/tmp")
+            owner = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=owned_test_root())
             with owner as temporary:
                 root = Path(temporary)
                 self.assertEqual(0o700, stat.S_IMODE(root.stat().st_mode))
@@ -18589,7 +18710,9 @@ class HistoricalPythonReplayCreationTests(unittest.TestCase):
                     "test_p_phase_static_documents_and_html_seed_are_literal"
                 )
                 result = subprocess.CompletedProcess("unit-only", 0, "", "Ran 1 test in 0.001s\n\nOK\n")
-                environment = {"H_REPLAY_LITERAL": "kept", "GIT_DIR": "/not-read/git",
+                environment = {"H_REPLAY_LITERAL": "kept",
+                    "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"],
+                    "TMPDIR": os.environ["TMPDIR"], "GIT_DIR": "/not-read/git",
                     "PYTHONPATH": "/not-read/python", "PYTHONPYCACHEPREFIX": "/not-read/cache"}
                 with mock.patch.dict(globals(), {"_P_HISTORY_TEMP": owner,
                         "_P_HISTORY_CHECKOUT": checkout, "_P_HISTORY_ANCHOR": anchor}), \
@@ -18615,7 +18738,8 @@ class HistoricalPythonReplayCreationTests(unittest.TestCase):
                         set(options))
                     self.assertIs(options["cwd"], checkout)
                     self.assertEqual({"H_REPLAY_LITERAL": "kept",
-                        "PYTHONPYCACHEPREFIX": str(root / "pycache")}, options["env"])
+                        "HTTP_TEST_OWNED_ROOT": environment["HTTP_TEST_OWNED_ROOT"],
+                        "TMPDIR": environment["TMPDIR"], "PYTHONPYCACHEPREFIX": str(root / "pycache")}, options["env"])
                     self.assertIs(options["text"], True)
                     self.assertIs(options["stdout"], subprocess.PIPE)
                     self.assertIs(options["stderr"], subprocess.PIPE)

@@ -17,8 +17,8 @@ class NativeOsEventClockDirectTests(unittest.TestCase):
         self.assertTrue(hasattr(time, 'CLOCK_MONOTONIC_RAW'),
                         'kernel RAW clock required; no wall-clock or implicit-clock fallback')
         raw_clock = time.CLOCK_MONOTONIC_RAW
-        temporary = tempfile.mkdtemp(prefix='native-os-event-clock-', dir='/private/tmp')
-        root = Path(temporary).resolve()
+        from test_cases.native_cpld_physical_io import new_owned_test_directory
+        root = new_owned_test_directory('native-os-event-clock-')
         print('IBSW_NATIVE_OS_EVENT_CLOCK_OWNED_ROOT=' + str(root), flush=True)
         remote = root / '.ibsw-event-clock-witness'
         remote.mkdir(mode=0o700)

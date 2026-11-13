@@ -36,10 +36,12 @@ needs_reexec(resolution, environ) -> bool
   An operator tool (upgrade, cron.sh; D1 initial-setup) re-runs as the operator when action is
   "represent" (euid 0, operator not root) and ROOT_PARENT_MARKER is absent.
 
-reexec_command(operator, script, args, *, environ, keep, interpreter, root_parent) -> argv
-  runuser -u <name> -- env -i PATH= LANG= LC_ALL= TERM= (those present) <keep names present>
+reexec_command(operator, script, args, *, environ, keep, interpreter, root_parent, env_fds) -> argv
+  runuser -u <name> -- env -i PATH= LANG= LC_ALL= TERM= (except names carried through env_fds)
   HOME=<pw_dir> USER=<name> LOGNAME=<name> [HTTP_ZTP_ROOT_PARENT=1] <interpreter or sys.executable>
-  <absolute script> <args>.  keep may not name ROOT_PARENT_MARKER.
+  <absolute script> <args>. Caller keep values travel only through owned sealed pipes and a fixed
+  Python bootstrap, never argv. The pure constructor requires env_fds for a nonempty payload.
+  keep may not name ROOT_PARENT_MARKER.
 
 exec_as_operator(..., inherit_fds) -> does not return: marks inherit_fds inheritable, flushes stdout and
   stderr, os.execvp; the exit code is the operator run's.  No marker: no root parent stays behind.
@@ -53,6 +55,7 @@ ROOT_PARENT_MARKER = "HTTP_ZTP_ROOT_PARENT", value "1" (已定 2): only "a root 
 """
 from __future__ import annotations
 
+import json
 import os
 import pwd
 import signal
@@ -64,6 +67,41 @@ ROOT_PARENT_MARKER = "HTTP_ZTP_ROOT_PARENT"
 ROOT_PARENT_MARKER_VALUE = "1"
 IDENTITY_SKIP_ARGUMENTS = frozenset({"-h", "--help", "--version"})
 REEXEC_ENV_WHITELIST = ("PATH", "LANG", "LC_ALL", "TERM")
+
+_ENVIRONMENT_BOOTSTRAP = '''import json,os,sys
+readers=[]
+try:
+    readers=json.loads(sys.argv[1])
+    names=json.loads(sys.argv[2])
+    chunks=[]
+    for descriptor in list(readers):
+        try:
+            while True:
+                chunk=os.read(descriptor,65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+            readers.remove(descriptor)
+    values=json.loads(b''.join(chunks).decode('ascii'))
+    if type(values) is not dict or set(values)!=set(names):
+        raise ValueError('invalid environment payload')
+    for name,value in values.items():
+        if name in ('HOME','USER','LOGNAME','HTTP_ZTP_ROOT_PARENT') or type(value) is not str:
+            raise ValueError('invalid environment field')
+        os.environ[name]=value
+    os.execvpe(sys.argv[3],sys.argv[3:],os.environ)
+except Exception:
+    sys.stderr.write('operator environment transport failed\\n')
+    raise SystemExit(2) from None
+finally:
+    for descriptor in readers:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+'''
 
 
 class Operator(NamedTuple):
@@ -173,37 +211,100 @@ def needs_reexec(resolution: Resolution, environ: Mapping[str, str] | None = Non
     return resolution.action == "represent" and ROOT_PARENT_MARKER not in environ
 
 
-def reexec_command(operator: Operator, script, args: Sequence[str], *, environ=None, keep=(), interpreter=None,
-                   root_parent=False) -> list:
-    environ = os.environ if environ is None else environ
+def _reexec_environment(operator, environ, keep, root_parent=False):
     if ROOT_PARENT_MARKER in keep:
         raise ValueError(f"{ROOT_PARENT_MARKER} is set only by the root parent form, never kept from the caller")
     assignments = {name: environ[name] for name in (*REEXEC_ENV_WHITELIST, *keep) if name in environ}
     assignments.update(HOME=operator.home, USER=operator.name, LOGNAME=operator.name)
     if root_parent:
         assignments[ROOT_PARENT_MARKER] = ROOT_PARENT_MARKER_VALUE
+    payload = {name: assignments.pop(name) for name in dict.fromkeys(keep)
+               if name in assignments and name not in ("HOME", "USER", "LOGNAME", ROOT_PARENT_MARKER)}
+    return assignments, payload
+
+
+def _close_environment_readers(readers):
+    for descriptor in readers:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _seal_environment(payload):
+    if not payload:
+        return ()
+    remaining = json.dumps(payload, ensure_ascii=True).encode("ascii")
+    readers = []
+    writer = None
+    offset = 0
+    try:
+        while offset < len(remaining):
+            reader, writer = os.pipe()
+            readers.append(reader)
+            os.set_blocking(writer, False)
+            written = os.write(writer, remaining[offset:])
+            os.close(writer)
+            writer = None
+            if written <= 0:
+                raise OSError("operator environment transport made no progress")
+            offset += written
+        return tuple(readers)
+    except BaseException:
+        if writer is not None:
+            try:
+                os.close(writer)
+            except OSError:
+                pass
+        _close_environment_readers(readers)
+        raise
+
+
+def reexec_command(operator: Operator, script, args: Sequence[str], *, environ=None, keep=(), interpreter=None,
+                   root_parent=False, env_fds=()) -> list:
+    environ = os.environ if environ is None else environ
+    assignments, payload = _reexec_environment(operator, environ, tuple(keep), root_parent)
+    target = [*(interpreter or (sys.executable,)), os.path.abspath(script), *args]
+    if payload:
+        if not env_fds:
+            raise ValueError("operator environment transport requires owned descriptors")
+        target = [sys.executable, "-I", "-S", "-B", "-c", _ENVIRONMENT_BOOTSTRAP,
+                  json.dumps(list(env_fds)), json.dumps(list(payload)), *target]
     return ["runuser", "-u", operator.name, "--", "env", "-i",
             *(f"{name}={value}" for name, value in assignments.items()),
-            *(interpreter or (sys.executable,)), os.path.abspath(script), *args]
+            *target]
 
 
 def exec_as_operator(operator: Operator, script, args: Sequence[str], *, environ=None, keep=(), interpreter=None,
                      inherit_fds=()):
-    command = reexec_command(operator, script, args, environ=environ, keep=keep, interpreter=interpreter)
-    for descriptor in inherit_fds:
-        os.set_inheritable(descriptor, True)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os.execvp(command[0], command)
+    environ, keep = dict(os.environ if environ is None else environ), tuple(keep)
+    _assignments, payload = _reexec_environment(operator, environ, keep)
+    readers = _seal_environment(payload)
+    try:
+        command = reexec_command(operator, script, args, environ=environ, keep=keep,
+                                 interpreter=interpreter, env_fds=readers)
+        for descriptor in (*readers, *inherit_fds):
+            os.set_inheritable(descriptor, True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execvp(command[0], command)
+    finally:
+        _close_environment_readers(readers)
 
 
 def run_as_operator(operator: Operator, script, args: Sequence[str], *, environ=None, keep=(), interpreter=None,
                     pass_fds=()) -> int:
-    command = reexec_command(operator, script, args, environ=environ, keep=keep, interpreter=interpreter,
-                             root_parent=True)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    child = subprocess.Popen(command, pass_fds=tuple(pass_fds))
+    environ, keep = dict(os.environ if environ is None else environ), tuple(keep)
+    _assignments, payload = _reexec_environment(operator, environ, keep, root_parent=True)
+    readers = _seal_environment(payload)
+    try:
+        command = reexec_command(operator, script, args, environ=environ, keep=keep, interpreter=interpreter,
+                                 root_parent=True, env_fds=readers)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        child = subprocess.Popen(command, pass_fds=(*pass_fds, *readers))
+    finally:
+        _close_environment_readers(readers)
 
     def forward(number, _frame):
         child.send_signal(number)

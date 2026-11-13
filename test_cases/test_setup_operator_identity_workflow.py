@@ -80,6 +80,8 @@ CHILD_LAUNCHER = '''import json, os, pathlib, runpy, sys
 record, yaml_site, script = pathlib.Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 sys.path.append(yaml_site)
 (record / "child.json").write_text(json.dumps({"env": dict(os.environ), "args": sys.argv[4:]}))
+os.environ['TMPDIR'] = TEST_OWNED_ROOT_LITERAL
+os.environ['HTTP_TEST_OWNED_ROOT'] = TEST_OWNED_ROOT_LITERAL
 sys.argv = [script, *sys.argv[4:]]
 runpy.run_path(script, run_name="__main__")
 '''
@@ -144,7 +146,9 @@ class SetupOperatorIdentityWorkflowTests(unittest.TestCase):
         launchers = self.base / "launchers"
         launchers.mkdir()
         (launchers / "root_launcher.py").write_text(ROOT_LAUNCHER, encoding="utf-8")
-        (launchers / "child_launcher.py").write_text(CHILD_LAUNCHER, encoding="utf-8")
+        (launchers / "child_launcher.py").write_text(
+            CHILD_LAUNCHER.replace("TEST_OWNED_ROOT_LITERAL", repr(os.environ["HTTP_TEST_OWNED_ROOT"])),
+            encoding="utf-8")
         self.root_launcher = launchers / "root_launcher.py"
         stub = self.base / "bin"
         stub.mkdir()
@@ -157,7 +161,9 @@ class SetupOperatorIdentityWorkflowTests(unittest.TestCase):
 
     def run_setup(self, sudo_user: str) -> subprocess.CompletedProcess:
         environment = {"PATH": f"{self.stub}:/usr/bin:/bin", "LANG": "C", "HOME": str(self.space.home),
-                       "PYTHONUSERBASE": site.getuserbase(), "PYTHONDONTWRITEBYTECODE": "1"}
+                       "PYTHONUSERBASE": site.getuserbase(), "PYTHONDONTWRITEBYTECODE": "1",
+                       "TMPDIR": os.environ["HTTP_TEST_OWNED_ROOT"],
+                       "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"]}
         return subprocess.run(
             [sys.executable, "-B", str(self.root_launcher), str(self.record),
              str(self.space.http / "DAY0-Prepare/01-a-setup.py"), str(self.operator_home), sudo_user,

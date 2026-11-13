@@ -126,7 +126,7 @@ def stage_tree(root: Path, *, pointer: bool) -> None:
     for name in ("cron.sh", "sw-info.sh", "sw-link.sh"):
         (monitor / name).symlink_to(f"../../ethernet/monitor/{name}")
     # cron.sh's data retention and log rotation, and the operator rule with the pointer reader it imports
-    for name in ("collection_archive.py", "log_rotation.py", "operator_identity.py", "project_contract.py"):
+    for name in ("collection_archive.py", "log_rotation.py", "operator_identity.py", "project_contract.py", "project_pointer.py"):
         (root / "tools").mkdir(exist_ok=True)
         shutil.copy2(TOOLS / name, root / "tools" / name)
     project = root / "DAY0-Prepare" / PROJECT

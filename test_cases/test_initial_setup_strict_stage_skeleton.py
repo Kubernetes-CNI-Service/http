@@ -38,6 +38,7 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -398,6 +399,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(sys, "argv", argv))
             stack.enter_context(mock.patch.object(app, "interactive_run", world.transport))
             stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="password"))
+            stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(mock.patch.object(app.subprocess, "run",
                                                   side_effect=AssertionError("external commands forbidden")))
             stack.enter_context(mock.patch.object(Path, "home", return_value=world.root / "home"))
@@ -545,7 +547,9 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             self.assertEqual(0, code, err)
         with self.subTest(case="failure-stops-only-this-device"), \
                 tempfile.TemporaryDirectory(prefix="strict-ipv4-fail-") as folder:
-            devices = [_Device(1, password=target, lines=unconfigured_lines(), ipv4_codes=(255, 255, 255)),
+            # Approved r506 WP-3/D34-O8: failure persists for all nine allowed probes.
+            devices = [_Device(1, password=target, lines=unconfigured_lines(),
+                               ipv4_codes=(255, 255, 255, 255, 255, 255, 255, 255, 255)),
                        _Device(2, password=target, lines=unconfigured_lines())]
             world, code, err = self.apply(folder, devices, initial=target, target=target)
             record = world.record(1)
@@ -635,19 +639,35 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- a-10 --------------------------------------------------------------------------------------
     def test_ipv4_readiness_has_one_wait_and_retry_loop(self) -> None:
-        # Guide 2.3 :204 ("verify_ipv4_login 的「3 次、每次先等 10 秒」，不另加第二套"); P3c map 2.3
-        # verify_ipv4_login :126; D1a2 report 4.3 V1 (basis guide :204; not an owner 04 item).
+        # Original one-loop contract: guide 2.3 :204 / P3c map2.3 / D1a2 report4.3 V1.
+        # Approved r506 WP-3 :631/:633 moves that one loop to wait_until_ready,
+        # with 15/10/9; it does not add another loop or weaken strict stage behavior.
         with self.subTest(case="one-loop-in-source"):
             tree = ast.parse(INITIAL.read_text(encoding="utf-8"))
-            function = next(node for node in tree.body
-                            if isinstance(node, ast.FunctionDef) and node.name == "verify_ipv4_login")
-            sleeps = [node for node in ast.walk(function) if isinstance(node, ast.Call)
-                      and isinstance(node.func, ast.Attribute) and node.func.attr == "sleep"]
-            loops = [node for node in ast.walk(function) if isinstance(node, ast.For)
-                     and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
-                     and node.iter.func.id == "range"]
-            self.assertEqual(1, len(sleeps), "one wait before each attempt")
-            self.assertEqual(1, len(loops), "one bounded attempt loop")
+            functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+            def retry_loops(function):
+                return [node for node in ast.walk(function)
+                        if isinstance(node, ast.While) or (isinstance(node, ast.For)
+                            and isinstance(node.iter, ast.Call) and isinstance(node.iter.func, ast.Name)
+                            and node.iter.func.id == "range")]
+
+            def sleeps(function):
+                return [node for node in ast.walk(function) if isinstance(node, ast.Call)
+                        and ((isinstance(node.func, ast.Name) and node.func.id == "sleep")
+                             or (isinstance(node.func, ast.Attribute) and node.func.attr == "sleep"))]
+
+            wait = functions["wait_until_ready"]
+            self.assertEqual(1, len(sleeps(wait)), "one injected wait before each attempt")
+            self.assertIsInstance(sleeps(wait)[0].func, ast.Name)
+            self.assertEqual(1, len(retry_loops(wait)), "one bounded attempt loop")
+            for name in ("verify_ipv4_login", "_probe_ipv4_login"):
+                self.assertEqual([], retry_loops(functions[name]), name + " adds no second retry loop")
+                self.assertEqual([], sleeps(functions[name]), name + " adds no second wait")
+            delegates = [node for node in ast.walk(functions["verify_ipv4_login"])
+                         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                         and node.func.id == "wait_until_ready"]
+            self.assertEqual(1, len(delegates), "the validated consumer delegates exactly once")
         target = secret("target")
         waits = []
         with self.subTest(case="three-attempts-strict"), \
@@ -656,7 +676,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             world, code, err = self.apply(folder, devices, initial=target, target=target,
                                           extra=(mock.patch.object(self.app.time, "sleep", side_effect=waits.append),))
             self.assertEqual(3, world.calls(host(1)).count(("ipv4", "strict")))
-            self.assertEqual([10, 10, 10], [value for value in waits if value == 10])
+            self.assertEqual([15, 10, 10], waits)
             self.assertEqual(0, code, err)
 
     # -- check-only --------------------------------------------------------------------------------
@@ -817,7 +837,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
         def stop(seconds):
             coordinator = app._ACTIVE_COORDINATOR
-            if seconds == 10 and coordinator is not None and not coordinator.stopped:
+            if seconds == 15 and coordinator is not None and not coordinator.stopped:
                 coordinator.stopped, coordinator.fatal = True, "PUBLIC operator stop"
 
         with self.subTest(case="stop-during-ipv4"), tempfile.TemporaryDirectory(prefix="strict-stop-") as folder:

@@ -320,7 +320,7 @@ class CollectionLockOwnerTests(_LockTree, unittest.TestCase):
         )
         # A tree with a pointer carries the operator rule modules cron.sh's identity step reads (WP-11).
         (root / "tools").mkdir()
-        for name in ("operator_identity.py", "project_contract.py"):
+        for name in ("operator_identity.py", "project_contract.py", "project_pointer.py"):
             shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
         with self.as_root_for():
             self.start_worker(root, root / "DAY0-Prepare/site", events=[])

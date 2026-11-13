@@ -240,6 +240,11 @@ class _EntryHarness(unittest.TestCase):
                 patch.object(OI, "resolve_operator", injected(REAL_SHARED_RULE, euid, environ)),
                 patch.dict(os.environ, {**SHELL_ENV, "HOME": str(self.home), **environ}, clear=True),
                 patch.object(os, "execvp", recorder.execvp),
+                # WP-A2 runtime is after identity. This identity-only harness
+                # explicitly supplies the matching interpreter; its old guard
+                # and return-code expectations remain unchanged.
+                patch.object(app2.metadata, "version", side_effect=lambda name: dict(VENV_VERSIONS)[name]),
+                patch.object(os, "execve", recorder.execve),
                 patch.object(GUARD2, "_runtime_instance_guard", recorder.guard()),
                 patch.object(app2, "run", side_effect=AssertionError("run() before the identity step")),
                 patch.object(sys, "argv", ["upgrade2.py", *args]),
@@ -368,6 +373,8 @@ class UpgradeReexecEntryTests(_EntryHarness):
         )
         environment = {"PATH": "/usr/bin:/bin", "HOME": str(self.root / "empty-home"), "LANG": "en_US.UTF-8",
                        "LC_ALL": "en_US.UTF-8"}
+        from test_cases.native_cpld_physical_io import owned_test_root
+        environment['TMPDIR'] = str(owned_test_root())
         result = subprocess.run([sys.executable, "-B", "-S", "-c", launcher, str(bundle), str(record),
                                  "--inspect-only"], cwd=self.root, env=environment, stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, encoding="utf-8", timeout=60)

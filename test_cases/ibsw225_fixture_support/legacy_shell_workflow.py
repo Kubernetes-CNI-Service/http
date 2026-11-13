@@ -29,13 +29,14 @@ RUNTIME = (
     "tools/ibsw_upgrade_executor.py", "tools/ibsw_upgrade_observer.py",
     "tools/ibsw_upgrade_access.py", "tools/ibsw_upgrade_pipeline.py",
 )
+CURRENT_RUNTIME = RUNTIME + ("tools/project_pointer.py",)
 HEADER = "hostname,type,template,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,eth1_mac,lo_ip,bgp_asn,bgp_ports,bond_ports,bond_type,bond_mac,peerlink_ports,vrl".split(",")
 
 class LegacyShellCompatibilityWorkflowTests(unittest.TestCase):
     def bundle(self, root):
         flat = root / "flat"
         flat.mkdir()
-        for relative in RUNTIME:
+        for relative in CURRENT_RUNTIME:
             shutil.copy2(ROOT / relative, flat / Path(relative).name)
         return flat
 
@@ -46,6 +47,13 @@ class LegacyShellCompatibilityWorkflowTests(unittest.TestCase):
                             and (flat / Path(relative).name).stat().st_size > 0
                             for relative in RUNTIME),
                         "The real compatibility shell fixture requires all18 actual runtime members")
+        self.assertEqual(len(CURRENT_RUNTIME), 19)
+        self.assertEqual(CURRENT_RUNTIME.count("tools/project_pointer.py"), 1)
+        self.assertTrue(all((flat / Path(relative).name).is_file()
+                            and not (flat / Path(relative).name).is_symlink()
+                            and (flat / Path(relative).name).stat().st_size > 0
+                            for relative in CURRENT_RUNTIME),
+                        "The current compatibility shell fixture requires its complete same-source runtime")
 
     def project(self, root, names):
         project = root / "project"

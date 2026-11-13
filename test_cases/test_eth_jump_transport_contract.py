@@ -42,6 +42,105 @@ def load_module(name: str, path: Path):
     return module
 
 
+def _ssh_argv_literal_callers(tree):
+    """Conservative List/Tuple census, with one exact stage-label AST exception."""
+    stage_source = '''stages = record.get("stage_status", {})
+state = " ".join(f"{label}={stages.get(key, '-')}" for key, label in
+    (("day0", "base"), ("services", "svc"), ("public_keys", "keys"), ("direct_ssh", "ssh")))'''
+    expected = [ast.dump(node, include_attributes=False) for node in ast.parse(stage_source).body]
+    matches = []
+    for outer in tree.body:
+        if not isinstance(outer, ast.FunctionDef) or outer.name != "run_prepared_tasks":
+            continue
+        for inner in outer.body:
+            if not isinstance(inner, ast.FunctionDef) or inner.name != "finish":
+                continue
+            for first, second in zip(inner.body, inner.body[1:]):
+                if [ast.dump(node, include_attributes=False) for node in (first, second)] == expected:
+                    generator = second.value.args[0]
+                    matches.append(id(generator.generators[0].iter.elts[-1]))
+    metadata = set(matches) if len(matches) == 1 else set()
+    return {
+        function.name
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for node in ast.walk(function)
+        if isinstance(node, (ast.List, ast.Tuple)) and id(node) not in metadata
+        and any(isinstance(element, ast.Constant) and element.value == "ssh" for element in node.elts)
+    }
+
+
+class SshArgvCensusTests(unittest.TestCase):
+    def test_every_ssh_argv_builder_is_in_the_closed_set(self):
+        # r508 WP6:921, independent WP1/WP3 before-coding predictions and WP5
+        # O14-PREDICTION-WP-5.md; readonly audit against fixed09efa, not new WP5.
+        # WP1 master control/start and WP3 standalone probe are the three additions
+        # to initial50ad. WP5 removal reuses outer_ssh_command, not a raw builder.
+        # Old nested-inclusive O14 traversal counts both enclosing management
+        # functions and bare attempt_once. Stage labels are not SSH argv.
+        expected = {
+            "outer_ssh_command", "jump_master_control_argv", "_start_jump_master",
+            "nested_ssh_command", "_probe_ipv4_login", "verify_ipv4_login",
+            "probe_ethernet_key", "verify_management_direct_ssh",
+            "verify_management_key_possession", "attempt_once",
+            "observe_managed_initial_configuration",
+        }
+        tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))
+        self.assertEqual(expected, _ssh_argv_literal_callers(tree))
+
+    def test_census_catches_nonleading_tuple_and_nested_builders(self):
+        source = '''
+def direct():
+    return ["ssh", "public"]
+def nonleading():
+    return ["ip", "vrf", "exec", "public", "ssh", "public"]
+def tuple_direct():
+    return ("ssh", "public")
+def tuple_nonleading():
+    return ("ip", "vrf", "exec", "public", "ssh", "public")
+def enclosing():
+    def inner():
+        return ["ssh", "public"]
+def other_literals():
+    return ["ssh-keygen", "the word ssh in text"]
+'''
+        self.assertEqual({"direct", "nonleading", "tuple_direct", "tuple_nonleading", "enclosing", "inner"},
+                         _ssh_argv_literal_callers(ast.parse(source)))
+
+    def test_only_exact_stage_generator_node_is_metadata(self):
+        source = '''
+def run_prepared_tasks():
+    def finish():
+        stages = record.get("stage_status", {})
+        state = " ".join(f"{label}={stages.get(key, '-')}" for key, label in
+            (("day0", "base"), ("services", "svc"), ("public_keys", "keys"), ("direct_ssh", "ssh")))
+        return state
+'''
+        self.assertEqual(set(), _ssh_argv_literal_callers(ast.parse(source)))
+        variants = (
+            source.replace('return state', 'argv = ("direct_ssh", "ssh")\n        return state'),
+            source.replace('return state', 'argv = ["ssh", "public"]\n        return state'),
+            source.replace('("day0", "base")', '("day0", "changed")'),
+            source.replace('for key, label in', 'for key, other in'),
+            source.replace('stages.get(key,', 'stages.get(label,'),
+            source.replace('("direct_ssh", "ssh")))', '("direct_ssh", "ssh")) if key)'),
+            source.replace('record.get("stage_status", {})', 'record.get("other", {})'),
+        )
+        for index, variant in enumerate(variants):
+            with self.subTest(index=index):
+                self.assertEqual({"run_prepared_tasks", "finish"},
+                                 _ssh_argv_literal_callers(ast.parse(variant)))
+        self.assertEqual({"elsewhere"}, _ssh_argv_literal_callers(ast.parse(
+            'def elsewhere():\n    return ("direct_ssh", "ssh")\n')))
+        nested = "def other():\n" + "\n".join("    " + line for line in source.splitlines())
+        self.assertEqual({"other", "run_prepared_tasks", "finish"},
+                         _ssh_argv_literal_callers(ast.parse(nested)))
+        stage_block = source[source.index('        stages ='):source.index('        return state')]
+        duplicate = source.replace('        return state', stage_block + '        return state')
+        self.assertEqual({"run_prepared_tasks", "finish"},
+                         _ssh_argv_literal_callers(ast.parse(duplicate)))
+
+
 class EthJumpTransportContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -700,13 +799,23 @@ class EthJumpTransportContractTests(unittest.TestCase):
         # install_oob_management_key retired with --auto (O3; map :74); v15's final management
         # direct check verify_management_direct_ssh (map :235) calls ib_command_argv itself and
         # interactive_run through its nested attempt_once.
+        # The paragraph above records v3.1.3 history. Current v3.1.4 literals
+        # use the independently reviewed BEFORE-coding WP1/WP3/WP5 predictions:
+        # 08a22a65a5aa9473ba3df4cbf0b00ef6819e99e1e43bb9d11174809834e9f547,
+        # 49839c3df2870b5944a83464ea3b35bf0df865303543de5cb83ad2439b8fba26,
+        # 662975924efadba8fe4b45cc14296f7591539999aef3f5ac195202fdb0d956e2.
+        # r508 WP1 master adds _start_jump_master; WP3 moves the outer/probe
+        # calls to _probe_ipv4_login; WP5 unique closed remove adds only that
+        # function to outer/interactive. The ib set and second O14 pin stay exact.
         self.assertEqual(
-            {"nested_ssh_command", "run_on_ethernet", "verify_ipv4_login"},
+            {"nested_ssh_command", "run_on_ethernet", "_probe_ipv4_login",
+             "remove_jump_known_hosts_entries"},
             callers["outer_ssh_command"],
         )
         self.assertEqual(
             {"_execute_ib_phase", "attempt_once", "run_on_ethernet", "run_on_ib",
-             "verify_ipv4_login", "verify_management_direct_ssh"},
+             "_probe_ipv4_login", "verify_management_direct_ssh", "_start_jump_master",
+             "remove_jump_known_hosts_entries"},
             callers["interactive_run"],
         )
         self.assertEqual(

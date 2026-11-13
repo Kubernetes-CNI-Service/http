@@ -34,13 +34,15 @@ def isolated_whole(function):
         if _ACTIVE_CHILD_SELECTOR is not None:
             raise RuntimeError('nested isolated test refused')
         from test_cases.native_cpld_safe_image import select_image
+        from test_cases.native_cpld_physical_io import owned_test_root
         source = Path(__file__).resolve().parents[1]
         root = select_image(source)
         print('IBSW_SCP_COLD_IMAGE=' + str(root), flush=True)
         nonce = secrets.token_hex(16)
         environment = {
             'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
-            'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': tempfile.gettempdir(),
+            'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': str(owned_test_root()),
+            'HTTP_TEST_OWNED_ROOT': str(owned_test_root()),
         }
         command = (sys.executable, '-B', '-c', _CHILD_PROGRAM,
                    str(root), selector, nonce)

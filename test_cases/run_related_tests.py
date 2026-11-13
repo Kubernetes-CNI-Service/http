@@ -3074,6 +3074,7 @@ class _FullShardLane:
         environment = _full_shard_environment()
         if private_tmpdir:
             environment["TMPDIR"] = str(self.tmpdir)
+            environment["HTTP_TEST_OWNED_ROOT"] = str(self.tmpdir)
         environment["PYTHONPYCACHEPREFIX"] = str(self.pycache)
         log = open(self.log, "xb")
         try:

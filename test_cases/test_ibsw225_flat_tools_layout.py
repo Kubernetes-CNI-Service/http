@@ -15,7 +15,8 @@ MEMBERS = tuple(ENTRY_DIR + name for name in (
         'ibsw_upgrade_contract.py', 'ibsw_upgrade_inputs.py', 'ibsw_upgrade_schedule.py',
         'ibsw_upgrade_component.py', 'ibsw_upgrade_driver.py', 'ibsw_upgrade_executor.py',
         'ibsw_upgrade_observer.py', 'ibsw_upgrade_access.py', 'ibsw_upgrade_pipeline.py',
-        'project_contract.py', '_package_common.py', 'ssh_key_preparation.py', 'ib_bringup_runtime_guard.py'))
+        'project_contract.py', '_package_common.py', 'ssh_key_preparation.py', 'ib_bringup_runtime_guard.py',
+        'project_pointer.py'))
 
 class FlatToolsBasenameTests(unittest.TestCase):
     def test_layout_regression_is_bound_to_direct_and_real_workflow(self):
@@ -248,6 +249,7 @@ assert Path(old_contract.__file__).resolve()==flat/'ibsw_upgrade_contract.py'
 # canonical contract. No __file__/function/global attribute is forged.
 assert Path(sys.modules['project_contract'].__file__).resolve()==flat/'project_contract.py'
 sys.modules.pop('project_contract')
+sys.modules.pop('project_pointer',None)
 sys.path.insert(0,str(tools))
 driver=importlib.import_module('ibsw_upgrade_driver')
 component=importlib.import_module('ibsw_upgrade_component')

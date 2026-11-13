@@ -24,8 +24,8 @@ from ibsw_upgrade_observer import (
 )
 
 
-from ibsw_upgrade_contract import _fixed_layout
-_RUNNER = _fixed_layout(__file__) / "upgrade-owned-runner.sh"
+from ibsw_upgrade_contract import _fixed_layout, _shared_script_layout
+_RUNNER = _shared_script_layout(__file__) / "upgrade-owned-runner.sh"
 
 _OS_COMMAND = "nv show system version"
 _UID_COMMAND = "id -u"
@@ -52,7 +52,7 @@ def _owned_runner_bytes(binding, remote):
         ("IBSW_EXIT_RECORD", posixpath.join(parent, "owned-exit.record")))
     if any(type(value) is not str or any(char in value for char in ("\n", "\r", "\x00")) for _key, value in values):
         raise ValueError("bounded single-line original runner fields required")
-    if _fixed_layout(__file__) / "upgrade-owned-runner.sh" != _RUNNER:
+    if _shared_script_layout(__file__) / "upgrade-owned-runner.sh" != _RUNNER:
         raise ValueError("fixed owned runner layout changed")
     body = _RUNNER.read_bytes()
     return ("#!/bin/bash\n" + "".join(key + "=" + shlex.quote(value) + "\n" for key, value in values)).encode() + body

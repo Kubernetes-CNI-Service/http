@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 from test_cases.module_loader import load_script
+from test_cases.native_os_safe_image import _restore_upgrade_layout_layer
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "infiniband/bringup/xdr-upgrade/upgrade.py"
@@ -6204,6 +6205,9 @@ def _native_os_sources_before_native34(sources):
     if any(type(sources[p]) is not bytes for p in _NATIVE_OS_PATHS):
         raise AssertionError('original source bytes required')
     sources = dict(sources)
+    for path in ('tools/ibsw_upgrade_component.py', 'tools/ibsw_upgrade_executor.py'):
+        if b'_shared_script_layout' in sources[path]:
+            sources[path] = _restore_upgrade_layout_layer(path, sources[path])
     if all(hashlib.sha256(sources[p]).hexdigest() == _NATIVE_OS_EXPECTED_U[p]
            for p in _NATIVE_OS_PATHS):
         return {p: sources[p] for p in _NATIVE_OS_PATHS}
@@ -6443,6 +6447,8 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
             with self.subTest(original=relative):
                 payload = (native_os_sources[relative] if relative in native_os_sources
                            else (ROOT / relative).read_bytes())
+                if relative == 'tools/ibsw_upgrade_contract.py' and b'_shared_script_layout' in payload:
+                    payload = _restore_upgrade_layout_layer(relative, payload)
                 if relative in NATIVE_SCP_APPROVED_COMPOSITION:
                     payload = _native_upstream_bytes_from_exact_composition(relative, payload)
                 if relative == "tools/ibsw_upgrade_access.py":

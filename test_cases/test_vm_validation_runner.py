@@ -53,7 +53,7 @@ def actual_deployment_contract_fixture(root: Path):
     package = tools / "__init__.py"
     package.write_bytes(b"")
     package.chmod(0o600)
-    for name in ("project_contract.py", "generation_report.py", "ssh_key_preparation.py"):
+    for name in ("project_contract.py", "generation_report.py", "ssh_key_preparation.py", "project_pointer.py"):
         destination = tools / name
         destination.write_bytes((ROOT / "tools" / name).read_bytes())
         destination.chmod(0o600)

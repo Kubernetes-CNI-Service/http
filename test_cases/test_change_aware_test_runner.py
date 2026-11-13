@@ -3658,6 +3658,46 @@ class FullShardReviewFixTests(unittest.TestCase):
             self.assertEqual(str(lane.tmpdir), environment["TMPDIR"])
             self.assertEqual(str(lane.pycache), environment["PYTHONPYCACHEPREFIX"])
 
+    def _capture_explicit_lane_roots(self, private_tmpdir):
+        # Same Popen-capture fixture as the original lane environment test: no
+        # child, shard, enumeration, process inventory or cleanup gate executes.
+        with tempfile.TemporaryDirectory(prefix="shard-owned-env-") as directory:
+            base = Path(directory).resolve()
+            lanes = base / "lanes"
+            lanes.mkdir()
+            coordinator = base / "coordinator-owned"
+            coordinator.mkdir(mode=0o700)
+            coordinator_tmp = base / "coordinator-tmp"
+            coordinator_tmp.mkdir(mode=0o700)
+            lane = RUNNER._FullShardLane("w0", "A", base / "work", lanes, base)
+            lane.tmpdir = base / "lane-tmp"
+            lane.tmpdir.mkdir(mode=0o700)
+            lane.pycache = base / "lane-pyc"
+            captured = {}
+            def fake_popen(argv, **kwargs):
+                captured.update(kwargs)
+                return mock.Mock(pid=0)
+            with mock.patch.dict(os.environ, HTTP_TEST_OWNED_ROOT=str(coordinator),
+                                 TMPDIR=str(coordinator_tmp)), \
+                    mock.patch.object(RUNNER.subprocess, "Popen", side_effect=fake_popen):
+                launched = lane.launch("run" if private_tmpdir else "enum", {},
+                                       private_tmpdir=private_tmpdir)
+            launched[1].close()
+            return captured["env"], str(lane.tmpdir), str(coordinator), str(coordinator_tmp)
+
+    def test_normal_lane_explicit_root_and_tmpdir_both_bind_the_prepared_lane(self):
+        environment, lane, coordinator, coordinator_tmp = self._capture_explicit_lane_roots(True)
+        self.assertNotEqual(coordinator, lane)
+        self.assertNotEqual(coordinator_tmp, lane)
+        self.assertEqual(lane, environment["HTTP_TEST_OWNED_ROOT"])
+        self.assertEqual(lane, environment["TMPDIR"])
+
+    def test_enumeration_retains_each_original_coordinator_root(self):
+        environment, lane, coordinator, coordinator_tmp = self._capture_explicit_lane_roots(False)
+        self.assertNotEqual(coordinator, lane)
+        self.assertEqual(coordinator, environment["HTTP_TEST_OWNED_ROOT"])
+        self.assertEqual(coordinator_tmp, environment["TMPDIR"])
+
     def test_residue_gate_runs_ps_and_lsof_by_absolute_path(self):
         # L6: lsof lives in /usr/sbin, which an operator PATH may omit; a PATH lookup
         # failure made every sharded run fail closed.

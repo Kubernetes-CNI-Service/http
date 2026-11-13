@@ -34,7 +34,8 @@ ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
 
 class BiosExercise(unittest.TestCase):
     def exercise(self, fault=None):
-        root = Path(tempfile.mkdtemp(prefix='native-bios-bridge-owned-', dir='/private/tmp')).resolve()
+        from test_cases.native_cpld_physical_io import new_owned_test_directory
+        root = new_owned_test_directory('native-bios-bridge-owned-')
         root.chmod(0o700)
         print('IBSW_NATIVE_BIOS_FLOW_OWNED_ROOT=' + str(root), flush=True)
         RETAINED_TREES.append(str(root))

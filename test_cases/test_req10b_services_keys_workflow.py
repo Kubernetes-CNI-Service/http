@@ -885,6 +885,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(sys, "argv", argv))
             if method_cycle is None:
                 stack.enter_context(mock.patch.object(self.initial, "__file__", str(tool / "initial-setup.py")))
+                # Ordinary runs really use a Leaf layout, including D3's three
+                # required modules, rather than falling back to repository tools.
+                (tool / "tools").mkdir(exist_ok=True)
+                for name in ("device_identity", "hostname_ranges", "login_path"):
+                    shutil.copyfile(ROOT / "tools" / (name + ".py"), tool / "tools" / (name + ".py"))
+                stack.enter_context(mock.patch.object(self.initial, "_TOOLS_ROOT", None))
+                stack.enter_context(mock.patch.object(sys, "path", list(sys.path)))
+                stack.enter_context(mock.patch.dict(sys.modules))
+                for name in list(sys.modules):
+                    if name == "tools" or name.startswith("tools."):
+                        del sys.modules[name]
             else:
                 self.assertEqual(ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py",
                                  Path(self.initial.__file__), "managed entry executes repository code, not a project copy")

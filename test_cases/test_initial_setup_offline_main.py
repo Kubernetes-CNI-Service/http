@@ -51,6 +51,7 @@ import unittest
 from unittest.mock import patch
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -157,6 +158,7 @@ class OfflineMainTests(unittest.TestCase):
             argv = self.create_project(root) + list(options)
             stack.enter_context(patch.object(sys, "argv", argv))
             stack.enter_context(patch.object(app, "REPORT_HANDLE", None))
+            stack.enter_context(patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
             stack.enter_context(patch.object(Path, "home", return_value=home))
             for name in ("Popen", "run"):
@@ -370,6 +372,7 @@ class OfflineMainTests(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
             stack.enter_context(patch.object(Path, "home", return_value=home))
             stack.enter_context(patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(patch.object(app, "run_on_ethernet", side_effect=ethernet))
             stack.enter_context(patch.object(app, "interactive_run", side_effect=transport))
             stack.enter_context(patch.object(app.subprocess, "run",
@@ -648,6 +651,7 @@ class RefusalExitCodeTests(unittest.TestCase):
             stack.enter_context(patch.dict(os.environ, {"HOME": str(home)}))
             stack.enter_context(patch.object(Path, "home", return_value=home))
             stack.enter_context(patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(patch.object(app, "run_on_ethernet", side_effect=ethernet))
             stack.enter_context(patch.object(app, "interactive_run", side_effect=transport))
             stack.enter_context(patch.object(app.subprocess, "run",

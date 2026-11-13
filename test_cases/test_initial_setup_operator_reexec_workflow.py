@@ -38,7 +38,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
-TOOLS = ("device_identity", "operator_identity", "project_contract", "credentials_fd")
+TOOLS = ("device_identity", "operator_identity", "project_contract", "credentials_fd",
+         "login_path", "hostname_ranges", "project_pointer")
 WHITELIST = {"PATH", "LANG", "LC_ALL", "TERM", "HOME", "USER", "LOGNAME", "HTTP_ZTP_ROOT_PARENT"}
 JUMP = "example-oob-leaf01"
 IB = "example-ib001"
@@ -98,6 +99,9 @@ def note(event):
         handle.write(event + "\\n")
 with open(record / "child.json", "w") as handle:
     json.dump({"env": dict(os.environ), "uid": os.getuid(), "args": sys.argv[5:]}, handle)
+# Test-only carrier is installed after observing the real clean identity environment.
+os.environ['TMPDIR'] = TEST_OWNED_ROOT_LITERAL
+os.environ['HTTP_TEST_OWNED_ROOT'] = TEST_OWNED_ROOT_LITERAL
 def interrupted(number, frame):
     note("child SIGINT")
     raise KeyboardInterrupt
@@ -115,9 +119,15 @@ if scenario == "fd":
     def recording(*args, **kwargs):
         value = read(*args, **kwargs)
         note("fd " + hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest())
+        try:
+            os.fstat(args[0])
+        except OSError:
+            note("business fd closed")
         return value
     credentials.read_credentials = recording
 if scenario == "sigint":
+    from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
+    module._new_jump_sessions = legacy_jump_sessions_factory(module)
     fixture = json.loads((record / "sigint.json").read_text())
     JUMP, SECRET = fixture["jump"], fixture["initial"]
     answers = {
@@ -170,6 +180,9 @@ command = argv[3:]
 index = 2
 while "=" in command[index]:
     index += 1
+if command[index + 1:index + 5] == ["-I", "-S", "-B", "-c"]:
+    # Preserve and really execute bootstrap; insert only at its target interpreter.
+    index += 8
 command[index + 1:index + 1] = [launcher, record, yaml_site, scenario]   # after the interpreter
 child = None
 def forward(number, frame):
@@ -202,6 +215,10 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
         (self.tree / "tools").mkdir()
         for name in TOOLS:
             (self.tree / "tools" / (name + ".py")).write_bytes((ROOT / "tools" / (name + ".py")).read_bytes())
+        (self.tree / "test_cases").mkdir()
+        (self.tree / "test_cases/__init__.py").write_text("")
+        (self.tree / "test_cases/initial_setup_jump_fixture.py").write_bytes(
+            (ROOT / "test_cases/initial_setup_jump_fixture.py").read_bytes())
         self.project = self.tree / "DAY0-Prepare" / "site-a"
         self.project.mkdir(parents=True)
         os.symlink("site-a", self.tree / "DAY0-Prepare" / "activate-project")
@@ -212,7 +229,9 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
         self.launchers = self.base / "launchers"
         self.launchers.mkdir()
         (self.launchers / "root_launcher.py").write_text(ROOT_LAUNCHER, encoding="utf-8")
-        (self.launchers / "child_launcher.py").write_text(CHILD_LAUNCHER, encoding="utf-8")
+        owned = os.environ["HTTP_TEST_OWNED_ROOT"]
+        (self.launchers / "child_launcher.py").write_text(
+            CHILD_LAUNCHER.replace("TEST_OWNED_ROOT_LITERAL", repr(owned)), encoding="utf-8")
         self.record = self.base / "record"
         self.record.mkdir()
 
@@ -231,6 +250,8 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
         stub = self.stage_runuser(scenario)
         environment = {"PATH": f"{stub}:/usr/bin:/bin", "LANG": "C", "HOME": str(self.base / "root-home"),
                        "PYTHONUSERBASE": site.getuserbase(), "PYTHONDONTWRITEBYTECODE": "1",
+                       "TMPDIR": os.environ["HTTP_TEST_OWNED_ROOT"],
+                       "HTTP_TEST_OWNED_ROOT": os.environ["HTTP_TEST_OWNED_ROOT"],
                        "PUBLIC_WP9_INITIAL": secret("environment"), "PUBLIC_WP9_UNRELATED": "1"}
         return subprocess.Popen(
             [sys.executable, "-B", str(self.launchers / "root_launcher.py"), str(self.record), str(self.tree),
@@ -263,6 +284,10 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
         self.assertEqual(str(self.home), child["env"]["HOME"])
         self.assertEqual(secret("environment"), child["env"]["PUBLIC_WP9_INITIAL"])
         self.assertEqual("1", child["env"]["HTTP_ZTP_ROOT_PARENT"])
+        for item in runuser["argv"]:
+            self.assertFalse(item.startswith("PUBLIC_WP9_INITIAL="), "keep assignment survived in argv")
+            self.assertFalse(secret("environment") in item, "keep value survived in argv")
+            self.assertFalse(json.dumps(secret("environment")) in item, "encoded keep value survived in argv")
         # What env -i was given is the whole environment; the interpreter itself may add locale
         # names (PEP 538 LC_CTYPE, macOS __CF_USER_TEXT_ENCODING), so the given set is compared.
         command = runuser["argv"][5:]
@@ -289,6 +314,12 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
         self.assertEqual(2, parent.returncode, err)
         digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         self.assertIn("fd " + digest, self.events(), "the child read the same JSON object")
+        self.assertEqual(1, self.events().count("fd " + digest), "the business reader consumed the original JSON once")
+        self.assertEqual(1, self.events().count("business fd closed"), "the original business reader closed its FD")
+        child = json.loads((self.record / "child.json").read_text())
+        self.assertEqual(secret("environment"), child["env"]["PUBLIC_WP9_INITIAL"])
+        self.assertNotIn("guard as root", self.events())
+        self.assertNotIn("main as root", self.events())
         self.assertNotIn(secret("fd"), out + err)
 
     def test_sigint_reaches_child_once(self):

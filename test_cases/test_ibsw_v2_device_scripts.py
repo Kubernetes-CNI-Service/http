@@ -99,6 +99,10 @@ class CheckScriptTest(unittest.TestCase):
 
     def run_check(self, *args):
         env = {"PATH": f"{self.bin}:/usr/bin:/bin", "IBSW_SYSROOT": str(self.sysroot), "LC_ALL": "C"}
+        from test_cases.native_cpld_physical_io import owned_test_root
+        owned = str(owned_test_root())
+        env['TMPDIR'] = owned
+        env['HTTP_TEST_OWNED_ROOT'] = owned
         return subprocess.run(["/bin/bash", "-s", "--", *args], input=CHECK.read_bytes(), capture_output=True,
                               env=env, timeout=60)
 

@@ -7933,6 +7933,7 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
                 ROOT / "tools/project_contract.py",
                 tools / "project_contract.py",
             )
+            shutil.copy2(ROOT / "tools/project_pointer.py", tools / "project_pointer.py")
             # the worker rotates its own log through this module
             shutil.copy2(ROOT / "tools/log_rotation.py", tools / "log_rotation.py")
             # v3.1.2 WP-11: the worker imports the root-parent marker from the operator rule module

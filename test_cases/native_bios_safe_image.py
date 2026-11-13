@@ -15,15 +15,18 @@ import stat
 import tempfile
 
 from test_cases.native_bios_physical_io import lower_fixed_io_images, _sections
+from test_cases.native_cpld_physical_io import new_owned_test_directory, owned_test_root
 from test_cases.native_bios_stub_sources import executable_sources
+from test_cases.native_cpld_safe_image import _verify_project_pointer_source
 from test_cases.native_os_safe_image import (
-    _native_os_reviewed_source_bytes as _previous_source_vector, PRODUCTION_PINS)
+    _native_os_reviewed_source_bytes as _previous_source_vector, PRODUCTION_PINS,
+    _restore_upgrade_layout_layer)
 
 PROVIDER = 'tools/ibsw_upgrade_scp.py'
 TEMPLATE = 'infiniband/bringup/xdr-upgrade/upgrade-component.sh'
 PROVIDER_PREIMAGE = '685cae25a02fae9cb447528c7a5e57abd3dc459f3247f9b5c5015662af7536d1'
 TEMPLATE_PREIMAGE = 'a2bde38c42ff14cc73ed5c5cbd3859701e93a8193eb78ae67f2bd5575393b502'
-COPY_FILES = (
+CORE_COPY_FILES = (
     'tools/_package_common.py', 'tools/project_contract.py',
     'tools/ssh_key_preparation.py', 'tools/ib_bringup_runtime_guard.py',
     'tools/ibsw_upgrade_contract.py', 'tools/ibsw_upgrade_inputs.py',
@@ -72,6 +75,7 @@ COPY_FILES = (
     'test_cases/native_os_safe_image.py',
     'test_cases/native_os_stub_sources.py',
 )
+COPY_FILES = CORE_COPY_FILES + ('tools/project_pointer.py',)
 METADATA = 'native-bios-safe-image.json'
 PREPARED_METADATA = 'native-bios-io-lowering.json'
 
@@ -286,6 +290,10 @@ def _restore_bios_layer(sources):
 def _verified_source_vector(files):
     """Validate only; never substitute inverse old bytes into execution image."""
     vector = dict(files)
+    for path in ('tools/ibsw_upgrade_component.py', 'tools/ibsw_upgrade_executor.py'):
+        raw = vector.get(path)
+        if type(raw) is bytes and b'_shared_script_layout' in raw:
+            vector[path] = _restore_upgrade_layout_layer(path, raw)
     if not all(type(vector.get(p)) is bytes and _sha(vector[p]) == digest
                for p, digest in _BIOS_TARGETS.items()):
         vector.update(_restore_bios_layer({p: vector[p] for p in _BIOS_TARGETS}))
@@ -302,11 +310,12 @@ def prepare_image(source):
         if path.resolve() != path:
             raise AssertionError('fixed copy source symlink refused')
         originals[relative] = _read(path)
+    _verify_project_pointer_source(originals)
     if _sha(originals[PROVIDER]) != PROVIDER_PREIMAGE:
         raise AssertionError('new image requires exact unlowered reviewed provider')
     _template_preimage(originals[TEMPLATE])  # Validate, do not substitute old bytes.
     _verified_source_vector(originals)
-    image = Path(tempfile.mkdtemp(prefix='native-bios-isolated-', dir='/private/tmp')).resolve()
+    image = new_owned_test_directory('native-bios-isolated-')
     print('IBSW_BIOS_PREPARED_IMAGE=' + str(image), flush=True)
     provider, template = originals[PROVIDER], originals[TEMPLATE]
     private = image / 'tools/native-bios-io'
@@ -354,7 +363,7 @@ def select_image(source):
 
 def validate_image(image):
     image = Path(image)
-    if (image.resolve() != image or image.parent != Path('/private/tmp')
+    if (image.resolve() != image or image.parent != owned_test_root()
             or stat.S_IMODE(image.stat().st_mode) != 0o700
             or image.stat().st_uid != os.geteuid()):
         raise AssertionError('exclusive test image identity required')
@@ -374,6 +383,7 @@ def validate_image(image):
         if path.resolve() != path or _sha(raw) != metadata['hashes'][relative]:
             raise AssertionError('cold image source identity changed')
         files[relative] = raw
+    _verify_project_pointer_source(files)
     stubs = executable_sources()
     if set(metadata['stubs']) != set(stubs):
         raise AssertionError('fixed executable stub roster required')

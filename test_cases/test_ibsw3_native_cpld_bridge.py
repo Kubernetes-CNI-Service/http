@@ -36,7 +36,7 @@ ORIGINALS = ('request.json', 'step.sh', 'step-binding.json', 'runner.sh',
 
 class NativeCpldBridgeWorkflowTests(unittest.TestCase):
     def exercise(self, fault=None):
-        root = Path(tempfile.mkdtemp(prefix='native-cpld-bridge-owned-', dir='/private/tmp')).resolve()
+        root = IO.new_owned_test_directory('native-cpld-bridge-owned-')
         RETAINED_TREES.append(str(root))
         switch = root / 'switch'; switch.mkdir(mode=0o700)
         trust = root / 'scp-source-known_hosts'

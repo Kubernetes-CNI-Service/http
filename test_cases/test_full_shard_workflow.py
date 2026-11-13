@@ -25,6 +25,8 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
+from test_cases.native_cpld_physical_io import owned_test_root
+
 
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -127,6 +129,7 @@ class AlphaTests(unittest.TestCase):
                 Path("outputs/diag").mkdir(parents=True, exist_ok=True)
                 Path("outputs/diag/retained.py").write_text("RETAINED = 1\\n", encoding="utf-8")
             if mode == "tmpdir":
+                assert os.environ.get("HTTP_TEST_OWNED_ROOT") == tempfile.gettempdir(), "lane root must precede leftover write"
                 Path(tempfile.gettempdir(), "left-in-lane-tmp.txt").write_text("left\\n", encoding="utf-8")
             if mode == "tracked":
                 with open("README.txt", "a", encoding="utf-8") as handle:
@@ -332,7 +335,7 @@ class ShardFixture(unittest.TestCase):
     def build(self, *, plan=None, extra_epsilon=False, pre_ignored=False):
         self.write("test_cases/__init__.py", "")
         for relative in ("tools/project_contract.py", "test_cases/run_related_tests.py",
-                         "requirements-container-top-level.lock"):
+                         "requirements-container-top-level.lock", "tools/project_pointer.py"):
             self.write(relative, (ROOT / relative).read_bytes())
         self.write("tools/sync-code.py", "ROOT_CODE_PATTERNS = ()\n"
                    "def matching_files(root, patterns): return ()\n")
@@ -350,7 +353,7 @@ class ShardFixture(unittest.TestCase):
         self.plan_bytes = (json.dumps(plan or fixture_plan(), indent=1) + "\n").encode("utf-8")
         self.write("test_cases/full_shard_plan.json", self.plan_bytes)
         scripts = {p: p for p in ("tools/project_contract.py", "tools/sync-code.py",
-                                  "infra/docker/activate.py", "tools/_package_common.py")}
+                                  "infra/docker/activate.py", "tools/_package_common.py", "tools/project_pointer.py")}
         support = ["test_cases/run_related_tests.py", "requirements-container-top-level.lock",
                    "test_cases/full_shard_plan.json"]
         manifest = {
@@ -442,6 +445,60 @@ class ShardFixture(unittest.TestCase):
 
 
 class FullShardWorkflowTests(ShardFixture):
+    def test_owned_synthetic_shared_root_retains_realpath_and_ancestor_inode_rejection(self):
+        shared = self.base / "synthetic-shared"
+        shared.mkdir(mode=0o700)
+        descendant = shared / "not-created" / "lane"
+        problems = RUNNER.full_shard_shared_temp_problems(
+            {"lane": descendant}, shared_roots=(shared,),
+        )
+        self.assertEqual(1, len(problems))
+        self.assertIn("machine-shared temporary directory", problems[0])
+        self.assertFalse(descendant.exists())
+        spelling = self.base / "alternate-spelling"
+        spelling.mkdir(mode=0o700)
+        original_stat = os.stat
+        shared_identity = original_stat(shared)
+
+        def alias_stat(path, *args, **kwargs):
+            if Path(path) == spelling:
+                return shared_identity
+            return original_stat(path, *args, **kwargs)
+
+        with mock.patch.object(os, "stat", side_effect=alias_stat):
+            inode_problems = RUNNER.full_shard_shared_temp_problems(
+                {"lane": spelling / "not-created"}, shared_roots=(shared,),
+            )
+        self.assertEqual(1, len(inode_problems))
+        self.assertIn(str(shared), inode_problems[0])
+        self.assertFalse((spelling / "not-created").exists())
+
+    def test_shared_parent_negative_never_creates_outside_runner_root(self):
+        if not SHARDED_PLATFORM:
+            self.assert_platform_refusal()
+            return
+        trusted = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        attempted = []
+        original_mkdtemp = tempfile.mkdtemp
+
+        class ReachedOwnedFactory(Exception):
+            pass
+
+        def boundary(*args, **kwargs):
+            prefix = kwargs.get("prefix", args[1] if len(args) > 1 else "tmp")
+            directory = kwargs.get("dir", args[2] if len(args) > 2 else None)
+            if prefix != "shard-wf-shared-":
+                self.assertEqual(trusted, Path(directory or tempfile.gettempdir()))
+                return original_mkdtemp(*args, **kwargs)
+            attempted.append(directory)
+            self.assertEqual(trusted, Path(directory or ""))
+            raise ReachedOwnedFactory
+
+        with mock.patch.object(tempfile, "mkdtemp", side_effect=boundary):
+            with self.assertRaises(ReachedOwnedFactory):
+                self.test_w2_lane_roots_inside_the_machine_shared_tmp_are_refused_before_any_lane()
+        self.assertEqual([trusted], [Path(value) for value in attempted])
+
     def test_w1_each_canonical_case_runs_once_in_its_lane_and_quiet_phase_runs_alone(self):
         self.build()
         if not SHARDED_PLATFORM:
@@ -689,16 +746,20 @@ class FullShardWorkflowTests(ShardFixture):
         self.assertFalse(serial_ledger.exists())
 
     def test_w2_lane_roots_inside_the_machine_shared_tmp_are_refused_before_any_lane(self):
-        # S0 root cause: lane TMPDIRs below /private/tmp share an ancestor that the suite's
-        # own tests write into while other lanes pin the stat of every ancestor.
+        # Model the original shared-ancestor fault inside the independent owned root.
         self.build()
         if not SHARDED_PLATFORM:
             self.assert_platform_refusal()
             return
-        shared = Path(tempfile.mkdtemp(prefix="shard-wf-shared-", dir="/tmp"))
+        shared = Path(tempfile.mkdtemp(prefix="shard-wf-shared-", dir=owned_test_root()))
         self.addCleanup(shutil.rmtree, shared, True)
         os.chown(shared, -1, os.getgid())
-        code, _evidence, markers, audit, output = self.run_in_process(temp_parent=shared)
+        predicate = RUNNER.full_shard_shared_temp_problems
+        with mock.patch.object(
+            RUNNER, "full_shard_shared_temp_problems",
+            side_effect=lambda paths: predicate(paths, shared_roots=(shared,)),
+        ):
+            code, _evidence, markers, audit, output = self.run_in_process(temp_parent=shared)
         self.assertEqual(1, code, output)
         self.assertEqual([], markers)
         self.assertTrue(

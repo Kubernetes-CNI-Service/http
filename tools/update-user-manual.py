@@ -410,6 +410,7 @@ def script_profile(root: Path, relative: str, *, _facts: _InvocationSources | No
             "project_contract.py", "ztp_service_runtime.py", "switch_collection_gate.py",
             "dhcp_runtime_inventory.py", "dynamic_air_inventory.py", "environment_probe.py",
             "nvue_normalizer.py", "config_sync_authority.py",
+            "login_path.py", "project_pointer.py",
         }
     )
     is_cgi = path.suffix.lower() == ".cgi"

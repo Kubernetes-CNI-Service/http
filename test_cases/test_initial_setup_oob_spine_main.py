@@ -59,6 +59,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -503,6 +504,7 @@ class OobSpineMainTests(unittest.TestCase):
             stack.enter_context(patch.object(app.subprocess, "run",
                                              side_effect=AssertionError("External commands forbidden")))
             stack.enter_context(patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(patch.object(app, "resolve_initial_ib_password",
                                              return_value=target_password if apply else "admin"))
             stack.enter_context(patch.object(app.ProjectPasswordPolicy, "password", return_value=target_password))

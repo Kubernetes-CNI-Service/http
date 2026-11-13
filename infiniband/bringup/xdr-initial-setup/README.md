@@ -27,7 +27,7 @@ Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经
 1. 读输入：`ib.csv` 里 `type=ib` 的是候选 IB；`type=eth`、`ethernet`、`eth_jump` 等 Ethernet 设备提供 OOB 登录地址。
    P2P 给出每台 IB 管理口（`eth0`、`mgmt`、`management`、`bmc` 都算管理口）连在哪台 Ethernet 的哪个口。解析结果写进
    目标缓存（版本 5），输入没变时直接复用。
-2. OOB 登录方式：每台要用到的 Ethernet 先用公钥试一次（`BatchMode`，最多 5 秒）；公钥被拒的才要口令，先问
+2. OOB 登录方式：每台要用到的 Ethernet 先用公钥建立本次复用连接（`BatchMode`）；公钥被拒的才要口令，先问
    「是否全部使用同一个口令 [Y/n]」，回车或 y 只输一次，n 则逐台输入。经管道给口令见「`--credentials-fd`」一节。
 3. 先采集全部 OOB 快照，再处理 IB：每台 Ethernet 只采集一次，取实际主机名（必须与 CSV 里这个登录地址对应的主机名
    一致，短名和同名 FQDN 算一致）、`nv show interface`、`ip -d link show`、`bridge fdb show`、`ip neighbor`，
@@ -59,7 +59,7 @@ Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经
    3. **Network**：按 CSV 配 `eth0`、`eth1` 的地址和网关、主机名，`eth0`、`eth1` 链路 up、类型 eth；两个网关相同时写成一条
       `interface eth0-1 ipv4 gateway`。设备上已有 CSV 要求的全部值（多出的设置保留）时跳过；只缺一部分、或与 CSV 冲突时
       在任何写入之前拒绝这台；`--force` 只补缺的字段，从不覆盖冲突的值。只写缺的那几条，然后 `apply -y`、`save`、读回核对。
-   4. **IPv4 就绪**（只在 `--apply` 时）：从同一台跳板、同一 VRF 用 IB 的 eth0 IPv4 登录核对，最多 3 次，每次之前等 10 秒。
+   4. **IPv4 就绪**（只在 `--apply` 时）：从同一台跳板、同一 VRF 用 IB 的 eth0 IPv4 登录核对，最多9次；Network本次有改动先等15秒，否则首探测立即开始，之后失败再等10秒。
    5. **Infra Services**：DNS、NTP、时区取项目的 `01-global.yaml`，global 里没写的取中性默认值 `infra-neutral.conf`；
       已有就跳过；没有 global 时这一阶段记 SKIP。
    6. **Public Keys**：把项目的非空 `*.pub` 合并进 IB 的 `authorized_keys`，已有的授权保留；管理服务器上有
@@ -71,6 +71,19 @@ Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经
 
 一台 IB 失败只停这一台，其余 IB 照常做完（日志 `other IB tasks remain eligible`）；失败的设备不自动重放不确定的写入。
 只有脚本或公共流程出错（例如运行中项目输入被改、worker 异常、操作员取消）才算 FAILED。
+
+### OOB 跳板连接复用（I-013）
+
+管理服务器到每台跳板，本次运行只保留一条外层 SSH master；公钥探测成功的连接本身就是 master。
+需要口令时，同地址公钥被拒后再用已取得的口令建立 master，不逐条命令重新登录；`--credentials-fd`
+仍从本次口令表取值、不再提问。建立后先核对跳板主机名，再采集快照和执行后续外层命令。
+
+控制目录是操作员进程创建的 `/tmp/isj-*`，权限 0700，正常结束或异常退出时关闭 master 并删除目录。
+root 等待父进程不创建它；在 OOB Leaf 本机执行的命令不创建 master。跳板到 IB 的内层 SSH 不复用，
+不在跳板上创建控制目录。使用前先检查 socket；丢失时由协调进程沿已选地址串行重建，不主动改走独立连接。
+
+真实 OpenSSH 的后台化、`ControlPersist`、会话上限及检查到使用之间的回退窗口，仍需现场卡
+`TC-REAL-I013-JUMP-MULTIPLEX-001` 验证；本机假 SSH 测试不能代替现场连接数证明。
 
 ### NVUE 逗号合并的接口和 fnm 接口（I-005）
 
@@ -304,13 +317,21 @@ Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在�
 
 ```text
 <目录>/initial-setup.py
+<目录>/tools/login_path.py         每次运行都需要
+<目录>/tools/hostname_ranges.py    每次运行都需要
+<目录>/tools/device_identity.py    每次运行都需要（hostname_ranges 的依赖）
 <目录>/tools/credentials_fd.py      Leaf 上用 --credentials-fd 时
-<目录>/tools/device_identity.py     用 --credentials-fd 且 fd 里有 jump_passwords 时
 ```
 
-不用 `--credentials-fd` 时只要 `initial-setup.py` 一个文件。`<目录>/tools/` 存在时脚本按这个布局 import；同时又在仓库
-布局里（`<仓库>/tools/device_identity.py` 存在）、或两种布局都不成立、而运行又要用到 tools 模块时，以 2 退出并写出两种
+每次只读检查、`--plan`、`--generate-json` 和 `--apply` 都在碰设备前加载 `tools.login_path`；Leaf 每次带上上述三个必需模块，缺文件以 2 退出并写明缺名。
+`<目录>/tools/` 存在时脚本按这个布局 import；同时又在仓库
+布局里（`<仓库>/tools/device_identity.py` 存在）、或两种布局都不成立时，以 2 退出并写出两种
 布局各要的文件，不猜。Leaf 上本地运行不认项目，也不判身份。
+
+本机主机密钥刷新库只编辑调用方指定的操作员 `~/.ssh/known_hosts`，拒绝其他文件和该文件的链接。
+管理服务器的两种直连核验可在 `--apply` 下接入已认证设备的指纹回调：核实一致后只删目标地址的全部旧记录，重试一次并再核对新指纹；只读不删。
+`ssh-keygen -R` 会按自身行为保留或覆盖 `known_hosts.old`；记录如实保存 `.old`、inode、权限前后变化，不主动改这些属性。
+当前真实 link-local 公钥读者、跳板串行删除及 `--refresh-host-key` 名单已接入下文 v3.1.4 工作流；没有可信读者时仍拒绝自动删除。
 
 ### 以 root 或 sudo 运行（I-006）
 
@@ -337,10 +358,12 @@ Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在�
   （默认 `NVOS_INITIAL_PASSWORD`），加 `--factory-default-admin` 时另有 `NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD`（父进程环境
   里有才带）；`HOME`（U 在 passwd 里的家目录）、`USER`、`LOGNAME`（都是 U）；标记变量 `HTTP_ZTP_ROOT_PARENT=1`
   （兜底标记：子进程以 U 运行，本来就不会再切换；它也传给子进程起的全部后代）。`--credentials-fd` 的 fd 原样交给子进程读。
-- **已知限制**：上面这些环境变量是以 `名字=值` 写在 `runuser` 的命令行参数里的，子进程运行的整个期间（`runuser` 一直在）同机用户用 `ps` 都能看到。所以 root
-  运行时，环境里不要有 `--ib-initial-password-env` 指定的变量（默认 `NVOS_INITIAL_PASSWORD`）或
-  `NVOS_FACTORY_DEFAULT_ADMIN_PASSWORD`，初始密码改用交互输入或 `--credentials-fd`。经 sudo 运行时 sudo 默认会清掉这类
-  变量，`sudo -E` 或 `sudo 变量名=…` 会把它们带进来。本版不改这一点。
+- **M6b：独立环境管道**：显式请求且实际存在的 keep 变量保留原字符串，包括空值、非 ASCII 和 surrogateescape；
+  值或其编码载荷不放进 runuser/重新执行链的 argv。共享机制通过本轮封存的非阻塞管道和固定标准库 bootstrap 恢复环境，
+  不创建载荷文件。原 `credentials_fd` 仍由业务入口唯一读取并关闭，环境 bootstrap 不预读、不关闭它。
+  passwd 的 HOME/USER/LOGNAME、框架 `HTTP_ZTP_ROOT_PARENT` 优先级不变，无关环境仍排除；普通 bootstrap 错误固定无值消息/2，
+  wait 退出码、INT/TERM 转发及 128+信号号不变。空 keep 的 setup/upgrade2/cron 不额外创建载荷管道。
+  Linux runuser/PAM、真实 UID 与终端行为仍为现场 OPEN/NOT RUN；macOS 合成替身通过不等于现场验证或设备操作授权。
 - 切到 U 以后没有 root 的 ssh-agent（`SSH_AUTH_SOCK` 不在子进程环境里）。
 
 ### 旧 `--auto` 定时任务的移除步骤
@@ -440,3 +463,116 @@ SSH 的 `known_hosts` 也可能新增主机密钥（`StrictHostKeyChecking=accep
   不配置这台。
 - 改密或写入结果不确定时停下这台、标为要人工核对，不自动重放。
 - 初始密码、目标密码、当前密码和 OOB 口令都不打印、不写进报告和 JSON。
+
+## v3.1.4 跳板不可达、冷却与逐台记录（D4 WP-2）
+
+各跳板最多有 8 台 IB 任务在途；全局 worker 数仍是 `min(--max-workers, ceil(ready/16))`，
+硬上限 16，不把 worker 固定分配给某台跳板。连续两次针对实际跳板登录地址的网络失败，或一次
+master 的所有候选地址都失败后，该跳板暂停派发 240 秒。换候选后成功不算一次失败。最多冷却
+两轮；冷却到期且这台跳板没有在途任务后，检查/必要时重建 master，再验证 `hostname` 和既有
+身份约束，成功才恢复。其他跳板继续派发，不为探测主动关闭仍有在途任务的 master。
+
+冷却由协调进程管理，不计入某台任务的 `--task-timeout`。因跳板网络失败且尚未尝试写入的任务
+保留本次 `.attempt-N.log`/`.attempt-N.json` 证据后重新入队，从头执行；最终结果才记为完成。
+已经拿到写入许可的任务不自动重放，仍归跳板不可达，但明确标为“写入已尝试、结果未核实”。
+两轮冷却后仍失败，这台跳板下剩余任务直接给出失败结果，不继续连接。快照先尝试所有跳板，
+再统一冷却、只重试网络失败者，不让前一台的 240 秒等待挡住后续健康跳板的首轮采集。
+
+`[DONE]` 与汇总先查询同一张 `failure_kind` 分类表，再回退旧分类：
+
+| `failure_kind` | `category` | 含义 |
+|---|---|---|
+| `OOB_JUMP_UNREACHABLE` | `FAILED_OOB_JUMP_UNREACHABLE` | 实际外层跳板地址网络不可达；查跳板网络/SSH/master，不按失败所处阶段推断密码错误 |
+| `OOB_JUMP_AUTHENTICATION` | `FAILED_OOB_JUMP_AUTHENTICATION` | 跳板认证被拒绝，既不算网络不可达，也不自动进入网络冷却 |
+| `DIRECT_SSH_NETWORK` | `FAILED_DIRECT_SSH_NETWORK` | 原有管理服务器直连网络失败 |
+| `TARGET_HOST_KEY_CHANGED` | `FAILED_TARGET_HOST_KEY_CHANGED` | 主机密钥冲突；不按网络故障重试，具体处理沿现有授权流程 |
+
+逐台 JSON 保留 `category`、`failure_kind`、`writes_attempted`；`jump` 保留 `hostname`、
+`login_ip`、`interface`、`vrf`、`access_vlan`、`selection_reason`，只新增 `type`。`login_ip`
+是实际选中的登录候选地址；本地 Leaf 的 `selection_reason` 仍是 `LEAF_LOCAL_PATH`。
+没有跳板的后续直接登录任务使用 `jump: null`，不占用跳板在途名额、不累计跳板失败。
+`writes_attempted: true` 表示已经请求过受控写入，不是写入已成功；须核对设备状态后再决定是否
+授权另一轮运行。网络判断使用地址/跳数事实，内层 IB 的 IPv4/link-local 失败不冒充跳板不可达。
+
+## v3.1.4 IPv4 就绪等待（D4 WP-3）
+
+每次 `--apply` 在 Network 核对后仍执行 IPv4 SSH 就绪检查。本次实际完成了 Network
+配置写入时，先等 15 秒再探测；本次无需改 Network 时立即探测。普通端点未就绪（连接拒绝、
+超时、无路由）失败后再等 10 秒，最多探测 9 次。只读检查不启动这段就绪探测。
+每次等待之后仍先检查跳板 master，必要时协调重建并复查，再发本轮探测；外层跳板故障保留
+既有分类和协调流程，不冒充 IB 收敛、在这里等待九轮。认证、主机密钥变化、要求改密、命令
+不存在或不完整结果帧仍立即停止；中断、批次停止和项目输入变化也不重试。
+
+仅在跑满九次时，有改动95秒、无改动80秒；提前就绪则等待更少。如果每次探测耗10秒，总耗时分别约185/170秒，都不是最坏上界。原单次
+PTY 会话预算 `max(connect_timeout * 3, 45)`、master 核验/重建开销和任务截止约束仍保持，
+不增加预算。九次仍未就绪时会提示“设备可能还在收敛”，由操作员核对现场再决定下一步，
+不自动重放 Network 写入。
+
+本工作包只解析完整的 OpenSSH 主机密钥变化事实，供后续受控处理读取；严格管理分支仍只
+输出既有固定安全错误文字，不带原始告警。缺少地址、指纹或 Offending 行时仍停止，不伪造
+事实。本包不接受变化后的密钥、不编辑 `known_hosts`，也未完成后续自动核实/删除/刷新流程。
+
+## v3.1.4 受控主机密钥刷新（D3 WP-5）
+
+此节补齐上节 WP-3 只解析事实的后续处理，不改变默认 SSH 身份校验、原凭据顺序或等待预算。
+factory reset 后，跳板至 IB 的 IPv4 主机密钥变化会先经已经认证的 link-local 会话读取这台
+IB 的固定主机公钥，用同一指纹算法核对。指纹一致且本次为 `--apply`，才进入原首次变更
+确认；`--yes` 沿用原预授权。核实不一致、无法核实或未授权时不删记录，也不重放配置写入。
+
+跳板上唯一新增写操作是固定命令
+`ssh-keygen -f /home/cumulus/.ssh/known_hosts -R <告警点名的地址>`。目标必须为本次 IB、
+账户必须为 cumulus，地址只能是该 CSV 的 eth0 IPv4 或该任务实际的带接口 link-local。
+只删这个地址的全部密钥类型，不删主机名或其他设备记录。远端删除由父协调进程串行执行，
+每次删除前重新 lookup；过期 Offending 行号不再属于当前 lookup 时保守拒绝，不额外登录或
+暗中采用新行号。其他不受本协调器控制的 accept-new 写者不在隔离保证内。
+
+默认 OpenSSH `-R` 可能留下或覆盖 `known_hosts.old`；报告只在返回输出实际说明留下该文件时
+记为 true，不额外远程 stat。远端 inode、权限四项未采集时为 null，不伪造数值。本机编辑器
+仍如实记录实际 `.old`、inode 和权限。AIR 的真实行为及并发追加边界仍须现场卡核实。
+
+核实不了但操作员已通过可信方式确认 reset 的设备，可指定一次 IB 名单，例如：
+
+```text
+--apply --refresh-host-key 'example-ib[01-02]'
+```
+
+名单复用 `*`、等宽数字范围、字母范围及逗号写法，只和本次 CSV 全部 type=ib 名称匹配；
+未匹配项、跳板名或不合法语法在设备访问前以 2 拒绝。`all` 不是全选关键字。名单仅跳过
+指纹核实，不跳过地址/文件/账户/授权/Offending 子集或重试后新指纹核对。它不扩大权限。
+尚未认证的 link-local 冲突没有安全 reader，只能在这份名单中才能删除并由调用方重试一次；
+阶段内部仍每次只有一个凭据会话。实际现有传输用 `-B <接口>` 加未带 zone 的邻居地址，
+解析器仍只接受 IPv4 或完整 scoped link-local 告警；真实现场告警结构未知时固定拒绝，
+不能用合成 scoped 用例冒称现场已通过。
+
+本地 Leaf 使用当前实际 passwd 用户自己的 `~/.ssh/known_hosts`，该用户必须等于
+`--eth-user`，不强行要求名为 cumulus；管理端也只编辑操作员自己的文件。告警指向其他文件
+则不删。IPv4 刷新后只再探测一次，无额外 15 秒首等候；管理端最后密码/公钥核验沿同一流程。
+原九次真实 IPv4 未就绪仍优先归 `FAILED_OOB_IPV4_READINESS`，末尾只读核验继续留证，但不再写。
+
+只读检查中，指纹已核一致为 `CHECKED_HOST_KEY_REFRESH_PENDING`（需关注，不算设备失败），
+不一致或无法核实为 `FAILED_TARGET_HOST_KEY_CHANGED`；两者都不删除、不重试。逐台 `host_key`
+为列表，可同时保存跳板与管理端事实；pending 的 result 为 `refresh-pending`、removal 为 null，
+成功为 `refreshed`，明确区分 `verified` 和 `operator-forced-unverified`。不保存原始 SSH 告警。
+上述本机合成验证不替代 `TC-REAL-I004-HOSTKEY-REFRESH-001`；现场卡仍 OPEN / NOT RUN。
+
+## 辅助脚本（手工准备，不由流程调用）
+
+辅助脚本以 `helper-` 开头，必须同时满足：不被仓库其他脚本调用或导入、自己不导入仓库模块；`--help` 在任何动作前无副作用地返回；只做人工准备或验证，不写仓库或项目里其他脚本要读的项目文件、锁、台账或配置。它们跟踪版本并随 upload/sync 分发，但不属于 initial-setup、load 或 UFM 的自动流程。辅助脚本只做语法、help 和引用普查，**行为未经测试验证**，必须由人审阅并授权手工运行。
+
+`helper-prepare-eth-jump.sh` 帮助准备 CSV 中 `type=eth_jump` 的跳板，以 `cumulus` 用户登录。文件权限为 0644，用 `bash` 运行；先在交互终端查看帮助：
+
+```bash
+bash helper-prepare-eth-jump.sh --help
+bash helper-prepare-eth-jump.sh [ib.csv] [publickey_dir] [--keys-only]
+```
+
+默认输入是当前目录的 `./ib.csv` 和 `./publickey`，读取其中有效、非空的 `*.pub`。默认模式安装公钥并修复持久 PATH；`--keys-only` 只安装公钥，不修改跳板持久的 `~/.bashrc`（准备会话仍设置临时 PATH）。口令从 `/dev/tty` 交互读取，不支持无人值守调用。
+
+运行的外部效果必须由操作者事先确认：
+
+- 管理服务器缺少 `sshpass` 时，会以 root 或 sudo 使用 apt 安装，必要时更新 apt 索引；要求 Ubuntu/Debian。
+- SSH 使用 `StrictHostKeyChecking=accept-new`，管理服务器上操作者的 `~/.ssh/known_hosts` 可能新增跳板主机密钥。
+- 跳板上会创建 `~/.ssh` 并设为 0700，创建或追加 `~/.ssh/authorized_keys` 并设为 0600；默认模式还在 `~/.bashrc` 第一行写入 PATH。
+- 改已有文件前分别保留 `~/.ssh/authorized_keys.prepare_eth_jump.bak` 和 `~/.bashrc.prepare_eth_jump.bak`；已有备份不覆盖。回退由人检查并使用这两份备份恢复，仓库流程不代为回退跳板。新建文件原先不存在时可能没有对应备份。
+
+这些跳板准备操作属于 owner 明确授权的手工辅助脚本例外，不扩大 initial-setup 等流程修改跳板的权限。README 本身不随生产包或 sync 部署，现场还应保留发布说明中的用法、备份名和未经行为验证的限制。

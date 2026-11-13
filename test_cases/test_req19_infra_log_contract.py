@@ -1804,7 +1804,7 @@ class RV3DeployInfraWithoutActiveProjectTests(unittest.TestCase):
         self.base = Path(temporary.name).resolve()
         self.root = self.base / "http"
         for relative in ("infra/deploy_infra.py", "infra/infra-teardown.sh",
-                         "tools/infra_components.py", "tools/project_contract.py"):
+                         "tools/infra_components.py", "tools/project_contract.py", "tools/project_pointer.py"):
             (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, self.root / relative)
         self.owned = self.root / "DAY0-Prepare/site-p/99-output-infra"
@@ -1860,7 +1860,7 @@ class RV5CheckInfraWithoutActiveProjectTests(unittest.TestCase):
         self.base = Path(temporary.name).resolve()
         self.root = self.base / "http"
         for relative in ("infra/check_infra.py", "infra/deploy_infra.py",
-                         "tools/infra_components.py", "tools/project_contract.py"):
+                         "tools/infra_components.py", "tools/project_contract.py", "tools/project_pointer.py"):
             (self.root / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / relative, self.root / relative)
         self.owned = self.root / "DAY0-Prepare/site-p/99-output-infra"

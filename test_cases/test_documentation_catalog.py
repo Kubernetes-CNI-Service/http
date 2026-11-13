@@ -793,6 +793,18 @@ class DocumentationCatalogTests(unittest.TestCase):
         self.assertIn("由上层 Python 模块导入", profile["syntax"])
         self.assertNotIn("python3 -B ztp/config_sync_authority.py", profile["syntax"])
 
+    def test_login_path_and_project_pointer_are_imported_libraries_not_clis(self):
+        updater = load_path("manual_v314_shared_libraries", USER_MANUAL_SCRIPT)
+        for relative in ("tools/login_path.py", "tools/project_pointer.py"):
+            with self.subTest(library=relative):
+                profile = updater.script_profile(ROOT, relative)
+                self.assertEqual("否；这是共享库/安全边界，由其列出的生产入口导入。",
+                                 profile["direct"])
+                self.assertEqual(f"由上层 Python 模块导入 {relative} 中的公开函数/类",
+                                 profile["syntax"])
+                self.assertIn("无受支持的独立 CLI", profile["parameters"])
+                self.assertNotIn(f"python3 -B {relative}", profile["example"])
+
     def test_v3_generated_load_guidance_declares_the_real_host_role(self):
         updater = load_path("manual_v3_host_role", USER_MANUAL_SCRIPT)
         load = load_path("manual_v3_load_parser", ROOT / "DAY0-Prepare/11-load.py")
@@ -1180,7 +1192,8 @@ class ManualPF2CurrentCliWorkflowTests(unittest.TestCase):
     """Real current updater CLIs; literal documents, never renderer-made oracles."""
 
     INVENTORY = (
-        "README.md", "module/README.md", "tools/project_contract.py",
+        "README.md", "module/README.md", "tools/login_path.py", "tools/project_contract.py",
+        "tools/project_pointer.py",
         "tools/update-root-readme.py", "tools/update-user-manual.py",
         "user-manual.html",
     )
@@ -1298,6 +1311,126 @@ class ManualPF2CurrentCliWorkflowTests(unittest.TestCase):
                 ("update-root-readme.py", 1, b"README catalog is stale"),
                 ("update-user-manual.py", 1, b"user-manual.html is stale"),
             ))
+
+    def test_current_manual_cli_documents_libraries_and_checks_from_another_directory(self):
+        with tempfile.TemporaryDirectory(prefix="v314-library-manual-cli-") as directory:
+            space = Path(directory)
+            root = space / "repository"
+            root.mkdir()
+            elsewhere = space / "another-working-directory"
+            elsewhere.mkdir()
+            self._fixture(root)
+            before = {relative: (root / relative).read_bytes()
+                      for relative in self.INVENTORY if relative != "user-manual.html"}
+            index = (root / ".git/index").read_bytes()
+            generated = subprocess.run(
+                [sys.executable, "-s", "-B", str(root / "tools/update-user-manual.py")],
+                cwd=root, env=self._environment(root), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30.0,
+            )
+            self.assertEqual(0, generated.returncode, generated.stdout + generated.stderr)
+            self.assertIn(b"updated user-manual.html", generated.stdout)
+            self.assertEqual(b"", generated.stderr)
+            manual = (root / "user-manual.html").read_bytes()
+            checked = subprocess.run(
+                [sys.executable, "-s", "-B", str(root / "tools/update-user-manual.py"), "--check"],
+                cwd=elsewhere, env=self._environment(root), stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30.0,
+            )
+            self.assertEqual(0, checked.returncode, checked.stdout + checked.stderr)
+            self.assertIn(b"user-manual.html exhaustive catalog is current", checked.stdout)
+            self.assertEqual(b"", checked.stderr)
+            self.assertEqual(manual, (root / "user-manual.html").read_bytes())
+            self.assertEqual(before, {relative: (root / relative).read_bytes() for relative in before})
+            self.assertEqual(index, (root / ".git/index").read_bytes())
+            self.assertFalse((root / "test_cases/script_test_approved_hashes.json").exists())
+            self._check_pair(root, (
+                ("update-root-readme.py", 0, b"README catalog is current"),
+                ("update-user-manual.py", 0, b"user-manual.html exhaustive catalog is current"),
+            ))
+            for relative in ("tools/login_path.py", "tools/project_pointer.py"):
+                with self.subTest(library=relative):
+                    entries = re.findall(
+                        rf'<details[^>]*data-script-reference="{re.escape(relative)}"[^>]*>'
+                        r'(.*?)</details>', manual.decode("utf-8"), flags=re.DOTALL,
+                    )
+                    self.assertEqual(1, len(entries), relative)
+                    body = html.unescape(" ".join(re.sub(r"<[^>]+>", " ", entries[0]).split()))
+                    self.assertIn("是否直接运行： 否；这是共享库/安全边界", body)
+                    self.assertIn(f"由上层 Python 模块导入 {relative} 中的公开函数/类", body)
+                    self.assertIn("无受支持的独立 CLI", body)
+                    self.assertNotIn(f"python3 -B {relative}", body)
+
+
+class Version314DocumentationTests(unittest.TestCase):
+    """Independent closeout expectations from approved v3.1.4 and owner Q060/Q062."""
+
+    def test_upgrade_v2_documents_its_distinct_input_runtime_and_route_contract(self):
+        text = (ROOT / "infiniband/bringup/xdr-upgrade/README.md").read_text(encoding="utf-8")
+        current = text.split("## 当前入口：", 1)[0]
+        for expected in (
+            "v1 仍是默认", "~/.venvs/http/ibsw-upgrade", "~/.venv-upgrade",
+            "--inventory-checked", "[RUN] evidence:", "OS_PACKAGE_ROUTE_UNAVAILABLE",
+            "[LOCK] WARN", "INPUT_CHANGED", "ALREADY_RUNNING", "canary-routes.jsonl",
+            "VERIFIED", "AT_TARGET", "CSV", "O_APPEND", "fsync",
+        ):
+            with self.subTest(expected=expected):
+                self.assertTrue(expected in current, "v2 README missing " + expected)
+        self.assertFalse("输入、凭据、金丝雀规则、预检和验证标准与 `upgrade.py` 相同" in current,
+                         "v2 README must not claim all v1 inputs and canary rules are identical")
+        self.assertIn("真实设备验收 NOT RUN", current)
+
+    def test_initial_and_manual_explain_separate_environment_and_business_channels(self):
+        readme = (ROOT / "infiniband/bringup/xdr-initial-setup/README.md").read_text(encoding="utf-8")
+        manual = html.unescape((ROOT / "user-manual.html").read_text(encoding="utf-8"))
+        for name, text in (("README", readme), ("manual", manual)):
+            with self.subTest(document=name):
+                for expected in ("独立环境管道", "argv", "credentials_fd", "128", "PAM", "NOT RUN"):
+                    self.assertTrue(expected in text, name + " missing " + expected)
+                self.assertFalse("本版不改这一点" in text, name + " retains the superseded argv limitation")
+                self.assertFalse("环境变量以「名字=值」写在" in text, name + " still describes values in argv")
+        self.assertIn("HTTP_ZTP_ROOT_PARENT", readme)
+        self.assertIn("NVOS_INITIAL_PASSWORD", readme)
+
+    def test_design_does_not_claim_the_canceled_icmp_measurement_or_code_tree_output(self):
+        text = (ROOT / "infiniband/bringup/xdr-upgrade/V2-DESIGN.md").read_text(encoding="utf-8")
+        self.assertFalse("ICMP 已确认全部放通" in text, "ICMP owner assumption is not a measurement")
+        for expected in ("默认现场可 ping", "额外最小实测已取消", "当前激活项目", "[RUN] evidence:",
+                         "ALREADY_RUNNING", "canary-routes.jsonl", "Family.segments", "VERIFIED"):
+            with self.subTest(expected=expected):
+                self.assertTrue(expected in text, "v2 design missing " + expected)
+
+    def test_new_field_cards_remain_open_and_do_not_turn_local_models_into_site_proof(self):
+        text = (ROOT / "test_cases/REAL_ENVIRONMENT.md").read_text(encoding="utf-8")
+        cards = (
+            "TC-REAL-I004-HOSTKEY-REFRESH-001",
+            "TC-REAL-I013-JUMP-MULTIPLEX-001",
+            "TC-REAL-I013-JUMP-BLOCKED-001",
+            "TC-REAL-I013-IPV4-READINESS-001",
+            "TC-REAL-IBSW-UPGRADE-CANARY-ROUTES-001",
+        )
+        for case_id in cards:
+            with self.subTest(case_id=case_id):
+                match = re.search(r"^## " + re.escape(case_id) + r"[^\n]*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+                self.assertIsNotNone(match, case_id)
+                first_line = next(line for line in match.group(1).splitlines() if line.strip())
+                self.assertIn("状态 **OPEN / NOT RUN**", first_line)
+                for expected in ("前置", "步骤", "预期", "证据", "清理", "风险", "OPEN", "NOT RUN"):
+                    self.assertIn(expected, match.group(1))
+
+    def test_readiness_wait_totals_are_conditional_on_network_change_and_nine_attempts(self):
+        for relative in ("infiniband/bringup/xdr-initial-setup/README.md", "user-manual.html", "test_cases/REAL_ENVIRONMENT.md"):
+            with self.subTest(document=relative):
+                text = (ROOT / relative).read_text(encoding="utf-8")
+                self.assertTrue("有改动95秒、无改动80秒" in text, "conditional nine-attempt waits missing in " + relative)
+                self.assertTrue("提前就绪" in text, "early readiness must not imply all waits occurred in " + relative)
+
+    def test_intro_readiness_summary_agrees_with_the_current_nine_attempt_policy(self):
+        text = (ROOT / "infiniband/bringup/xdr-initial-setup/README.md").read_text(encoding="utf-8")
+        line = next(line for line in text.splitlines() if "**IPv4 就绪**" in line)
+        self.assertRegex(line, r"最多\s*9\s*次")
+        for expected in ("Network", "15", "10"):
+            self.assertIn(expected, line)
 
 
 if __name__ == "__main__":

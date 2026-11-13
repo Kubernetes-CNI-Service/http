@@ -40,6 +40,7 @@ import ast
 import base64
 import copy
 import csv
+import enum
 import errno
 import fcntl
 import getpass
@@ -51,6 +52,7 @@ import multiprocessing
 from multiprocessing.connection import wait as wait_connections
 import os
 import pty
+import pwd
 import random
 import re
 import select
@@ -67,7 +69,7 @@ import time
 import weakref
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from collections import deque
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -281,6 +283,7 @@ _WORKER_CONNECTION = None
 _WORKER_STOP = None
 _WORKER_SECRETS = []
 _ACTIVE_COORDINATOR = None
+_JUMP_SESSIONS = None
 _TASK_LOG_BUFFER = None
 _TASK_DEADLINE = None
 # Conservative authorized_keys grammar; preserve existing records byte-for-byte.
@@ -388,6 +391,108 @@ _KEY_INSTALL_SCRIPT = (
 
 class SetupError(RuntimeError):
     pass
+
+
+class SshFailureKind(enum.Enum):
+    # D4 WP-1's small pure base; WP-2 adds the ordered reporting table.
+    JUMP_UNREACHABLE = "OOB_JUMP_UNREACHABLE"
+    JUMP_AUTHENTICATION = "OOB_JUMP_AUTHENTICATION"
+    TARGET_HOST_KEY_CHANGED = "TARGET_HOST_KEY_CHANGED"
+    HOST_KEY_REFRESH_PENDING = "HOST_KEY_REFRESH_PENDING"
+    IDENTITY_MISMATCH = "OOB_IDENTITY_CONFLICT"
+    LOCAL_COMMAND = "LOCAL_COMMAND_ERROR"
+    DIRECT_SSH_NETWORK = "DIRECT_SSH_NETWORK"
+
+
+class SshFailure(SetupError):
+    def __init__(self, kind, hop, address, jump=None):
+        self.kind, self.hop, self.address, self.jump = kind, hop, address, jump
+        self.failure_kind = kind.value
+        super().__init__(f"SSH {kind.value}: {hop} {address}" + (f" via {jump}" if jump else ""))
+
+
+def classify_ssh_failure(output, *, outer_address, inner_address=None):
+    """Classify the address actually named by SSH, never a 255 or address substring."""
+    named = re.search(r"(?i)(?:connect to host|connection (?:closed|reset) by)\s+(\S+)", output)
+    address = named.group(1).strip("[]") if named else None
+    if address == "remote" and re.search(r"(?i)kex_exchange_identification", output):
+        address = None  # Literal "remote host" is not a conflicting address token.
+    if address is not None:
+        if outer_address is not None and address == outer_address:
+            hop = "outer"
+        elif inner_address is not None and address == inner_address:
+            hop = "direct" if outer_address is None else "inner"
+        else:
+            return None
+    else:
+        evidence = "\n".join(line for line in output.splitlines() if re.search(
+            r"(?i)permission denied|authentication failed|host key|identification|offending|"
+            r"connection|route|unreachable|kex_exchange|control socket|mux_client", line))
+        outer_named = outer_address is not None and re.search(
+            r"(?<![A-Za-z0-9_.:%-])" + re.escape(outer_address) + r"(?![A-Za-z0-9_.:%-])", evidence)
+        inner_named = inner_address is not None and re.search(
+            r"(?<![A-Za-z0-9_.:%-])" + re.escape(inner_address) + r"(?![A-Za-z0-9_.:%-])", evidence)
+        mux = re.search(r"(?i)control socket connect|mux_client_request_session", output)
+        if outer_address is None:
+            hop, address = "direct", inner_address or ""
+        elif outer_named or mux or inner_address is None:
+            hop, address = "outer", outer_address
+        elif inner_named:
+            hop, address = "inner", inner_address
+        else:
+            return None
+    if re.search(r"(?i)remote host identification has changed|host key verification failed|offending .* key", output):
+        kind = SshFailureKind.TARGET_HOST_KEY_CHANGED
+    elif re.search(r"(?i)permission denied|authentication failed", output):
+        if hop != "outer":
+            return None  # The existing inner credential/forced-change protocol owns IB authentication.
+        kind = SshFailureKind.JUMP_AUTHENTICATION
+    elif re.search(r"(?i)connection timed out|connection refused|no route to host|network is unreachable|"
+                   r"connection closed by|connection reset by|kex_exchange_identification|"
+                   r"control socket connect|mux_client_request_session", output):
+        if hop == "inner":
+            return None
+        kind = SshFailureKind.JUMP_UNREACHABLE if hop == "outer" else SshFailureKind.DIRECT_SSH_NETWORK
+    else:
+        return None
+    return SshFailure(kind, hop, address)
+
+
+# I-037 section3 outcome order: incomplete inputs, link mismatch, jump unreachable,
+# login failure, identity mismatch, backup failure, config/verification failure, done.
+# Existing DIRECT row retains its order; D1b adds rows here, never another stage map.
+FAILURE_KIND_CATEGORY = {
+    "DIRECT_SSH_NETWORK": "FAILED_DIRECT_SSH_NETWORK",
+    "OOB_JUMP_UNREACHABLE": "FAILED_OOB_JUMP_UNREACHABLE",
+    "OOB_JUMP_AUTHENTICATION": "FAILED_OOB_JUMP_AUTHENTICATION",
+    "TARGET_HOST_KEY_CHANGED": "FAILED_TARGET_HOST_KEY_CHANGED",
+    "HOST_KEY_REFRESH_PENDING": "CHECKED_HOST_KEY_REFRESH_PENDING",
+}
+
+
+def _ssh_failure_fact(error):
+    return error if isinstance(error, SshFailure) else getattr(error, "ssh_failure", None)
+
+
+def _retain_ssh_failure(error, source):
+    failure = _ssh_failure_fact(source)
+    if failure is not None:
+        error.ssh_failure = failure
+        error.failure_kind = failure.kind.value
+        change = getattr(failure, "host_key_change", None)
+        if change is not None:
+            error.host_key_change = change
+    return error
+
+
+def _classify_jump_output(output, jump, inner_address=None):
+    records = getattr(_JUMP_SESSIONS, "records", {})
+    record = records.get(normalize_name(jump.hostname), {})
+    address = record.get("address") or jump.login_ip
+    failure = classify_ssh_failure(output, outer_address=address, inner_address=inner_address)
+    if failure is not None:
+        failure.jump = jump.hostname
+    return failure
 
 
 class DirectSSHNetworkError(SetupError):
@@ -2323,13 +2428,14 @@ def _ib_phase_error_facts(error):
     return uncertain, number if type(number) is int and 1 <= number <= 255 else None
 
 
-def _ib_raise_phase_failure(stage, uncertain=False, number=None):
+def _ib_raise_phase_failure(stage, uncertain=False, number=None, *, ssh_failure=None):
     messages = {
         "project": "IB phase project authority failed; device state is UNKNOWN",
         "transport": "IB phase transport failed; device state is UNKNOWN",
         "verification": "IB phase verification failed; device state is UNKNOWN",
     }
     error = SetupError(messages[stage])
+    _retain_ssh_failure(error, ssh_failure)
     if uncertain is True:
         error.cleanup_uncertain = True
     if type(number) is int and 1 <= number <= 255:
@@ -2684,20 +2790,31 @@ def _execute_ib_phase(target, neighbor, eth_user, ethernet_password, ib_user,
     phase = _IBPhase(os.urandom(16).hex(), _phase_operation,
                      ib_user + "@" + neighbor.ipv6, eth_user + "@" + target.ethernet.login_ip,
                      _password_policy)
-    command = nested_ssh_command(target, neighbor, eth_user, ib_user, timeout, ib_command,
-                                 local=False, marker=phase.nonce, password_only=True, _phase=phase)
     responder = NestedResponder(ethernet_password, current_password,
                                 _phase_operation == "password-change" and allow_password_change is True,
                                 ib_new_password=ib_new_password,
                                 ib_destination=phase.endpoint, _phase=phase)
     failure = None
+    ssh_failure = None
     result = None
     try:
+        command = nested_ssh_command(target, neighbor, eth_user, ib_user, timeout, ib_command,
+                                     local=False, marker=phase.nonce, password_only=True, _phase=phase)
         result = interactive_run(command, responder, max(timeout * 4, 60))
+        if (type(result) is SessionResult and type(result.exit_code) is int and result.exit_code != 0
+                and type(result.output) is str):
+            classified = (_ib_host_key_failure(result.output, target, neighbor, local=False)
+                          or _classify_jump_output(result.output, target.ethernet, neighbor.ipv6))
+            if classified is not None:
+                raise classified
+    except (ProjectInputChanged, BatchStopped):
+        raise
     except (SetupError, OSError) as error:
         failure = _ib_phase_error_facts(error)
+        ssh_failure = _ssh_failure_fact(error)
     if failure is not None:
-        _ib_raise_phase_failure("project" if phase.authority_pending else "transport", *failure)
+        _ib_raise_phase_failure("project" if phase.authority_pending else "transport", *failure,
+                                ssh_failure=ssh_failure)
     return phase.finish(result)
 
 
@@ -2928,26 +3045,306 @@ def typed_argv(argv: object, *, label: str) -> list[str]:
     return list(argv)
 
 
+def jump_master_control_argv(op: str, path: str, jump: Device) -> list[str]:
+    """The one closed check/exit builder (D4 WP-1, later included in WP-6's census)."""
+    if op not in {"check", "exit"}:
+        raise SetupError("unsupported jump master control operation")
+    return ["ssh", "-o", f"ControlPath={path}", "-O", op, jump.login_ip]
+
+
+class JumpSessions:
+    """Coordinator-owned outer SSH masters; workers only read paths or request rebuilds."""
+    def __init__(self, *, local_keys=(), timeout=10):
+        self.local_keys, self.timeout = set(local_keys), timeout
+        self.directory = None
+        self.records = {}
+
+    def _jump_key(self, jump):
+        return normalize_name(jump.hostname)
+
+    def _record(self, jump, user, responder, verify_identity):
+        key = self._jump_key(jump)
+        if key not in self.records:
+            try:
+                if self.directory is None:
+                    self.directory = Path(tempfile.mkdtemp(prefix="isj-", dir="/tmp"))
+                    os.chmod(self.directory, 0o700)
+                path = str(self.directory / str(len(self.records)))
+                if len(os.fsencode(path)) + 17 > 104:
+                    raise SetupError("jump ControlPath exceeds the OpenSSH socket limit")
+            except (OSError, SetupError):
+                raise SshFailure(SshFailureKind.LOCAL_COMMAND, "outer", jump.login_ip, jump.hostname) from None
+            self.records[key] = dict(jump=jump, user=user, responder=responder,
+                                     verify_identity=verify_identity, path=path,
+                                     address=None, mode="key", ready=False, error=None)
+        record = self.records[key]
+        if responder is not None:
+            record["responder"] = responder
+        if verify_identity is not None:
+            record["verify_identity"] = verify_identity
+        return record
+
+    def _control_jump_master(self, record, op):
+        actual = replace(record["jump"], login_ip=record["address"])
+        try:
+            result = subprocess.run(jump_master_control_argv(op, record["path"], actual),
+                                    text=True, capture_output=True, timeout=min(self.timeout, 5), check=False)
+        except (OSError, subprocess.TimeoutExpired):
+            raise SshFailure(SshFailureKind.JUMP_UNREACHABLE, "outer", record["address"],
+                             record["jump"].hostname) from None
+        return result.returncode == 0
+
+    def _start_jump_master(self, record, *, password):
+        # The only new interactive_run caller, predicted before implementation.
+        command = ["ssh", "-M", "-N", *ssh_options(self.timeout),
+                   "-o", f"ControlPath={record['path']}", "-o", "ControlPersist=600"]
+        if password:
+            command += ["-o", "PubkeyAuthentication=no", "-o", "PreferredAuthentications=password,keyboard-interactive"]
+        else:
+            command += ["-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey"]
+        command.append(record["user"] + "@" + record["address"])
+        try:
+            result = interactive_run(command, record["responder"] if password else lambda _: None,
+                                     max(self.timeout * 3, 15))
+        except SetupError as error:
+            kind = (SshFailureKind.JUMP_UNREACHABLE if str(error).startswith("SSH/PAM session timed out;")
+                    else SshFailureKind.LOCAL_COMMAND)
+            raise SshFailure(kind, "outer", record["address"], record["jump"].hostname) from None
+        except OSError:
+            raise SshFailure(SshFailureKind.LOCAL_COMMAND, "outer", record["address"],
+                             record["jump"].hostname) from None
+        if result.exit_code:
+            failure = classify_ssh_failure(result.output, outer_address=record["address"], inner_address=None)
+            if failure is None:
+                failure = SshFailure(SshFailureKind.LOCAL_COMMAND, "outer", record["address"])
+            failure.jump = record["jump"].hostname
+            raise failure
+        if not self._control_jump_master(record, "check"):
+            raise SshFailure(SshFailureKind.JUMP_UNREACHABLE, "outer", record["address"],
+                             record["jump"].hostname)
+
+    def _verify_jump_master_identity(self, record):
+        actual_jump = replace(record["jump"], login_ip=record["address"])
+        try:
+            output = run_on_ethernet(actual_jump, record["user"], "", ["hostname"], self.timeout,
+                                     control_path=record["path"])
+        except (ProjectInputChanged, BatchStopped):
+            raise
+        except SshFailure:
+            raise
+        except SetupError as error:
+            failure = classify_ssh_failure(str(error), outer_address=record["address"], inner_address=None)
+            if failure is None:
+                failure = SshFailure(SshFailureKind.LOCAL_COMMAND, "outer", record["address"])
+            failure.jump = record["jump"].hostname
+            raise failure from None
+        actual = output.strip()
+        if (not valid_hostname(actual) or normalize_name(actual).split(".", 1)[0]
+                != normalize_name(record["jump"].hostname).split(".", 1)[0]):
+            raise SshFailure(SshFailureKind.IDENTITY_MISMATCH, "outer", record["address"],
+                             record["jump"].hostname)
+        callback = record["verify_identity"]
+        if callback is not None:
+            try:
+                callback(record["jump"], record["address"])
+            except SetupError:
+                raise SshFailure(SshFailureKind.IDENTITY_MISMATCH, "outer", record["address"],
+                                 record["jump"].hostname) from None
+
+    def _reject_jump_master(self, record, failure):
+        was_ready = record["ready"]
+        record["ready"], record["error"] = False, failure
+        if was_ready:
+            try:
+                self._control_jump_master(record, "exit")
+            except Exception:
+                # Ordinary cleanup cannot replace the refused identity; an
+                # interruption still propagates after failed state is committed.
+                pass
+
+    def _open_jump_master(self, jump, user, responder, candidates, verify_identity, *, key_only=False):
+        if self._jump_key(jump) in self.local_keys:
+            return None
+        record = self._record(jump, user, responder, verify_identity)
+        if record["ready"]:
+            return record["address"]
+        addresses = tuple(candidates) if candidates is not None else (jump.login_ip,)
+        if not addresses or any(not usable(address) for address in addresses):
+            raise SshFailure(SshFailureKind.LOCAL_COMMAND, "outer", jump.login_ip, jump.hostname)
+        for address in addresses:
+            if record["address"] != address:
+                record["mode"] = "key"
+            record["address"], record["error"] = address, None
+            try:
+                if record["mode"] == "key":
+                    try:
+                        self._start_jump_master(record, password=False)
+                    except SshFailure as failure:
+                        if failure.kind != SshFailureKind.JUMP_AUTHENTICATION:
+                            raise
+                        record["mode"] = "password"
+                if record["mode"] == "password":
+                    if key_only:
+                        return None
+                    if record["responder"] is None:
+                        raise SshFailure(SshFailureKind.JUMP_AUTHENTICATION, "outer", address, jump.hostname)
+                    self._start_jump_master(record, password=True)
+                record["ready"] = True
+                self._verify_jump_master_identity(record)
+                return address
+            except SshFailure as failure:
+                self._reject_jump_master(record, failure)
+                if failure.kind != SshFailureKind.JUMP_UNREACHABLE or failure.hop != "outer":
+                    raise
+        record["error"].candidates_exhausted = True
+        raise record["error"]
+
+    def probe_jump_key(self, jump, user):
+        return ("key" if self._open_jump_master(jump, user, None, None, None, key_only=True)
+                is not None else "password")
+
+    def open_jump_master(self, jump, user, responder, *, candidates=None, verify_identity=None):
+        return self._open_jump_master(jump, user, responder, candidates, verify_identity)
+
+    def jump_control_path(self, jump):
+        if self._jump_key(jump) in self.local_keys:
+            return None
+        record = self.records.get(self._jump_key(jump))
+        if record is None:
+            raise SshFailure(SshFailureKind.JUMP_UNREACHABLE, "outer", jump.login_ip, jump.hostname)
+        if record["error"] is not None:
+            raise record["error"]
+        if not record["ready"]:
+            raise SshFailure(SshFailureKind.JUMP_AUTHENTICATION, "outer", record["address"], jump.hostname)
+        return record["path"]
+
+    def jump_master_alive(self, jump):
+        return self._control_jump_master(self.records[self._jump_key(jump)], "check")
+
+    def ensure_jump_master(self, jump):
+        record = self.records[self._jump_key(jump)]
+        if self._control_jump_master(record, "check"):
+            return
+        record["ready"] = False
+        self._open_jump_master(jump, record["user"], record["responder"],
+                               (record["address"],), record["verify_identity"])
+
+    def probe_jump_master(self, jump):
+        """Called only by an idle per-jump gate: check alone never proves recovery."""
+        record = self.records[self._jump_key(jump)]
+        previous = record["error"]
+        if previous is not None and previous.kind != SshFailureKind.JUMP_UNREACHABLE:
+            raise previous
+        self.ensure_jump_master(jump)
+        try:
+            self._verify_jump_master_identity(record)
+        except SshFailure as failure:
+            self._reject_jump_master(record, failure)
+            raise
+        record["ready"], record["error"] = True, None
+
+    def close_jump_masters(self):
+        first_failure = None
+        try:
+            for record in self.records.values():
+                if record["ready"]:
+                    try:
+                        if not self._control_jump_master(record, "exit"):
+                            raise SshFailure(SshFailureKind.JUMP_UNREACHABLE, "outer", record["address"],
+                                             record["jump"].hostname)
+                    except SshFailure as error:
+                        first_failure = first_failure or error
+                    finally:
+                        record["ready"] = False
+        finally:
+            if self.directory is not None:
+                shutil.rmtree(self.directory)
+                self.directory = None
+        if first_failure is not None:
+            raise first_failure
+
+
+def _new_jump_sessions(*, local_keys=(), timeout=10):
+    return JumpSessions(local_keys=local_keys, timeout=timeout)
+
+
+def _jump_master_request_result(value, target):
+    if value != normalize_name(target.ethernet.hostname):
+        raise SetupError("jump master request does not match the task transit")
+    try:
+        _JUMP_SESSIONS.ensure_jump_master(target.ethernet)
+    except SshFailure as error:
+        return {"ssh_failure": (error.kind.value, error.hop, error.address, error.jump)}
+    return {"ok": True}
+
+
+def _unwrap_jump_master_reply(reply):
+    if "ssh_failure" in reply:
+        kind, hop, address, jump = reply["ssh_failure"]
+        raise SshFailure(SshFailureKind(kind), hop, address, jump)
+    return reply
+
+
+def _jump_control_path_for(jump, *, local=False):
+    if local or _JUMP_SESSIONS is None:
+        return None
+    path = _JUMP_SESSIONS.jump_control_path(jump)
+    if path is None:
+        return None
+    if not _JUMP_SESSIONS.jump_master_alive(jump):
+        key = normalize_name(jump.hostname)
+        if _WORKER_CONNECTION is not None:
+            worker_request("jump-master", key)
+        elif _ACTIVE_COORDINATOR is not None:
+            _unwrap_jump_master_reply(_ACTIVE_COORDINATOR.request(
+                "jump-master", key, _ACTIVE_COORDINATOR.current_target))
+        else:
+            _JUMP_SESSIONS.ensure_jump_master(jump)
+        if not _JUMP_SESSIONS.jump_master_alive(jump):
+            raise SshFailure(SshFailureKind.JUMP_UNREACHABLE, "outer",
+                             _JUMP_SESSIONS.records[key]["address"], jump.hostname)
+    return path
+
+
+@contextmanager
+def _jump_session_lifetime():
+    """Cover direct main callers as well as the guarded entry, without changing its signature."""
+    global _JUMP_SESSIONS
+    previous = _JUMP_SESSIONS
+    primary = None
+    try:
+        yield
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        current, _JUMP_SESSIONS = _JUMP_SESSIONS, previous
+        if current is not None and current is not previous:
+            try:
+                current.close_jump_masters()
+            except BaseException as cleanup:
+                # Same priority as the existing report-handle cleanup: an ordinary
+                # cleanup error must not replace an in-flight interruption.
+                if primary is None or (isinstance(primary, Exception) and not isinstance(cleanup, Exception)):
+                    raise
+
+
 def ethernet_command_argv(argv: object) -> list[str]:
     """Enforce the complete read-only command surface of a transit switch."""
     command = typed_argv(argv, label="Ethernet jump command")
-    exact_commands = {
-        ("hostname",),
-        ("nv", "show", "interface"),
-        ("nv", "config", "show"),
-        ("ip", "-d", "link", "show"),
-        ("bridge", "fdb", "show"),
-        ("ip", "neighbor"),
-        ("ip", "-j", "address", "show"),
-    }
-    tokens = tuple(command)
-    if tokens in exact_commands:
-        return command
-    if (
-        len(command) == 2
-        and command[0] == "ifquery"
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", command[1])
-    ):
+    # One table: precise vectors and their bounded parameter patterns (K8).
+    table = (
+        (("hostname",), None), (("nv", "show", "interface"), None),
+        (("nv", "config", "show"), None), (("ip", "-d", "link", "show"), None),
+        (("bridge", "fdb", "show"), None), (("ip", "neighbor"), None),
+        (("ip", "-j", "address", "show"), None),
+        (("ifquery", None), lambda value: bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value))),
+        (("ssh-keygen", "-l", "-F", None, "-f", "/home/cumulus/.ssh/known_hosts"),
+         lambda value: _import_tools("tools.login_path")._host_key_address(value)),
+    )
+    if any(len(command) == len(pattern) and all(
+            token == expected if expected is not None else validator(token)
+            for token, expected in zip(command, pattern)) for pattern, validator in table):
         return command
     raise SetupError(
         "Ethernet jump command is not allowed by the read-only argv allowlist: "
@@ -2976,6 +3373,9 @@ def ib_command_argv(argv: object) -> list[str]:
         ("nv", "set", "system", "config", "auto-save", "state", "enabled"),
         ("nv", "set", "system", "ztp", "config-save", "enabled"),
         ("nv", "config", "save"),
+        ("cat", "/etc/ssh/ssh_host_rsa_key.pub"),
+        ("cat", "/etc/ssh/ssh_host_ecdsa_key.pub"),
+        ("cat", "/etc/ssh/ssh_host_ed25519_key.pub"),
     }:
         return command
     if (
@@ -3034,7 +3434,7 @@ def ib_command_argv(argv: object) -> list[str]:
 
 def outer_ssh_command(ethernet: Device, user: str, remote_argv: list[str],
                       timeout: int, *, tty: bool = False,
-                      local: bool = False) -> list[str]:
+                      local: bool = False, control_path: Optional[str] = None) -> list[str]:
     command = typed_argv(remote_argv, label="outer SSH command")
     # Local execution uses the same fixed PATH as the remote wrapper (v15; T14).
     script = "export PATH=" + shlex.quote(_SAFE_PATH) + "; exec " + shlex.join(command)
@@ -3047,7 +3447,7 @@ def outer_ssh_command(ethernet: Device, user: str, remote_argv: list[str],
             f"{ethernet.hostname}.eth0_ip login address is required for remote Ethernet access"
         )
     return ["ssh", *(["-tt"] if tty else []), *ssh_options(timeout),
-            "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "ControlMaster=no", "-o", "ControlPath=" + (control_path if control_path is not None else "none"),
             f"{user}@{ethernet.login_ip}", shlex.join(wrapper)]
 
 def ethernet_responder(ethernet_password: str) -> Callable[[str], Optional[str]]:
@@ -3067,17 +3467,26 @@ def ethernet_responder(ethernet_password: str) -> Callable[[str], Optional[str]]
 
 
 def run_on_ethernet(ethernet: Device, user: str, password: str,
-                    remote_argv: list[str], timeout: int, *, local: bool = False) -> str:
+                    remote_argv: list[str], timeout: int, *, local: bool = False,
+                    control_path: Optional[str] = None) -> str:
     if ethernet.dev_type not in TRANSIT_DEVICE_TYPES:
         raise SetupError(
             f"{ethernet.hostname} is not a supported Ethernet transit device"
         )
     command = ethernet_command_argv(remote_argv)
+    path = control_path if control_path is not None else _jump_control_path_for(ethernet, local=local)
+    outer_options = {"local": local}
+    if path is not None:
+        outer_options["control_path"] = path
     result = interactive_run(
-        outer_ssh_command(ethernet, user, command, timeout, local=local),
+        outer_ssh_command(ethernet, user, command, timeout, **outer_options),
         (lambda _output: None) if local else ethernet_responder(password), timeout,
     )
     if result.exit_code != 0:
+        if not local:
+            failure = _classify_jump_output(result.output, ethernet)
+            if failure is not None:
+                raise failure
         if (
             command[0] == "ifquery"
             and result.exit_code == 1
@@ -3087,6 +3496,8 @@ def run_on_ethernet(ethernet: Device, user: str, password: str,
             # stanza.  That semantic absence means the Linux default VRF; no
             # other exit/output combination is downgraded.
             return ""
+        if command[:3] == ["ssh-keygen", "-l", "-F"] and result.exit_code == 1 and not result.output.strip():
+            return ""  # Exact OpenSSH lookup no-match; never downgrade another command.
         raise SetupError(
             f"Ethernet SSH failed for {ethernet.hostname} ({ethernet.login_ip}), "
             f"exit={result.exit_code}: {result.output.strip()[-600:]}"
@@ -3562,8 +3973,11 @@ def nested_ssh_command(target: Target, neighbor: Neighbor, eth_user: str,
                 or _phase.outer_endpoint != eth_user + "@" + target.ethernet.login_ip):
             raise SetupError("private phase is not bound to this exact SSH request")
         nested = ["sh", "-c", _ib_phase_script(nested, _phase)]
-    return outer_ssh_command(target.ethernet, eth_user, nested, timeout,
-                             tty=True, local=local)
+    outer_options = {"tty": True, "local": local}
+    path = _jump_control_path_for(target.ethernet, local=local)
+    if path is not None:
+        outer_options["control_path"] = path
+    return outer_ssh_command(target.ethernet, eth_user, nested, timeout, **outer_options)
 
 def _pending_diff_has_password_update_notice(output: str) -> bool:
     """Recognize notification lines, not keywords inside NVUE setter values."""
@@ -3614,6 +4028,15 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
     )
     record_metric("ib_ssh_attempts")
     result = interactive_run(command, responder, max(timeout * 4, 60))
+    if (type(result) is SessionResult and type(result.exit_code) is int and result.exit_code != 0
+            and type(result.output) is str):
+        failure = (_ib_host_key_failure(result.output, target, neighbor, local=local)
+                   or (None if local else _classify_jump_output(result.output, target.ethernet, neighbor.ipv6)))
+        if failure is not None:
+            raise failure
+        if re.search(r"(?i)WARNING:\s+REMOTE HOST IDENTIFICATION HAS CHANGED", result.output):
+            raise SshFailure(SshFailureKind.TARGET_HOST_KEY_CHANGED, "inner", neighbor.ipv6,
+                             None if local else target.ethernet.hostname)
     if ib_command == ["nv", "config", "diff", "-o", "commands"] and (
         result.password_changed or result.password_change_required
         or result.password_change_attempted or result.ib_authentication_rejected
@@ -4278,6 +4701,7 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
     """Authorize one ordinary management command without changing credential roles."""
     result = None
     failure = None
+    ssh_failure = None
     summary = None
     withheld = None
     try:
@@ -4329,10 +4753,12 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
             if type(candidate) is int and 1 <= candidate <= 255:
                 number = candidate
         failure = uncertain, number
+        ssh_failure = _ssh_failure_fact(error)
         summary = _authorized_failure_summary(
             error, (ethernet_password, current_password, withheld))
     if failure is not None:
         error = SetupError("management IB operation failed; device state is UNKNOWN")
+        _retain_ssh_failure(error, ssh_failure)
         if failure[0] is True:
             error.cleanup_uncertain = True
         if failure[1] is not None:
@@ -4467,9 +4893,9 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
         except (ProjectInputChanged, BatchStopped):
             raise
         except SetupError as exc:
-            raise IBConfigurationStageUncertain(
+            raise _retain_ssh_failure(IBConfigurationStageUncertain(
                 "initial configuration was not fully verified; writes may be partial: " + str(exc)
-            ) from None
+            ), exc) from None
         return readback, authorized
     except (ProjectInputChanged, BatchStopped):
         raise
@@ -4482,7 +4908,9 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
             if type(candidate) is int and 1 <= candidate <= 255:
                 number = candidate
         failure = uncertain, number
+        ssh_failure = _ssh_failure_fact(error)
     error = SetupError("Initial stage failed; device state is UNKNOWN")
+    _retain_ssh_failure(error, ssh_failure)
     if failure[0] is True:
         error.cleanup_uncertain = True
     if failure[1] is not None:
@@ -4585,11 +5013,137 @@ def verify_state(device: Device, state: DeviceState) -> None:
         raise SetupError("post-configuration verification failed: " + "; ".join(errors))
 
 
+@dataclass(frozen=True)
+class ReadinessPolicy:
+    first_delay: int = 15
+    interval: int = 10
+    attempts: int = 9
+
+
+IPV4_READINESS = ReadinessPolicy()
+
+
+def wait_until_ready(probe, policy: ReadinessPolicy, *, label: str, sleep=time.sleep):
+    """One bounded readiness loop; transport and existing exceptional failures stay outside."""
+    reason = "no verified response"
+    for attempt in range(policy.attempts):
+        check_task_cancelled()
+        delay = policy.first_delay if attempt == 0 else policy.interval
+        log(f"  IPv4 SSH [{attempt + 1}/{policy.attempts}]: "
+            f"{'waiting ' + str(delay) + 's' if delay else 'no initial wait'} "
+            f"for interface readiness; {label}")
+        if delay:
+            sleep(delay)
+        check_task_cancelled()
+        state, fact = probe()
+        if state == "READY":
+            return
+        if state == "FATAL":
+            raise fact
+        reason = fact
+        log(f"  IPv4 SSH [{attempt + 1}/{policy.attempts}] not ready: {reason}")
+    raise SetupError(f"IPv4 SSH verification failed for {label} after {policy.attempts} attempts; "
+                     f"设备可能还在收敛; last failure: {reason}")
+
+
+def _readiness_failure_result(failure):
+    if failure.kind in (SshFailureKind.JUMP_UNREACHABLE, SshFailureKind.DIRECT_SSH_NETWORK):
+        if failure.hop == "outer":
+            raise failure  # Existing coordinator/Gate owns an unavailable jump.
+        return "RETRY", "SSH endpoint network is not ready"
+    return "FATAL", failure
+
+
+def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout, *,
+                       local, strict, password, destination, strict_inner, password_policy):
+    """One read-only probe, after the caller's wait; never replay a fatal operation."""
+    nonretryable = re.compile(
+        r"(?i)permission denied|authentication failed|"
+        r"host key verification failed|remote host identification has changed|"
+        r"offending .* key|operation not permitted|command not found|"
+        r"could not resolve hostname")
+    marker = os.urandom(16).hex()
+    outer_options = {"tty": True, "local": local}
+    try:
+        path = _jump_control_path_for(target.ethernet, local=local)
+    except SshFailure as failure:
+        return _readiness_failure_result(failure)
+    if path is not None:
+        outer_options["control_path"] = path
+    if strict:
+        probe = typed_argv(outer_ssh_command(
+            target.ethernet, eth_user, strict_inner, timeout, **outer_options,
+        ), label="IPv4 management outer command")
+    else:
+        probe = outer_ssh_command(target.ethernet, eth_user, [
+            "ip", "vrf", "exec", vrf, "ssh", "-tt",
+            "-o", f"ConnectTimeout={timeout}", "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
+            "-o", "PreferredAuthentications=password,keyboard-interactive",
+            f"{ib_user}@{destination}",
+            shlex.join(["sh", "-c", _framed_script(["true"], marker)]),
+        ], timeout, **outer_options)
+    responder = NestedResponder(ethernet_password, password, False,
+                                ib_destination=f"{ib_user}@{destination}")
+    record_metric("ib_ssh_attempts")
+    try:
+        result = interactive_run(probe, responder, max(timeout * 3, 45))
+    except SshFailure as failure:
+        return _readiness_failure_result(failure)
+    except SetupError as exc:
+        if not str(exc).startswith("SSH/PAM session timed out;"):
+            raise
+        return "RETRY", "SSH session timed out"
+    if (type(result) is SessionResult and type(result.exit_code) is int and result.exit_code != 0
+            and type(result.output) is str):
+        classified = (classify_ssh_failure(result.output, outer_address=None, inner_address=destination)
+                      if local else _classify_jump_output(result.output, target.ethernet, destination))
+        if local and classified is not None and classified.kind is not SshFailureKind.TARGET_HOST_KEY_CHANGED:
+            classified = None  # Preserve the existing local endpoint/credential protocol below.
+        if classified is not None:
+            if classified.kind is SshFailureKind.TARGET_HOST_KEY_CHANGED:
+                location = "local" if local or classified.hop == "outer" else "jump"
+                change = _import_tools("tools.login_path").parse_host_key_change(
+                    result.output, location=location,
+                    jump=target.ethernet.hostname if location == "jump" else None)
+                if change is not None:
+                    classified.host_key_change = change
+            return _readiness_failure_result(classified)
+    detail = _ib_failure_detail(result.output, marker, (ethernet_password, password))
+    if (result.password_change_required or result.password_change_attempted
+            or _EXPIRED_PASSWORD.search(result.output)):
+        raise SetupError(f"IPv4 SSH verification blocked for {target.ib.hostname}: "
+                         "password change is required; no rotation or retry performed")
+    if result.ib_authentication_rejected or nonretryable.search(result.output):
+        raise SetupError(f"IPv4 SSH verification blocked for {target.ib.hostname}: "
+                         f"authentication/host-key/local command failure; {detail}")
+    if strict and (type(result) is not SessionResult
+                   or type(result.exit_code) is not int
+                   or type(result.output) is not str
+                   or any(getattr(result, name) is not False for name in (
+                       "password_changed", "password_change_required",
+                       "password_change_attempted", "ib_authentication_rejected"))
+                   or responder.password_change_attempted
+                   or responder.password_change_blocked
+                   or _pending_diff_has_password_update_notice(result.output)):
+        raise SetupError("IPv4 management outcome is unverified")
+    if result.exit_code == 0:
+        if strict:
+            password_policy.assert_unchanged()
+        else:
+            extract_command_output(result.output, marker)
+        log(f"  IPv4 SSH SUCCESS: {'management' if strict else 'password-only'} login verified.")
+        return "READY", None
+    return "RETRY", f"exit={result.exit_code}; {detail}"
+
+
 def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
                       ethernet_password: str, ib_user: str, timeout: int, *,
                       local: bool = False, _ib_current_password=None,
-                      _password_policy=None, ib_password: Optional[str] = None) -> None:
-    """Up to 3 read-only IPv4 readiness probes, each after a 10 s wait (v15; table 6-1 row 9).
+                      _password_policy=None, ib_password: Optional[str] = None,
+                      readiness_policy: ReadinessPolicy = IPV4_READINESS) -> None:
+    """Read-only IPv4 readiness with independent 15/10/9 policy (v3.1.4 WP-3).
 
     One loop (guide 2.3 :204).  Authentication, host-key, local-command and password-change
     evidence is never retried; only a session timeout or a non-zero exit without such evidence
@@ -4598,11 +5152,6 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
     checked, and a failure becomes the fixed safe management error (P3c map 2.3).  Otherwise
     the v15 password-only probe runs with the selected IB credential (ib_password).
     """
-    nonretryable = re.compile(
-        r"(?i)permission denied|authentication failed|"
-        r"host key verification failed|remote host identification has changed|"
-        r"offending .* key|operation not permitted|command not found|"
-        r"could not resolve hostname")
     strict = _ib_current_password is not None or _password_policy is not None
     failure = None
     try:
@@ -4637,15 +5186,14 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
             # Verified target permission never replaces the selected inner current.
             _ib_project_value(_password_policy, user=ib_user, fetch=True)
             password = _ib_current_password
-            probe = typed_argv(outer_ssh_command(
-                target.ethernet, eth_user, typed_argv([
-                    "ip", "vrf", "exec", validated_vrf, "ssh",
-                    "-o", f"ConnectTimeout={timeout}",
-                    "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "LogLevel=ERROR",
-                    f"{ib_user}@{destination}", shlex.join(ib_command_argv(["true"])),
-                ], label="IPv4 management command"), timeout, tty=True, local=False,
-            ), label="IPv4 management outer command")
+            strict_inner = typed_argv([
+                "ip", "vrf", "exec", validated_vrf, "ssh",
+                "-o", f"ConnectTimeout={timeout}",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "LogLevel=ERROR",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                f"{ib_user}@{destination}", shlex.join(ib_command_argv(["true"])),
+            ], label="IPv4 management command")
         else:
             validate_jump_target(target)
             validated_vrf = validate_network_selector(vrf, label="IPv4 verification VRF")
@@ -4653,63 +5201,13 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
                 raise SetupError("IPv4 verification needs the selected IB credential")
             password = ib_password
             destination = target.ib.login_ip
-        last_failure = "no verified response"
-        for attempt in range(1, 4):
-            log(f"  IPv4 SSH [{attempt}/3]: waiting 10s for interface readiness; "
-                f"{destination} via {target.ethernet.hostname}, VRF {validated_vrf}")
-            check_task_cancelled()
-            time.sleep(10)
-            marker = os.urandom(16).hex()
-            if not strict:
-                probe = outer_ssh_command(target.ethernet, eth_user, [
-                    "ip", "vrf", "exec", validated_vrf, "ssh", "-tt",
-                    "-o", f"ConnectTimeout={timeout}", "-o", "StrictHostKeyChecking=accept-new",
-                    "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
-                    "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
-                    "-o", "PreferredAuthentications=password,keyboard-interactive",
-                    f"{ib_user}@{destination}",
-                    shlex.join(["sh", "-c", _framed_script(["true"], marker)]),
-                ], timeout, tty=True, local=local)
-            responder = NestedResponder(ethernet_password, password, False,
-                                        ib_destination=f"{ib_user}@{destination}")
-            record_metric("ib_ssh_attempts")
-            try:
-                result = interactive_run(probe, responder, max(timeout * 3, 45))
-            except SetupError as exc:
-                if not str(exc).startswith("SSH/PAM session timed out;"):
-                    raise
-                last_failure = "SSH session timed out"
-            else:
-                detail = _ib_failure_detail(result.output, marker, (ethernet_password, password))
-                if (result.password_change_required or result.password_change_attempted
-                        or _EXPIRED_PASSWORD.search(result.output)):
-                    raise SetupError(f"IPv4 SSH verification blocked for {target.ib.hostname}: "
-                                     "password change is required; no rotation or retry performed")
-                if result.ib_authentication_rejected or nonretryable.search(result.output):
-                    raise SetupError(f"IPv4 SSH verification blocked for {target.ib.hostname}: "
-                                     f"authentication/host-key/local command failure; {detail}")
-                if strict and (type(result) is not SessionResult
-                               or type(result.exit_code) is not int
-                               or type(result.output) is not str
-                               or any(getattr(result, name) is not False for name in (
-                                   "password_changed", "password_change_required",
-                                   "password_change_attempted", "ib_authentication_rejected"))
-                               or responder.password_change_attempted
-                               or responder.password_change_blocked
-                               or _pending_diff_has_password_update_notice(result.output)):
-                    raise SetupError("IPv4 management outcome is unverified")
-                if result.exit_code == 0:
-                    if strict:
-                        _password_policy.assert_unchanged()
-                    else:
-                        extract_command_output(result.output, marker)
-                    log(f"  IPv4 SSH SUCCESS [{attempt}/3]: "
-                        f"{'management' if strict else 'password-only'} login verified.")
-                    return
-                last_failure = f"exit={result.exit_code}; {detail}"
-            log(f"  IPv4 SSH [{attempt}/3] not ready: {last_failure}")
-        raise SetupError(f"IPv4 password-only SSH verification failed for {target.ib.hostname} "
-                         f"after 3 attempts (10s wait before each); last failure: {last_failure}")
+            strict_inner = None
+        wait_until_ready(lambda: _probe_ipv4_login(
+            target, validated_vrf, eth_user, ethernet_password, ib_user, timeout,
+            local=local, strict=strict, password=password, destination=destination,
+            strict_inner=strict_inner, password_policy=_password_policy),
+            readiness_policy, label=target.ib.hostname, sleep=time.sleep)
+        return
     except (ProjectInputChanged, BatchStopped):
         raise
     except (SetupError, OSError) as error:
@@ -4721,7 +5219,12 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
             if type(candidate) is int and 1 <= candidate <= 255:
                 number = candidate
         failure = uncertain, number
+        ssh_failure = _ssh_failure_fact(error)
     error = SetupError("management IB operation failed; device state is UNKNOWN")
+    _retain_ssh_failure(error, ssh_failure)
+    change = getattr(ssh_failure, "host_key_change", None)
+    if change is not None:
+        error.host_key_change = change
     if failure[0] is True:
         error.cleanup_uncertain = True
     if failure[1] is not None:
@@ -4781,8 +5284,230 @@ def readonly_direct_ssh_retry(label, address, timeout, metric, attempt_once, *, 
         f"(connect-timeout={connect_timeout}s, retry-delay=3s): {last_failure}")
 
 
+def _management_host_key_failure(output):
+    change = _import_tools("tools.login_path").parse_host_key_change(output, location="local")
+    if change is not None:
+        failure = SshFailure(SshFailureKind.TARGET_HOST_KEY_CHANGED, "direct", change.address)
+        failure.host_key_change = change
+        return failure
+    if re.search(r"(?i)WARNING:\s+REMOTE HOST IDENTIFICATION HAS CHANGED", output):
+        raise SetupError("host-key change (unparseable); no known_hosts entry removed")
+    return None
+
+
+def _ib_host_key_failure(output, target, neighbor, *, local):
+    """Retain only complete parser facts; never add scope to a real warning."""
+    change = _import_tools("tools.login_path").parse_host_key_change(output,
+        location="local" if local else "jump", jump=None if local else target.ethernet.hostname)
+    if change is None:
+        return None
+    host, separator, interface = change.address.partition("%")
+    if not separator or interface != neighbor.interface or ipaddress.IPv6Address(host) != ipaddress.IPv6Address(neighbor.ipv6):
+        return None
+    failure = SshFailure(SshFailureKind.TARGET_HOST_KEY_CHANGED, "inner", change.address,
+                         None if local else target.ethernet.hostname)
+    failure.host_key_change = change
+    return failure
+
+
+_JUMP_KNOWN_HOSTS = "/home/cumulus/.ssh/known_hosts"
+
+
+def _host_key_task_gate(task, change, *, eth_user, apply):
+    """Bind deletion to this admitted IB and the warning's original address."""
+    validate_jump_target(task.target)
+    validate_neighbor_boundary(task.neighbor)
+    library = _import_tools("tools.login_path")
+    if type(change) is not library.HostKeyChange or not library._host_key_address(change.address):
+        raise SetupError("host-key change address is unverified; no entry removed")
+    if (not change.lines or any(type(line) is not int or line < 1 for line in change.lines)
+            or not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", change.new_fingerprint)):
+        raise SetupError("host-key warning facts are unverified; no entry removed")
+    host, separator, interface = change.address.partition("%")
+    if separator:
+        matched = (ipaddress.IPv6Address(host) == ipaddress.IPv6Address(task.neighbor.ipv6)
+                   and interface == task.neighbor.interface)
+    else:
+        matched = ipaddress.IPv4Address(host) == ipaddress.IPv4Address(task.target.ib.login_ip)
+    if not apply or not matched:
+        raise SetupError("host-key change is outside this IB apply/address scope; no entry removed")
+    if task.local:
+        if change.location != "local" or pwd.getpwuid(os.getuid()).pw_name != eth_user:
+            raise SetupError("local Leaf user/location differs; no entry removed")
+    elif (eth_user != "cumulus" or change.location != "jump"
+            or change.jump != task.target.ethernet.hostname or change.known_hosts_path != _JUMP_KNOWN_HOSTS):
+        raise SetupError("host-key change is outside this IB jump/apply scope; no entry removed")
+
+
+def remove_jump_known_hosts_entries(task, change, *, eth_user, apply, timeout, before_write=None):
+    """The sole closed jump write; parent re-reads before every serialized deletion."""
+    if task.local:
+        raise SetupError("local Leaf removal must use its local known_hosts editor")
+    _host_key_task_gate(task, change, eth_user=eth_user, apply=apply)
+    check_task_cancelled()
+    library = _import_tools("tools.login_path")
+    rows = library.parse_known_host_fingerprints(run_on_ethernet(
+        task.target.ethernet, eth_user, task.ethernet_password,
+        ["ssh-keygen", "-l", "-F", change.address, "-f", _JUMP_KNOWN_HOSTS], timeout))
+    if not set(change.lines).issubset({row[0] for row in rows}):
+        raise SetupError("Offending host-key lines differ from current lookup; no entry removed")
+    command = ["ssh-keygen", "-f", _JUMP_KNOWN_HOSTS, "-R", change.address]
+    path = _jump_control_path_for(task.target.ethernet, local=False)
+    if before_write is not None:
+        before_write()
+    result = interactive_run(outer_ssh_command(task.target.ethernet, eth_user, command,
+        timeout, tty=True, control_path=path), ethernet_responder(task.ethernet_password), timeout)
+    if result.exit_code != 0:
+        failure = _classify_jump_output(result.output, task.target.ethernet)
+        if failure is not None:
+            raise failure
+        raise SetupError("jump host-key remove failed; no automatic replay")
+    old = any(line.strip() == "Original contents retained as " + _JUMP_KNOWN_HOSTS + ".old"
+              for line in result.output.splitlines())
+    return library.RemovalReceipt(tuple(row[0] for row in rows), old, None, None, None, None)
+
+
+class JumpKnownHostsEditor:
+    """Read on the worker's existing transport; only the parent can remove."""
+    def __init__(self, task, change, *, eth_user, timeout):
+        self.task, self.change, self.eth_user, self.timeout = task, change, eth_user, timeout
+
+    def fingerprints(self, address):
+        if address != self.change.address:
+            raise ValueError("host-key editor address differs from warning")
+        return _import_tools("tools.login_path").parse_known_host_fingerprints(run_on_ethernet(
+            self.task.target.ethernet, self.eth_user, self.task.ethernet_password,
+            ["ssh-keygen", "-l", "-F", address, "-f", _JUMP_KNOWN_HOSTS], self.timeout))
+
+    def remove(self, address):
+        if address != self.change.address:
+            raise ValueError("host-key editor address differs from warning")
+        if _WORKER_CONNECTION is not None:
+            return worker_request("host-key-remove", self.change)
+        if _ACTIVE_COORDINATOR is None:
+            raise SetupError("host-key deletion requires the admitted coordinator")
+        return _ACTIVE_COORDINATOR.request("host-key-remove", self.change, self.task.target)
+
+
+def ib_host_key_reader(task, eth_user, ib_user, current_password, timeout, *, policy=None):
+    """Construct only after authentication; one fixed read, one existing fingerprint algorithm."""
+    def read(key_type):
+        paths = {"RSA": "/etc/ssh/ssh_host_rsa_key.pub", "ECDSA": "/etc/ssh/ssh_host_ecdsa_key.pub",
+                 "ED25519": "/etc/ssh/ssh_host_ed25519_key.pub"}
+        if key_type.upper() not in paths:
+            return None
+        if policy is not None:
+            policy.assert_unchanged()
+        result = run_on_ib(task.target, task.neighbor, eth_user, task.ethernet_password,
+            ib_user, current_password, timeout, ["cat", paths[key_type.upper()]],
+            local=task.local, allow_password_change=False, password_only=True)
+        if result.exit_code != 0:
+            return None
+        return _public_key_fingerprint(result.output.strip())
+    return read
+
+
+def _host_key_outcome(change, *, pending=False):
+    failure = SshFailure(SshFailureKind.HOST_KEY_REFRESH_PENDING if pending else
+                         SshFailureKind.TARGET_HOST_KEY_CHANGED,
+                         "inner" if change.location == "jump" else "direct", change.address, change.jump)
+    failure.host_key_change = change
+    return failure
+
+
+def _refresh_host_key(change, editor, *, apply, read_device_fingerprint, retry,
+                       operator_forced, host_key_records):
+    library = _import_tools("tools.login_path")
+    try:
+        if not apply:
+            verified = read_device_fingerprint(change.key_type) if read_device_fingerprint else None
+            if verified != change.new_fingerprint:
+                raise _host_key_outcome(change)
+            record = library.HostKeyRefreshRecord(change.location, change.jump, change.known_hosts_path,
+                change.lines, change.address, change.key_type,
+                tuple(row[2] for row in editor.fingerprints(change.address)), change.new_fingerprint,
+                "verified", "refresh-pending", None)
+        else:
+            before_remove = None
+            if isinstance(editor, library.LocalKnownHostsEditor) and (_WORKER_CONNECTION is not None or _ACTIVE_COORDINATOR is not None):
+                def before_remove():
+                    reason = "refresh this verified IB host-key entry in the operator's known_hosts"
+                    if _WORKER_CONNECTION is not None:
+                        worker_request("authorize", reason)
+                    else:
+                        _ACTIVE_COORDINATOR.authorize(_ACTIVE_COORDINATOR.current_target, reason)
+                    obtain_write_permit("host_key")
+            record = library.refresh_target_host_key(change, editor,
+                read_device_fingerprint=read_device_fingerprint, retry=retry, operator_forced=operator_forced,
+                before_remove=before_remove)
+    except (ProjectInputChanged, BatchStopped, SshFailure):
+        raise
+    except (ValueError, OSError, SetupError, subprocess.TimeoutExpired):
+        raise _host_key_outcome(change) from None
+    if host_key_records is not None:
+        host_key_records.append(record)
+    if not apply:
+        raise _host_key_outcome(change, pending=True)
+    return record
+
+
+def refresh_ib_host_key(change, task, *, eth_user, timeout, apply,
+                        read_device_fingerprint, retry, operator_forced, host_key_records):
+    library = _import_tools("tools.login_path")
+    try:
+        if task.local:
+            _host_key_task_gate(task, change, eth_user=eth_user, apply=True)
+            editor = library.LocalKnownHostsEditor(Path(change.known_hosts_path), home=Path.home())
+        else:
+            _host_key_task_gate(task, change, eth_user=eth_user, apply=True)
+            editor = JumpKnownHostsEditor(task, change, eth_user=eth_user, timeout=timeout)
+        return _refresh_host_key(change, editor, apply=apply, read_device_fingerprint=read_device_fingerprint,
+            retry=retry, operator_forced=operator_forced, host_key_records=host_key_records)
+    except (ProjectInputChanged, BatchStopped, SshFailure):
+        raise
+    except (ValueError, OSError, SetupError, subprocess.TimeoutExpired):
+        raise _host_key_outcome(change) from None
+
+
+def resolve_host_key_refresh_selector(value, ib_devices):
+    if value is None:
+        return frozenset()
+    ranges = _import_tools("tools.hostname_ranges")
+    try:
+        selector = ranges.parse_selector(value, option="--refresh-host-key", allow_all=False)
+        return frozenset(normalize_name(name) for name in ranges.select(selector,
+            [device.hostname for device in ib_devices.values() if device.dev_type == "ib"]))
+    except ranges.SelectorError as error:
+        raise SetupError(str(error)) from None
+
+
+def _refresh_management_host_key(change, device, address, *, apply,
+                                 read_device_fingerprint, retry, operator_forced, host_key_records):
+    """Local management gate; the authenticated link-local reader belongs to WP5."""
+    if device.dev_type != "ib":
+        raise SetupError("host-key change requires IB --apply; no known_hosts entry removed")
+    allowed = {str(ipaddress.IPv4Interface(prefix).ip)
+               for prefix in (device.eth0_prefix, device.eth1_prefix) if prefix}
+    try:
+        actual = str(ipaddress.IPv4Address(change.address))
+    except ipaddress.AddressValueError:
+        raise SetupError("host-key change address differs from this CSV IB") from None
+    if actual != address or actual not in allowed or change.location != "local":
+        raise SetupError("host-key change address differs from this CSV IB")
+    library = _import_tools("tools.login_path")
+    try:
+        editor = library.LocalKnownHostsEditor(Path(change.known_hosts_path), home=Path.home())
+        return _refresh_host_key(change, editor, apply=apply,
+            read_device_fingerprint=read_device_fingerprint, retry=retry,
+            operator_forced=operator_forced, host_key_records=host_key_records)
+    except (ValueError, OSError, subprocess.TimeoutExpired) as error:
+        # Library errors contain fixed facts, never raw remote banners.
+        raise SetupError("management host-key refresh failed: " + str(error)) from None
+
+
 def verify_management_direct_ssh(device: Device, interface: str, user: str,
-                                 password: str, timeout: int) -> None:
+                                 password: str, timeout: int, *, apply=False,
+                                 read_device_fingerprint=None, operator_forced=False, host_key_records=None) -> None:
     """Final read-only management-server -> IB check, with no configured proxy."""
     if device.dev_type != "ib" or not valid_ssh_user(user):
         raise SetupError("invalid IB target or user for management direct SSH")
@@ -4802,18 +5527,36 @@ def verify_management_direct_ssh(device: Device, interface: str, user: str,
             f"{user}@{address}",
             shlex.join(["sh", "-c", _framed_script(command, marker)]),
         ]
-        return interactive_run(
+        result = interactive_run(
             argv, NestedResponder("", password, False, ib_destination=f"{user}@{address}"),
             max(connect_timeout * 3, 15))
-    result = readonly_direct_ssh_retry("direct password-only IPv4 SSH", address, timeout,
-                                      "direct_ssh_attempts", attempt_once, secrets=(password,))
+        if result.exit_code != 0:
+            failure = _management_host_key_failure(result.output)
+            if failure is not None:
+                raise failure
+        return result
+    def verify_once():
+        return readonly_direct_ssh_retry("direct password-only IPv4 SSH", address, timeout,
+                                         "direct_ssh_attempts", attempt_once, secrets=(password,))
+    try:
+        result = verify_once()
+    except SshFailure as error:
+        change = getattr(error, "host_key_change", None)
+        if change is None:
+            raise
+        retried = []
+        _refresh_management_host_key(change, device, address, apply=apply,
+            read_device_fingerprint=read_device_fingerprint, retry=lambda: retried.append(verify_once()),
+            operator_forced=operator_forced, host_key_records=host_key_records)
+        result = retried[0]
     output = _split_comma_interface_lines(extract_command_output(result.output, marker))
     verify_state(device, parse_nvue_state(output))
 
 
 def run_management_direct_checks(targets: list[Target], credentials: dict[str, str],
                                  user: str, timeout: int, *,
-                                 on_management_server: bool) -> list[dict[str, str]]:
+                                 on_management_server: bool, apply=False, read_device_fingerprint=None,
+                                 operator_forced=False, host_key_records=None) -> list[dict[str, str]]:
     """Prefer eth0; probe eth1 only after eth0 fails. Never report credentials."""
     log("\nStage 5: ZTP server -> IB direct IPv4 SSH checks (NO OOB jump)")
     log("  Password-only SSH and applied hostname/IP identity are checked; no device changes.")
@@ -4838,10 +5581,19 @@ def run_management_direct_checks(targets: list[Target], credentials: dict[str, s
             else:
                 log(f"  DIRECT SSH RUN: {device.hostname} {interface} {row['ip']}")
                 try:
-                    verify_management_direct_ssh(device, interface, user, credentials[key], timeout)
+                    options = (dict(apply=apply, read_device_fingerprint=read_device_fingerprint,
+                                    operator_forced=operator_forced, host_key_records=host_key_records)
+                               if apply or read_device_fingerprint is not None or operator_forced
+                               or host_key_records is not None else {})
+                    verify_management_direct_ssh(device, interface, user, credentials[key], timeout, **options)
+                except (ProjectInputChanged, BatchStopped):
+                    raise
                 except SetupError as exc:
                     row["status"] = "FAIL"
                     row["detail"] = str(exc).replace(credentials[key], "<redacted>") if credentials[key] else str(exc)
+                    failure = _ssh_failure_fact(exc)
+                    if failure is not None:
+                        row["failure_kind"] = failure.kind.value
                 else:
                     row["status"] = "PASS"
                     row["detail"] = "direct password-only SSH and expected applied configuration verified"
@@ -4931,6 +5683,7 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
                               local_keys: set[str], *, eth_user: str = "cumulus",
                               timeout: int = 5,
                               password_for: Optional[Callable[[str], Optional[str]]] = None,
+                              jump_sessions=None,
                               ) -> dict[str, Optional[str]]:
     """Public key first (I13); then the shared/per-switch hidden prompts, or with
     password_for (--credentials-fd) the fd table and never a prompt (R-012 design :345).
@@ -4946,7 +5699,8 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
             passwords[key] = ""
             continue
         try:
-            mode = probe_ethernet_key(switch, eth_user, timeout)
+            mode = (probe_ethernet_key(switch, eth_user, timeout) if jump_sessions is None
+                    else jump_sessions.probe_jump_key(switch, eth_user))
         except SetupError as exc:
             log(f"OOB access unavailable: {exc}; snapshot collection will report its dependents.")
             passwords[key] = ""
@@ -4956,6 +5710,19 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
             passwords[key] = ""
         else:
             pending.append((key, switch))
+
+    def finish_jump_password_masters():
+        if jump_sessions is not None:
+            for key, switch in pending:
+                if passwords.get(key) is None:
+                    continue
+                try:
+                    jump_sessions.open_jump_master(switch, eth_user, ethernet_responder(passwords[key]))
+                except SshFailure as error:
+                    # Retain the typed failure in the coordinator's record; its snapshot
+                    # fails without another login or a guessed credential.
+                    log(f"OOB master unavailable: {error}; snapshot collection will report its dependents.")
+
     if pending and password_for is not None:
         for key, switch in pending:
             value = password_for(switch.hostname)
@@ -4966,6 +5733,7 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
                 log(f"OOB password for {switch.hostname} is not in --credentials-fd; "
                     "no login attempted, its dependents are reported.")
             passwords[key] = value
+        finish_jump_password_masters()
         return passwords
     if pending:
         if not sys.stdin.isatty():
@@ -4981,6 +5749,7 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
             if not value:
                 raise SetupError("OOB password cannot be empty")
             passwords[key] = value
+    finish_jump_password_masters()
     return passwords
 
 
@@ -5079,15 +5848,16 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
     except SetupError as exc:
         # The authorized helper's own fixed error carries the product text it replaced
         # (DEV _authorized_failure_text); keep it through the v15 wrapper (map 2.3 :121).
-        raise IBConfigurationStageUncertain(
+        raise _retain_ssh_failure(IBConfigurationStageUncertain(
             "services were not fully verified; writes may be partial: "
-            + _authorized_failure_text(exc)) from None
+            + _authorized_failure_text(exc)), exc) from None
     log("  Infra Services SUCCESS: desired values verified.")
     return authorized, False
 
 def verify_management_key_possession(target: Target, ib_user: str,
                                      entry: dict[str, str], private_key: Path,
-                                     timeout: int) -> None:
+                                     timeout: int, *, apply=False, read_device_fingerprint=None,
+                                     operator_forced=False, host_key_records=None) -> None:
     """Prove the installed management key by a public-key-only IPv4 reconnect."""
     if private_key.is_symlink() or not private_key.is_file():
         raise SetupError("management private key is not a regular local file")
@@ -5119,9 +5889,24 @@ def verify_management_key_possession(target: Target, ib_user: str,
         ]
         result = subprocess.run(probe, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, timeout=15, check=False)
-        return SessionResult((result.stdout or "") + "\n" + (result.stderr or ""), result.returncode)
-    readonly_direct_ssh_retry("management public-key-only IPv4 SSH", login_ip, timeout,
-                              "public_key_ssh_attempts", attempt_once)
+        result = SessionResult((result.stdout or "") + "\n" + (result.stderr or ""), result.returncode)
+        if result.exit_code != 0:
+            failure = _management_host_key_failure(result.output)
+            if failure is not None:
+                raise failure
+        return result
+    def verify_once():
+        return readonly_direct_ssh_retry("management public-key-only IPv4 SSH", login_ip, timeout,
+                                         "public_key_ssh_attempts", attempt_once)
+    try:
+        verify_once()
+    except SshFailure as error:
+        change = getattr(error, "host_key_change", None)
+        if change is None:
+            raise
+        _refresh_management_host_key(change, target.ib, login_ip, apply=apply,
+            read_device_fingerprint=read_device_fingerprint, retry=verify_once,
+            operator_forced=operator_forced, host_key_records=host_key_records)
     record_metric("public_key_ssh_verified")
 
 
@@ -5318,7 +6103,8 @@ def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
                   management_private_key: Optional[Path] = None,
                   _ib_current_password=None, _password_policy=None,
                   ib_password: Optional[str] = None,
-                  details: Optional[dict] = None) -> bool:
+                  details: Optional[dict] = None, read_device_fingerprint=None,
+                  operator_forced=False, host_key_records=None) -> bool:
     """Public-key stage: the management-server context installs through the
     authorized helper (DEV), otherwise with the selected IB credential (v15);
     only the two canonical receipts are accepted (DEV)."""
@@ -5381,7 +6167,9 @@ def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
     for entry in keys:
         if entry["name"] == "mgmt-server.pub" and management_private_key is not None:
             verify_management_key_possession(
-                target, ib_user, entry, management_private_key, timeout,
+                target, ib_user, entry, management_private_key, timeout, apply=apply,
+                read_device_fingerprint=read_device_fingerprint, operator_forced=operator_forced,
+                host_key_records=host_key_records,
             )
             log(f"  Public key {entry['name']} {entry['fingerprint']}: 已验证")
         else:
@@ -5511,6 +6299,8 @@ def parse_args() -> argparse.Namespace:
                         help="configure devices that pass the all-unconfigured check")
     parser.add_argument("--force", action="store_true",
                         help="only complete missing Network fields; refuse conflicts")
+    parser.add_argument("--refresh-host-key", metavar="HOST[,HOST...]",
+                        help="IB selector for operator-confirmed, otherwise unverifiable host-key refresh (with --apply)")
     parser.add_argument("--yes", action="store_true",
                         help="with --apply, do not ask for final confirmation")
     parser.add_argument(
@@ -5570,11 +6360,138 @@ def automatic_worker_count(count: int, max_workers: int = 16) -> int:
     return min(max_workers, (count + 15) // 16) if count else 0
 
 
+def task_jump(target):
+    """The single optional transit getter; D1b's direct tasks have no jump."""
+    return target.ethernet
+
+
+class JumpGate:
+    """Coordinator-only admission and two bounded cooldown/probe cycles."""
+    def __init__(self):
+        self.jumps = {}
+
+    def _jump_state(self, jump):
+        return self.jumps.setdefault(jump, dict(in_flight=0, failures=0, cooldowns=0,
+                                                until=None, exhausted=False, failure=None))
+
+    def jump_slot_available(self, jump, now):
+        if jump is None:
+            return True
+        state = self._jump_state(jump)
+        return not state["exhausted"] and state["until"] is None and state["in_flight"] < 8
+
+    def claim_jump_slot(self, jump, now):
+        if not self.jump_slot_available(jump, now):
+            return False
+        if jump is not None:
+            self._jump_state(jump)["in_flight"] += 1
+        return True
+
+    def report_jump_outcome(self, jump, failure, *, writes_attempted, now):
+        if jump is None:
+            return "fail" if failure is not None else "done"
+        state = self._jump_state(jump)
+        state["in_flight"] = max(0, state["in_flight"] - 1)
+        unreachable = (failure is not None and failure.hop == "outer"
+                       and failure.kind == SshFailureKind.JUMP_UNREACHABLE)
+        if unreachable:
+            state["failure"] = failure
+            state["failures"] += 1
+            if state["until"] is None and not state["exhausted"] and (
+                    state["failures"] >= 2 or getattr(failure, "candidates_exhausted", False)):
+                if state["cooldowns"] >= 2:
+                    state["exhausted"] = True
+                else:
+                    state["cooldowns"] += 1
+                    state["until"] = now + 240
+            return "fail" if writes_attempted or state["exhausted"] else "requeue"
+        if failure is None:
+            state["failures"] = 0
+        return "fail" if failure is not None else "done"
+
+    def jump_probes_due(self, now):
+        return [jump for jump, state in self.jumps.items()
+                if state["until"] is not None and state["until"] <= now
+                and not state["exhausted"] and state["in_flight"] == 0]
+
+    def report_jump_probe(self, jump, failure, *, now):
+        state = self._jump_state(jump)
+        state["failure"] = failure
+        if failure is None:
+            state["until"], state["failures"] = None, 0
+        elif failure.hop != "outer" or failure.kind != SshFailureKind.JUMP_UNREACHABLE:
+            state["until"], state["exhausted"] = None, True
+        elif state["cooldowns"] >= 2:
+            state["until"], state["exhausted"] = None, True
+        else:
+            state["cooldowns"] += 1
+            state["until"] = now + 240
+
+    def jump_wait_seconds(self, now):
+        waits = [max(0, state["until"]-now) for state in self.jumps.values()
+                 if state["until"] is not None and not state["exhausted"]]
+        return min(waits) if waits else None
+
+    def jump_exhausted(self, jump):
+        return jump is not None and self._jump_state(jump)["exhausted"]
+
+
+def recover_jump_cooldowns(gate, jumps, coordinator, *, wait=False):
+    """Only an idle coordinator waits; running workers retain their own deadlines."""
+    now = time.monotonic()
+    delay = gate.jump_wait_seconds(now)
+    if wait and delay is not None and delay > 0:
+        coordinator.assert_unchanged()
+        time.sleep(delay)
+        now = time.monotonic()
+    for key in gate.jump_probes_due(now):
+        coordinator.assert_unchanged()
+        failure = None
+        try:
+            _JUMP_SESSIONS.probe_jump_master(jumps[key])
+        except SshFailure as error:
+            failure = error
+        gate.report_jump_probe(key, failure, now=time.monotonic())
+
+
+def collect_jump_snapshot_passes(devices, collect, *, authority=None):
+    """Finish the first full pass before a shared cooldown; never retry auth/identity."""
+    failures, pending = {}, list(devices)
+    for attempt in range(3):
+        if attempt:
+            time.sleep(240)
+        retry = []
+        for device in pending:
+            key = normalize_name(device.hostname)
+            # Preserve main's pre-transport authority boundary, including a new
+            # retry probe after cooling. Authority failures are not device failures.
+            if authority is not None:
+                authority.assert_unchanged()
+            try:
+                if attempt:
+                    _JUMP_SESSIONS.probe_jump_master(device)
+                collect(device)
+                failures.pop(key, None)
+            except (ProjectInputChanged, BatchStopped):
+                raise
+            except SetupError as error:
+                failures[key] = error
+                failure = _ssh_failure_fact(error)
+                if (failure is not None and failure.hop == "outer"
+                        and failure.kind == SshFailureKind.JUMP_UNREACHABLE):
+                    retry.append(device)
+        if not retry:
+            break
+        pending = retry
+    return failures
+
+
 def interleave_oob_tasks(tasks):
     """Spread initial submissions across OOBs without reserving any worker."""
     groups = {}
     for task in tasks:
-        groups.setdefault(normalize_name(task.target.ethernet.hostname), deque()).append(task)
+        jump = task_jump(task.target)
+        groups.setdefault(normalize_name(jump.hostname) if jump is not None else None, deque()).append(task)
     ordered = []
     while groups:
         for key in list(groups):
@@ -5656,6 +6573,10 @@ def worker_request(kind, value=None):
         raise BatchStopped(reply)
     if status != "ok":
         raise SetupError(reply)
+    if kind == "jump-master":
+        return _unwrap_jump_master_reply(reply)
+    if kind == "host-key-remove" and isinstance(reply, dict) and "ssh_failure" in reply:
+        return _unwrap_jump_master_reply(reply)
     if kind in {"target-password", "current-password"} and reply:
         _WORKER_SECRETS.append(reply)
     return reply
@@ -5726,6 +6647,7 @@ class RuntimeCoordinator:
         self.secrets = [initial_password, *(task.ethernet_password for task in tasks)]
         self.paused_seconds = 0.0
         self.current_target = None
+        self.host_key_tasks = {normalize_name(task.target.ib.hostname): task for task in tasks}
         self.metrics = {}
 
     def assert_unchanged(self):
@@ -5786,7 +6708,7 @@ class RuntimeCoordinator:
         # Pairs keep this write-category table (not a credential) outside the
         # public audit's literal-credential pattern.
         metric = dict((("nvue", "nvue_write_commands"), ("public_key", "public_key_install_attempts"),
-                       ("password", "password_change_sessions"))).get(category)
+                       ("password", "password_change_sessions"), ("host_key", "host_key_remove_attempts"))).get(category)
         if metric is None:
             raise SetupError("unknown device write category")
         self.metrics[metric] = self.metrics.get(metric, 0) + 1
@@ -5803,6 +6725,28 @@ class RuntimeCoordinator:
             _TASK_LOG_BUFFER = previous
 
     def request(self, kind, value, target):
+        if kind == "host-key-remove":
+            self.assert_unchanged()
+            if self.stopped:
+                raise BatchStopped(self.fatal or "batch stopped")
+            task = self.host_key_tasks.get(normalize_name(target.ib.hostname))
+            if task is None or task.target != target:
+                raise SetupError("host-key removal task is not admitted")
+            _host_key_task_gate(task, value, eth_user=self.args.eth_user, apply=self.args.apply)
+            def mark_write():
+                self.authorize(target, "remove this IB host-key entry from the jump's known_hosts")
+                self.before_write("host_key")
+            try:
+                return remove_jump_known_hosts_entries(task, value, eth_user=self.args.eth_user,
+                    apply=self.args.apply, timeout=self.args.connect_timeout, before_write=mark_write)
+            except (ProjectInputChanged, BatchStopped):
+                raise
+            except SshFailure as error:
+                return {"ssh_failure": (error.kind.value, error.hop, error.address, error.jump)}
+            except (SetupError, ValueError, OSError, subprocess.TimeoutExpired):
+                raise SetupError("jump host-key removal failed; no automatic replay") from None
+        if kind == "jump-master":
+            return _jump_master_request_result(value, target)
         if kind == "target-password":
             return self.password()
         if kind == "current-password":
@@ -5838,6 +6782,9 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
     credential = None
     readback = ""
     base_verified = False
+    host_key_records = []
+    fingerprint_reader = None
+    operator_forced = normalize_name(target.ib.hostname) in getattr(args, "_refresh_host_key_names", ())
     strict_cache = getattr(args, "_strict_cache", None)
     strict = strict_cache is not None and policy is not None and not task.local
     log(f"[{target.ib.hostname}] via {target.ethernet.hostname}:{target.ethernet_port}")
@@ -5863,16 +6810,31 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 strict_failure = _ib_phase_error_facts(error)
             if strict_failure is not None:
                 _ib_raise_phase_failure("project", *strict_failure)
-        current, credential, authorized = inspect_ib_device(
-            target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-            initial_password, args.connect_timeout, policy, apply=args.apply,
-            authorized=authorized, local=task.local, strict=strict)
+        def inspect_once():
+            return inspect_ib_device(target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
+                initial_password, args.connect_timeout, policy, apply=args.apply,
+                authorized=authorized, local=task.local, strict=strict)
+        try:
+            current, credential, authorized = inspect_once()
+        except SetupError as error:
+            failure = _ssh_failure_fact(error)
+            change = getattr(failure, "host_key_change", None)
+            if change is None:
+                raise
+            retried = []
+            refresh_ib_host_key(change, task, eth_user=args.eth_user, timeout=args.connect_timeout,
+                apply=args.apply, read_device_fingerprint=None,
+                retry=lambda: retried.append(inspect_once()), operator_forced=operator_forced,
+                host_key_records=host_key_records)
+            current, credential, authorized = retried[0]
         if current.password_change_required:
             result_record["outcome"] = "PASSWORD_CHANGE_REQUIRED"
             stages[stage] = "PASSWORD_CHANGE_REQUIRED"
             log("  BLOCKED: initial IB password change required; read-only mode made no change.")
             return result_record
         stages[stage] = "VERIFIED"
+        fingerprint_reader = ib_host_key_reader(task, args.eth_user, args.ib_user,
+                                               credential, args.connect_timeout, policy=policy)
         # I-005: each Network readback enters here once; comma interface lines are split and
         # every later consumer reads `body`.  `readback` keeps the device text for the location.
         readback = current.output
@@ -5938,9 +6900,22 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         if args.apply:
             stage = "ipv4_readiness"
             stages[stage] = "RUNNING"
-            task_phase("IPv4 readiness: up to 3 attempts, 10s before each")
-            verify_ipv4_login(target, neighbor.vrf, args.eth_user, task.ethernet_password,
-                              args.ib_user, args.connect_timeout, local=task.local, **stage_context)
+            task_phase("IPv4 readiness: up to 9 attempts, Network write waits 15s first, then 10s")
+            try:
+                verify_ipv4_login(target, neighbor.vrf, args.eth_user, task.ethernet_password,
+                    args.ib_user, args.connect_timeout, local=task.local,
+                    readiness_policy=ReadinessPolicy(first_delay=15 if needs_base else 0), **stage_context)
+            except SetupError as error:
+                failure = _ssh_failure_fact(error)
+                change = getattr(failure, "host_key_change", None)
+                if change is None:
+                    raise
+                refresh_ib_host_key(change, task, eth_user=args.eth_user, timeout=args.connect_timeout,
+                    apply=args.apply, read_device_fingerprint=fingerprint_reader,
+                    retry=lambda: verify_ipv4_login(target, neighbor.vrf, args.eth_user,
+                        task.ethernet_password, args.ib_user, args.connect_timeout, local=task.local,
+                        readiness_policy=ReadinessPolicy(first_delay=0, attempts=1), **stage_context),
+                    operator_forced=operator_forced, host_key_records=host_key_records)
             stages[stage] = "VERIFIED"
         else:
             stages["ipv4_readiness"] = "NOT_REQUESTED"
@@ -5967,7 +6942,9 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         authorized = run_key_stage(
             target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
             args.connect_timeout, keys, local=task.local, apply=args.apply, authorized=authorized,
-            management_private_key=management_private_key, details=key_details, **stage_context)
+            management_private_key=management_private_key, details=key_details,
+            read_device_fingerprint=fingerprint_reader, operator_forced=operator_forced,
+            host_key_records=host_key_records, **stage_context)
         stages[stage] = "NO_KEYS_PROVIDED" if not keys else "COMPLETED" if args.apply else "PLANNED_NOT_APPLIED"
         # Owner 04 Q-037 (b) (R-260): on a check-only run an Initial stage that cannot be skipped
         # also needs configuration; --apply keeps the v15 formula.
@@ -5992,7 +6969,14 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         log(f"  DEVICE STOP: {exc}; no further writes.")
     except SetupError as exc:
         result_record["failed_stage"] = stage
-        if isinstance(exc, DirectSSHNetworkError):
+        ssh_failure = _ssh_failure_fact(exc)
+        if ssh_failure is not None:
+            result_record["failure_kind"] = ssh_failure.kind.value
+            if ssh_failure.kind is SshFailureKind.HOST_KEY_REFRESH_PENDING:
+                result_record["outcome"] = "CHECK_ONLY"
+            if getattr(ssh_failure, "candidates_exhausted", False):
+                result_record["_jump_candidates_exhausted"] = True
+        elif isinstance(exc, DirectSSHNetworkError):
             result_record["failure_kind"] = "DIRECT_SSH_NETWORK"
         stages[stage] = "FAILED"
         result_record["reason"] = _authorized_failure_text(exc)
@@ -6009,13 +6993,22 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 log(f"  LOCATION: readback line {number}, interface {member}, setting {setting or '-'}")
         log("  DEVICE STOP: no further writes or automatic replay; other IB tasks remain eligible.")
     # Keep the final direct probe inside this task, rather than a serial tail.
+    prior_failure = bool(result_record.get("failed_stage")
+                         and result_record.get("failure_kind") != "HOST_KEY_REFRESH_PENDING")
     if base_verified and credential is not None and not result_record["batch_error"]:
         try:
             task_phase("ZTP server direct IPv4 SSH (eth0, then eth1 fallback)")
             result_record["direct_rows"] = run_management_direct_checks(
                 [target], {normalize_name(target.ib.hostname): credential}, args.ib_user,
                 args.connect_timeout, on_management_server=getattr(args, "_on_management_server",
-                    args.execution_mode != "ethernet" and not task.local))
+                    args.execution_mode != "ethernet" and not task.local), apply=args.apply and not prior_failure,
+                read_device_fingerprint=fingerprint_reader, operator_forced=operator_forced,
+                host_key_records=host_key_records)
+            for row in result_record["direct_rows"]:
+                if not prior_failure and row.get("failure_kind") in {"HOST_KEY_REFRESH_PENDING", "TARGET_HOST_KEY_CHANGED"}:
+                    result_record["failure_kind"] = row["failure_kind"]
+                    if row["failure_kind"] == "HOST_KEY_REFRESH_PENDING":
+                        result_record["outcome"] = "CHECK_ONLY"
             stages["direct_ssh"] = ("VERIFIED" if any(row["status"] == "PASS" for row in result_record["direct_rows"])
                                       else "FAILED" if any(row["status"] == "FAIL" for row in result_record["direct_rows"])
                                       else "NOT_TESTED")
@@ -6025,6 +7018,7 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
             stages["direct_ssh"] = "FAILED"
             result_record.setdefault("failed_stage", "direct_ssh")
             result_record["outcome"], result_record["reason"] = "FAILED", str(exc)
+    result_record["host_key"] = [asdict(record) for record in host_key_records]
     return result_record
 
 
@@ -6134,6 +7128,55 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
     coordinator.assert_unchanged()
     outcomes = result["outcomes"]
     timeout = getattr(args, "task_timeout", 1800)
+    gate = JumpGate()
+    pending = list(tasks)
+    jumps = {normalize_name(jump.hostname): jump for task in tasks
+             for jump in [task_jump(task.target)] if jump is not None}
+
+    def jump_key(task):
+        jump = task_jump(task.target)
+        return normalize_name(jump.hostname) if jump is not None else None
+
+    def take_pending():
+        now = time.monotonic()
+        for index, task in enumerate(pending):
+            key = jump_key(task)
+            if gate.jump_exhausted(key):
+                return pending.pop(index), True
+            if gate.claim_jump_slot(key, now):
+                return pending.pop(index), False
+        return None, False
+
+    def exhausted_record(task):
+        failure = gate.jumps[jump_key(task)]["failure"]
+        return {"outcome": "FAILED", "failure_kind": failure.kind.value,
+                "reason": str(failure), "direct_rows": [], "batch_error": ""}
+
+    def jump_outcome(task, record, writes):
+        kind = record.get("failure_kind")
+        key = jump_key(task)
+        failure = None
+        if kind in {"OOB_JUMP_UNREACHABLE", "OOB_JUMP_AUTHENTICATION"}:
+            jump = task_jump(task.target)
+            address = (getattr(_JUMP_SESSIONS, "records", {}).get(key, {}).get("address")
+                       or (jump.login_ip if jump is not None else ""))
+            failure = SshFailure(SshFailureKind(kind), "outer", address,
+                                 jump.hostname if jump is not None else None)
+            failure.candidates_exhausted = record.pop("_jump_candidates_exhausted", False)
+        return gate.report_jump_outcome(key, failure, writes_attempted=writes, now=time.monotonic())
+
+    attempt_numbers = {}
+    def retain_requeued_attempt(task, record, path, writes, metrics):
+        name = normalize_name(task.target.ib.hostname)
+        number = attempt_numbers[name] = attempt_numbers.get(name, 0) + 1
+        attempt = path.with_name(path.stem + f".attempt-{number}.log")
+        path.rename(attempt)
+        evidence = {**record, "writes_attempted": bool(writes), "metrics": dict(metrics),
+                    "category": record_category(record)}
+        attempt.with_suffix(".json").write_text(
+            json.dumps(redact_data(evidence, coordinator.secrets), indent=2) + "\n", encoding="utf-8")
+        report_detail(f"[REQUEUE] {task.target.ib.hostname}: unwritten jump failure; evidence {attempt}")
+        pending.append(task)
 
     def finish(task, record, path, writes, metrics=None):
         name = normalize_name(task.target.ib.hostname)
@@ -6148,13 +7191,21 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
         record["outcome"], record["writes_attempted"] = outcome, bool(writes)
         record["metrics"] = dict(metrics or {})
         physical = task.target.attachment or task.target
-        record["oob"] = physical.ethernet.hostname
+        physical_jump = task_jump(physical)
+        record["oob"] = physical_jump.hostname if physical_jump is not None else None
         record["port"] = physical.ethernet_port
-        record["jump"] = {"hostname": task.target.ethernet.hostname,
-                          "login_ip": task.target.ethernet.login_ip,
+        jump = task_jump(task.target)
+        address = (getattr(_JUMP_SESSIONS, "records", {}).get(jump_key(task), {}).get("address")
+                   or (jump.login_ip if jump is not None else None))
+        record["jump"] = ({"hostname": jump.hostname, "login_ip": address, "type": jump.dev_type,
                           "interface": task.neighbor.interface, "vrf": task.neighbor.vrf,
                           "access_vlan": task.target.access_vlan or None,
-                          "selection_reason": task.target.jump_reason or "LEAF_LOCAL_PATH"}
+                          "selection_reason": task.target.jump_reason or "LEAF_LOCAL_PATH"} if jump is not None else None)
+        record.setdefault("failure_kind", None)
+        record.pop("_jump_candidates_exhausted", None)
+        record["category"] = record_category(record)
+        if writes and record["failure_kind"] == "OOB_JUMP_UNREACHABLE":
+            record["reason"] = record.get("reason", "") + "; writes attempted; result unverified; no automatic replay"
         record["neighbor"] = {"ipv6": task.neighbor.ipv6, "interface": task.neighbor.interface,
                               "vrf": task.neighbor.vrf, "mac": task.neighbor.mac,
                               "address_source": task.neighbor.address_source}
@@ -6189,13 +7240,19 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
     if count == 1:
         _ACTIVE_COORDINATOR = coordinator
         try:
-            for task in tasks:
+            while pending:
                 if coordinator.stopped:
                     break
                 coordinator.assert_unchanged()
+                recover_jump_cooldowns(gate, jumps, coordinator)
+                task, exhausted = take_pending()
+                if task is None:
+                    recover_jump_cooldowns(gate, jumps, coordinator, wait=True)
+                    continue
                 coordinator.current_target, coordinator.writes_attempted = task.target, False
                 coordinator.metrics = {}
-                report_detail(f"[START worker=1] {task.target.ib.hostname} via {task.target.ethernet.hostname}", verbose=getattr(args, "verbose", False))
+                jump = task_jump(task.target)
+                report_detail(f"[START worker=1] {task.target.ib.hostname} via {jump.hostname if jump is not None else 'direct'}", verbose=getattr(args, "verbose", False))
                 path = directory / (task.target.ib.hostname + ".log")
                 _TASK_LOG_BUFFER = []
                 _TASK_DEADLINE = time.monotonic() + timeout
@@ -6204,7 +7261,7 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                     # object, the DEV phase/helper authority; worker processes get pinned copies.
                     task_policy = (policy if getattr(args, "_strict_cache", None) is not None
                                    else WorkerPasswordPolicy.pinned_copy(policy))
-                    record = execute_ib_task(task, args, task_policy,
+                    record = exhausted_record(task) if exhausted else execute_ib_task(task, args, task_policy,
                                              initial_password, services, keys, management_private_key,
                                              coordinator.authorized)
                     if policy is not None and policy._password:
@@ -6219,6 +7276,14 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                 finally:
                     lines, _TASK_LOG_BUFFER = _TASK_LOG_BUFFER, None
                     _TASK_DEADLINE = None
+                with path.open("x", encoding="utf-8") as handle:
+                    os.chmod(path, 0o600)
+                    for line in lines:
+                        handle.write(redact_text(line, coordinator.secrets) + "\n")
+                action = jump_outcome(task, record, coordinator.writes_attempted)
+                if action == "requeue" and not coordinator.stopped:
+                    retain_requeued_attempt(task, record, path, coordinator.writes_attempted, coordinator.metrics)
+                    continue
                 if method_cycle is not None:
                     if (record.get("outcome") in {"CONFIGURED", "ALREADY_CONFIGURED"}
                             and not record.get("batch_error")):
@@ -6229,19 +7294,17 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                             record["failed_stage"] = "managed_receipt"
                             record["reason"] = "managed current initial-setup configuration was not verified"
                     method_cycle.fail_unfinished(task.target)
-                with path.open("x", encoding="utf-8") as handle:
-                    os.chmod(path, 0o600)
-                    for line in lines:
-                        handle.write(redact_text(line, coordinator.secrets) + "\n")
                 finish(task, record, path, coordinator.writes_attempted, coordinator.metrics)
         except ProjectInputChanged as exc:
             coordinator.stopped, coordinator.fatal = True, str(exc)
+        except (KeyboardInterrupt, EOFError):
+            coordinator.stopped, coordinator.fatal = True, "user cancelled the batch"
         finally:
             _ACTIVE_COORDINATOR, _TASK_LOG_BUFFER, _TASK_DEADLINE = None, None, None
     else:
         context = multiprocessing.get_context("fork")
         stop_event = context.Event()
-        active, pending = {}, list(tasks)
+        active = {}
         free_slots = list(range(1, count + 1))
         last_heartbeat = time.monotonic()
         try:
@@ -6252,8 +7315,19 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                     coordinator.stopped, coordinator.fatal = True, str(exc)
                 if coordinator.stopped:
                     stop_event.set()
+                if not coordinator.stopped:
+                    recover_jump_cooldowns(gate, jumps, coordinator)
                 while pending and free_slots and not coordinator.stopped:
-                    task, slot = pending.pop(0), free_slots.pop(0)
+                    task, exhausted = take_pending()
+                    if task is None:
+                        break
+                    if exhausted:
+                        path = directory / (task.target.ib.hostname + ".log")
+                        path.write_text("Jump cooldown attempts exhausted; no task dispatched.\n", encoding="utf-8")
+                        os.chmod(path, 0o600)
+                        finish(task, exhausted_record(task), path, False)
+                        continue
+                    slot = free_slots.pop(0)
                     parent, child = context.Pipe(duplex=True)
                     # A new fork must not retain other workers' IPC descriptors.
                     other_fds = [job["connection"].fileno() for job in active.values()
@@ -6281,7 +7355,8 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                         "path": path, "handle": handle, "record": None, "writes": False,
                         "deadline": started_at + timeout, "terminated": None, "phase": "starting", "metrics": {},
                         "started_at": started_at, "phase_at": started_at}
-                    report_detail(f"[START worker={slot}] {task.target.ib.hostname} via {task.target.ethernet.hostname}", verbose=getattr(args, "verbose", False))
+                    jump = task_jump(task.target)
+                    report_detail(f"[START worker={slot}] {task.target.ib.hostname} via {jump.hostname if jump is not None else 'direct'}", verbose=getattr(args, "verbose", False))
                 connections = [job["connection"] for job in active.values() if not job["connection"].closed]
                 ready = wait_connections(connections, timeout=0.2) if connections else []
                 if not connections and active:
@@ -6310,13 +7385,14 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                             request_kind, value = payload
                             before = coordinator.paused_seconds
                             coordinator.metrics = job["metrics"]
+                            coordinator.writes_attempted = job["writes"]
                             try:
                                 coordinator.assert_unchanged()
                                 if coordinator.stopped:
                                     raise BatchStopped(coordinator.fatal or "batch stopped")
                                 answer = coordinator.request(request_kind, value, task.target)
-                                if request_kind == "write":
-                                    job["writes"] = True
+                                if request_kind in {"write", "host-key-remove"}:
+                                    job["writes"] = coordinator.writes_attempted
                                 reply = ("ok", answer)
                             except ProjectInputChanged as exc:
                                 coordinator.stopped, coordinator.fatal = True, str(exc)
@@ -6325,6 +7401,8 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                                 reply = ("stopped", str(exc))
                             except SetupError as exc:
                                 reply = ("error", str(exc))
+                            if request_kind == "host-key-remove":
+                                job["writes"] = coordinator.writes_attempted
                             pause = coordinator.paused_seconds - before
                             for running in active.values():
                                 running["deadline"] += pause
@@ -6357,9 +7435,15 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                             record["script_error"] = True
                         record["elapsed_seconds"] = round(max(0, now-job["started_at"]), 3)
                         record["last_phase"] = job["phase"]
-                        finish(task, record, job["path"], job["writes"], job["metrics"])
+                        action = jump_outcome(task, record, job["writes"])
+                        if action == "requeue" and not coordinator.stopped:
+                            retain_requeued_attempt(task, record, job["path"], job["writes"], job["metrics"])
+                        else:
+                            finish(task, record, job["path"], job["writes"], job["metrics"])
                         del active[slot]
                         free_slots.append(slot)
+                if pending and not active and not coordinator.stopped:
+                    recover_jump_cooldowns(gate, jumps, coordinator, wait=True)
                 if coordinator.stopped:
                     stop_event.set()
                 if time.monotonic() - last_heartbeat >= _PROGRESS_HEARTBEAT_SECONDS and active:
@@ -6403,10 +7487,20 @@ def prepare_ready_ib_tasks(targets, args, passwords, local_keys, interface_table
     for target in targets:
         name, eth_key = normalize_name(target.ib.hostname), normalize_name(target.ethernet.hostname)
         def skipped(category, reason):
-            outcomes[name] = "SKIPPED"
+            failure = _ssh_failure_fact(reason)
+            mapped = FAILURE_KIND_CATEGORY.get(failure.kind.value) if failure is not None else None
+            category = mapped or category
+            outcomes[name] = "FAILED" if mapped is not None else "SKIPPED"
+            record = getattr(_JUMP_SESSIONS, "records", {}).get(eth_key, {})
             records[name] = {"hostname": target.ib.hostname, "oob": target.ethernet.hostname,
-                "outcome": "SKIPPED", "category": category, "reason": str(reason),
-                "port": target.ethernet_port, "metrics": {}, "stage_status": {}, "writes_attempted": False}
+                "outcome": outcomes[name], "category": category, "reason": str(reason),
+                "port": target.ethernet_port, "metrics": {}, "stage_status": {}, "writes_attempted": False,
+                "failure_kind": failure.kind.value if failure is not None else None,
+                "jump": {"hostname": target.ethernet.hostname,
+                         "login_ip": record.get("address") or target.ethernet.login_ip,
+                         "type": target.ethernet.dev_type, "interface": None, "vrf": None,
+                         "access_vlan": target.access_vlan or None,
+                         "selection_reason": target.jump_reason or "LEAF_LOCAL_PATH"}}
             log(f"[SKIP] {target.ib.hostname} | {category} | {target.ethernet.hostname}:{target.ethernet_port}")
             if isinstance(reason, IBMacMismatch) and reason.expected_mac and reason.observed_mac:
                 records[name]["mac_mismatch"] = {"expected": reason.expected_mac, "observed": reason.observed_mac}
@@ -6415,8 +7509,8 @@ def prepare_ready_ib_tasks(targets, args, passwords, local_keys, interface_table
         try:
             if eth_key in table_failures:
                 reason = table_failures[eth_key]
-                category = ("SKIPPED_OOB_IDENTITY_CONFLICT" if re.search(r"(?i)identity|host key|identification", reason)
-                    else "SKIPPED_OOB_UNREACHABLE" if re.search(r"(?i)route|unreachable|timed? out|timeout|connect|permission denied|authentication", reason)
+                category = ("SKIPPED_OOB_IDENTITY_CONFLICT" if re.search(r"(?i)identity|host key|identification", str(reason))
+                    else "SKIPPED_OOB_UNREACHABLE" if re.search(r"(?i)route|unreachable|timed? out|timeout|connect|permission denied|authentication", str(reason))
                     else "SKIPPED_OOB_SNAPSHOT_FAILED")
                 skipped(category, reason)
                 continue
@@ -6733,7 +7827,8 @@ def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tabl
             key = normalize_name(spine.hostname)
             try:
                 if key in table_failures:
-                    raise SetupError(table_failures[key])
+                    error = table_failures[key]
+                    raise error if isinstance(error, SetupError) else SetupError(error)
                 if key not in network_tables or key not in passwords:
                     raise SetupError("Spine snapshot/authentication did not complete")
                 if key not in address_cache:
@@ -6806,6 +7901,9 @@ def compact_ports(ports):
 
 def record_category(record):
     """One final outcome per target; key refresh is not a base-network change."""
+    mapped = FAILURE_KIND_CATEGORY.get(record.get("failure_kind"))
+    if mapped is not None:
+        return mapped
     outcome = record.get("outcome", "NOT_ATTEMPTED")
     if record.get("category"):
         return record["category"]
@@ -6827,8 +7925,6 @@ def record_category(record):
             return "FAILED_SHARED_INPUT"
         if record.get("script_error"):
             return "FAILED_SCRIPT_EXECUTION"
-        if record.get("failure_kind") == "DIRECT_SSH_NETWORK":
-            return "FAILED_DIRECT_SSH_NETWORK"
         if record.get("stage_status", {}).get("ipv4_readiness") == "FAILED":
             return "FAILED_OOB_IPV4_READINESS"
         return "FAILED_AFTER_WRITE_UNVERIFIED" if record.get("writes_attempted") else "FAILED_CHECK_OR_LOGIN"
@@ -6859,6 +7955,10 @@ def attention_guidance(category):
         "BLOCKED_PASSWORD_CHANGE_REQUIRED": "Use the verified project IB target password with --apply and authorize rotation; do not use the OOB password.",
         "CHECKED_NEEDS_CONFIGURATION": "Review the proposed missing settings; re-run with --apply only when ready to authorize device changes.",
         "FAILED_DIRECT_SSH_NETWORK": "Check management-server routes, neighbor convergence, firewall rules and TCP/22 to the listed IB addresses. Re-test SSH; do not assume the installed key is wrong or replay configuration writes.",
+        "FAILED_OOB_JUMP_UNREACHABLE": "Check the named jump login address, network routes and TCP/22; restore the jump connection before retrying downstream devices. Verify any attempted writes; do not replay them automatically.",
+        "FAILED_OOB_JUMP_AUTHENTICATION": "Verify authentication to the named OOB jump and the intended jump account; this is not an IB target-password failure.",
+        "FAILED_TARGET_HOST_KEY_CHANGED": "Verify this IB host key through an authenticated path, or use --refresh-host-key only after confirming its reset. No unverified entry is removed automatically.",
+        "CHECKED_HOST_KEY_REFRESH_PENDING": "The authenticated IB fingerprint matches; re-run with --apply to refresh only this host-key entry. No entry was removed during this read-only run.",
         "FAILED_DIRECT_SSH_AUTHENTICATION": "Verify the intended IB credentials or matching management private/public key. Connectivity alone does not prove authentication.",
         "FAILED_DIRECT_SSH_HOST_KEY": "Verify the IB host key through a trusted channel before correcting the specific known_hosts entry; do not disable host-key checking.",
         "FAILED_DIRECT_SSH_CHECK": "Inspect the direct SSH error and hostname/IP readback; do not treat authentication or identity mismatches as network jitter.",
@@ -6883,9 +7983,10 @@ def initial_setup_attention(records, direct_rows):
         rows_by_name.setdefault(normalize_name(row["hostname"]), []).append(row)
     groups = {}
     for name, record in sorted(records.items()):
-        category = record_category(record)
+        mapped = FAILURE_KIND_CATEGORY.get(record.get("failure_kind"))
+        category = mapped or record_category(record)
         rows = rows_by_name.get(normalize_name(name), [])
-        successful_task = record.get("outcome") in {"CONFIGURED", "ALREADY_CONFIGURED"}
+        successful_task = mapped is None and record.get("outcome") in {"CONFIGURED", "ALREADY_CONFIGURED"}
         stage = record.get("failed_stage", "preflight" if record.get("category") else "unknown")
         reason = record.get("reason", "")
         if successful_task:
@@ -7113,6 +8214,7 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
     return status
 
 
+@_jump_session_lifetime()
 def main(*, method_cycle=None) -> int:
     """One run: inputs, cache, credentials, snapshots, task queue, summary.
 
@@ -7121,7 +8223,7 @@ def main(*, method_cycle=None) -> int:
     preparation, receipts each device in the single inline slot and closes after
     the summary, all in this parent process.
     """
-    global REPORT_HANDLE, _CONSOLE_VERBOSE, _CREDENTIALS_FD_MODE
+    global REPORT_HANDLE, _CONSOLE_VERBOSE, _CREDENTIALS_FD_MODE, _JUMP_SESSIONS
     args = parse_args()
     _CONSOLE_VERBOSE = args.verbose
     if args.ethernet_password is not None:
@@ -7157,6 +8259,11 @@ def main(*, method_cycle=None) -> int:
             raise SetupError("--credentials-fd with --apply also needs --yes: fd mode never asks "
                              "for the first-change confirmation")
         jump_password_for = lambda hostname: jump_table.get(jump_key(hostname))  # noqa: E731
+    # WP4/r6: mandatory even for read-only, plan and generation; fail before device contact.
+    _import_tools("tools.login_path")
+    if _TOOLS_ROOT == Path(__file__).resolve().parent:
+        _import_tools("tools.device_identity")
+        _import_tools("tools.hostname_ranges")
     project = None
     if args.project_dir is not None:
         project = args.project_dir.expanduser().resolve(strict=True)
@@ -7204,6 +8311,10 @@ def main(*, method_cycle=None) -> int:
     p2p_path = discover_input_file(
         args.p2p, "p2p.xlsx", ".xlsx", "P2P workbook"
     )
+    # K11: resolve once against all CSV IB names before any device/output/cache path.
+    selector_value = getattr(args, "refresh_host_key", None)
+    args._refresh_host_key_names = resolve_host_key_refresh_selector(selector_value,
+        load_devices(ib_csv_path)[0] if selector_value is not None else {})
     # O12 (guide :1071): without --report every run writes its own report in the default directory,
     # initial-setup-report-<YYYYmmdd-HHMMSS>.log, with -<pid> when that name exists; the devices-*
     # evidence directory starts with the same timestamp (run_prepared_tasks).  --report is used as given.
@@ -7429,10 +8540,12 @@ def main(*, method_cycle=None) -> int:
             raise SetupError("managed method authority requires an explicit management --apply execution")
         # The cache's targets, not the Spine-routed copies (config_sync_authority _inputs).
         method_cycle.start(tool, cache_path, ib_csv_path, p2p_path, targets, services, public_keys)
+    _JUMP_SESSIONS = _new_jump_sessions(local_keys=local_keys, timeout=args.connect_timeout)
     passwords = prompt_ethernet_passwords(
         targets, args.ethernet_password, local_keys,
         eth_user=args.eth_user, timeout=args.connect_timeout,
         password_for=jump_password_for,
+        jump_sessions=_JUMP_SESSIONS,
     )
 
     # Project password authority.  On the management server a present global is
@@ -7568,7 +8681,7 @@ def main(*, method_cycle=None) -> int:
 
     interface_tables: dict[str, str] = {}
     network_tables: dict[str, tuple[str, str, str]] = {}
-    table_failures: dict[str, str] = {}
+    table_failures: dict[str, SetupError] = {}
     failures = configured = skipped = day0_skipped = services_skipped = 0
     outcomes = {normalize_name(target.ib.hostname): "NOT_ATTEMPTED" for target in targets}
     # Verified credentials are retained in process memory only for the final probe.
@@ -7578,32 +8691,30 @@ def main(*, method_cycle=None) -> int:
         for target in targets
     }
     log("\nCollecting Ethernet snapshots ...")
-    for eth_key, ethernet in sorted(ethernet_switches.items()):
+    def collect_leaf_snapshot(ethernet):
+        eth_key = normalize_name(ethernet.hostname)
         ethernet_is_local = eth_key in local_keys
         eth_password = passwords[eth_key]
         location = "local" if ethernet_is_local else "SSH"
         log(f"  [{ethernet.hostname}] via {location}")
-        try:
-            if eth_password is None:
-                raise SetupError(f"OOB access unavailable: no --credentials-fd password for "
-                                 f"{ethernet.hostname}; no login attempted")
-            actual_hostname, interface_tables[eth_key] = collect_ethernet_interfaces(
-                ethernet, args.eth_user, eth_password, args.connect_timeout,
-                local=ethernet_is_local,
-            )
-            network_tables[eth_key] = collect_ethernet_network_tables(
-                ethernet, args.eth_user, eth_password, args.connect_timeout,
-                local=ethernet_is_local,
-            )
-            links, fdb, neighbors = network_tables[eth_key]
-            snapshot_path = save_ethernet_snapshot(
-                snapshot_directory, ethernet, actual_hostname, location,
-                interface_tables[eth_key], links, fdb, neighbors,
-            )
-            log(f"    Snapshot saved: {snapshot_path}")
-        except SetupError as exc:
-            table_failures[eth_key] = str(exc)
-            log(f"    ERROR: {exc}")
+        if eth_password is None:
+            raise SetupError(f"OOB access unavailable: no --credentials-fd password for "
+                             f"{ethernet.hostname}; no login attempted")
+        actual_hostname, interfaces = collect_ethernet_interfaces(
+            ethernet, args.eth_user, eth_password, args.connect_timeout, local=ethernet_is_local)
+        network = collect_ethernet_network_tables(
+            ethernet, args.eth_user, eth_password, args.connect_timeout, local=ethernet_is_local)
+        links, fdb, neighbors = network
+        snapshot_path = save_ethernet_snapshot(
+            snapshot_directory, ethernet, actual_hostname, location, interfaces, links, fdb, neighbors)
+        interface_tables[eth_key], network_tables[eth_key] = interfaces, network
+        log(f"    Snapshot saved: {snapshot_path}")
+
+    table_failures.update(collect_jump_snapshot_passes(
+        [device for key, device in sorted(ethernet_switches.items())], collect_leaf_snapshot,
+        authority=runtime_authority))
+    for eth_key, error in table_failures.items():
+        log(f"    ERROR: {error}")
 
     log("\nPreparing IB tasks from completed OOB snapshots ...")
     runtime_authority.assert_unchanged()
@@ -7612,7 +8723,7 @@ def main(*, method_cycle=None) -> int:
     # Read the same hash-pinned CSV even when static P2P target cache is reused.
     _, transit_inventory = load_devices(ib_csv_path)
     spine_inventory = select_spine_inventory(transit_inventory, args.oob_spines)
-    leaf_snapshot_failures = dict(table_failures)
+    leaf_snapshot_failures = {key: str(value) for key, value in table_failures.items()}
     jump_routes = []
 
     def fetch_oob_addresses(device):
@@ -7636,26 +8747,25 @@ def main(*, method_cycle=None) -> int:
         # Reuse key-first/shared-password prompting; never install keys on Jumps.
         password_targets = [Target(targets[0].ib, device, "lldp-uplink", "mgmt") for device in missing]
         passwords.update(prompt_ethernet_passwords(password_targets, args.ethernet_password, local_keys,
-            eth_user=args.eth_user, timeout=args.connect_timeout, password_for=jump_password_for))
+            eth_user=args.eth_user, timeout=args.connect_timeout, password_for=jump_password_for,
+            jump_sessions=_JUMP_SESSIONS))
         log("\nCollecting LLDP Spine candidate snapshots (read-only) ...")
-        for device in missing:
+        def collect_one_spine(device):
             key = normalize_name(device.hostname)
-            runtime_authority.assert_unchanged()
-            try:
-                if passwords[key] is None:
-                    raise SetupError(f"OOB access unavailable: no --credentials-fd password for "
-                                     f"{device.hostname}; no login attempted")
-                actual, interfaces = collect_ethernet_interfaces(device, args.eth_user, passwords[key],
-                    args.connect_timeout, local=key in local_keys)
-                network = collect_ethernet_network_tables(device, args.eth_user, passwords[key],
-                    args.connect_timeout, local=key in local_keys)
-            except SetupError as exc:
-                table_failures[key] = redact_text(str(exc), list(passwords.values()))
-                log(f"  [SPINE] {device.hostname}: snapshot failed; {table_failures[key]}")
-                continue
+            if passwords[key] is None:
+                raise SetupError(f"OOB access unavailable: no --credentials-fd password for "
+                                 f"{device.hostname}; no login attempted")
+            actual, interfaces = collect_ethernet_interfaces(device, args.eth_user, passwords[key],
+                args.connect_timeout, local=key in local_keys)
+            network = collect_ethernet_network_tables(device, args.eth_user, passwords[key],
+                args.connect_timeout, local=key in local_keys)
             interface_tables[key], network_tables[key] = interfaces, network
             save_ethernet_snapshot(snapshot_directory, device, actual,
                 "local" if key in local_keys else "SSH", interfaces, *network)
+        failed = collect_jump_snapshot_passes(missing, collect_one_spine, authority=runtime_authority)
+        table_failures.update(failed)
+        for key, error in failed.items():
+            log(f"  [SPINE] {key}: snapshot failed; {redact_text(str(error), list(passwords.values()))}")
 
     ready_tasks = prepare_routed_ib_tasks(
         targets, args, passwords, local_keys, interface_tables, network_tables, table_failures,
@@ -7741,7 +8851,7 @@ def main(*, method_cycle=None) -> int:
                 "mode": "APPLY" if args.apply else "CHECK_ONLY", "result": summary_status,
                 "workers": batch["workers"], "csv_ib_candidates": ib_candidate_count,
                 "p2p_management_targets": len(targets), "oob_snapshot_failures": leaf_snapshot_failures,
-                "spine_snapshot_failures": {key: value for key, value in table_failures.items()
+                "spine_snapshot_failures": {key: str(value) for key, value in table_failures.items()
                                             if key not in ethernet_switches},
                 "spine_jump_routes": jump_routes,
                 "records": records, "direct_rows": direct_rows, "batch_stop_reason": batch["fatal"],

@@ -283,6 +283,8 @@ class RuntimeVenvSwitchWorkflowTests(unittest.TestCase):
             lock = root / 'private-runtime.lock'
             environment = {'PATH': '/usr/bin:/bin', 'HOME': str(home), 'LC_ALL': 'C',
                            'IBSW_TEST_RECORD': str(record), 'IBSW_TEST_CANARY': 'unchanged-value'}
+            from test_cases.native_cpld_physical_io import owned_test_root
+            environment['TMPDIR'] = str(owned_test_root())
             args = ['--inspect-only', '--devices', 'ib-spine0[1-2]*']
             # -S hides every site-packages: this interpreter lacks paramiko and PyYAML.
             result = subprocess.run([sys.executable, '-B', '-S', '-c', LAUNCHER, str(bundle), str(lock), *args],

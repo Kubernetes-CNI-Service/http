@@ -247,6 +247,10 @@ class Session:
             raise
         except (OSError, EOFError, socket.timeout):
             raise SshError("COMMAND_INCOMPLETE") from None
+        except Exception as error:
+            if type(error) is _sdk().SSHException:
+                raise SshError("COMMAND_INCOMPLETE") from None
+            raise
         finally:
             try:
                 channel.close()

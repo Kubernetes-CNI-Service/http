@@ -18,12 +18,15 @@ from __future__ import annotations
 
 import argparse
 import copy
+import csv
 from datetime import datetime, timezone
 import getpass
 import hashlib
 import importlib
+from importlib import metadata
 import json
 import os
+import stat
 from pathlib import Path
 import secrets
 import signal
@@ -42,6 +45,121 @@ COMPONENTS = ("os", "bios", "cpld")
 EXIT_BAD_INPUT, EXIT_BUSY = 2, 75
 PASSWORD_ATTEMPTS = 3                       # like upgrade.py: re-asked after an explicit refusal, three in all
 NOT_OFFERED = {"CONNECT_FAILED", "CONNECT_TIMEOUT", "HANDSHAKE_FAILED", "HOST_KEY_UNKNOWN", "HOST_KEY_MISMATCH"}
+RUN_DIRECTORY_NAME = "xdr-upgrade-v2-logs"
+_RUNTIME_VENV_PATHS = ("~/.venvs/http/ibsw-upgrade", "~/.venv-upgrade")
+_RUNTIME_VENV_MARKER = "IBSW_UPGRADE_VENV_REEXEC"
+from fleet_ssh import SSH_RUNTIME_PINS
+_RUNTIME_DISTRIBUTIONS = (*SSH_RUNTIME_PINS, ("PyYAML", None))
+
+
+def _runtime_problems(version):
+    problems = []
+    for name, expected in _RUNTIME_DISTRIBUTIONS:
+        try:
+            installed = version(name)
+        except metadata.PackageNotFoundError:
+            installed = None
+        if installed is None or (expected is not None and installed != expected):
+            problems.append(name)
+    return problems
+
+
+def _runtime_venv_candidates():
+    return tuple(Path(os.path.expanduser(path)) for path in _RUNTIME_VENV_PATHS)
+
+
+def _audited_runtime_venv(venv):
+    """The v1 bounded ownership/mode/layout audit, using v2's own distribution list."""
+    import grp
+    import pwd
+    uid = os.geteuid()
+    account = pwd.getpwuid(uid)
+    def safe(info):
+        if info.st_uid not in (0, uid) or info.st_mode & stat.S_IWOTH:
+            return False
+        if info.st_mode & stat.S_IWGRP:
+            try:
+                group = grp.getgrgid(info.st_gid)
+            except KeyError:
+                return False
+            return (info.st_gid == account.pw_gid and group.gr_name == account.pw_name
+                    and all(member == account.pw_name for member in group.gr_mem))
+        return True
+    venv, home = Path(venv), Path(os.path.expanduser("~"))
+    try:
+        if not venv.is_absolute():
+            return None, "not absolute"
+        paths = [parent for parent in venv.parents if parent != home and parent.is_relative_to(home)]
+        paths += [venv, venv / "bin", venv / "lib"]
+        sites = sorted((venv / "lib").glob("python3.*/site-packages"))
+        if len(sites) != 1:
+            return None, "needs exactly one site-packages"
+        paths += [sites[0].parent, sites[0]]
+        for path in paths:
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode) or not safe(info):
+                return None, "unsafe directory"
+        config = os.lstat(venv / "pyvenv.cfg")
+        python = venv / "bin/python3"
+        executable = os.stat(python)
+        if (not stat.S_ISREG(config.st_mode) or not safe(config)
+                or not stat.S_ISREG(executable.st_mode) or not safe(executable)
+                or not os.access(python, os.X_OK)):
+            return None, "unsafe runtime files"
+        def version(name):
+            found = [item.version for item in metadata.distributions(name=name, path=[str(sites[0])])]
+            if len(found) != 1:
+                raise metadata.PackageNotFoundError(name)
+            return found[0]
+        if _runtime_problems(version):
+            return None, "runtime distributions do not match"
+    except (OSError, ValueError, UnicodeError):
+        return None, "runtime unreadable"
+    return str(python), "usable"
+
+
+def _reexec_in_runtime_venv(argv=None):
+    """Identity has already switched; exec preserves original args and inheritable FDs."""
+    args = tuple(sys.argv[1:] if argv is None else argv)
+    if any(arg in ("-h", "--help", "--version") for arg in args):
+        return "NOT_NEEDED"
+    switched = os.environ.pop(_RUNTIME_VENV_MARKER, None) is not None
+    if not _runtime_problems(metadata.version):
+        return "NOT_NEEDED"
+    if not switched:
+        for venv in _runtime_venv_candidates():
+            python, _reason = _audited_runtime_venv(venv)
+            if python is None:
+                continue
+            environment = dict(os.environ, **{_RUNTIME_VENV_MARKER: "1"})
+            options = ["-B"] if sys.flags.dont_write_bytecode else []
+            print(f"[RUNTIME] re-running once with fixed venv {venv}; arguments unchanged", file=sys.stderr)
+            try:
+                os.execve(python, [python, *options, sys.argv[0], *args], environment)
+            except OSError:
+                continue
+    print("ERROR: pinned SSH runtime and PyYAML unavailable; use a matching fixed venv: "
+          + ", ".join(_RUNTIME_VENV_PATHS) + "; nothing was installed automatically", file=sys.stderr)
+    return "NO_CANDIDATE"
+
+
+def _runtime_locked_files(locked_type, out):
+    locked = []
+    for name, _expected in _RUNTIME_DISTRIBUTIONS:
+        distribution = metadata.distribution(name)
+        files = distribution.files
+        if files is None:
+            print(f"[LOCK] WARN {name}: no RECORD; its files are not locked", file=out)
+            continue
+        for item in files:
+            if "__pycache__" in item.parts:
+                continue
+            path = distribution.locate_file(item)
+            try:
+                locked.append(locked_type.read(name, path))
+            except OSError:
+                continue
+    return locked
 
 
 def parser():
@@ -65,6 +183,7 @@ def parser():
     inputs.add_argument("--devices", help="hostname glob (case-insensitive)")
     inputs.add_argument("--p2p", help="P2P XLSX/DOT/CSV with the eth0/mgmt links (default: p2p.xlsx in the project)")
     inputs.add_argument("--package-dir", help="override upgrade.package_dir")
+    inputs.add_argument("--inventory-checked", action="store_true", help=argparse.SUPPRESS)
     inputs.add_argument("--local-dir", default="/home/admin", help="package/step directory on the switch")
     auth = p.add_argument_group("credentials (the switch password is always typed, never an argument)")
     auth.add_argument("--known-hosts", default=str(Path.home() / ".ssh/known_hosts"),
@@ -178,14 +297,28 @@ def _check_password(ops, devices, ssh):
 
 
 def _run_directory(args, paths, run_id):
-    if args.project:
-        return Path(paths.project) / "99-output-ib_nvl" / "bringup" / "xdr-upgrade-v2-logs" / run_id
-    return ENTRY.parent / "xdr-upgrade-v2-logs" / run_id
+    return Path(paths.project) / "99-output-ib_nvl" / "bringup" / RUN_DIRECTORY_NAME / run_id
 
 
 def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_factory=None, sysfs_root=Path("/sys"),
         link_run=None, timings=None):
     """The CLI; keyword arguments exist for tests (simulated switches, short probe timings)."""
+    import fleet_ssh as ssh
+    try:
+        return _run(argv, out=out, password_reader=password_reader, ops_factory=ops_factory,
+                    sysfs_root=sysfs_root, link_run=link_run, timings=timings)
+    except OSError as error:
+        print("ERROR: input file unreadable: " + str(error.filename or "input") + " ("
+              + str(error.strerror or "read failed") + ")", file=out)
+    except ssh.SshError as error:
+        print("ERROR: " + error.code + "; management key or SSH runtime unavailable", file=out)
+    except metadata.PackageNotFoundError:
+        print(f"ERROR: SDK_UNAVAILABLE; required runtime distribution missing: {sys.prefix}", file=out)
+    return EXIT_BAD_INPUT
+
+
+def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_factory=None, sysfs_root=Path("/sys"),
+         link_run=None, timings=None):
     args = parser().parse_args(argv)
     problems = _validate(args)
     if problems:
@@ -201,25 +334,65 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     import ibsw_v2_device as ib
 
     selected = _selected(args)
+    from project_contract import ActiveProjectPointerError, active_project_dir, yaml
+    try:
+        project = Path(args.project).resolve() if args.project else active_project_dir(REPOSITORY)
+    except ActiveProjectPointerError as error:
+        print(f"ERROR: {error}", file=out)
+        return EXIT_BAD_INPUT
+    if project is None:
+        print("ERROR: no active project; run setup or use --project", file=out)
+        return EXIT_BAD_INPUT
+    args.project = str(project)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ") + "_upgrade-v2_" + secrets.token_hex(16)
-    paths = plan_input_paths(str(ENTRY), cwd=os.getcwd(), run_id=run_id, project=args.project,
-                             csv_path=args.ib_csv, global_path=args.global_path)
-    csv_text = Path(paths.csv_path).read_text(encoding="utf-8-sig")
-    global_text = Path(paths.global_path).read_text(encoding="utf-8-sig")
-    snapshot = select_inventory_devices(snapshot_inventory(csv_text, global_text), args.devices)
-    document = load_global_text(global_text)
+    csv_path = args.ib_csv or (str(project / "ib.csv") if (project / "ib.csv").exists() else None)
+    try:
+        paths = plan_input_paths(str(ENTRY), cwd=os.getcwd(), run_id=run_id, project=args.project,
+                                 csv_path=csv_path, global_path=args.global_path)
+    except ValueError as error:
+        reason = ("explicit project input cannot silently use foreign source" if
+                  str(error) == "explicit project input cannot silently use foreign source" else "invalid input path")
+        print(f"ERROR: {reason}: {csv_path or project}; {args.global_path or project}", file=out)
+        return EXIT_BAD_INPUT
+    if not args.inventory_checked and (args.ib_csv or (project / "ib.csv").exists()):
+        from tools.inventory_subset import compare
+        master_csv = project / "02-devices_config.csv"
+        try:
+            mismatches = compare(paths.csv_path, master_csv)
+        except (OSError, UnicodeError, csv.Error, IndexError):
+            # M4's reader owns no CLI; malformed encoding/CSV rows are input
+            # errors at this boundary, not device or engine exceptions.
+            print(f"ERROR: cannot read or parse inventory comparison inputs: {paths.csv_path}; {master_csv}", file=out)
+            return EXIT_BAD_INPUT
+        for item in mismatches:
+            print(f"INVENTORY MISMATCH: {item.hostname}; {item.column}; ib.csv={item.subset_value}; "
+                  f"02={item.master_value}; {item.kind}", file=out)
+        if mismatches:
+            return EXIT_BAD_INPUT
+    try:
+        csv_text = Path(paths.csv_path).read_text(encoding="utf-8-sig")
+        global_text = Path(paths.global_path).read_text(encoding="utf-8-sig")
+        snapshot = select_inventory_devices(snapshot_inventory(csv_text, global_text), args.devices)
+        document = load_global_text(global_text)
+    except (ValueError, UnicodeError, yaml.YAMLError):
+        print(f"ERROR: invalid project inputs: {paths.csv_path}; {paths.global_path}", file=out)
+        return EXIT_BAD_INPUT
     endpoints, listed = [], False
     policy_document = document
     if args.method == "http":
         try:
             endpoints, listed = _http_endpoints(document)
-        except ValueError as error:
-            print(f"ERROR: {error}", file=out)
+        except ValueError:
+            print(f"ERROR: invalid HTTP service configuration: {paths.global_path}", file=out)
             return EXIT_BAD_INPUT
         if listed:                          # the v1 policy reader takes one address: build URLs with the first
             policy_document = copy.deepcopy(document)
             policy_document["common"]["mgmt"]["http"]["address"] = endpoints[0].host
-    policy = normalize_upgrade(policy_document, selected=selected, method=args.method, package_dir=args.package_dir)
+    try:
+        policy = normalize_upgrade(policy_document, selected=selected, method=args.method, package_dir=args.package_dir)
+    except ValueError:
+        print(f"ERROR: invalid upgrade configuration: {paths.global_path}", file=out)
+        return EXIT_BAD_INPUT
     devices = list(snapshot.devices)
     names = [device.hostname for device in devices]
 
@@ -260,7 +433,15 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
 
     p2p = Path(args.p2p) if args.p2p else Path(paths.project or ENTRY.parent) / "p2p.xlsx"
     if p2p.is_file():
-        groups, notes = dist.oob_groups(p2p, names)
+        setup = dist._p2p_module()
+        try:
+            groups, notes = dist.oob_groups(p2p, names, module=setup)
+        except (setup.SetupError, setup.ET.ParseError, csv.Error, setup.zipfile.BadZipFile):
+            print(f"ERROR: invalid P2P input: {p2p}", file=out)
+            return EXIT_BAD_INPUT
+    elif args.p2p:
+        print(f"ERROR: P2P input unreadable: {p2p}", file=out)
+        return EXIT_BAD_INPUT
     else:
         groups, notes = {name: dist.UNKNOWN_GROUP for name in names}, [f"no P2P file ({p2p}); every switch relays from any holder"]
     for note in notes:
@@ -274,21 +455,44 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     if private is None:
         print("ERROR: no management key pair (~/.ssh/id_ed25519 or id_rsa with .pub, or --identity)", file=out)
         return EXIT_BAD_INPUT
-    key, key_fingerprint = ssh.load_private_key(private, public)
+    locked_inputs = [fleet_engine.LockedFile.read("private key", private),
+                     fleet_engine.LockedFile.read("management public key", public)]
+    locked_inputs += _runtime_locked_files(fleet_engine.LockedFile, out)
+    try:
+        key, key_fingerprint = ssh.load_private_key(private, public)
+    except ssh.SshError as error:
+        print(f"ERROR: {error.code}; management key or SSH runtime unavailable: {private}; {public}", file=out)
+        return EXIT_BAD_INPUT
+    except (ValueError, UnicodeError):
+        print(f"ERROR: KEY_INVALID; invalid management key pair: {private}; {public}", file=out)
+        return EXIT_BAD_INPUT
     password = None
     if args.upgrade or args.password:
         password = _ask("Switch password: ", password_reader)
     scp_server = None
     if args.method == "scp":
         scp_password = _ask("Password for the ztp-server scp account: ", password_reader) if args.upgrade else None
-        server_pins = ssh.HostPins.load(args.scp_known_hosts)
-        keys = server_pins.known_hosts_text(args.mgmt_server, args.mgmt_port)
+        server_watch = fleet_engine.LockedFile.read("scp known hosts", args.scp_known_hosts)
+        try:
+            server_pins = ssh.HostPins.load(args.scp_known_hosts)
+            keys = server_pins.known_hosts_text(args.mgmt_server, args.mgmt_port)
+        except ValueError:
+            print(f"ERROR: invalid scp known_hosts: {args.scp_known_hosts}", file=out)
+            return EXIT_BAD_INPUT
         if not keys:
-            print("ERROR: --scp-known-hosts has no entry for the ztp-server; no trust on first use", file=out)
+            print(f"ERROR: --scp-known-hosts has no entry for the ztp-server; no trust on first use: "
+                  f"{args.scp_known_hosts}", file=out)
             return EXIT_BAD_INPUT
         scp_server = ib.ScpServer(args.mgmt_server, args.mgmt_user, args.mgmt_port, keys, scp_password)
     credentials = ssh.Credentials(args.user, key, key_fingerprint, password)
-    pins = ssh.HostPins.load(args.known_hosts)
+    watched_inputs = [fleet_engine.LockedFile.read("known hosts", args.known_hosts)]
+    if args.method == "scp":
+        watched_inputs.append(server_watch)
+    try:
+        pins = ssh.HostPins.load(args.known_hosts)
+    except ValueError:
+        print(f"ERROR: invalid known_hosts: {args.known_hosts}", file=out)
+        return EXIT_BAD_INPUT
     ops_arguments = dict(pins=pins, credentials=credentials, policy=policy, selected=selected,
                          run_id=run_id, switch_dir=args.local_dir, force_health=args.force,
                          management_line=Path(public).read_bytes().splitlines()[0] + b"\n",
@@ -321,6 +525,7 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
                   "that rejects the password holds the prechecks", file=out)
     run_dir = _run_directory(args, paths, run_id)
     evidence = fleet_engine.Evidence(run_dir)
+    print(f"[RUN] evidence: {run_dir.resolve()}", file=out, flush=True)
     evidence.write("plan.json", dict(
         version=VERSION, run_id=run_id, argv=list(argv if argv is not None else sys.argv[1:]),
         mode="upgrade" if args.upgrade else "plan", selected=list(selected), method=args.method,
@@ -346,7 +551,9 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
         progress_seconds=args.progress_seconds, password_given=password is not None,
         **({"timings": timings} if timings is not None else {}))
     engine = fleet_engine.Engine(devices, ib.IbFamily(policy), ops, options, evidence, out=out,
-                                 blocked_inputs=snapshot.blocked_devices, service_issues=service_issues)
+                                 blocked_inputs=snapshot.blocked_devices, service_issues=service_issues,
+                                 locked_inputs=locked_inputs, watched_inputs=watched_inputs,
+            packages_ready=ops.bind_available_packages, routes_path=run_dir.parent / 'canary-routes.jsonl')
     interrupts = []
 
     def on_interrupt(_signum, _frame):
@@ -379,9 +586,9 @@ def main():
     if not operator_identity.skips_identity(argv):
         project = parser().parse_args(argv).project
         if project is None:
-            from project_contract import ActiveProjectPointerError
+            from project_pointer import ActiveProjectPointerError, active_project_dir
             try:
-                project = operator_identity.active_project(REPOSITORY)
+                project = active_project_dir(REPOSITORY)
             except ActiveProjectPointerError as error:
                 print(f"ERROR: {error}", file=sys.stderr)
                 return EXIT_BAD_INPUT
@@ -393,6 +600,8 @@ def main():
             if operator_identity.needs_reexec(identity):
                 operator_identity.exec_as_operator(identity.operator, ENTRY, argv)
             print(identity.banner, file=sys.stderr)
+    if _reexec_in_runtime_venv(argv) == "NO_CANDIDATE":
+        return EXIT_BAD_INPUT
     if tuple(sys.argv[1:]) in (("--version",), ("--help",), ("-h",)):
         return run()
     guard = importlib.import_module("ib_bringup_runtime_guard")
@@ -401,7 +610,7 @@ def main():
             return run()
     except guard._InstanceGuardError as error:
         print(f"ERROR [{error.code}] {error}", file=sys.stderr)
-        return EXIT_BUSY
+        return EXIT_BUSY if error.code == "ALREADY_RUNNING" else EXIT_BAD_INPUT
 
 
 if __name__ == "__main__":

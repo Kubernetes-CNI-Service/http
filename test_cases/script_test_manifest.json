@@ -230,7 +230,15 @@
         "test_cases.test_setup_operator_identity",
         "test_cases.test_setup_operator_identity_workflow",
         "test_cases.test_initial_setup_comma_interfaces",
-        "test_cases.test_initial_setup_comma_interfaces_workflow"
+        "test_cases.test_initial_setup_comma_interfaces_workflow",
+        "test_cases.test_initial_setup_jump_sessions",
+        "test_cases.test_initial_setup_jump_gate",
+        "test_cases.test_initial_setup_jump_unreachable_workflow",
+        "test_cases.test_initial_setup_ipv4_readiness",
+        "test_cases.test_login_path",
+        "test_cases.test_initial_setup_host_key_refresh",
+        "test_cases.test_initial_setup_host_key_refresh_workflow",
+        "test_cases.test_project_pointer_contract"
       ]
     },
     {
@@ -514,7 +522,18 @@
         "test_cases.test_ibsw_v2_device_scripts",
         "test_cases.test_ibsw_v2_device",
         "test_cases.test_ibsw_v2_workflow",
-        "test_cases.test_ibsw_v2_entry"
+        "test_cases.test_ibsw_v2_entry",
+        "test_cases.test_ibsw_upgrade_layout_independence",
+        "test_cases.test_ibsw_upgrade_layout_independence_workflow",
+        "test_cases.test_ibsw_upgrade_entry_runtime",
+        "test_cases.test_ibsw_upgrade_project_inventory_workflow",
+        "test_cases.test_ibsw_upgrade_runtime_lock_workflow",
+        "test_cases.test_ibsw_upgrade_connection_drops",
+        "test_cases.test_ibsw_upgrade_connection_drops_workflow",
+        "test_cases.test_fleet_canary_routes",
+        "test_cases.test_ibsw_upgrade_canary_routes_workflow",
+        "test_cases.test_troot_checkscript_env_control",
+        "test_cases.test_project_pointer_entry_workflow"
       ]
     },
     {
@@ -918,7 +937,10 @@
     "tools/hostname_ranges.py": "tools/hostname_ranges.py",
     "tools/inventory_subset.py": "tools/inventory_subset.py",
     "tools/operator_identity.py": "tools/operator_identity.py",
-    "tools/credentials_fd.py": "tools/credentials_fd.py"
+    "tools/credentials_fd.py": "tools/credentials_fd.py",
+    "tools/login_path.py": "tools/login_path.py",
+    "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh": "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh",
+    "tools/project_pointer.py": "tools/project_pointer.py"
   },
   "test_rules": [
     {
@@ -1497,7 +1519,8 @@
         "test_cases.test_terminal_l2_stp_generation",
         "test_cases.test_v2_project_schema",
         "test_cases.test_v2_generation_flow",
-        "test_cases.test_reference_only_path_disposition"
+        "test_cases.test_reference_only_path_disposition",
+        "test_cases.test_project_pointer_contract"
       ]
     },
     {
@@ -1998,7 +2021,8 @@
         "test_cases.test_ibsw3_source_inverse_fixture_portability",
         "test_cases.test_native_bios_os22_consumer_compatibility",
         "test_cases.test_ibsw3_native_probe_target_query_stop",
-        "test_cases.test_ibsw3_native_scp_landing_docs"
+        "test_cases.test_ibsw3_native_scp_landing_docs",
+        "test_cases.test_ibsw_upgrade_layout_independence"
       ]
     },
     {
@@ -2134,7 +2158,8 @@
         "tools/fleet_ssh.py"
       ],
       "tests": [
-        "test_cases.test_fleet_ssh"
+        "test_cases.test_fleet_ssh",
+        "test_cases.test_ibsw_upgrade_connection_drops"
       ]
     },
     {
@@ -2143,7 +2168,9 @@
         "tools/fleet_engine.py"
       ],
       "tests": [
-        "test_cases.test_fleet_engine"
+        "test_cases.test_fleet_engine",
+        "test_cases.test_ibsw_upgrade_entry_runtime",
+        "test_cases.test_fleet_canary_routes"
       ]
     },
     {
@@ -2163,7 +2190,11 @@
       ],
       "tests": [
         "test_cases.test_ibsw_v2_device",
-        "test_cases.test_ibsw_v2_device_scripts"
+        "test_cases.test_ibsw_v2_device_scripts",
+        "test_cases.test_ibsw_upgrade_entry_runtime",
+        "test_cases.test_ibsw_upgrade_connection_drops",
+        "test_cases.test_fleet_canary_routes",
+        "test_cases.test_troot_checkscript_env_control"
       ]
     },
     {
@@ -2172,7 +2203,8 @@
         "infiniband/bringup/xdr-upgrade/upgrade2.py"
       ],
       "tests": [
-        "test_cases.test_ibsw_v2_entry"
+        "test_cases.test_ibsw_v2_entry",
+        "test_cases.test_ibsw_upgrade_entry_runtime"
       ]
     },
     {
@@ -2446,6 +2478,70 @@
       "tests": [
         "test_cases.test_initial_setup_comma_interfaces"
       ]
+    },
+    {
+      "id": "initial_setup_jump_sessions_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_jump_sessions"
+      ]
+    },
+    {
+      "id": "initial_setup_jump_gate_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_jump_gate"
+      ]
+    },
+    {
+      "id": "initial_setup_ipv4_readiness_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/login_path.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_ipv4_readiness"
+      ]
+    },
+    {
+      "id": "login_path_direct",
+      "paths": [
+        "tools/login_path.py"
+      ],
+      "tests": [
+        "test_cases.test_login_path"
+      ]
+    },
+    {
+      "id": "initial_setup_host_key_refresh_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_host_key_refresh"
+      ]
+    },
+    {
+      "id": "helper_scripts_direct",
+      "paths": [
+        "*/helper-*"
+      ],
+      "tests": [
+        "test_cases.test_all_script_entrypoints"
+      ]
+    },
+    {
+      "id": "project_pointer_direct",
+      "paths": [
+        "tools/project_pointer.py"
+      ],
+      "tests": [
+        "test_cases.test_project_pointer_contract"
+      ]
     }
   ],
   "workflows": [
@@ -2545,9 +2641,14 @@
         "tools/deploy-shared-artifacts.py",
         "tools/f01_ssh_dependency_identity.py",
         "tools/ibsw_upgrade_observer.py",
-        "DAY0-Prepare/11-load.py"
+        "DAY0-Prepare/11-load.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py",
+        "tools/fleet_ssh.py"
       ],
-      "tests": ["test_cases.test_deps_table_workflow", "test_cases.test_deps_table"]
+      "tests": [
+        "test_cases.test_deps_table_workflow",
+        "test_cases.test_deps_table"
+      ]
     },
     {
       "id": "issue_tracker_engine_imports_to_image_gate_and_cron",
@@ -3054,7 +3155,8 @@
         "ethernet/monitor/post-collect.py",
         "infiniband/monitor/cron.sh",
         "nvlink/monitor/cron.sh",
-        "tools/lldp-analyze-tool/analyze_lldp.py"
+        "tools/lldp-analyze-tool/analyze_lldp.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_collection_cycle_contract",
@@ -3092,7 +3194,8 @@
         "monitor/switch-collection-worker.py",
         "monitor/switch_collection_gate.py",
         "monitor/switch-collection-control.cgi",
-        "monitor/generate-monitor-html.py"
+        "monitor/generate-monitor-html.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_project_contracts",
@@ -3681,7 +3784,8 @@
         "tools/ibsw_upgrade_observer.py",
         "tools/ibsw_upgrade_access.py",
         "tools/ibsw_upgrade_pipeline.py",
-        "tools/ibsw_upgrade_scp.py"
+        "tools/ibsw_upgrade_scp.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_ibsw225_three_component_workflow",
@@ -3852,13 +3956,19 @@
         "tools/ibsw_upgrade_driver.py",
         "tools/project_contract.py",
         "tools/ssh_key_preparation.py",
-        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_ibsw_v2_device",
         "test_cases.test_ibsw_v2_workflow",
         "test_cases.test_ibsw_v2_entry",
-        "test_cases.test_ibsw_v2_device_scripts"
+        "test_cases.test_ibsw_v2_device_scripts",
+        "test_cases.test_ibsw_upgrade_layout_independence_workflow",
+        "test_cases.test_ibsw_upgrade_connection_drops_workflow",
+        "test_cases.test_ibsw_upgrade_canary_routes_workflow",
+        "test_cases.test_ibsw_upgrade_runtime_lock_workflow",
+        "test_cases.test_troot_checkscript_env_control"
       ]
     },
     {
@@ -3868,7 +3978,8 @@
         "tools/ib_bringup_runtime_guard.py"
       ],
       "tests": [
-        "test_cases.test_ibsw_v2_entry"
+        "test_cases.test_ibsw_v2_entry",
+        "test_cases.test_ibsw_upgrade_runtime_lock_workflow"
       ]
     },
     {
@@ -4078,7 +4189,8 @@
         "ztp/config/cumulus/template/90-c2-generate_configs.py",
         "ztp/dynamic_air_inventory.py",
         "ztp/backup/yaml-collect.py",
-        "ztp/optimize/feedback.py"
+        "ztp/optimize/feedback.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_activate_project_unsetup_workflow",
@@ -4110,7 +4222,8 @@
       "id": "operator_identity_project_pointer",
       "members": [
         "tools/operator_identity.py",
-        "tools/project_contract.py"
+        "tools/project_contract.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_operator_identity"
@@ -4256,7 +4369,9 @@
       "members": [
         "infiniband/bringup/xdr-initial-setup/initial-setup.py",
         "tools/operator_identity.py",
-        "tools/project_contract.py"
+        "tools/project_contract.py",
+        "tools/credentials_fd.py",
+        "tools/project_pointer.py"
       ],
       "tests": [
         "test_cases.test_initial_setup_operator_reexec_workflow"
@@ -4293,6 +4408,84 @@
       ],
       "tests": [
         "test_cases.test_load_operator_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_jump_sessions_handoff",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_jump_sessions"
+      ]
+    },
+    {
+      "id": "initial_setup_jump_multiplex_and_unreachable",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_jump_unreachable_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_host_key_refresh",
+      "members": [
+        "ztp/config_sync_authority.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/login_path.py",
+        "tools/hostname_ranges.py",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_host_key_refresh_workflow"
+      ]
+    },
+    {
+      "id": "helper_scripts_with_initial_setup",
+      "members": [
+        "*/helper-*",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_all_script_entrypoints"
+      ]
+    },
+    {
+      "id": "ibsw_upgrade_project_inventory",
+      "members": [
+        "infiniband/bringup/xdr-upgrade/upgrade2.py",
+        "tools/inventory_subset.py",
+        "tools/device_identity.py",
+        "tools/project_contract.py",
+        "tools/project_pointer.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw_upgrade_project_inventory_workflow"
+      ]
+    },
+    {
+      "id": "operator_identity_sealed_environment_transport",
+      "members": [
+        "tools/operator_identity.py",
+        "tools/credentials_fd.py"
+      ],
+      "tests": [
+        "test_cases.test_operator_identity"
+      ]
+    },
+    {
+      "id": "project_pointer_entry_workflow",
+      "members": [
+        "tools/project_pointer.py",
+        "tools/project_contract.py",
+        "tools/operator_identity.py",
+        "infiniband/bringup/xdr-upgrade/upgrade2.py"
+      ],
+      "tests": [
+        "test_cases.test_project_pointer_entry_workflow"
       ]
     }
   ],

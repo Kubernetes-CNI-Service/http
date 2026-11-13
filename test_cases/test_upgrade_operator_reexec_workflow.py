@@ -69,6 +69,9 @@ def note(event):
     with open(record / "events", "a") as handle:
         handle.write(event + "\\n")
 note("child uid=%d venv=%s" % (os.geteuid(), os.environ.get("IBSW_UPGRADE_VENV_REEXEC", "-")))
+# Test-only carrier input is installed AFTER the real identity-clean environment
+# was recorded by runuser. It is not a production reexec whitelist entry.
+os.environ['TMPDIR'] = TEST_OWNED_ROOT_LITERAL
 sys.path.insert(0, guard_dir)
 guard = importlib.import_module("ib_bringup_runtime_guard")
 class Busy:
@@ -81,6 +84,14 @@ guard._runtime_instance_guard = Busy
 def missing(name):
     raise metadata.PackageNotFoundError(name)
 metadata.version = missing
+# WP-A2 adds the v2 runtime check after identity. This old identity-only path
+# supplies an independently pinned matching interpreter, preserving its guard
+# and 75 assertions; v1 still exercises the original cold venv switch above.
+if pathlib.Path(args[0]).name == "upgrade2.py":
+    versions = {"paramiko": "5.0.0", "bcrypt": "5.0.0", "cryptography": "50.0.1", "invoke": "2.2.1",
+                "PyNaCl": "1.6.2", "cffi": "2.0.0", "pycparser": "2.23", "typing-extensions": "4.16.0",
+                "PyYAML": "6.0.2"}
+    metadata.version = lambda name: versions[name]
 sys.argv = list(args)
 runpy.run_path(args[0], run_name="__main__")
 '''
@@ -138,7 +149,9 @@ class UpgradeReexecWorkflowTests(unittest.TestCase):
     def stage(self, name, guard_dir):
         record = self.root / ("record-" + name)
         record.mkdir()
-        launcher = self.write_executable(self.root / "child-launcher.py", CHILD_LAUNCHER)
+        from test_cases.native_cpld_physical_io import owned_test_root
+        launcher = self.write_executable(self.root / "child-launcher.py", CHILD_LAUNCHER.replace(
+            'TEST_OWNED_ROOT_LITERAL', repr(str(owned_test_root()))))
         bin_dir = self.root / ("bin-" + name)
         self.write_executable(bin_dir / "runuser", RUNUSER.format(
             python=sys.executable, record=str(record), launcher=str(launcher), guard_dir=str(guard_dir)))
@@ -149,6 +162,8 @@ class UpgradeReexecWorkflowTests(unittest.TestCase):
                        "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8", "TERM": "dumb", "USER": "root",
                        "LOGNAME": "root", "SSH_AUTH_SOCK": str(self.root / "agent.sock"),
                        "IBSW_TEST_CANARY": "root-only"}
+        from test_cases.native_cpld_physical_io import owned_test_root
+        environment['TMPDIR'] = str(owned_test_root())
         if sudo:
             environment.update(SUDO_USER=self.me.pw_name, SUDO_UID=str(self.me.pw_uid),
                                SUDO_GID=str(self.me.pw_gid))
@@ -215,7 +230,7 @@ class UpgradeReexecWorkflowTests(unittest.TestCase):
         entry.parent.mkdir(parents=True)
         entry.write_bytes((ROOT / "infiniband/bringup/xdr-upgrade/upgrade2.py").read_bytes())
         (tree / "tools").mkdir()
-        for name in ("operator_identity.py", "ib_bringup_runtime_guard.py"):
+        for name in ("operator_identity.py", "ib_bringup_runtime_guard.py", "fleet_ssh.py", "ssh_key_preparation.py"):
             (tree / "tools" / name).write_bytes((ROOT / "tools" / name).read_bytes())
         args = ["--project", str(self.project), "--plan"]
         for label, sudo in (("root login", False), ("sudo by the owner", True)):
