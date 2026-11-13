@@ -2377,6 +2377,7 @@ def _source_bound_unsetup_pointer_sinks(
     tree: ast.AST,
     contract_tree: ast.AST | None = None,
     sample_tree: ast.AST | None = None,
+    pointer_tree: ast.AST | None = None,
 ) -> set[str]:
     """Bind R-016 unsetup's deletions to their one real remove sink.
 
@@ -2436,6 +2437,7 @@ def _source_bound_unsetup_pointer_sinks(
     for name in ("ACTIVE_PROJECT_POINTER", "RETIRED_SETUP_LINKS", "setup_dynamic_link_patterns"):
         if imported(tree, name) != [("project_contract", name, None)] or stores(tree, name):
             return set()
+    contract_from_root = contract_tree is None
     if contract_tree is None:
         contract_tree = ast.parse(
             (ROOT / "tools/project_contract.py").read_text(encoding="utf-8")
@@ -2452,6 +2454,53 @@ def _source_bound_unsetup_pointer_sinks(
     # table's project rows name governed files; the dynamic section holds the sample glob, whose
     # links carry governed names.
     pointer = assignment(contract_tree, "ACTIVE_PROJECT_POINTER")
+    if not isinstance(pointer, ast.Constant):
+        # Current PC exports exactly the same-source NEW fact; no canonical
+        # fallback is allowed when the caller supplied a contract AST.
+        alias = "_project_pointer"
+        if not (isinstance(pointer, ast.Attribute) and named(pointer.value, alias)
+                and pointer.attr == "ACTIVE_PROJECT_POINTER"):
+            return set()
+        branches = [node for node in getattr(contract_tree, "body", ())
+                    if isinstance(node, ast.If) and named(node.test, "__package__")]
+        if len(branches) != 1 or len(branches[0].body) != 1 or len(branches[0].orelse) != 1:
+            return set()
+        relative, bare = branches[0].body[0], branches[0].orelse[0]
+        if not (isinstance(relative, ast.ImportFrom) and relative.level == 1
+                and relative.module is None and len(relative.names) == 1
+                and relative.names[0].name == "project_pointer"
+                and relative.names[0].asname == alias
+                and isinstance(bare, ast.Import) and len(bare.names) == 1
+                and bare.names[0].name == "project_pointer" and bare.names[0].asname == alias):
+            return set()
+        bindings = _source_scope_bindings(contract_tree)
+        if (bindings.get(alias) != [("import-from", relative.names[0]), ("import", bare.names[0])]
+                or len(bindings.get("ACTIVE_PROJECT_POINTER", ())) != 1
+                or imported(contract_tree, alias) != [(None, "project_pointer", alias)] * 2
+                or stores(contract_tree, alias)
+                or any(isinstance(node, (ast.Global, ast.Nonlocal)) and alias in node.names
+                       for node in ast.walk(contract_tree))
+                or any(isinstance(node, ast.Attribute) and named(node.value, alias)
+                       and isinstance(node.ctx, (ast.Store, ast.Del))
+                       for node in ast.walk(contract_tree))):
+            return set()
+        if pointer_tree is None:
+            if not contract_from_root:
+                return set()
+            pointer_tree = ast.parse(
+                (ROOT / "tools/project_pointer.py").read_text(encoding="utf-8")
+            )
+        assignments = [node for node in getattr(pointer_tree, "body", ())
+                       if isinstance(node, ast.Assign)
+                       and any(named(target, "ACTIVE_PROJECT_POINTER") for target in node.targets)]
+        if (len(assignments) != 1 or len(assignments[0].targets) != 1
+                or not named(assignments[0].targets[0], "ACTIVE_PROJECT_POINTER")
+                or _source_scope_bindings(pointer_tree).get("ACTIVE_PROJECT_POINTER")
+                != [("store", assignments[0].targets[0])]
+                or stores(pointer_tree, "ACTIVE_PROJECT_POINTER") != 1
+                or imported(pointer_tree, "ACTIVE_PROJECT_POINTER")):
+            return set()
+        pointer = assignments[0].value
     retired = assignment(contract_tree, "RETIRED_SETUP_LINKS")
     if (
         not isinstance(pointer, ast.Constant)
@@ -7219,15 +7268,24 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             "unsetup": (ROOT / "DAY0-Prepare/02-unsetup.py").read_text(encoding="utf-8"),
             "contract": (ROOT / "tools/project_contract.py").read_text(encoding="utf-8"),
             "sample": (ROOT / "ztp/optimize/sample_links.py").read_text(encoding="utf-8"),
+            "pointer": (ROOT / "tools/project_pointer.py").read_text(encoding="utf-8"),
         }
 
         def bound(changed: dict[str, str]) -> set[str]:
             return _source_bound_unsetup_pointer_sinks(
                 ast.parse(changed["unsetup"]), ast.parse(changed["contract"]),
-                ast.parse(changed["sample"]),
+                ast.parse(changed["sample"]), ast.parse(changed["pointer"]),
             )
 
         self.assertEqual({"_main_locked_impl"}, bound(sources))
+        legacy_contract = subprocess.check_output([
+            "git", "-C", os.fspath(ROOT), "show",
+            "50ad1700c5e5675a06c413aa699c7c0e72803289:tools/project_contract.py",
+        ], text=True, timeout=10)
+        self.assertEqual({"_main_locked_impl"}, _source_bound_unsetup_pointer_sinks(
+            ast.parse(sources["unsetup"]), ast.parse(legacy_contract), ast.parse(sources["sample"])))
+        self.assertEqual(set(), _source_bound_unsetup_pointer_sinks(
+            ast.parse(sources["unsetup"]), ast.parse(sources["contract"]), ast.parse(sources["sample"])))
         unsetup_tree = ast.parse(sources["unsetup"])
         self.assertIn("_main_locked_impl", literal_governed_mutation_sinks(unsetup_tree))
         # 13-unload delegates to unsetup: the structural binding keeps that script a governed target.
@@ -7248,9 +7306,36 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
              "for name in RETIRED_SETUP_LINKS]", "for name in ()]"),
             ("pointer_rebound", "unsetup",
              "LEGACY_ZTP_LINKS = (", 'ACTIVE_PROJECT_POINTER = "elsewhere"\nLEGACY_ZTP_LINKS = ('),
-            ("contract_pointer_changed", "contract",
+            ("contract_pointer_changed", "pointer",
              'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"',
              'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/other-pointer"'),
+            ("pointer_alias_relative_foreign", "contract",
+             "    from . import project_pointer as _project_pointer\n",
+             "    from . import foreign_pointer as _project_pointer\n"),
+            ("pointer_alias_bare_foreign", "contract",
+             "    import project_pointer as _project_pointer\n",
+             "    import foreign_pointer as _project_pointer\n"),
+            ("pointer_alias_rebound", "contract",
+             "ACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n",
+             "_project_pointer = None\nACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n"),
+            ("pointer_alias_deleted", "contract",
+             "ACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n",
+             "del _project_pointer\nACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n"),
+            ("pointer_alias_attribute_rebound", "contract",
+             "ACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n",
+             "_project_pointer.ACTIVE_PROJECT_POINTER = 'other'\nACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n"),
+            ("pointer_export_redirected", "contract",
+             "ACTIVE_PROJECT_POINTER = _project_pointer.ACTIVE_PROJECT_POINTER\n",
+             "ACTIVE_PROJECT_POINTER = _project_pointer.OTHER_POINTER\n"),
+            ("new_pointer_rebound", "pointer",
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\n',
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\nACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\n'),
+            ("new_pointer_imported", "pointer",
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\n',
+             'from foreign_pointer import ACTIVE_PROJECT_POINTER\n'),
+            ("new_pointer_not_literal", "pointer",
+             'ACTIVE_PROJECT_POINTER = "DAY0-Prepare/activate-project"\n',
+             'ACTIVE_PROJECT_POINTER = str("DAY0-Prepare/activate-project")\n'),
             ("contract_route_bypasses_pointer", "contract",
              'posixpath.relpath(ACTIVE_PROJECT_POINTER + "/" + project_name,',
              'posixpath.relpath("DAY0-Prepare/" + project_name,'),

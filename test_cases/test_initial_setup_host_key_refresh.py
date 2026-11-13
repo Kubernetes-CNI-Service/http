@@ -221,6 +221,43 @@ class HostKeyRefreshTests(unittest.TestCase):
         self.assertEqual(("OOB_JUMP_UNREACHABLE", "outer", "198.51.100.10", "EXAMPLE-JUMP01"),
             (caught.exception.failure_kind, caught.exception.hop, caught.exception.address, caught.exception.jump))
 
+    def test_inline_remove_raises_typed_reply_and_preserves_success_receipt(self):
+        # r551 :442: inline has the same typed-error boundary; success stays the same object.
+        app, task, change = self.app, self.task(), self.change()
+        library = app._import_tools("tools.login_path")
+        receipt = library.RemovalReceipt((7, 9), True, None, None, None, None)
+        old_reply = {"ssh_failure": ("OOB_JUMP_UNREACHABLE", "outer", "198.51.100.10", "EXAMPLE-JUMP01")}
+        for sideband in (None, False, 0, 1, "True", True):
+            reply = dict(old_reply)
+            if sideband is not None:
+                reply["_jump_candidates_exhausted"] = sideband
+            parent = SimpleNamespace(request=mock.Mock(return_value=reply))
+            caught = None
+            with self.subTest(sideband=sideband), \
+                    mock.patch.object(app, "_WORKER_CONNECTION", None), \
+                    mock.patch.object(app, "_ACTIVE_COORDINATOR", parent), \
+                    mock.patch.object(app, "interactive_run", side_effect=AssertionError("unexpected transport")), \
+                    mock.patch.object(app.subprocess, "run", side_effect=AssertionError("unexpected child")):
+                editor = app.JumpKnownHostsEditor(task, change, eth_user="cumulus", timeout=2)
+                try:
+                    editor.remove(change.address)
+                except app.SshFailure as error:
+                    caught = error
+                self.assertIsInstance(caught, app.SshFailure, "inline must raise, not return the typed error dict")
+                self.assertIsInstance(caught, app.SetupError)
+                self.assertEqual(("OOB_JUMP_UNREACHABLE", "outer", "198.51.100.10", "EXAMPLE-JUMP01"),
+                    (caught.failure_kind, caught.hop, caught.address, caught.jump))
+                self.assertEqual(sideband is True, getattr(caught, "candidates_exhausted", False) is True)
+                parent.request.assert_called_once_with("host-key-remove", change, task.target)
+        parent = SimpleNamespace(request=mock.Mock(return_value=receipt))
+        with mock.patch.object(app, "_WORKER_CONNECTION", None), \
+                mock.patch.object(app, "_ACTIVE_COORDINATOR", parent), \
+                mock.patch.object(app, "interactive_run", side_effect=AssertionError("unexpected transport")), \
+                mock.patch.object(app.subprocess, "run", side_effect=AssertionError("unexpected child")):
+            editor = app.JumpKnownHostsEditor(task, change, eth_user="cumulus", timeout=2)
+            self.assertIs(receipt, editor.remove(change.address))
+            parent.request.assert_called_once_with("host-key-remove", change, task.target)
+
     def test_parent_first_change_refusal_blocks_actual_closed_writer(self):
         app, task = self.app, self.task()
         parent = app.RuntimeCoordinator(SimpleNamespace(apply=True, yes=False, eth_user="cumulus", connect_timeout=2),

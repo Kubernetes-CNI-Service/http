@@ -93,7 +93,7 @@ DOT_LINK_RE = re.compile(
 REPORT_HANDLE = None
 # Fixed in the file: an OOB Leaf copy has no git to derive it from.  Every version that
 # changes this script sets it to that version before its release tag (guide WP-2, A.11).
-_REPOSITORY_REVISION = "http-v3.1.3"
+_REPOSITORY_REVISION = "http-v3.1.4"
 
 # Fixed host-local identity, independent of user HOME/TMPDIR, cwd, project,
 # selected devices and renamed/copied entries. Upgrade uses the same path.
@@ -3268,20 +3268,30 @@ def _new_jump_sessions(*, local_keys=(), timeout=10):
     return JumpSessions(local_keys=local_keys, timeout=timeout)
 
 
+def _ssh_failure_reply(error):
+    reply = {"ssh_failure": (error.kind.value, error.hop, error.address, error.jump)}
+    if getattr(error, "candidates_exhausted", False) is True:
+        reply["_jump_candidates_exhausted"] = True
+    return reply
+
+
 def _jump_master_request_result(value, target):
     if value != normalize_name(target.ethernet.hostname):
         raise SetupError("jump master request does not match the task transit")
     try:
         _JUMP_SESSIONS.ensure_jump_master(target.ethernet)
     except SshFailure as error:
-        return {"ssh_failure": (error.kind.value, error.hop, error.address, error.jump)}
+        return _ssh_failure_reply(error)
     return {"ok": True}
 
 
 def _unwrap_jump_master_reply(reply):
     if "ssh_failure" in reply:
         kind, hop, address, jump = reply["ssh_failure"]
-        raise SshFailure(SshFailureKind(kind), hop, address, jump)
+        failure = SshFailure(SshFailureKind(kind), hop, address, jump)
+        if reply.get("_jump_candidates_exhausted") is True:
+            failure.candidates_exhausted = True
+        raise failure
     return reply
 
 
@@ -5386,7 +5396,10 @@ class JumpKnownHostsEditor:
             return worker_request("host-key-remove", self.change)
         if _ACTIVE_COORDINATOR is None:
             raise SetupError("host-key deletion requires the admitted coordinator")
-        return _ACTIVE_COORDINATOR.request("host-key-remove", self.change, self.task.target)
+        reply = _ACTIVE_COORDINATOR.request("host-key-remove", self.change, self.task.target)
+        if isinstance(reply, dict) and "ssh_failure" in reply:
+            return _unwrap_jump_master_reply(reply)
+        return reply
 
 
 def ib_host_key_reader(task, eth_user, ib_user, current_password, timeout, *, policy=None):
@@ -6742,7 +6755,7 @@ class RuntimeCoordinator:
             except (ProjectInputChanged, BatchStopped):
                 raise
             except SshFailure as error:
-                return {"ssh_failure": (error.kind.value, error.hop, error.address, error.jump)}
+                return _ssh_failure_reply(error)
             except (SetupError, ValueError, OSError, subprocess.TimeoutExpired):
                 raise SetupError("jump host-key removal failed; no automatic replay") from None
         if kind == "jump-master":

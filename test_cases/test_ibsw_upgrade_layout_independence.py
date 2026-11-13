@@ -119,7 +119,7 @@ else:
         sys.path.insert(0, str(ROOT / "tools"))
         from ibsw_upgrade_contract import _fixed_layout
         for flat in (False, True):
-            for missing in old.MEMBERS:
+            for missing in CurrentPointerLayoutCompatibilityTests.CORE:
                 with self.subTest(flat=flat, missing=missing), tempfile.TemporaryDirectory(prefix="upgrade-v1-") as directory:
                     root = Path(directory).resolve()
                     for relative in old.MEMBERS:
@@ -289,3 +289,72 @@ class UpgradeLayoutSourceInverseTests(unittest.TestCase):
             for label, payload in mutations.items():
                 with self.subTest(source=relative, fault=label), self.assertRaises(AssertionError):
                     restore(relative, payload)
+
+
+class CurrentPointerLayoutCompatibilityTests(unittest.TestCase):
+    # Old fixed-layout integrity contract: 5 entry/assets plus 13 tool modules.
+    CORE = tuple("infiniband/bringup/xdr-upgrade/" + name for name in (
+        "upgrade.py", "upgrade.sh", "upgrade-component.sh", "upgrade-owned-runner.sh", "requirements.txt")) + tuple(
+        "tools/" + name for name in (
+            "ibsw_upgrade_contract.py", "ibsw_upgrade_inputs.py", "ibsw_upgrade_schedule.py",
+            "ibsw_upgrade_component.py", "ibsw_upgrade_driver.py", "ibsw_upgrade_executor.py",
+            "ibsw_upgrade_observer.py", "ibsw_upgrade_access.py", "ibsw_upgrade_pipeline.py",
+            "project_contract.py", "_package_common.py", "ssh_key_preparation.py", "ib_bringup_runtime_guard.py"))
+
+    def test_current_members_are_old_eighteen_core_plus_one_pointer(self):
+        from test_cases import test_ibsw225_flat_tools_layout as old
+        self.assertEqual(18, len(self.CORE))
+        self.assertEqual(18, len(set(self.CORE)))
+        self.assertEqual(self.CORE + ("tools/project_pointer.py",), old.MEMBERS)
+        self.assertEqual(19, len(old.MEMBERS))
+
+    def test_current_cold_contract_requires_pointer_in_both_complete_layouts(self):
+        from test_cases import test_ibsw225_flat_tools_layout as old
+        import yaml
+        runtime_site = str(Path(yaml.__file__).resolve().parents[1])
+        program = '''import importlib.util, sys
+from pathlib import Path
+tools=Path(sys.argv[1]).resolve(); canonical=Path(sys.argv[2]).resolve()
+runtime_site=sys.argv[3]; missing=sys.argv[4]=='missing'
+sys.path[:]=[str(tools),runtime_site]+[p for p in sys.path if p and
+ Path(p).resolve() not in {canonical,canonical/'tools',tools,tools.parent} and p!=runtime_site]
+def no_external(event,args):
+ if event in {'subprocess.Popen','os.system','os.exec','socket.connect','socket.bind'}:
+  raise AssertionError('unexpected external effect in cold import')
+sys.addaudithook(no_external)
+spec=importlib.util.find_spec('project_pointer')
+if missing:
+ assert spec is None,'foreign pointer spec must not be executed'
+else:
+ assert spec is not None and Path(spec.origin).resolve()==tools/'project_pointer.py'
+try:
+ import project_contract
+except ModuleNotFoundError as error:
+ assert missing and error.name=='project_pointer',type(error).__name__
+ print('CURRENT_POINTER_MISSING_REJECTED')
+else:
+ assert not missing,'current contract silently accepted a missing dependency'
+ import project_pointer
+ assert Path(project_contract.__file__).resolve()==tools/'project_contract.py'
+ assert Path(project_pointer.__file__).resolve()==tools/'project_pointer.py'
+ assert project_contract.ActiveProjectPointerError is project_pointer.ActiveProjectPointerError
+ print('CURRENT_POINTER_SAME_TREE_OK')
+'''
+        for flat in (False, True):
+            for missing in (False, True):
+                with self.subTest(flat=flat, missing=missing), tempfile.TemporaryDirectory(prefix="v1-current-pointer-") as folder:
+                    root = Path(folder).resolve()
+                    for relative in old.MEMBERS:
+                        target = root / (Path(relative).name if flat else relative)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes((ROOT / relative).read_bytes())
+                    tools = root if flat else root / "tools"
+                    if missing:
+                        (tools / "project_pointer.py").unlink()
+                    done = subprocess.run(
+                        [sys.executable, "-B", "-c", program, str(tools), str(ROOT), runtime_site,
+                         "missing" if missing else "complete"], cwd=root,
+                        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(0, done.returncode, done.stderr)
+                    self.assertEqual("CURRENT_POINTER_MISSING_REJECTED" if missing else "CURRENT_POINTER_SAME_TREE_OK",
+                                     done.stdout.strip())

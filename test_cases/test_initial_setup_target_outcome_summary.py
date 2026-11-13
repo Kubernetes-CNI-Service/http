@@ -1,6 +1,8 @@
 """I15 canonical fixture v3 draft; not executed or approved for W adoption.
 
-The six original test methods and independent literal oracles are unchanged.
+The six original test methods remain. Only the v3.1.4-approved S0 legacy
+counter oracle and S3 nine-attempt readiness oracle are migrated; all other
+independent oracles are unchanged.
 Default None creates one retained own0700 parent only after the real class setup
 four workers settle. Explicit Root parent+birth6 must qualify before any worker.
 Native stdlib cleanup remains original; UNKNOWN blocks this I15 class births,
@@ -77,12 +79,18 @@ SUMMARY_PEER_TRANSFORMS = (
 )
 
 
+# Current fixture-only outer layer: compare its exact old peer preimage,
+# but execute only current source. This does not re-pin the old whole SHA.
+SUMMARY_PEER_IPV4_PREVIOUS = '    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR"]\n'
+SUMMARY_PEER_IPV4_CURRENT = '    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",\n                "-o","ControlMaster=no","-o","ControlPath=none"]\n'
+
 def _summary_two_target_peer(caller):
     # Fixture qualification only: exact original generated peer, no SUT oracle.
     original = caller.peer_program()
-    if (type(original) is not str or
-            hashlib.sha256(original.encode("utf-8")).hexdigest()
-            != SUMMARY_PEER_BASE_SHA256):
+    if type(original) is not str or original.count(SUMMARY_PEER_IPV4_CURRENT) != 1:
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    previous = original.replace(SUMMARY_PEER_IPV4_CURRENT, SUMMARY_PEER_IPV4_PREVIOUS, 1)
+    if hashlib.sha256(previous.encode("utf-8")).hexdigest() != SUMMARY_PEER_BASE_SHA256:
         raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
     program = original
     for label, old, new in SUMMARY_PEER_TRANSFORMS:
@@ -579,6 +587,50 @@ class _CanonicalI15FixtureReadiness:
             self.hold()
 
 
+class SummaryPeerCurrentBindingTests(unittest.TestCase):
+    """Pure PUBLIC fixture DATA only; no KAT, main, PTY or old peer execution."""
+    @staticmethod
+    def source_caller(payload):
+        class PublicCaller:
+            @staticmethod
+            def peer_program():
+                return payload
+        return PublicCaller
+
+    def test_current_peer_qualifies_without_repinning_and_keeps_two_target_transform(self):
+        from test_cases import test_initial_setup_main_caller_precommit as caller
+        current = caller.peer_program()
+        expected = ('    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",\n'
+                    '                "-o","ControlMaster=no","-o","ControlPath=none"]\n')
+        self.assertEqual(1, current.count(expected))
+        transformed = _summary_two_target_peer(self.source_caller(current))
+        self.assertEqual(1, transformed.count(expected))
+        self.assertIn('summary-device-02.json', transformed)
+        self.assertIn('admin@203.0.113.3', transformed)
+        self.assertEqual("e79cb3fa63569505380fb367f82d04c7fcc5de6667d0cee9703eb82391009948", SUMMARY_PEER_BASE_SHA256)
+
+    def test_old_missing_duplicate_and_external_peer_drift_are_refused(self):
+        from test_cases import test_initial_setup_main_caller_precommit as caller
+        current = caller.peer_program()
+        expected = ('    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",\n'
+                    '                "-o","ControlMaster=no","-o","ControlPath=none"]\n')
+        previous = '    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR"]\n'
+        self.assertEqual(1, current.count(expected))
+        cases = {
+            "old-peer": current.replace(expected, previous, 1),
+            "missing-path": current.replace(expected,
+                expected.replace(',"-o","ControlPath=none"', ''), 1),
+            "duplicate-layer": current + expected,
+            "outside-prefix": "# PUBLIC drift\n" + current,
+            "outside-suffix": current + "# PUBLIC drift\n",
+            "different-definition": current.replace("def direct_check(args):", "def direct_check_drift(args):", 1),
+            "wrong-type": current.encode(),
+        }
+        for label, payload in cases.items():
+            with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, "^NOT_READY: original PUBLIC summary peer changed$"):
+                _summary_two_target_peer(self.source_caller(payload))
+
+
 class TargetOutcomeSummaryDirectTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -840,11 +892,27 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                             and not f["caller"]["fetch"] and not f["caller"]["helper"])
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            # T12 (guide :2298) keeps the counter line; tables 6-1 rows 2 and 11: the three
-            # OOB-blocked devices are a prerequisite skip, not a failure (v15
-            # HANDOFF-CODEX-TEST.md:29 "前提 SKIP 不算脚本崩溃"; CURRENT-CONTRACT.md:67).
+            # T12 keeps the counter format. v3.1.4 WP-2 K4/:520-521:
+            # no IB attempt is possible, but each device is a jump-authentication
+            # FAILED outcome. Overall INCOMPLETE/exit 2 is not a script crash.
             self.require_report(f, result, "S0",
-                "Summary: targets=3 configured=0 skipped=3 failed=0 day0-skipped=0 services-skipped=0", summaries)
+                "Summary: targets=3 configured=0 skipped=0 failed=3 day0-skipped=0 services-skipped=0", summaries)
+            # v3.1.4 WP-2 K4/:520-521 supersedes the old v3.1.3 SKIP
+            # classification only; none of these devices reached IB/write.
+            [results_file] = sorted(self.summaries(f) - summaries)
+            records = json.loads(results_file.read_text(encoding="utf-8"))["records"]
+            self.assertEqual({
+                "EXAMPLE-IB01": ("FAILED", "FAILED_OOB_JUMP_AUTHENTICATION", "OOB_JUMP_AUTHENTICATION",
+                                  "EXAMPLE-JUMP01", "192.0.2.10", "swp7"),
+                "EXAMPLE-IB02": ("FAILED", "FAILED_OOB_JUMP_AUTHENTICATION", "OOB_JUMP_AUTHENTICATION",
+                                  "EXAMPLE-JUMP01", "192.0.2.10", "swp8"),
+                "EXAMPLE-IB03": ("FAILED", "FAILED_OOB_JUMP_AUTHENTICATION", "OOB_JUMP_AUTHENTICATION",
+                                  "EXAMPLE-JUMP01", "192.0.2.10", "swp9"),
+            }, {row["hostname"]: (row["outcome"], row.get("category"), row.get("failure_kind"),
+                  row["jump"]["hostname"], row["jump"]["login_ip"], row["port"])
+                for row in records.values()})
+            self.assertTrue(all(row["writes_attempted"] is False for row in records.values()))
+            self.assertTrue(all(row.get("script_error", False) is False for row in records.values()))
 
     def test_S1_actual_checkonly_missing_plan_never_counts_an_update(self):
         with self.root() as folder:
@@ -1058,8 +1126,8 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             applied = [i for i, e in enumerate(fresh) if e["kind"] == "summary-network-applied"]
             saved = [i for i, e in enumerate(fresh) if e["kind"] == "summary-network-saved"]
             faults = [i for i, e in enumerate(fresh) if e["kind"] == "summary-ipv4-fault"]
-            # Table 6-1 row 9 (guide :752): IPv4 readiness is tried up to 3 times.
-            self.assertTrue(len(applied) == len(saved) == 1 and len(faults) == 3
+            # Approved WP-3 (guide :30/:631; I-037 :148): IPv4 readiness has 9 attempts.
+            self.assertTrue(len(applied) == len(saved) == 1 and len(faults) == 9
                             and applied[0] < saved[0] < faults[0])
             reads = [i for i, e in enumerate(fresh) if e["kind"] == "caller-show"
                      and saved[0] < i < faults[0]]

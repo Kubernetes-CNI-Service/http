@@ -3,13 +3,13 @@
  "description": "Two-phase full-suite shard plan (G5Q-RA shape, re-derived on the current canonical discovery). Correctness never depends on balance: the runner checks exact coverage.",
  "derivation": {
   "status": "provisional",
-  "weights": "v3.1.4 A6: actual canonical census e5249b7 (7098 cases); saved v3.1.3 measured per-case weights SHA256 4542c77090046571d1c148800a837b033e5d9b075f05a807d5e335149466ef0f (6707 records) provide historical inputs. Missing current cases use the unchanged module-mean/median fallback. All lane seconds are predictions, not v3.1.4 full-run measurements; no quiet, same-lane, deadline or acceptance rule is relaxed.",
+  "weights": "Historical v3.1.3 measured per-case weights only: SHA256 4542c77090046571d1c148800a837b033e5d9b075f05a807d5e335149466ef0f, 6707 entries. Applied provisionally to actual current census d86bf6b405a27f2cae8cfd4d1f461ef57289f7b24d03d1c2c3985d036e4aedb3 (7119 occurrences); missing current cases use measured module mean, else median module mean, exactly as the unchanged deriver does. This is not current FP1/full timing; defaulted share and predicted lanes remain estimates.",
   "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.1443",
   "rerun": "re-derive from a timing log of the tree the plan is for before any timed comparison (B-6)",
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
-  "dev_rederivation": "v3.1.4 A6 final re-derivation on exact clean private candidate e5249b7b654122f5019522c952e71ac153a4c61b, canonical census SHA256 228fe255aeeb4ebd6cf73fc1cbbfc56166d32f37a36f060110357d51504d3ac7 (442 modules, 7098 rows); original DEV quiet-module/case, same-lane and deadline rules retained. Enumeration is import-only, not execution of 7098 tests.",
-  "tlrt": "Original no-solo placement retained. Current derivation uses the saved v3.1.3 measured per-case weights, not a new v3.1.4 timing measurement.",
-  "ufm": "Original three contiguous phase-A slices in w5/w6/w7 retained, excluding the original nine quiet TimedSecretTest cases. The current ordered census and historical v3.1.3 measured weights determine the cuts by unchanged minmax_dp; resulting seconds are predictions, not current measured evidence. Five free lanes w0-w4 and the original 9000-second deadline remain unchanged."
+  "dev_rederivation": "v3.1.4 final-fix canonical data re-derivation: actual clean HEAD c379709a4dd6c244807ebcdf74f6bd5e7cb4f091, tree aa94e286989377b7a50ef8d68352df91f4ef85be; census SHA256 d86bf6b405a27f2cae8cfd4d1f461ef57289f7b24d03d1c2c3985d036e4aedb3, 442 modules/7119 occurrences. Policy retains 18 quiet modules and actual 18 expanded quiet cases; no current timing measurement or formal full-proof conclusion is implied.",
+  "tlrt": "Historical policy retained: test_load_release_transaction has no dedicated lane. The earlier 2.9-second note is not a measurement of this final-fix source.",
+  "ufm": "Keep test_ufm_setup_upgrade in three contiguous nonquiet slices plus five free lanes. Actual new boundaries/row counts/predictions come only from this census and unchanged minmax_dp; old 111/19/36 or FP-311b lane times are historical, not current measurements."
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -74,14 +74,14 @@
     "test_cases.test_docker_destructive_confirmation",
     "test_cases.test_docker_destructive_confirmation_workflow",
     "test_cases.test_documentation_catalog",
-    "test_cases.test_download_cli_contract"
+    "test_cases.test_download_cli_contract",
+    "test_cases.test_eth_activity_cycle_handoff_workflow",
+    "test_cases.test_eth_jump_duplicate_identity"
    ]
   },
   {
    "lane": "w1",
    "units": [
-    "test_cases.test_eth_activity_cycle_handoff_workflow",
-    "test_cases.test_eth_jump_duplicate_identity",
     "test_cases.test_eth_jump_transport_contract",
     "test_cases.test_eth_jump_transport_workflow",
     "test_cases.test_eth_jump_zero_config_contract",
@@ -243,17 +243,17 @@
    "lane": "w2",
    "units": [
     "test_cases.test_infra_setup_py",
-    "test_cases.test_infra_setup_py_workflow"
+    "test_cases.test_infra_setup_py_workflow",
+    "test_cases.test_initial_setup_authorized_key_quoted_options",
+    "test_cases.test_initial_setup_authorized_key_shell_workflow",
+    "test_cases.test_initial_setup_bare_expiry_readonly",
+    "test_cases.test_initial_setup_base_and_subset",
+    "test_cases.test_initial_setup_cache_admission_mode_auto_workflow"
    ]
   },
   {
    "lane": "w3",
    "units": [
-    "test_cases.test_initial_setup_authorized_key_quoted_options",
-    "test_cases.test_initial_setup_authorized_key_shell_workflow",
-    "test_cases.test_initial_setup_bare_expiry_readonly",
-    "test_cases.test_initial_setup_base_and_subset",
-    "test_cases.test_initial_setup_cache_admission_mode_auto_workflow",
     "test_cases.test_initial_setup_cache_admission_output",
     "test_cases.test_initial_setup_comma_interfaces",
     "test_cases.test_initial_setup_comma_interfaces_workflow",

@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -109,6 +110,7 @@ class JumpSessionTests(unittest.TestCase):
         self.environment.start()
         self.addCleanup(self.environment.stop)
         real_mkdtemp = tempfile.mkdtemp
+        self.original_mkdtemp = real_mkdtemp
 
         def control_directory(*args, **kwargs):
             self.assertEqual((), args)
@@ -600,6 +602,417 @@ class JumpSessionTests(unittest.TestCase):
                     process.terminate()
                     process.join(5)
             self.assertEqual(0, process.exitcode)
+
+    @contextmanager
+    def fresh_failed_rebuild_case(self, label):
+        # Each case starts ready/error=None; a previous failed record must never bypass ensure.
+        folder = self.root / label
+        folder.mkdir(mode=0o700)
+        home = folder / 'home'
+        home.mkdir(mode=0o700)
+        config, state, calls = (folder / name for name in ('config.json', 'state.json', 'calls.jsonl'))
+        config.write_text('{}')
+        with mock.patch.dict(os.environ, {'HOME': str(home), 'WP1_CONFIG': str(config),
+                                         'WP1_STATE': str(state), 'WP1_CALLS': str(calls)}):
+            sessions = self.app.JumpSessions(timeout=2)
+            try:
+                address = sessions.open_jump_master(self.jump, 'cumulus',
+                    self.app.ethernet_responder('fixture-password'))
+                self.assertEqual('192.0.2.10', address)
+                record = sessions.records[self.app.normalize_name(self.jump.hostname)]
+                self.assertTrue(record['ready'])
+                self.assertIsNone(record['error'])
+                path = Path(sessions.jump_control_path(self.jump))
+                self.assertEqual(owned_test_root(), path.resolve().parent.parent)
+                path.unlink()  # Only the fresh owned fake socket, not a real SSH socket.
+                config.write_text(json.dumps({'network': ['192.0.2.10']}))
+                yield folder, sessions, config, calls
+            finally:
+                sessions.close_jump_masters()
+
+    def failed_rebuild_task(self):
+        ib = self.app.Device('EXAMPLE-IB01', 'ib', '203.0.113.2', '203.0.113.2/24',
+                             '203.0.113.1', '02:00:00:00:00:17', '', '')
+        target = self.app.Target(ib, self.jump, 'swp7', 'eth0')
+        return self.app.PreparedIBTask(target,
+            self.app.Neighbor('fe80::17', 'vlan1', '02:00:00:00:00:17'), 'PUBLIC-outer-71!', False)
+
+    def test_failed_real_rebuild_keeps_exhaustion_across_inline_and_fork_reply(self):
+        app = self.app
+        for fork in (False, True):
+            with self.subTest(fork=fork), self.fresh_failed_rebuild_case('rpc-' + str(fork)) as world, ExitStack() as stack:
+                _, sessions, _, calls = world
+                task = self.failed_rebuild_task()
+                parent = app.RuntimeCoordinator.__new__(app.RuntimeCoordinator)
+                stack.enter_context(mock.patch.object(app, '_JUMP_SESSIONS', sessions))
+                ensure = stack.enter_context(mock.patch.object(sessions, 'ensure_jump_master', wraps=sessions.ensure_jump_master))
+                encode = stack.enter_context(mock.patch.object(app, '_jump_master_request_result', wraps=app._jump_master_request_result))
+                key = app.normalize_name(self.jump.hostname)
+                if not fork:
+                    reply = parent.request('jump-master', key, task.target)
+                    caught = None
+                    with mock.patch.object(app, '_unwrap_jump_master_reply', wraps=app._unwrap_jump_master_reply) as decode:
+                        try:
+                            app._unwrap_jump_master_reply(reply)
+                        except app.SshFailure as error:
+                            caught = error
+                    self.assertEqual(1, decode.call_count)
+                    self.assertIsInstance(caught, app.SshFailure)
+                    observed = (caught.kind.value, caught.hop, caught.address, caught.jump,
+                                isinstance(caught, app.SetupError), getattr(caught, 'candidates_exhausted', False) is True)
+                else:
+                    context = multiprocessing.get_context('fork')
+                    parent_conn, child_conn = context.Pipe()
+
+                    def child_request():
+                        parent_conn.close()
+                        app._WORKER_CONNECTION = child_conn
+                        try:
+                            with mock.patch.object(app, '_unwrap_jump_master_reply', wraps=app._unwrap_jump_master_reply) as decode:
+                                try:
+                                    app.worker_request('jump-master', key)
+                                except app.SshFailure as error:
+                                    child_conn.send(('observed', (error.kind.value, error.hop, error.address, error.jump,
+                                        isinstance(error, app.SetupError), getattr(error, 'candidates_exhausted', False) is True),
+                                        decode.call_count))
+                        except Exception as error:
+                            child_conn.send(('unexpected', type(error).__name__, str(error)))
+                        finally:
+                            child_conn.close()
+
+                    process = context.Process(target=child_request)
+                    process.start()
+                    child_conn.close()
+                    try:
+                        self.assertTrue(parent_conn.poll(5), 'owned child must request the actual parent')
+                        message = parent_conn.recv()
+                        self.assertEqual(('request', ('jump-master', key)), message)
+                        reply = parent.request(*message[1], task.target)
+                        parent_conn.send(('ok', reply))
+                        self.assertTrue(parent_conn.poll(5))
+                        answer = parent_conn.recv()
+                        if answer[0] == 'unexpected':
+                            raise RuntimeError('unexpected owned child error: ' + repr(answer[1:]))
+                        self.assertEqual('observed', answer[0])
+                        self.assertEqual(1, answer[2])
+                        observed = answer[1]
+                    finally:
+                        parent_conn.close()
+                        process.join(5)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(5)
+                    self.assertEqual(0, process.exitcode)
+                ensure.assert_called_once_with(self.jump)
+                encode.assert_called_once_with(key, task.target)
+                masters = [json.loads(line) for line in calls.read_text().splitlines() if '-M' in json.loads(line)]
+                self.assertEqual(2, len(masters), 'one successful initial master and one actual failed rebuild')
+                self.assertEqual(('OOB_JUMP_UNREACHABLE', 'outer', '192.0.2.10', 'EXAMPLE-JUMP01'), reply['ssh_failure'])
+                self.assertEqual({'ssh_failure', '_jump_candidates_exhausted'}, set(reply))
+                self.assertIs(True, reply['_jump_candidates_exhausted'])
+                self.assertEqual(('OOB_JUMP_UNREACHABLE', 'outer', '192.0.2.10', 'EXAMPLE-JUMP01', True, True), observed)
+
+        # Separate literal compatibility matrix, not a substitute for the actual failed-rebuild cases above.
+        for present, value in ((False, None), (True, False), (True, 0), (True, 1), (True, 'True')):
+            with self.subTest(nontrue_present=present, value=value), ExitStack() as stack:
+                task = self.failed_rebuild_task()
+                failure = app.SshFailure(app.SshFailureKind.JUMP_UNREACHABLE, 'outer', '192.0.2.10', self.jump.hostname)
+                if present:
+                    failure.candidates_exhausted = value
+                model = SimpleNamespace(ensure_jump_master=mock.Mock(side_effect=failure))
+                stack.enter_context(mock.patch.object(app, '_JUMP_SESSIONS', model))
+                stack.enter_context(mock.patch.object(app, 'interactive_run', side_effect=AssertionError('literal matrix transport')))
+                stack.enter_context(mock.patch.object(app.subprocess, 'run', side_effect=AssertionError('literal matrix child')))
+                reply = app._jump_master_request_result(app.normalize_name(self.jump.hostname), task.target)
+                self.assertEqual({'ssh_failure'}, set(reply), 'nonexact True must preserve the legacy shape')
+                parent = app.RuntimeCoordinator(SimpleNamespace(apply=True, yes=True, eth_user='cumulus', connect_timeout=2),
+                    None, 'PUBLIC-initial-71!', [task], SimpleNamespace(assert_unchanged=lambda: None))
+                library = app._import_tools('tools.login_path')
+                change = library.HostKeyChange('203.0.113.2', 'ED25519', 'SHA256:' + 'A' * 43,
+                    app._JUMP_KNOWN_HOSTS, (7, 9), 'jump', self.jump.hostname)
+                with mock.patch.object(app, 'remove_jump_known_hosts_entries', side_effect=failure):
+                    reply = parent.request('host-key-remove', change, task.target)
+                self.assertEqual({'ssh_failure'}, set(reply), 'the second catch must also preserve the legacy shape')
+
+    def test_parent_remove_retains_real_rebuild_exhaustion_on_second_encoding(self):
+        app = self.app
+        for fork in (False, True):
+            with self.subTest(fork=fork), self.fresh_failed_rebuild_case('remove-' + str(fork)) as world, ExitStack() as stack:
+                _, sessions, _, _ = world
+                task = self.failed_rebuild_task()
+                library = app._import_tools('tools.login_path')
+                change = library.HostKeyChange('203.0.113.2', 'ED25519', 'SHA256:' + 'A' * 43,
+                    app._JUMP_KNOWN_HOSTS, (7, 9), 'jump', self.jump.hostname)
+                parent = app.RuntimeCoordinator(SimpleNamespace(apply=True, yes=True, eth_user='cumulus', connect_timeout=2),
+                    None, 'PUBLIC-initial-71!', [task], SimpleNamespace(assert_unchanged=lambda: None))
+                parent.current_target = task.target
+                events, replies = [], {}
+                actual_request, actual_decode = parent.request, app._unwrap_jump_master_reply
+
+                def request(kind, value, target):
+                    events.append(('request', kind))
+                    reply = actual_request(kind, value, target)
+                    replies[kind] = reply
+                    return reply
+
+                def decode(reply):
+                    events.append(('decode', 'parent-or-inline'))
+                    return actual_decode(reply)
+
+                def lookup(device, user, password, command, timeout, **kwargs):
+                    self.assertEqual(['ssh-keygen', '-l', '-F', '203.0.113.2', '-f', app._JUMP_KNOWN_HOSTS], command)
+                    events.append(('lookup', 'fresh'))
+                    return ('# Host 203.0.113.2 found: line 7\n256 ED25519 SHA256:' + 'B' * 43 + '\n'
+                            '# Host 203.0.113.2 found: line 9\n2048 RSA SHA256:' + 'B' * 43 + '\n')
+
+                actual_interactive = app.interactive_run
+                def only_master(command, *args, **kwargs):
+                    self.assertIn('-M', command, 'no deletion write may occur after the rebuild failed')
+                    return actual_interactive(command, *args, **kwargs)
+
+                stack.enter_context(mock.patch.object(app, '_JUMP_SESSIONS', sessions))
+                stack.enter_context(mock.patch.object(app, '_ACTIVE_COORDINATOR', parent))
+                stack.enter_context(mock.patch.object(app, '_WORKER_CONNECTION', None))
+                stack.enter_context(mock.patch.object(parent, 'request', side_effect=request))
+                stack.enter_context(mock.patch.object(app, '_unwrap_jump_master_reply', side_effect=decode))
+                stack.enter_context(mock.patch.object(app, 'run_on_ethernet', side_effect=lookup))
+                stack.enter_context(mock.patch.object(app, 'interactive_run', side_effect=only_master))
+                ensure = stack.enter_context(mock.patch.object(sessions, 'ensure_jump_master', wraps=sessions.ensure_jump_master))
+                encode = stack.enter_context(mock.patch.object(app, '_jump_master_request_result', wraps=app._jump_master_request_result))
+                if not fork:
+                    caught = None
+                    editor = app.JumpKnownHostsEditor(task, change, eth_user='cumulus', timeout=2)
+                    try:
+                        editor.remove(change.address)
+                    except app.SshFailure as error:
+                        caught = error
+                    observed = None if caught is None else (caught.kind.value, caught.hop, caught.address,
+                        caught.jump, getattr(caught, 'candidates_exhausted', False) is True)
+                    child_decode_hits = 0
+                else:
+                    context = multiprocessing.get_context('fork')
+                    parent_conn, child_conn = context.Pipe()
+
+                    def child_remove():
+                        parent_conn.close()
+                        app._WORKER_CONNECTION = child_conn
+                        events.clear()  # private fork copy; only its decoder observations go back.
+                        try:
+                            editor = app.JumpKnownHostsEditor(task, change, eth_user='cumulus', timeout=2)
+                            try:
+                                editor.remove(change.address)
+                            except app.SshFailure as error:
+                                child_conn.send(('observed', (error.kind.value, error.hop, error.address,
+                                    error.jump, getattr(error, 'candidates_exhausted', False) is True),
+                                    sum(event[0] == 'decode' for event in events)))
+                        except Exception as error:
+                            child_conn.send(('unexpected', type(error).__name__, str(error)))
+                        finally:
+                            child_conn.close()
+
+                    process = context.Process(target=child_remove)
+                    process.start()
+                    child_conn.close()
+                    try:
+                        self.assertTrue(parent_conn.poll(5))
+                        message = parent_conn.recv()
+                        self.assertEqual(('request', ('host-key-remove', change)), message)
+                        parent_conn.send(('ok', parent.request(*message[1], task.target)))
+                        self.assertTrue(parent_conn.poll(5))
+                        answer = parent_conn.recv()
+                        if answer[0] == 'unexpected':
+                            raise RuntimeError('unexpected owned child error: ' + repr(answer[1:]))
+                        self.assertEqual('observed', answer[0])
+                        observed, child_decode_hits = answer[1:]
+                    finally:
+                        parent_conn.close()
+                        process.join(5)
+                        if process.is_alive():
+                            process.terminate()
+                            process.join(5)
+                    self.assertEqual(0, process.exitcode)
+                ensure.assert_called_once_with(self.jump)
+                encode.assert_called_once_with(app.normalize_name(self.jump.hostname), task.target)
+                self.assertEqual([('request', 'host-key-remove'), ('lookup', 'fresh'), ('request', 'jump-master')],
+                                 [event for event in events if event[0] != 'decode'])
+                self.assertEqual(2, sum(event[0] == 'decode' for event in events) + child_decode_hits)
+                for kind in ('jump-master', 'host-key-remove'):
+                    self.assertEqual({'ssh_failure', '_jump_candidates_exhausted'}, set(replies[kind]))
+                    self.assertEqual(('OOB_JUMP_UNREACHABLE', 'outer', '192.0.2.10', 'EXAMPLE-JUMP01'),
+                                     replies[kind]['ssh_failure'])
+                    self.assertIs(True, replies[kind]['_jump_candidates_exhausted'])
+                self.assertEqual(('OOB_JUMP_UNREACHABLE', 'outer', '192.0.2.10', 'EXAMPLE-JUMP01', True), observed)
+                self.assertFalse(parent.writes_attempted)
+                self.assertEqual({}, parent.metrics)
+
+    def test_real_exhausted_rebuild_cools_inline_and_fork_queue_on_first_failure(self):
+        app = self.app
+        for fork in (False, True):
+            with self.subTest(fork=fork), self.fresh_failed_rebuild_case('queue-' + str(fork)) as world, ExitStack() as stack:
+                folder, sessions, config, calls = world
+                original = self.failed_rebuild_task()
+                tasks = [app.replace(original, target=app.replace(original.target,
+                    ib=app.replace(original.target.ib, hostname='EXAMPLE-IB' + str(index + 1))))
+                    for index in range(17 if fork else 1)]
+                args = SimpleNamespace(apply=False, yes=False, force=False, verbose=False, eth_user='cumulus',
+                    ib_user='admin', connect_timeout=2, execution_mode='management', max_workers=2,
+                    task_timeout=30, report=folder / 'report.log',
+                    run_stamp='PUBLIC-r551-fork' if fork else 'PUBLIC-r551-inline')
+                clock, reports, recovered, created, connections, gates, requests = [0.0], [], [], [], [], [], []
+                clock_domains = []
+                actual_time, actual_interactive = app.time, app.interactive_run
+                real_gate, real_request = app.JumpGate, app._jump_master_request_result
+                context = multiprocessing.get_context('fork')
+                original_guard = app.tempfile.mkdtemp
+                expected_devices_prefix = 'devices-PUBLIC-r551-fork-' if fork else 'devices-PUBLIC-r551-inline-'
+                self.assertEqual(folder, folder.resolve())
+                self.assertTrue(folder.is_relative_to(owned_test_root()))
+                self.assertEqual(os.getuid(), folder.stat().st_uid)
+                self.assertEqual(0o700, stat.S_IMODE(folder.stat().st_mode))
+
+                def case_mkdtemp(*args, **kwargs):
+                    if kwargs.get('prefix') == expected_devices_prefix:
+                        self.assertEqual((), args)
+                        self.assertEqual({'prefix', 'dir'}, set(kwargs))
+                        self.assertEqual(folder, Path(kwargs['dir']))
+                        self.assertEqual(folder, folder.resolve())
+                        self.assertEqual(os.getuid(), folder.stat().st_uid)
+                        self.assertEqual(0o700, stat.S_IMODE(folder.stat().st_mode))
+                        return self.original_mkdtemp(*args, **kwargs)
+                    return original_guard(*args, **kwargs)
+
+                class ParentCooldownObserved(RuntimeError):
+                    pass
+
+                def gate_factory():
+                    gate = real_gate()
+                    gates.append(gate)
+                    report, probe = gate.report_jump_outcome, gate.report_jump_probe
+                    def after_report(jump, failure, **kwargs):
+                        action = report(jump, failure, **kwargs)  # delegate before reading any state.
+                        if failure is not None:
+                            reports.append((failure.kind.value, getattr(failure, 'candidates_exhausted', False) is True,
+                                            gate.jumps[jump]['until'], kwargs['now']))
+                        return action
+                    def after_probe(jump, failure, **kwargs):
+                        probe(jump, failure, **kwargs)
+                        recovered.append((failure, gate.jumps[jump]['until'], kwargs['now']))
+                        raise ParentCooldownObserved('parent observed the actual bounded cooldown recovery')
+                    gate.report_jump_outcome, gate.report_jump_probe = after_report, after_probe
+                    return gate
+
+                def sleep(seconds):
+                    if seconds < 1:
+                        return actual_time.sleep(min(seconds, 0.001))
+                    self.assertEqual(240, seconds)
+                    self.assertIsNone(app._TASK_DEADLINE)
+                    gate = gates[0]
+                    clock[0] = 239.0
+                    self.assertEqual([], gate.jump_probes_due(clock[0]))
+                    clock[0] = 240.0
+                    self.assertEqual(['example-jump01'], gate.jump_probes_due(clock[0]))
+                    config.write_text('{}')  # recovery still runs real fake -M, check and hostname.
+
+                def master_request(value, target):
+                    requests.append((value, clock[0]))
+                    return real_request(value, target)
+
+                def inspect(target, neighbor, eth_user, ethernet_password, ib_user, initial_password, timeout, *unused, **kwargs):
+                    # Real execute catches the real run_on_ib failure; no hand-made record/flag.
+                    return app.run_on_ib(target, neighbor, eth_user, ethernet_password, ib_user,
+                        'PUBLIC-current-71!', timeout, ['nv', 'config', 'show', '-o', 'commands'],
+                        local=False, allow_password_change=False, password_only=True)
+
+                def interactive(command, *args, **kwargs):
+                    self.assertEqual('ssh', command[0])
+                    self.assertEqual(str(self.root / 'ssh'), shutil.which(command[0]))
+                    fake_time, deadline = app.time, app._TASK_DEADLINE
+                    fake_now, real_now = fake_time.monotonic(), actual_time.monotonic()
+                    real_deadline = None if deadline is None else real_now + (deadline - fake_now)
+                    observation = {'fake_now': fake_now, 'original_deadline': deadline, 'real_now': real_now,
+                                   'mapped_deadline': real_deadline}
+                    clock_domains.append(observation)
+                    try:
+                        with mock.patch.object(app, 'time', actual_time), \
+                                mock.patch.object(app, '_TASK_DEADLINE', real_deadline):
+                            observation['during_real_time'] = app.time is actual_time
+                            observation['during_deadline'] = app._TASK_DEADLINE
+                            return actual_interactive(command, *args, **kwargs)
+                    finally:
+                        observation['restored_fake_time'] = app.time is fake_time
+                        observation['restored_deadline'] = app._TASK_DEADLINE
+
+                def process(*args, **kwargs):
+                    child = context.Process(*args, **kwargs)
+                    created.append((child, len(reports)))
+                    return child
+
+                def pipe(*args, **kwargs):
+                    pair = context.Pipe(*args, **kwargs)
+                    connections.extend(pair)
+                    return pair
+
+                stack.enter_context(mock.patch.object(app, '_JUMP_SESSIONS', sessions))
+                stack.enter_context(mock.patch.object(app.tempfile, 'mkdtemp', side_effect=case_mkdtemp))
+                stack.enter_context(mock.patch.object(app, 'JumpGate', side_effect=gate_factory))
+                stack.enter_context(mock.patch.object(app, '_jump_master_request_result', side_effect=master_request))
+                stack.enter_context(mock.patch.object(app, 'inspect_ib_device', side_effect=inspect))
+                stack.enter_context(mock.patch.object(app, 'interactive_run', side_effect=interactive))
+                stack.enter_context(mock.patch.object(app, 'multiprocessing', SimpleNamespace(get_context=lambda name:
+                    SimpleNamespace(Event=context.Event, Pipe=pipe, Process=process))))
+                stack.enter_context(mock.patch.object(app, 'time', SimpleNamespace(
+                    monotonic=lambda: clock[0], sleep=sleep, strftime=actual_time.strftime)))
+                ensure = stack.enter_context(mock.patch.object(sessions, 'ensure_jump_master', wraps=sessions.ensure_jump_master))
+                observed = False
+                try:
+                    app.run_prepared_tasks(tasks, args, None, 'PUBLIC-initial-71!', None, [], None)
+                except ParentCooldownObserved:
+                    observed = True
+                self.assertTrue(observed, 'only the explicit parent recovery observation stops the finite case')
+                self.assertTrue(reports)
+                self.assertEqual(('OOB_JUMP_UNREACHABLE', True, 240.0, 0.0), reports[0],
+                                 'the first actual exhausted-rebuild result must already cool, not the second')
+                self.assertEqual([(None, None, 240.0)], recovered)
+                self.assertTrue(requests, 'real parent master request must have executed')
+                self.assertGreaterEqual(ensure.call_count, 2, 'failed rebuild and real recovery both run ensure')
+                self.assertTrue(sessions.records['example-jump01']['ready'])
+                self.assertIsNone(sessions.records['example-jump01']['error'])
+                commands = [json.loads(line) for line in calls.read_text().splitlines()]
+                self.assertGreaterEqual(sum('-M' in command for command in commands), 3)
+                hostname_commands = [command for command in commands if '-M' not in command and '-O' not in command
+                                     and 'hostname' in command[-1]]
+                self.assertGreaterEqual(len(hostname_commands), 3,
+                                        'initial identity plus the real recovery open and probe hostname checks')
+                self.assertEqual([0] * len(created), [seen_reports for _, seen_reports in created],
+                                 'no new same-jump child may be dispatched after its first exhausted report')
+                self.assertEqual(2 if fork else 0, len(created))
+                self.assertTrue(all(not child.is_alive() for child, _ in created))
+                self.assertTrue(all(connection.closed for connection in connections))
+                self.assertTrue(clock_domains)
+                budgeted = [entry for entry in clock_domains if entry['original_deadline'] is not None]
+                self.assertEqual(0 if fork else 1, len(budgeted))
+                for entry in budgeted:
+                    self.assertEqual(0.0, entry['fake_now'])
+                    self.assertEqual(30.0, entry['original_deadline'])
+                    self.assertAlmostEqual(30.0, entry['mapped_deadline'] - entry['real_now'], places=6)
+                    self.assertEqual(entry['mapped_deadline'], entry['during_deadline'])
+                for entry in clock_domains:
+                    self.assertTrue(entry['during_real_time'])
+                    self.assertTrue(entry['restored_fake_time'])
+                    self.assertEqual(entry['original_deadline'], entry['restored_deadline'])
+                    if entry['original_deadline'] is None:
+                        self.assertIsNone(entry['during_deadline'])
+        for kind, hop in ((app.SshFailureKind.JUMP_UNREACHABLE, 'inner'),
+                          (app.SshFailureKind.JUMP_AUTHENTICATION, 'outer'),
+                          (app.SshFailureKind.LOCAL_COMMAND, 'outer')):
+            with self.subTest(nonouter_or_nonnetwork=(kind.value, hop)):
+                gate = app.JumpGate()
+                gate.claim_jump_slot('example-jump01', 0)
+                failure = app.SshFailure(kind, hop, '192.0.2.10', self.jump.hostname)
+                failure.candidates_exhausted = True  # deliberately irrelevant metadata in this pure negative control.
+                self.assertEqual('fail', gate.report_jump_outcome('example-jump01', failure,
+                    writes_attempted=False, now=0))
+                self.assertIsNone(gate.jumps['example-jump01']['until'])
 
     def test_real_fork_missing_socket_rebuilds_once_in_coordinator(self):
         self.establish()

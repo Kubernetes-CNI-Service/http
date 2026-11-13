@@ -202,7 +202,17 @@ switches:
             self.assertIn((switch.state / "version").read_text(), ("25.02.7002", "25.02.8008"))
 
     def run_dir(self):
-        [run] = list((self.project / "99-output-ib_nvl/bringup/xdr-upgrade-v2-logs").iterdir())
+        logs = self.project / "99-output-ib_nvl/bringup/xdr-upgrade-v2-logs"
+        runs = []
+        for path in logs.iterdir():
+            if path.name == "canary-routes.jsonl":
+                self.assertTrue(path.is_file(), "the declared optional route record must be a file")
+            else:
+                self.assertTrue(path.is_dir(), "unexpected object in the evidence root")
+                runs.append(path)
+        self.assertEqual(1, len(runs), "evidence root must contain exactly one run directory")
+        [run] = runs
+        self.assertTrue((run / "plan.json").is_file(), "the run directory must contain plan.json")
         return run
 
     def test_plan_reads_only_and_reports_every_switch(self):
@@ -237,7 +247,7 @@ switches:
         self.assertEqual(code, 3, "sw09's inventory row is invalid, so the run is incomplete")
         for switch in self.switches:
             self.assertEqual((switch.state / "version").read_text(), "25.02.8008")
-        for path in self.run_dir().rglob("*"):
+        for path in self.run_dir().parent.rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
 
@@ -280,7 +290,7 @@ switches:
                          "the mistyped password was tried once, on one switch")
         self.assertRegex(text, r"UPGRADED \(2\)[^\n]*\n  sw01\n  sw02", text)
         self.assertEqual(code, 3, "sw09's inventory row is invalid, so the run is incomplete")
-        for path in self.run_dir().rglob("*"):
+        for path in self.run_dir().parent.rglob("*"):
             if path.is_file():
                 self.assertNotIn(SENTINEL.encode(), path.read_bytes(), path)
                 self.assertNotIn(TYPO.encode(), path.read_bytes(), path)
@@ -406,6 +416,57 @@ switches:
         self.assertEqual((sw04.home / ".ssh/authorized_keys").read_bytes(), keys, "nothing written")
         self.assertEqual([path.name for path in sw04.home.iterdir() if path.name.startswith(".ibsw-")], [])
         self.assertEqual((sw04.state / "version").read_text(), "25.02.7002")
+
+
+class EntryEvidenceFixtureCompatibilityTests(unittest.TestCase):
+    """Exercise the old fixture helper on owned synthetic evidence, no SimFleet."""
+    def holder(self, folder):
+        owner = EntryTest("test_upgrade_through_the_entry")
+        owner.project = Path(folder) / "project"
+        logs = owner.project / "99-output-ib_nvl/bringup/xdr-upgrade-v2-logs"
+        logs.mkdir(parents=True)
+        return owner, logs
+
+    def test_run_directory_allows_only_the_declared_optional_route_record(self):
+        for with_record in (False, True):
+            with self.subTest(with_record=with_record), tempfile.TemporaryDirectory(prefix="v2-evidence-layout-") as folder:
+                owner, logs = self.holder(folder)
+                run = logs / "PUBLIC-run"
+                run.mkdir()
+                (run / "plan.json").write_text("{}\n")
+                if with_record:
+                    (logs / "canary-routes.jsonl").write_text(
+                        "ib,os,25.02.7002,25.02.8008,PUBLIC-a,PUBLIC-b,sw01,PUBLIC-run,PUBLIC-time\n")
+                error = None
+                actual = None
+                try:
+                    actual = owner.run_dir()
+                except (AssertionError, ValueError) as exc:
+                    error = type(exc).__name__
+                self.assertIsNone(error, "one declared sibling record must not invalidate a singleton run")
+                self.assertEqual(run, actual)
+
+    def test_run_directory_rejects_unknown_objects_missing_plan_or_second_run(self):
+        for fault in ("unknown-file", "second-directory", "missing-plan", "record-is-directory", "only-file"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="v2-evidence-reject-") as folder:
+                owner, logs = self.holder(folder)
+                if fault != "only-file":
+                    run = logs / "PUBLIC-run"
+                    run.mkdir()
+                    if fault != "missing-plan":
+                        (run / "plan.json").write_text("{}\n")
+                if fault in ("unknown-file", "only-file"):
+                    (logs / "PUBLIC-unknown").write_text("PUBLIC\n")
+                elif fault == "second-directory":
+                    (logs / "PUBLIC-second-run").mkdir()
+                elif fault == "record-is-directory":
+                    (logs / "canary-routes.jsonl").mkdir()
+                rejected = False
+                try:
+                    owner.run_dir()
+                except (AssertionError, ValueError):
+                    rejected = True
+                self.assertTrue(rejected, "the helper must not silently filter unknown evidence objects")
 
 
 if __name__ == "__main__":

@@ -32,7 +32,9 @@ import zlib
 from types import SimpleNamespace
 from unittest import mock
 
-from test_cases.native_cpld_physical_io import owned_test_root
+def owned_test_root():
+    from test_cases.native_cpld_physical_io import owned_test_root as validated_owned_test_root
+    return validated_owned_test_root()
 
 
 ROOT = Path(__file__).resolve().parents[1]

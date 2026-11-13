@@ -2407,6 +2407,8 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
             neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
+                from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
+                stack.enter_context(mock.patch.object(self.initial, "_new_jump_sessions", legacy_jump_sessions_factory(self.initial)))
                 stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
                 for name, value in (
                     ("local_ethernet_keys", set()),

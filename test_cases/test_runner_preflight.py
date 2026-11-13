@@ -306,6 +306,88 @@ class PreflightFixture(unittest.TestCase):
 
 
 class PreflightDirectTests(PreflightFixture):
+    def test_cold_public_authority_loads_real_clean_predicate_without_fixture_helper(self):
+        authority_path = self.root / "test_cases/test_public_publication_workflow.py"
+        self.assertFalse((self.root / "test_cases/native_cpld_physical_io.py").exists())
+        ledger_before = self.ledger.read_bytes()
+        index_path = self.root / ".git/index"
+        index_before = (index_path.read_bytes(), index_path.stat().st_ino)
+        probe = (
+            "import importlib.util,pathlib,sys\n"
+            "source=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2])\n"
+            "if importlib.util.find_spec('test_cases') is not None:\n"
+            "    raise AssertionError('PUBLIC cold test package unexpectedly available')\n"
+            "spec=importlib.util.spec_from_file_location('_rv113_cold_authority',source)\n"
+            "module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module\n"
+            "spec.loader.exec_module(module)\n"
+            "if pathlib.Path(module.__file__).resolve()!=source.resolve():\n"
+            "    raise AssertionError('PUBLIC cold authority source changed')\n"
+            "ledger=root/module.P_LEDGER_PATH;before=ledger.read_bytes()\n"
+            "index=root/'.git/index';index_before=(index.read_bytes(),index.stat().st_ino)\n"
+            "head=module._head(root);module._assert_clean_and_ledger(root,before,head)\n"
+            "if before!=ledger.read_bytes() or index_before!=(index.read_bytes(),index.stat().st_ino):\n"
+            "    raise AssertionError('PUBLIC clean authority mutated index or ledger')\n"
+            "if any(name=='test_cases' or name.startswith('test_cases.') for name in sys.modules):\n"
+            "    raise AssertionError('PUBLIC clean authority imported optional fixture package')\n"
+            "if module._P_HISTORY_TEMP is not None:\n"
+            "    raise AssertionError('PUBLIC clean authority created historical fixture')\n"
+            "print('PUBLIC_COLD_AUTHORITY_CLEAN_OK')\n"
+        )
+        environment = dict(self.env)
+        environment.pop("HTTP_TEST_OWNED_ROOT", None)
+        result = subprocess.run(
+            [sys.executable, "-I", "-S", "-B", "-c", probe,
+             str(authority_path), str(self.root)],
+            cwd=self.root, env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertEqual("PUBLIC_COLD_AUTHORITY_CLEAN_OK\n", result.stdout)
+        self.assertEqual("", result.stderr)
+        self.assertEqual(ledger_before, self.ledger.read_bytes())
+        self.assertEqual(index_before, (index_path.read_bytes(), index_path.stat().st_ino))
+        self.assertFalse(self.marker.exists())
+
+    def test_public_fixture_root_delegates_to_real_validator_and_exact_history_gate(self):
+        from test_cases import native_cpld_physical_io as roots
+        self.assertEqual((ROOT / "test_cases/native_cpld_physical_io.py").resolve(),
+                         Path(roots.__file__).resolve())
+        real_validator = roots.owned_test_root
+        expected = Path(os.environ["HTTP_TEST_OWNED_ROOT"])
+        self.assertEqual(expected, real_validator())
+        with mock.patch.object(roots, "owned_test_root", wraps=real_validator) as delegate:
+            authority = RUNNER._load_preflight_authority(self.root)
+            delegate.assert_not_called()
+            self.assertEqual(expected, authority.owned_test_root())
+            delegate.assert_called_once_with()
+            delegate.reset_mock()
+            with mock.patch.dict(os.environ):
+                os.environ.pop("HTTP_TEST_OWNED_ROOT", None)
+                with self.assertRaisesRegex(AssertionError, "^explicit owned test root refused$"):
+                    authority.owned_test_root()
+            delegate.assert_called_once_with()
+            delegate.reset_mock()
+            temporary = tempfile.TemporaryDirectory(prefix="http-p-v2-history-", dir=expected)
+            self.addCleanup(temporary.cleanup)
+            invalid_root = Path(temporary.name) / "not-a-root"
+            invalid_root.write_text("PUBLIC non-directory root", encoding="ascii")
+            with mock.patch.dict(os.environ, {"HTTP_TEST_OWNED_ROOT": str(invalid_root)}):
+                with self.assertRaisesRegex(AssertionError, "^explicit owned test root refused$"):
+                    authority.owned_test_root()
+            delegate.assert_called_once_with()
+            delegate.reset_mock()
+            with mock.patch.object(authority, "_P_HISTORY_TEMP", temporary), \
+                    mock.patch.object(authority.subprocess, "run",
+                                      side_effect=AssertionError("PUBLIC unexpected history subprocess")) as child:
+                with self.assertRaisesRegex(AssertionError, "requires exact clone/detach"):
+                    authority._git_run(authority.ROOT, ["status"], text=True,
+                        _history_checkout_creation=(temporary, "a" * 40))
+                delegate.assert_called_once_with()
+                child.assert_not_called()
+            temporary.cleanup()
+            self.assertFalse(Path(temporary.name).exists())
+        self.assertEqual(expected, real_validator())
+
     def test_finite_module_predicates_and_historical_pins_match_reviewed_authority(self):
         from test_cases import test_public_publication_workflow as authority
         from test_cases import test_public_s_phase_contract as s_authority

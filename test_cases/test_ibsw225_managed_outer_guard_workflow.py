@@ -10,6 +10,7 @@ from contextlib import ExitStack, redirect_stdout, redirect_stderr
 import base64
 import hashlib
 import importlib
+import inspect
 import io
 import json
 import os
@@ -23,10 +24,13 @@ import unittest
 from unittest import mock
 
 from test_cases.module_loader import load_script
+from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
+from test_cases.native_cpld_physical_io import owned_test_root
 from test_cases import test_req10b_services_keys_workflow as req10b_fixtures
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+_REAL_TEMPORARY_DIRECTORY = tempfile.TemporaryDirectory
 
 _MANAGED_SUCCESS_STATE = (
     "nv set interface eth0 ipv4 address 203.0.113.2/24\n"
@@ -39,6 +43,122 @@ _MANAGED_SUCCESS_STATE = (
 )
 
 class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
+    def _checked_fixture_directory(self, *, prefix, dir):
+        declared_root = owned_test_root()
+        self.assertEqual(declared_root, Path(dir),
+                         "managed outer fixture must use the runner-owned root")
+        return _REAL_TEMPORARY_DIRECTORY(prefix=prefix, dir=dir)
+
+    def test_fixture_directory_consumes_two_independently_declared_roots(self):
+        runner_root = owned_test_root()
+        previous_root = os.environ.get("HTTP_TEST_OWNED_ROOT")
+        previous_tmpdir = os.environ.get("TMPDIR")
+        created = []
+        with ExitStack() as owners:
+            declared = [Path(owners.enter_context(_REAL_TEMPORARY_DIRECTORY(
+                prefix=prefix, dir=runner_root))).resolve() for prefix in (
+                    "managed root with spaces ", "managed long root " + "long-" * 20)]
+            self.assertNotEqual(declared[0], declared[1])
+            for root in declared:
+                root_info = root.lstat()
+                with self.subTest(root=root.name), mock.patch.dict(
+                        os.environ, {"HTTP_TEST_OWNED_ROOT": str(root)}):
+                    self.assertEqual(owned_test_root(), root)
+                    self.assertEqual(os.environ.get("TMPDIR"), previous_tmpdir)
+                    for prefix in ("ibsw-managed-real-cleanup-", "ibsw-managed-success-"):
+                        with self.subTest(prefix=prefix):
+                            with self._checked_fixture_directory(prefix=prefix, dir=root) as raw:
+                                child = Path(raw)
+                                created.append(child)
+                                info = child.lstat()
+                                self.assertEqual(child.resolve().parent, root)
+                                self.assertTrue(child.name.startswith(prefix))
+                                self.assertFalse(child.is_symlink())
+                                self.assertEqual((info.st_uid, info.st_gid, info.st_mode & 0o777),
+                                                 (os.geteuid(), root_info.st_gid, 0o700))
+                            self.assertFalse(child.exists())
+                    expected = RuntimeError("PUBLIC controlled body failure")
+                    with self.assertRaises(RuntimeError) as caught:
+                        with self._checked_fixture_directory(
+                                prefix="ibsw-managed-success-", dir=root) as raw:
+                            failed_child = Path(raw)
+                            raise expected
+                    self.assertIs(caught.exception, expected)
+                    self.assertFalse(failed_child.exists())
+                    denied = PermissionError("PUBLIC controlled factory refusal")
+                    with mock.patch.object(sys.modules[__name__], "_REAL_TEMPORARY_DIRECTORY",
+                                           side_effect=denied) as delegate:
+                        with self.assertRaises(PermissionError) as caught:
+                            self._checked_fixture_directory(prefix="ibsw-managed-success-", dir=root)
+                        self.assertIs(caught.exception, denied)
+                        delegate.assert_called_once_with(prefix="ibsw-managed-success-", dir=root)
+            self.assertEqual(len(created), len(set(created)))
+        self.assertTrue(all(not root.exists() for root in declared))
+        self.assertEqual(os.environ.get("HTTP_TEST_OWNED_ROOT"), previous_root)
+        self.assertEqual(os.environ.get("TMPDIR"), previous_tmpdir)
+
+    def test_fixture_directory_refuses_invalid_roots_before_real_factory(self):
+        runner_root = owned_test_root()
+        previous_root = os.environ.get("HTTP_TEST_OWNED_ROOT")
+        previous_tmpdir = os.environ.get("TMPDIR")
+        sentinel = "PUBLIC unsafe real fixture factory reached"
+        with _REAL_TEMPORARY_DIRECTORY(prefix="managed root refusals ", dir=runner_root) as raw:
+            world = Path(raw).resolve()
+            valid = world / "valid"
+            other = world / "other"
+            wrong_mode = world / "wrong-mode"
+            wrong_uid = world / "wrong-uid"
+            for root in (valid, other, wrong_mode, wrong_uid):
+                root.mkdir(mode=0o700)
+            regular = world / "regular-file"
+            regular.write_text("PUBLIC non-directory", encoding="ascii")
+            link = world / "root-link"
+            link.symlink_to(valid, target_is_directory=True)
+            real_lstat = Path.lstat
+            wrong_uid_info = wrong_uid.lstat()
+            changed_uid = list(wrong_uid_info)
+            changed_uid[4] = wrong_uid_info.st_uid + 1
+            forged_uid_info = os.stat_result(changed_uid)
+
+            def controlled_lstat(path, *args, **kwargs):
+                if path == wrong_uid:
+                    return forged_uid_info
+                return real_lstat(path, *args, **kwargs)
+
+            cases = (("missing", None), ("relative", "."), ("file", str(regular)),
+                     ("link", str(link)), ("mode", str(wrong_mode)),
+                     ("uid", str(wrong_uid)), ("parent-mismatch", str(valid)))
+            for label, value in cases:
+                with self.subTest(case=label), ExitStack() as scope:
+                    scope.enter_context(mock.patch.dict(os.environ))
+                    if value is None:
+                        os.environ.pop("HTTP_TEST_OWNED_ROOT", None)
+                    else:
+                        os.environ["HTTP_TEST_OWNED_ROOT"] = value
+                    if label == "mode":
+                        wrong_mode.chmod(0o755)
+                        scope.callback(wrong_mode.chmod, 0o700)
+                    if label == "uid":
+                        scope.enter_context(mock.patch.object(Path, "lstat", controlled_lstat))
+                    delegate = scope.enter_context(mock.patch.object(
+                        sys.modules[__name__], "_REAL_TEMPORARY_DIRECTORY",
+                        side_effect=AssertionError(sentinel)))
+                    requested = other if label == "parent-mismatch" else valid
+                    with self.assertRaises(AssertionError) as caught:
+                        self._checked_fixture_directory(prefix="ibsw-managed-real-cleanup-", dir=requested)
+                    if label == "parent-mismatch":
+                        self.assertIn("managed outer fixture must use the runner-owned root",
+                                      str(caught.exception))
+                    else:
+                        self.assertEqual(str(caught.exception), "explicit owned test root refused")
+                    self.assertNotIn(sentinel, str(caught.exception))
+                    delegate.assert_not_called()
+                    self.assertEqual(os.environ.get("TMPDIR"), previous_tmpdir)
+            self.assertEqual(wrong_mode.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(world.exists())
+        self.assertEqual(os.environ.get("HTTP_TEST_OWNED_ROOT"), previous_root)
+        self.assertEqual(os.environ.get("TMPDIR"), previous_tmpdir)
+
     def test_real_pending_failure_report_and_deployment_cleanup_remain_guarded(self):
         authority = load_script("ibsw_true_managed_outer_guard", ROOT / "ztp/config_sync_authority.py")
         guard = importlib.import_module("tools.ib_bringup_runtime_guard")
@@ -51,7 +171,7 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
         previous_module = sys.modules.get("_http_managed_initial_setup")
         previous_argv = sys.argv
         events, cycle_objects, real_main_globals, reports = [], [], [], []
-        with tempfile.TemporaryDirectory(prefix="ibsw-managed-real-cleanup-", dir="/private/tmp") as raw:
+        with self._checked_fixture_directory(prefix="ibsw-managed-real-cleanup-", dir=owned_test_root()) as raw:
             base = Path(raw).resolve()
             project = base / "project"
             root, tool, global_file, csv_path, p2p, pubdir, cache, _, _ = (
@@ -102,7 +222,7 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 # Fixed real main Code/globals, and the actual TextIOWrapper's
                 # built-in close events only. No profile callback grants IO.
                 if event == "call" and frame.f_code.co_filename == str(INITIAL) and frame.f_code.co_name == "main":
-                    function = frame.f_globals.get("main")
+                    function = inspect.unwrap(frame.f_globals.get("main"))
                     if function is not None and function.__code__ is frame.f_code and function.__globals__ is frame.f_globals:
                         real_main_globals.append(frame.f_globals)
                         cycle_objects.append(frame.f_locals.get("method_cycle"))
@@ -190,7 +310,7 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
         kat = req10b_fixtures.strict_kat(load_script("ibsw_managed_success_kat", INITIAL))
         worker_argv = [sys.executable, "-I", "-S", "-B", str(INITIAL.resolve()), "--_verify-password"]
         witnesses = []
-        with tempfile.TemporaryDirectory(prefix="ibsw-managed-success-", dir="/private/tmp") as raw, ExitStack() as patches:
+        with self._checked_fixture_directory(prefix="ibsw-managed-success-", dir=owned_test_root()) as raw, ExitStack() as patches:
             base = Path(raw).resolve()
             project = base / "project"
             _, tool, global_path, csv_path, p2p, pubdir, cache, laptop, _ = req10b_fixtures.Req10BServicesKeysWorkflowTests().fixture(
@@ -274,6 +394,8 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 real_init(cycle, *args, **kwargs)
                 cycles.append(cycle)
                 initial = cycle.initial
+                patches.enter_context(mock.patch.object(
+                    initial, "_new_jump_sessions", legacy_jump_sessions_factory(initial)))
                 ethernet = {
                     ("hostname",): "EXAMPLE-JUMP01\n",
                     ("nv", "show", "interface"): "Interface Admin Oper\nswp7 up up\n",
@@ -322,7 +444,14 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                     # v15 checks IPv4 SSH readiness on every --apply (owner Q-035 (a)); the
                     # simulated device answers ready.
                     transports.append("ipv4")
-                def direct_transport(device, interface, user, password, timeout):
+                def direct_transport(device, interface, user, password, timeout, *,
+                                     apply=False, read_device_fingerprint=None,
+                                     operator_forced=False, host_key_records=None):
+                    self.assertIs(apply, True)
+                    self.assertTrue(callable(read_device_fingerprint))
+                    self.assertIs(operator_forced, False)
+                    self.assertIs(type(host_key_records), list)
+                    self.assertEqual(host_key_records, [])
                     # v15's final management-server -> IB direct read (CURRENT-CONTRACT.md
                     # 「最终测试由管理服务器直连 IB eth0」, guide :754 P4): the simulated device
                     # answers on eth0 with its applied configuration and the project target.
@@ -362,7 +491,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 return result
             def observe(frame, event, argument):
                 if event == "call" and frame.f_code.co_filename == str(ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py") and frame.f_code.co_name == "main":
-                    self.assertIs(frame.f_globals["main"].__code__, frame.f_code)
+                    function = inspect.unwrap(frame.f_globals["main"])
+                    self.assertIs(function.__code__, frame.f_code)
+                    self.assertIs(function.__globals__, frame.f_globals)
                     main_globals.append(frame.f_globals)
                     self.assertIs(frame.f_locals["method_cycle"], cycles[0])
                     held("main")

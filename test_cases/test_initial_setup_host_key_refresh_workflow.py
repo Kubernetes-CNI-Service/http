@@ -574,6 +574,109 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
         self.assertFalse(evidence["records"]["example-ib01"]["writes_attempted"])
 
 
+class InlineTypedHostKeyWorkflowTests(unittest.TestCase):
+    """Real initial -> original login_path refresh -> real inline parent/closed remove.
+
+    The only transport is an explicit fixed-output model. No real keygen, SSH,
+    files, credentials, process, clock sleep or native backend is used by these cases.
+    """
+    def run_refresh(self, *, fail, next_lookup):
+        app = readiness.load_app("r551_inline_refresh_" + next_lookup + str(fail))
+        api = app._import_tools("tools.login_path")
+        target = readiness.target(app)
+        task = app.PreparedIBTask(target, app.Neighbor("fe80::10", "vlan1000", target.ib.eth0_mac),
+                                  readiness.credential("outer"), False)
+        change = api.parse_host_key_change(hostkeys.warning(), location="jump", jump="EXAMPLE-JUMP01")
+        old = ("# Host 192.0.2.10 found: line 7\n256 ED25519 SHA256:" + "B" * 43 + "\n"
+               "# Host 192.0.2.10 found: line 9\n2048 RSA SHA256:" + "B" * 43 + "\n")
+        new = "# Host 192.0.2.10 found: line 11\n256 ED25519 " + hostkeys.FINGERPRINT + "\n"
+        args = SimpleNamespace(apply=True, yes=True, eth_user="cumulus", connect_timeout=2)
+        parent = app.RuntimeCoordinator(args, None, readiness.credential("initial"), [task],
+                                         SimpleNamespace(assert_unchanged=lambda: None))
+        parent.current_target = target
+        events, records, retry_calls, lookups = [], [], [], []
+
+        def reader(key_type):
+            self.assertEqual("ED25519", key_type)
+            events.append("verify")
+            return hostkeys.FINGERPRINT
+
+        def lookup(device, user, password, command, timeout, **kwargs):
+            self.assertEqual(["ssh-keygen", "-l", "-F", "192.0.2.10", "-f", hostkeys.KNOWN_HOSTS], command)
+            self.assertEqual((target.ethernet, "cumulus", readiness.credential("outer"), 2),
+                             (device, user, password, timeout))
+            lookups.append(command)
+            events.append("lookup")
+            if len(lookups) <= 2:
+                return old  # library's read, then parent's independent fresh read.
+            if fail:
+                return "" if next_lookup == "empty" else old
+            return "" if len(lookups) == 3 else new
+
+        def transport(command, responder, timeout):
+            self.assertEqual("ssh", command[0])
+            self.assertIn("ssh-keygen", command[-1])
+            self.assertIn("-R", command[-1])
+            self.assertIn("192.0.2.10", command[-1])
+            events.append("remove")
+            if fail:
+                return app.SessionResult("ssh: connect to host 198.51.100.10 port 22: Connection timed out", 255)
+            return app.SessionResult("Original contents retained as " + hostkeys.KNOWN_HOSTS + ".old\n", 0)
+
+        def retry():
+            events.append("retry")
+            retry_calls.append(1)
+
+        caught = record = None
+        with mock.patch.object(app, "_WORKER_CONNECTION", None), \
+                mock.patch.object(app, "_ACTIVE_COORDINATOR", parent), \
+                mock.patch.object(app, "_JUMP_SESSIONS", None), \
+                mock.patch.object(app, "run_on_ethernet", side_effect=lookup), \
+                mock.patch.object(app, "interactive_run", side_effect=transport), \
+                mock.patch.object(app.subprocess, "run", side_effect=AssertionError("unexpected real child")):
+            try:
+                record = app.refresh_ib_host_key(change, task, eth_user="cumulus", timeout=2, apply=True,
+                    read_device_fingerprint=reader, retry=retry, operator_forced=False, host_key_records=records)
+            except app.SshFailure as error:
+                caught = error
+            except AttributeError as error:
+                # Capture this one known old dict-as-receipt outcome, never an unknown fixture ERROR.
+                if str(error) != "'dict' object has no attribute 'lines'":
+                    raise
+                caught = error
+        return app, caught, record, records, events, retry_calls, parent
+
+    def test_inline_refresh_typed_delete_failure_stops_before_followup_lookup_or_retry(self):
+        for state in ("empty", "remaining"):
+            with self.subTest(next_lookup=state):
+                app, error, record, records, events, retries, parent = self.run_refresh(fail=True, next_lookup=state)
+                self.assertEqual(["verify", "lookup", "lookup", "remove"], events,
+                                 "typed removal failure must stop before any post-remove lookup or retry")
+                self.assertIsInstance(error, app.SshFailure)
+                self.assertEqual(("OOB_JUMP_UNREACHABLE", "outer", "198.51.100.10", "EXAMPLE-JUMP01"),
+                                 (error.failure_kind, error.hop, error.address, error.jump))
+                self.assertIsNone(record)
+                self.assertEqual([], records)
+                self.assertEqual([], retries)
+                self.assertTrue(parent.writes_attempted)
+                self.assertEqual({"host_key_remove_attempts": 1}, parent.metrics)
+
+    def test_inline_refresh_success_keeps_receipt_and_single_retry(self):
+        app, error, record, records, events, retries, parent = self.run_refresh(fail=False, next_lookup="empty")
+        self.assertIsNone(error)
+        self.assertEqual(["verify", "lookup", "lookup", "remove", "lookup", "retry", "lookup"], events)
+        self.assertEqual([1], retries)
+        self.assertEqual([record], records)
+        self.assertEqual(("refreshed", "verified", "192.0.2.10", (7, 9)),
+                         (record.result, record.verification, record.address, record.lines))
+        self.assertEqual((True, None, None, None, None),
+                         (record.removal.old_file, record.removal.inode_before, record.removal.inode_after,
+                          record.removal.mode_before, record.removal.mode_after))
+        self.assertEqual({"host_key_remove_attempts": 1}, parent.metrics)
+        self.assertNotIn("WARNING:", repr(record))
+        self.assertNotIn("@@@@", repr(record))
+
+
 class JumpCoordinatorWorkflowTests(unittest.TestCase):
     """Actual fork/IPC + original parent scheduler and closed writer; fake SSH only."""
     @classmethod

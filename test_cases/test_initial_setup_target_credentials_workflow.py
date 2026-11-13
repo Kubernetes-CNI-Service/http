@@ -6,6 +6,7 @@ The proposed PLAN7905 phase wire is a review prerequisite, not existing ABI.
 This file must not be issued until Root reviews its fixture/closure and budget.
 """
 from __future__ import annotations
+import ast
 import base64
 import builtins
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
@@ -16,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import stat
 import struct
@@ -381,7 +383,8 @@ def run():
     allowed6 = ["-6","-tt","-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new",
                 "-o","LogLevel=ERROR","-o","ControlMaster=no","-o","ControlPath=none",
                 "-o","NumberOfPasswordPrompts=1","-B","vlan1"]
-    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR"]
+    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",
+                "-o","ControlMaster=no","-o","ControlPath=none"]
     # Explicit future password-only additions are independently closed.
     auth_add = ["-o","PubkeyAuthentication=no","-o","PreferredAuthentications=password,keyboard-interactive"]
     if inner_flags not in (allowed6, allowed4, allowed6[:-2]+auth_add+allowed6[-2:]):
@@ -645,6 +648,19 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
             stream.write(source)
         own_source.chmod(0o600)
         self.assertTrue(own_source.read_bytes() == source, "owned source copy must be exact")
+        leaf_tools = tool / "tools"
+        leaf_tools.mkdir(mode=0o700)
+        for name in ("device_identity", "hostname_ranges", "login_path"):
+            current_source = ROOT / "tools" / (name + ".py")
+            source_identity, module_bytes = bound_file(current_source)
+            owned_module = leaf_tools / (name + ".py")
+            with owned_module.open("xb") as stream:
+                stream.write(module_bytes)
+            owned_module.chmod(0o600)
+            self.assertTrue(bound_file(current_source) == (source_identity, module_bytes),
+                            "fixture tools source changed during copy")
+            self.assertTrue(bound_file(owned_module)[1] == module_bytes,
+                            "fixture Leaf module must match its exact bound current source")
         app = load_script("target_workflow_" + root.name.replace("-", "_"), own_source)
         project = root / "project"
         project.mkdir()
@@ -879,6 +895,18 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                      "NVOS_INITIAL_PASSWORD": json.loads(f["config"].read_text())["initial"]}
         try:
             with ExitStack() as stack:
+                stack.enter_context(mock.patch.object(sys, "path", list(sys.path)))
+                saved_tools = {name: module for name, module in sys.modules.items()
+                               if name == "tools" or name.startswith("tools.")}
+                def restore_tools():
+                    for name in list(sys.modules):
+                        if name == "tools" or name.startswith("tools."):
+                            del sys.modules[name]
+                    sys.modules.update(saved_tools)
+                stack.callback(restore_tools)
+                for name in saved_tools:
+                    del sys.modules[name]
+                stack.enter_context(mock.patch.object(app, "_TOOLS_ROOT", None))
                 stack.enter_context(mock.patch.dict(os.environ, clean_env, clear=True))
                 stack.enter_context(mock.patch.object(sys, "argv", argv))
                 stack.enter_context(mock.patch.object(sys, "stdin", _OwnedTTY()))
@@ -1035,6 +1063,191 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                             "provisional phase protocol must be actual wire, not synthesized evidence")
             self.assertFalse(f["credentials"].exists())
             self.assertEqual(FOREIGN_CRON, f["cron"].read_text())
+
+class TargetFixtureLeafCompatibilityTests(unittest.TestCase):
+    """Fixture metadata/loader checks only; PUBLIC labels are NOT KAT qualification.
+
+    Never call the workflow's setUpClass, P1, password verifier or native backend.
+    The main replacement below observes only the real tools loader and fixture scope.
+    """
+    def metadata_fixture(self, folder):
+        owner = InitialTargetCredentialsMainAutoWorkflowDraftTests(
+            "test_real_c2_p1_manual_pam_fresh_read_and_all_stage_consumers_use_project_target")
+        owner.kat = {"PASSWORD": "PUBLIC-METADATA-NOT-A-KAT",
+                     "SHA512": "PUBLIC-METADATA-NOT-A-HASH",
+                     "YESCRYPT": "PUBLIC-METADATA-NOT-A-HASH"}
+        return owner, owner.fixture(folder)
+
+    def add_loader_inputs(self, f):
+        # Independent scaffold for scope/missing-file tests, not a substitute
+        # for the separate assertion that fixture() itself carries these files.
+        tools = f["tool"] / "tools"
+        tools.mkdir(exist_ok=True)
+        for name in ("device_identity", "hostname_ranges", "login_path"):
+            (tools / (name + ".py")).write_bytes((ROOT / "tools" / (name + ".py")).read_bytes())
+
+    def test_shared_fixture_carries_three_exact_bound_leaf_modules(self):
+        with tempfile.TemporaryDirectory(prefix="target-fixture-leaf-") as folder:
+            _, f = self.metadata_fixture(folder)
+            for name in ("device_identity", "hostname_ranges", "login_path"):
+                with self.subTest(module=name):
+                    original = ROOT / "tools" / (name + ".py")
+                    before, expected = bound_file(original)
+                    own = f["tool"] / "tools" / (name + ".py")
+                    self.assertTrue(own.is_file(), "shared fixture must carry every Leaf dependency")
+                    self.assertEqual(expected, bound_file(own)[1])
+                    self.assertEqual((before, expected), bound_file(original))
+            self.assertFalse((Path(folder) / "tools").exists(), "do not create an ambiguous repository layout")
+
+    def test_real_leaf_loader_refuses_each_missing_dependency(self):
+        for missing in ("device_identity", "hostname_ranges", "login_path"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory(prefix="target-fixture-missing-") as folder:
+                _, f = self.metadata_fixture(folder)
+                self.add_loader_inputs(f)
+                (f["tool"] / "tools" / (missing + ".py")).unlink()
+                with self.assertRaisesRegex(f["app"].SetupError, "tools[.]" + missing + " is missing:"):
+                    f["app"]._import_tools("tools." + missing)
+
+    def test_invoke_isolates_foreign_tools_and_restores_success_and_error_scope(self):
+        for fail in (False, True):
+            with self.subTest(fail=fail), tempfile.TemporaryDirectory(prefix="target-fixture-scope-") as folder:
+                owner, f = self.metadata_fixture(folder)
+                self.add_loader_inputs(f)
+                app = f["app"]
+                original_path = sys.path
+                path_value = list(sys.path)
+                original_root = ROOT / "PUBLIC-FOREIGN-TOOLS-ROOT"
+                observed = []
+                package = type(sys)("tools")
+                package.__path__ = [str(original_root / "tools")]
+                foreign = {"tools": package}
+                for name in ("device_identity", "hostname_ranges", "login_path"):
+                    module = type(sys)("tools." + name)
+                    module.__file__ = str(original_root / "tools" / (name + ".py"))
+                    setattr(package, name, module)
+                    foreign["tools." + name] = module
+                saved = {name: value for name, value in sys.modules.items()
+                         if name == "tools" or name.startswith("tools.")}
+                unrelated = type(sys)("PUBLIC_UNRELATED_FIXTURE_MODULE")
+
+                def restore():
+                    for name in list(sys.modules):
+                        if name == "tools" or name.startswith("tools."):
+                            del sys.modules[name]
+                    sys.modules.update(saved)
+
+                def observe_loader():
+                    for name in ("device_identity", "hostname_ranges", "login_path"):
+                        module = app._import_tools("tools." + name)
+                        observed.append(Path(module.__file__).resolve())
+                    if fail:
+                        raise app.SetupError("PUBLIC loader-only scope failure")
+                    return 0
+
+                with ExitStack() as stack:
+                    stack.callback(restore)
+                    for name in list(sys.modules):
+                        if name == "tools" or name.startswith("tools."):
+                            del sys.modules[name]
+                    sys.modules.update(foreign)
+                    stack.enter_context(mock.patch.dict(sys.modules, {"PUBLIC_UNRELATED_FIXTURE_MODULE": unrelated}))
+                    stack.enter_context(mock.patch.object(app, "_TOOLS_ROOT", original_root))
+                    stack.enter_context(mock.patch.object(app, "main", side_effect=observe_loader))
+                    stack.enter_context(mock.patch.object(app.pty, "fork", side_effect=AssertionError("unexpected PTY")))
+                    result = owner.invoke(f)
+                    self.assertEqual([f["tool"] / "tools" / (name + ".py")
+                                      for name in ("device_identity", "hostname_ranges", "login_path")], observed)
+                    self.assertIs(sys.path, original_path)
+                    self.assertEqual(path_value, sys.path)
+                    self.assertEqual(original_root, app._TOOLS_ROOT)
+                    self.assertIs(sys.modules["PUBLIC_UNRELATED_FIXTURE_MODULE"], unrelated)
+                    for name, module in foreign.items():
+                        self.assertIs(sys.modules[name], module)
+                    if fail:
+                        self.assertIsInstance(result["error"], app.SetupError)
+                        self.assertEqual("PUBLIC loader-only scope failure", str(result["error"]))
+                    else:
+                        self.assertIsNone(result["error"])
+                        self.assertEqual(0, result["rc"])
+
+
+class TargetFixtureIPv4ParserCompatibilityTests(unittest.TestCase):
+    """Only the PUBLIC peer parser; no KAT, real termios, PTY or state IO."""
+    CURRENT = ["-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
+               "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
+    def observe_parser(self, flags):
+        class ReachedValidatedFrame(Exception):
+            pass
+        class PublicTTY:
+            ECHO, TCSANOW = 8, 0
+            @staticmethod
+            def tcgetattr(descriptor):
+                self.assertEqual(0, descriptor)
+                return [0, 0, 0, 8]
+            @staticmethod
+            def tcsetattr(descriptor, action, attrs):
+                self.assertEqual((0, 0, 0), (descriptor, action, attrs[3]))
+        inner = ["ip", "vrf", "exec", "default", "ssh", *flags, "admin@203.0.113.2", "true"]
+        outer = ["-tt", "-o", "ConnectTimeout=2", "-o", "ServerAliveInterval=10",
+                 "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                 "cumulus@192.0.2.10", shlex.join(["sh", "-c",
+                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec " + shlex.join(inner)])]
+        model_sys = type(sys)("PUBLIC_parser_sys")
+        model_sys.argv = ["owned-ssh.py", "PUBLIC-config-not-opened", *outer]
+        frame_hits = []
+        def frame(text):
+            self.assertEqual("true", text)
+            frame_hits.append("validated")
+            raise ReachedValidatedFrame()
+        def answer(prompt):
+            self.assertEqual("cumulus@192.0.2.10's password: ", prompt)
+            return "PUBLIC-OOB"
+        def record(kind, **facts):
+            self.assertEqual("outer-answer", kind)
+            self.assertEqual({"oob": True}, facts)
+        class ForbiddenOS:
+            def __getattr__(self, name):
+                raise AssertionError("state or external IO must not be reached")
+        scope = dict(termios=PublicTTY, sys=model_sys, shlex=shlex, re=__import__("re"),
+                     C={"oob": "PUBLIC-OOB", "scenario": "normal"}, read_answer=answer,
+                     role=lambda value: {"oob": value == "PUBLIC-OOB"}, record=record,
+                     unframe=frame, os=ForbiddenOS())
+        nodes = [n for n in ast.parse(SSH_PROGRAM).body
+                 if isinstance(n, ast.FunctionDef) and n.name in ("unwrap", "unphase", "run")]
+        self.assertEqual(["unwrap", "unphase", "run"], [n.name for n in nodes])
+        # Definitions from the real PUBLIC fixture only, never the top-level
+        # config reader/SystemExit or generated production/device source.
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<PUBLIC peer parser>", "exec"), scope)
+        observed = None
+        try:
+            scope["run"]()
+        except (ReachedValidatedFrame, ValueError) as error:
+            observed = error
+        return observed, frame_hits, ReachedValidatedFrame
+
+    def test_literal_current_ipv4_flags_reach_the_real_parser_frame_boundary(self):
+        observed, frame_hits, reached = self.observe_parser(list(self.CURRENT))
+        self.assertIsInstance(observed, reached)
+        self.assertEqual(["validated"], frame_hits)
+
+    def test_ipv4_near_miss_flags_are_rejected_before_any_state_io(self):
+        cases = {
+            "old-missing-both": self.CURRENT[:-4],
+            "missing-path": self.CURRENT[:-2],
+            "master-enabled": ["ControlMaster=yes" if x == "ControlMaster=no" else x for x in self.CURRENT],
+            "foreign-path": ["ControlPath=/PUBLIC/foreign" if x == "ControlPath=none" else x for x in self.CURRENT],
+            "extra-option": self.CURRENT + ["-o", "BatchMode=yes"],
+            "reordered-pairs": self.CURRENT[:-4] + self.CURRENT[-2:] + self.CURRENT[-4:-2],
+        }
+        for label, flags in cases.items():
+            with self.subTest(label=label):
+                observed, frame_hits, _ = self.observe_parser(flags)
+                self.assertIsInstance(observed, ValueError)
+                self.assertEqual("inner SSH flags", str(observed))
+                self.assertEqual([], frame_hits)
+
 
 if __name__ == "__main__":
     unittest.main()
