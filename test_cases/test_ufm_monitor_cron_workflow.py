@@ -224,6 +224,30 @@ class UfmCronCase(unittest.TestCase):
         self.stop_remote_sessions()
         self.tmp.cleanup()
 
+    @staticmethod
+    def _darwin_group_has_only_owned_zombies(group):
+        """Accept only exact current-UID all-Z metadata after a Darwin signal refusal."""
+        if sys.platform != "darwin":
+            return False
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-x", "-g", str(group), "-o", "pgid=,uid=,stat="],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False,
+            )
+        except (OSError, UnicodeError, subprocess.SubprocessError):
+            return False
+        if (result.returncode != 0 or type(result.stdout) is not str
+                or type(result.stderr) is not str or result.stderr or not result.stdout):
+            return False
+        owner = os.geteuid()
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if (len(fields) != 3 or not fields[0].isdecimal() or not fields[1].isdecimal()
+                    or int(fields[0]) != group or int(fields[1]) != owner
+                    or not fields[2].startswith("Z")):
+                return False
+        return True
+
     def stop_remote_sessions(self):
         """cron.sh starts the collectors on a UFM with nohup and need not wait for them: on a VIP holder that is
         then rejected, ufm-ibdiagnet.sh and `ufm-info.sh --ha` are never fetched and may still run when cron.sh
@@ -238,12 +262,20 @@ class UfmCronCase(unittest.TestCase):
                     os.killpg(group, signum)
                 except ProcessLookupError:
                     groups.discard(group)
+                except PermissionError:
+                    if not self._darwin_group_has_only_owned_zombies(group):
+                        raise
+                    groups.discard(group)
             deadline = time.monotonic() + 10
             while groups and time.monotonic() < deadline:
                 for group in sorted(groups):
                     try:
                         os.killpg(group, 0)
                     except ProcessLookupError:
+                        groups.discard(group)
+                    except PermissionError:
+                        if not self._darwin_group_has_only_owned_zombies(group):
+                            raise
                         groups.discard(group)
                 if groups:
                     time.sleep(0.05)
@@ -852,6 +884,118 @@ class UfmSharedReportCleanupTest(UfmCronCase):
         with tarfile.open(info / f"{yesterday}-daily.tar.gz") as bundle:
             self.assertEqual(bundle.getnames()[1:], [f"{yesterday}-0100.tar.gz", newest.name])
         self.assertIn(f"newest of its kind kept loose: {newest.name}", result.stdout)
+
+
+class UfmCronZombieCleanupControllerTests(unittest.TestCase):
+    """Model only cleanup signals and exact-group metadata; never launch a UFM fixture."""
+
+    GROUP = 424242
+
+    def _observe_cleanup(self, stage, *, platform_name="darwin", stdout="",
+                         stderr="", returncode=0, query_error=None, missing=False):
+        from unittest import mock
+
+        primary = (ProcessLookupError(3, "synthetic missing owned group") if missing
+                   else PermissionError(1, "synthetic owned-group signal refusal"))
+        signals, queries = [], []
+
+        def signal_group(group, signum):
+            self.assertEqual(self.GROUP, group, "never signal an unrecorded group")
+            signals.append((group, signum))
+            if stage == "poll" and len(signals) == 1:
+                self.assertEqual(signal.SIGTERM, signum)
+                return None
+            self.assertEqual(signal.SIGTERM if stage == "signal" else 0, signum)
+            raise primary
+
+        def query_group(argv, **kwargs):
+            expected = ["/bin/ps", "-x", "-g", str(self.GROUP), "-o", "pgid=,uid=,stat="]
+            self.assertEqual(expected, argv, "only the recorded group metadata may be requested")
+            queries.append(list(argv))
+            if query_error is not None:
+                raise query_error
+            return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
+
+        with tempfile.TemporaryDirectory(prefix="ufm-cleanup-controller-") as folder:
+            subject = UfmCronCase()
+            subject.root = Path(folder)
+            record = subject.root / "remote-sessions"
+            original_record = f"{self.GROUP}\n"
+            record.write_text(original_record, encoding="ascii")
+            observed = None
+            with mock.patch.object(os, "killpg", side_effect=signal_group), \
+                    mock.patch.object(subprocess, "run", side_effect=query_group), \
+                    mock.patch.object(sys, "platform", platform_name):
+                try:
+                    subject.stop_remote_sessions()
+                except PermissionError as error:
+                    observed = error
+            self.assertEqual(original_record, record.read_text(encoding="ascii"))
+        expected_signals = [(self.GROUP, signal.SIGTERM)]
+        if stage == "poll":
+            expected_signals.append((self.GROUP, 0))
+        self.assertEqual(expected_signals, signals, "no additional signal after the refusal")
+        return primary, observed, queries
+
+    def test_darwin_eperm_accepts_only_current_uid_all_zombie_rows(self):
+        uid = os.geteuid()
+        outputs = (
+            ("single-zombie", f"{self.GROUP} {uid} Z\n"),
+            ("zombie-status-flags", f"{self.GROUP} {uid} Z+\n{self.GROUP} {uid} Zs\n"),
+        )
+        for stage in ("signal", "poll"):
+            for name, stdout in outputs:
+                with self.subTest(stage=stage, rows=name):
+                    primary, observed, queries = self._observe_cleanup(stage, stdout=stdout)
+                    if observed is not None:
+                        self.assertIs(primary, observed)
+                        self.fail("an exact current-UID all-Z group has no runnable remote writer")
+                    self.assertEqual(1, len(queries), "the permission refusal needs exact group evidence")
+
+    def test_darwin_eperm_keeps_unknown_live_or_foreign_groups_fatal(self):
+        uid = os.geteuid()
+        valid = f"{self.GROUP} {uid} Z\n"
+        rejected = (
+            ("empty", "", "", 0),
+            ("whitespace-only", " \n", "", 0),
+            ("live", f"{self.GROUP} {uid} S+\n", "", 0),
+            ("mixed", valid + f"{self.GROUP} {uid} R\n", "", 0),
+            ("foreign-uid", f"{self.GROUP} {uid + 1} Z\n", "", 0),
+            ("wrong-group", f"{self.GROUP + 1} {uid} Z\n", "", 0),
+            ("partial-row", f"{self.GROUP} {uid}\n", "", 0),
+            ("extra-field", f"{self.GROUP} {uid} Z unexpected\n", "", 0),
+            ("invalid-group", f"not-a-group {uid} Z\n", "", 0),
+            ("invalid-uid", f"{self.GROUP} not-a-uid Z\n", "", 0),
+            ("query-failed", valid, "", 1),
+            ("query-stderr", valid, "synthetic metadata warning\n", 0),
+        )
+        for stage in ("signal", "poll"):
+            for name, stdout, stderr, returncode in rejected:
+                with self.subTest(stage=stage, refusal=name):
+                    primary, observed, queries = self._observe_cleanup(
+                        stage, stdout=stdout, stderr=stderr, returncode=returncode,
+                    )
+                    self.assertIs(primary, observed, "unknown group state must preserve the original refusal")
+                    self.assertEqual(1, len(queries))
+            with self.subTest(stage=stage, refusal="metadata-unavailable"):
+                primary, observed, queries = self._observe_cleanup(
+                    stage, stdout=valid, query_error=OSError("synthetic metadata unavailable"),
+                )
+                self.assertIs(primary, observed, "a metadata error is not evidence of group exit")
+                self.assertEqual(1, len(queries))
+            with self.subTest(stage=stage, refusal="not-darwin"):
+                primary, observed, queries = self._observe_cleanup(
+                    stage, platform_name="linux", stdout=valid,
+                )
+                self.assertIs(primary, observed, "the compatibility exception is Darwin-only")
+                self.assertEqual([], queries)
+
+    def test_missing_process_group_finishes_without_metadata_query(self):
+        for stage in ("signal", "poll"):
+            with self.subTest(stage=stage):
+                _primary, observed, queries = self._observe_cleanup(stage, missing=True)
+                self.assertIsNone(observed)
+                self.assertEqual([], queries, "the existing missing-group path needs no ps command")
 
 
 if __name__ == "__main__":

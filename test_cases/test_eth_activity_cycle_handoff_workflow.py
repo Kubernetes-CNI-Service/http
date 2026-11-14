@@ -157,8 +157,33 @@ class EthActivityCycleHandoffWorkflowTests(unittest.TestCase):
             )
             eth = next(item for item in payload["result"]["outcomes"]
                        if item["source_slot"] == "ethernet/prod")
+            eth_raw_streams = {}
+            if eth["outcome"] != "accepted":
+                for channel in ("stdout", "stderr"):
+                    path = root / f"fixture-child-ethernet-{channel}.txt"
+                    try:
+                        eth_raw_streams[channel] = {
+                            "state": "present",
+                            "text": path.read_text(encoding="utf-8", errors="replace"),
+                        }
+                    except FileNotFoundError:
+                        eth_raw_streams[channel] = {"state": "absent"}
+                    except OSError as exc:
+                        eth_raw_streams[channel] = {
+                            "state": "read_error", "type": type(exc).__name__,
+                            "errno": exc.errno,
+                        }
             self.assertEqual("accepted", eth["outcome"],
-                             "\n".join(f"{path}: {path.read_text(errors='replace')[:3000]}"
+                             json.dumps({
+                                 "eth_evidence": eth["evidence"],
+                                 "eth_raw_streams": eth_raw_streams,
+                                 "slot_outcomes": [
+                                     {"source_slot": item["source_slot"],
+                                      "outcome": item["outcome"]}
+                                     for item in payload["result"]["outcomes"]
+                                 ],
+                             }, ensure_ascii=False, sort_keys=True) + "\n"
+                             + "\n".join(f"{path}: {path.read_text(errors='replace')[:3000]}"
                                        for path in root.rglob("*activity*.json")))
             binding = next(item for item in traces
                            if item["context"]["source_slot"] == "ethernet/prod")
