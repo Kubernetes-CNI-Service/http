@@ -1052,11 +1052,11 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
             self.assertEqual(1, len(warm_calls), "the HO-7 stdlib pyc warm child ran once")
             self.assertEqual([], [argv for argv in intercepted_argv if argv[1:5] == warm_signature],
                              "the HO-7 warm child must never be intercepted")
-            self.assertEqual(30, run.call_args.kwargs["timeout"])
+            self.assertEqual(110, run.call_args.kwargs["timeout"])
             self.assertEqual(["-B", "-c", BOOTSTRAP], run.call_args.args[0][1:4],
                              "the last observed call is the intercepted BOOTSTRAP launch")
             self.assertEqual(1, len(intercepted), "exactly one BOOTSTRAP launch is intercepted")
-            self.assertEqual(30, intercepted[0]["timeout"])
+            self.assertEqual(110, intercepted[0]["timeout"])
             self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDOUT\nchild-started\n", diagnostics.getvalue())
             self.assertIn('COLLECTION_PHASE_START {"phase":"collect","slot":"infiniband/prod"}', diagnostics.getvalue())
             self.assertIn("COLLECTION_WORKFLOW_TIMEOUT_STDERR", diagnostics.getvalue())
