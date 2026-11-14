@@ -1073,7 +1073,7 @@ class TargetFixtureLeafCompatibilityTests(unittest.TestCase):
     def metadata_fixture(self, folder):
         owner = InitialTargetCredentialsMainAutoWorkflowDraftTests(
             "test_real_c2_p1_manual_pam_fresh_read_and_all_stage_consumers_use_project_target")
-        owner.kat = {"PASSWORD": "PUBLIC-METADATA-NOT-A-KAT",
+        owner.kat = {"PASSWORD": 'placeholder',
                      "SHA512": "PUBLIC-METADATA-NOT-A-HASH",
                      "YESCRYPT": "PUBLIC-METADATA-NOT-A-HASH"}
         return owner, owner.fixture(folder)
