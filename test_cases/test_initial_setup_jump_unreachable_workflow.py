@@ -17,6 +17,7 @@ import shlex
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -208,8 +209,9 @@ if '-O' in a:
             stack.enter_context(mock.patch.object(app.tempfile, 'mkdtemp', side_effect=owned_directory))
             stack.enter_context(mock.patch.object(app.subprocess, 'run', side_effect=run))
             stack.enter_context(mock.patch.object(app, 'interactive_run', side_effect=transport))
-            stack.enter_context(mock.patch.object(app.time, 'monotonic', side_effect=lambda: now[0]))
-            stack.enter_context(mock.patch.object(app.time, 'sleep', side_effect=sleep))
+            application_clock = SimpleNamespace(**{**vars(app.time), 'monotonic': lambda: now[0], 'sleep': sleep})
+            stack.enter_context(mock.patch.object(app, 'time', application_clock))
+            stack.enter_context(mock.patch.object(existing, 'time', application_clock))
             stack.enter_context(mock.patch.object(app, '_new_jump_sessions', side_effect=factory))
             stack.enter_context(mock.patch.object(app, 'verify_password_hash',
                                                  side_effect=lambda value, setting: value == PUBLIC_CURRENT and setting == PUBLIC_HASH))
@@ -275,6 +277,38 @@ if '-O' in a:
             self.assertEqual(1, len(sessions), '--generate-json has no session factory; online MAIN creates one')
             self.assertTrue(all(session.directory is None for session in sessions))
             return code, summary, outputs_text, waits, opened
+
+    def test_application_clock_does_not_capture_external_time_consumers(self):
+        # The real subprocess module retains this same stdlib module, not
+        # the subject's app.time reference. Its waits must stay on real time.
+        import time as external_time
+        original_sleep, original_monotonic = external_time.sleep, external_time.monotonic
+        original_load = load_script
+        observed, subject = [], {}
+
+        def load_with_clock_observation(name, path):
+            if Path(path) == C2:
+                observed.append('clock installed before real C2')
+                self.assertIs(original_sleep, external_time.sleep)
+                self.assertIs(original_monotonic, external_time.monotonic)
+                self.assertIsNot(external_time, subject['app'].time)
+                self.assertEqual(0.0, subject['app'].time.monotonic())
+                external_time.sleep(0)
+                self.assertEqual(0.0, subject['app'].time.monotonic())
+            loaded = original_load(name, path)
+            if Path(path) == INITIAL:
+                subject['app'] = loaded
+            return loaded
+
+        with mock.patch.object(sys.modules[__name__], 'load_script',
+                               side_effect=load_with_clock_observation):
+            code, summary, text, waits, opened = self.run_world(blocked_until=180)
+        self.assertEqual(['clock installed before real C2'], observed)
+        self.assertEqual(0, code)
+        self.assertEqual([240], waits)
+        self.assertEqual(2, opened.count('198.51.100.10'))
+        self.assertEqual(1, opened.count('198.51.100.11'))
+        self.assertNotIn(PUBLIC_BANNER, text)
 
     def test_blocked_jump_recovers_or_is_named(self):
         code, summary, text, waits, opened = self.run_world(blocked_until=180)

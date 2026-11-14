@@ -3,13 +3,13 @@
  "description": "Two-phase full-suite shard plan (G5Q-RA shape, re-derived on the current canonical discovery). Correctness never depends on balance: the runner checks exact coverage.",
  "derivation": {
   "status": "provisional",
-  "weights": "Historical v3.1.3 measured per-case weights only: SHA256 4542c77090046571d1c148800a837b033e5d9b075f05a807d5e335149466ef0f, 6707 entries. Applied provisionally to actual current census d86bf6b405a27f2cae8cfd4d1f461ef57289f7b24d03d1c2c3985d036e4aedb3 (7119 occurrences); missing current cases use measured module mean, else median module mean, exactly as the unchanged deriver does. This is not current FP1/full timing; defaulted share and predicted lanes remain estimates.",
+  "weights": "Historical v3.1.3 measured per-case weights only: SHA256 4542c77090046571d1c148800a837b033e5d9b075f05a807d5e335149466ef0f, 6707 entries; provisionally applied to current census 6fef76095fa882ec6c5aab1bca1fc9ba1e6378ea52c105f58645063367ffd31f (7123 occurrences). Missing cases use measured module mean, else median module mean, exactly as the unchanged deriver; defaulted share and predicted lanes are estimates, not current FP1/full measurement.",
   "default_seconds_per_unmeasured_test": "module measured mean, else median module mean 0.1443",
   "rerun": "re-derive from a timing log of the tree the plan is for before any timed comparison (B-6)",
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
-  "dev_rederivation": "v3.1.4 final-fix canonical data re-derivation: actual clean HEAD c379709a4dd6c244807ebcdf74f6bd5e7cb4f091, tree aa94e286989377b7a50ef8d68352df91f4ef85be; census SHA256 d86bf6b405a27f2cae8cfd4d1f461ef57289f7b24d03d1c2c3985d036e4aedb3, 442 modules/7119 occurrences. Policy retains 18 quiet modules and actual 18 expanded quiet cases; no current timing measurement or formal full-proof conclusion is implied.",
-  "tlrt": "Historical policy retained: test_load_release_transaction has no dedicated lane. The earlier 2.9-second note is not a measurement of this final-fix source.",
-  "ufm": "Keep test_ufm_setup_upgrade in three contiguous nonquiet slices plus five free lanes. Actual new boundaries/row counts/predictions come only from this census and unchanged minmax_dp; old 111/19/36 or FP-311b lane times are historical, not current measurements."
+  "dev_rederivation": "v3.1.4 RV31-131 canonical data re-derivation: actual clean HEAD 1dbde48e90045f5c093338df7f4a753a76b670c6, tree 7abad1baaee9c6e17a936223463d301b547c6be1; census SHA256 6fef76095fa882ec6c5aab1bca1fc9ba1e6378ea52c105f58645063367ffd31f, 442 modules/7123 occurrences. Policy retains 18 quiet modules and actual 18 expanded quiet cases; no current timing or full-proof conclusion.",
+  "tlrt": "Historical policy retained: test_load_release_transaction has no dedicated lane; the earlier 2.9-second note is not this source's measurement.",
+  "ufm": "Keep the original three contiguous nonquiet UFM slices, five free lanes and same-lane group; actual boundaries/row counts/predictions come only from this census and unchanged minmax_dp, not old 111/19/36 or FP-311b times."
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -75,13 +75,13 @@
     "test_cases.test_docker_destructive_confirmation_workflow",
     "test_cases.test_documentation_catalog",
     "test_cases.test_download_cli_contract",
-    "test_cases.test_eth_activity_cycle_handoff_workflow",
-    "test_cases.test_eth_jump_duplicate_identity"
+    "test_cases.test_eth_activity_cycle_handoff_workflow"
    ]
   },
   {
    "lane": "w1",
    "units": [
+    "test_cases.test_eth_jump_duplicate_identity",
     "test_cases.test_eth_jump_transport_contract",
     "test_cases.test_eth_jump_transport_workflow",
     "test_cases.test_eth_jump_zero_config_contract",
@@ -538,7 +538,7 @@
  "phase_b_reasons": {
   "test_cases.test_backup_bounded_process_workflow": "DEV 普查：真实 Python 子进程在 1.0 s 产品预算下运行，超时会改变预期退出码；另有 assertLess(elapsed, 1.5)（:409-421）",
   "test_cases.test_bootstrap_config_fetch_workflow::test_cases.test_bootstrap_config_fetch_workflow.RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated": "BOOT：沿用 TEST（V14r b1 超时）；DEV 仍是真实 15 s bash 超时（test_bootstrap_config_fetch_contract.py:226-228）",
-  "test_cases.test_collection_cycle_handoff_workflow::test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed": "HANDOFF：沿用 TEST（V8c 中 'accepted' != 'missing_marker'）；DEV 内层 10 s、外层 30 s 不变（:664、:1186-1202）",
+  "test_cases.test_collection_cycle_handoff_workflow::test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed": "HANDOFF：历史安静依据：沿用 TEST（V8c 中 'accepted' != 'missing_marker'）；原DEV记录内层10s、外层30s（原:664、:1186-1202）。本轮Q072/R577仅将prod direct/persisted外层改90s、all改110s，air及显式sigkill仍30s；内层plan/collect10s、生产coordinator/full9000与quiet成员不变。本字段不冒本轮实测。",
   "test_cases.test_collector_retrieval": "DEV 普查：真实 bash 经新写出的 scp 桩 sleep/轮询（:52-54），assertLess(elapsed, 10)（:108），串行 6.9 s",
   "test_cases.test_config_sync_authority": "共享主机锁（实测）：经真实 managed_initial_main（:30、:124）拿 tools/ib_bringup_runtime_guard.py:9 写死的 /tmp/http-ib-bringup.runtime.lock（ztp/config_sync_authority.py:1610-1612），没有改路径；两条车道同时进入会得到 ALREADY_RUNNING",
   "test_cases.test_config_sync_authority_workflow": "共享主机锁（实测）：:68 经真实 managed_initial_main 拿同一把 /tmp 锁，没有改路径",
@@ -566,7 +566,7 @@
   "test_cases.test_ufm_setup_upgrade::test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_defaults_to_no_after_the_deadline": "UFM_TIMED_SECRET_7：DEV 普查：0.2 s 时向 pty 输入密钥，期限 0.5–0.6 s，余量只有 0.3–0.4 s 的线程唤醒（:3656 起）",
   "test_cases.test_ufm_setup_upgrade::test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_echoes_and_accepts_y": "UFM_TIMED_SECRET_8：DEV 普查：0.2 s 时向 pty 输入密钥，期限 0.5–0.6 s，余量只有 0.3–0.4 s 的线程唤醒（:3656 起）",
   "test_cases.test_ufm_setup_upgrade::test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_without_a_terminal_is_no": "UFM_TIMED_SECRET_9：DEV 普查：0.2 s 时向 pty 输入密钥，期限 0.5–0.6 s，余量只有 0.3–0.4 s 的线程唤醒（:3656 起）",
-  "test_cases.test_ufm_worker_collection::test_cases.test_ufm_worker_collection.UfmWorkerCollectionWorkflowTest.test_the_worker_plan_reaches_the_ufm_phase_and_the_switch_result_still_qualifies": "UFM_WORKER：DEV 普查：沿用交接 harness 每个 cron.sh 10 s、每个 workflow 30 s 的预算并加入 UFM 阶段；模块自己的注释（:174）说 UFM 阶段让 infiniband cron.sh 接近 10 s",
+  "test_cases.test_ufm_worker_collection::test_cases.test_ufm_worker_collection.UfmWorkerCollectionWorkflowTest.test_the_worker_plan_reaches_the_ufm_phase_and_the_switch_result_still_qualifies": "UFM_WORKER：历史安静依据：原DEV普查沿用交接harness每个cron.sh 10s、每个workflow 30s并加入UFM；原模块注释（原:174）说UFM阶段让infiniband cron.sh接近10s。本轮Q072/R577仅将prod direct/persisted外层改90s、all改110s，air及显式sigkill仍30s；内层plan/collect10s、生产coordinator/full9000与quiet成员不变。本字段不冒本轮实测。",
   "test_cases.test_ztp_applied_receipt::test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_receipt_stage_without_blocking": "RECEIPT_FIFO_1：DEV 普查（实测核对行号）：bash -x 运行新写出的 mktemp 桩，真实 communicate(timeout=10)（:454-499、:505-551、:559-600）；其中一个在串行全量里超过原 3 s 预算，eea8deb 放宽到 10 s",
   "test_cases.test_ztp_applied_receipt::test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_yaml_stage_without_blocking": "RECEIPT_FIFO_2：DEV 普查（实测核对行号）：bash -x 运行新写出的 mktemp 桩，真实 communicate(timeout=10)（:454-499、:505-551、:559-600）；其中一个在串行全量里超过原 3 s 预算，eea8deb 放宽到 10 s",
   "test_cases.test_ztp_applied_receipt::test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_before_stage_fsync_without_blocking": "RECEIPT_FIFO_3：DEV 普查（实测核对行号）：bash -x 运行新写出的 mktemp 桩，真实 communicate(timeout=10)（:454-499、:505-551、:559-600）；其中一个在串行全量里超过原 3 s 预算，eea8deb 放宽到 10 s",

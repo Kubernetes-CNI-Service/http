@@ -1,7 +1,7 @@
 """O-only tests-first TEXT; not executed by its author.
 
 Intended ordinary path: test_cases/test_initial_setup_pty_cleanup.py.
-Only three owned PUBLIC child processes, one per method, on future Root issue.
+Only four owned PUBLIC child invocations, one per test method, on future Root issue.
 No SSH, keys, packages, credentials, network or device operations are involved.
 The current and prospective source remain immutable; this is not proof of a
 new regression. The fixture's independent cleanup is never counted as SUT reap.
@@ -185,6 +185,7 @@ class InitialPTYClosePrimaryTests(unittest.TestCase):
             "pid": None, "master": None, "forks": 0, "ready": False,
             "close_calls": 0, "closed": False, "signals": [],
             "sut_waits": [], "sut_reaped": False, "blocking_attempt": False,
+            "cleanup_started": False, "normal_waits": [], "raw_waits": [],
             "fixture_waits": [], "fixture_killed": False,
             "fixture_reaped": False, "fixture_closed": False,
             "adapter_errors": [], "fixture_errors": [],
@@ -205,6 +206,7 @@ class InitialPTYClosePrimaryTests(unittest.TestCase):
                 state["adapter_errors"].append("RETRIED_TARGET_CLOSE")
                 raise OSError(errno.EIO, "PUBLIC prevented ambiguous close retry")
             real_close(fd)
+            state["cleanup_started"] = True
             try:
                 real_fstat(fd)
             except OSError as error:
@@ -232,7 +234,12 @@ class InitialPTYClosePrimaryTests(unittest.TestCase):
                 state["blocking_attempt"] = True
                 raise RuntimeError("PUBLIC unexpected blocking wait")
             result = real_waitpid(pid, options)
-            state["sut_waits"].append((options, result))
+            phase = "cleanup" if state["cleanup_started"] else "normal"
+            state["raw_waits"].append((phase, pid, options, result))
+            if state["cleanup_started"]:
+                state["sut_waits"].append((options, result))
+            else:
+                state["normal_waits"].append((pid, options, result))
             if result[0] == pid:
                 state["sut_reaped"] = True
             return result
@@ -312,6 +319,44 @@ class InitialPTYClosePrimaryTests(unittest.TestCase):
         self.assertTrue(state["fixture_reaped"])
         self.assertEqual(
             [os.WNOHANG, 0], [options for options, _result in state["fixture_waits"]])
+        self.assertTrue(state["cleanup_started"])
+        for observed in state["normal_waits"]:
+            self.assertEqual((state["pid"], os.WNOHANG, (0, 0)), observed)
+        self.assertEqual(
+            [("normal", pid, options, result) for pid, options, result in state["normal_waits"]]
+            + [("cleanup", state["pid"], options, result) for options, result in state["sut_waits"]],
+            state["raw_waits"],
+        )
+
+
+    def test_pre_ready_poll_does_not_count_as_an_extra_cleanup_wait(self):
+        app = self.app
+        original_fork, original_select = app.pty.fork, app.select.select
+        owned = {"pid": None, "master": None, "forced": []}
+
+        def own_fork():
+            pid, master = original_fork()
+            if pid > 0:
+                owned["pid"], owned["master"] = pid, master
+            return pid, master
+
+        def first_owned_poll(readers, writers, exceptional, timeout=None):
+            if (owned["master"] is not None and readers == [owned["master"]]
+                    and not writers and not exceptional and not owned["forced"]):
+                self.assertGreater(timeout, 0)
+                owned["forced"].append(owned["master"])
+                # Only the first owned read-readiness observation is empty.
+                # The product's following waitpid remains the real syscall;
+                # no child output, READY marker or wait status is fabricated.
+                return [], [], []
+            return original_select(readers, writers, exceptional, timeout)
+
+        with mock.patch.object(app.pty, "fork", side_effect=own_fork), \
+                mock.patch.object(app.select, "select", side_effect=first_owned_poll):
+            self.test_double_signal_denial_preserves_primary_and_reports_actual_unreaped_uncertainty()
+        self.assertEqual([owned["master"]], owned["forced"])
+        self.assertIs(type(owned["pid"]), int)
+        self.assertGreater(owned["pid"], 0)
 
 
 if __name__ == "__main__":

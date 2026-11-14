@@ -1095,6 +1095,32 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
         self.assertTrue(payload["returned"], payload)
         self.assertTrue(probe["blocked"], "another cron must not enter between phases")
 
+    def test_fixture_outer_deadline_preserves_scope_and_sigkill_contract(self):
+        """Only the owner-approved outer wait varies; no collector is launched."""
+        expected = (
+            ("air", "direct", 30), ("prod", "direct", 90), ("all", "direct", 110),
+            ("air", "persisted", 30), ("prod", "persisted", 90),
+            ("all", "persisted", 110), ("air", "sigkill", 30),
+            ("prod", "sigkill", 30), ("all", "sigkill", 30),
+        )
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch(__name__ + ".private_stdlib_pycache") as cache, \
+                mock.patch.object(self, "_temporary_environment", return_value={}), \
+                mock.patch.object(self, "_fixture_environment", return_value={}), \
+                mock.patch(__name__ + ".run_workflow_process") as launch:
+            cache.return_value.__enter__.return_value = directory
+            launch.return_value = subprocess.CompletedProcess([], 0, "", "")
+            for scope, action, seconds in expected:
+                with self.subTest(scope=scope, action=action):
+                    self.run_workflow(Path(directory), scope, action=action)
+                    self.assertEqual(seconds, launch.call_args.kwargs["timeout"])
+                    self.assertEqual(
+                        [sys.executable, "-B", "-c", BOOTSTRAP, directory,
+                         scope, "success", "", action],
+                        launch.call_args.args[0],
+                    )
+            self.assertEqual(9, launch.call_count)
+
     def make_layout(self, directory: str) -> Path:
         root = Path(directory)
         private_tmp = root / "fixture-tmp"
@@ -1195,6 +1221,8 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
     ) -> tuple[subprocess.CompletedProcess[str], dict | None, list[dict]]:
         trace = root / "fixture-trace.jsonl"
         trace.unlink(missing_ok=True)
+        outer_timeout = (30 if action == "sigkill"
+                         else {"prod": 90, "all": 110}.get(scope, 30))
         with private_stdlib_pycache() as stdlib_pycache:
             completed = run_workflow_process(
                 [
@@ -1204,7 +1232,7 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=30,
+                timeout=outer_timeout,
                 check=False,
                 env={
                     **self._temporary_environment(root),

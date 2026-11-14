@@ -16,6 +16,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -288,11 +289,49 @@ class PreflightFixture(unittest.TestCase):
             with subprocess.Popen(command, cwd=self.root, env=self.env, stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
                 try:
-                    out, err = child.communicate(timeout=2)
-                    self.fail("watch exited unexpectedly: " + (out + err).decode(errors="replace"))
-                except subprocess.TimeoutExpired:
-                    child.terminate()
-                    out, err = child.communicate(timeout=10)
+                    deadline = time.monotonic() + 10
+                    natural_exit = False
+                    missing_ready = False
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            missing_ready = True
+                            break
+                        try:
+                            out, err = child.communicate(timeout=min(0.1, remaining))
+                        except subprocess.TimeoutExpired as exc:
+                            if any(
+                                line.startswith(b"preflight failed; approved hashes were not changed: EFF E-3:")
+                                and line.endswith(b"\n")
+                                for line in (exc.stderr or b"").splitlines(keepends=True)
+                            ):
+                                break
+                        else:
+                            natural_exit = True
+                            break
+                    if not natural_exit and not missing_ready:
+                        try:
+                            out, err = child.communicate(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            pass
+                        else:
+                            natural_exit = True
+                    if natural_exit:
+                        self.fail("watch exited unexpectedly: " + (out + err).decode(errors="replace"))
+                finally:
+                    if child.poll() is None:
+                        child.terminate()
+                        try:
+                            out, err = child.communicate(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            child.kill()
+                            child.communicate(timeout=10)
+                            raise
+                    elif missing_ready:
+                        out, err = child.communicate(timeout=10)
+                if missing_ready:
+                    self.fail("watch did not reach EFF E-3 within 10 seconds: "
+                              + (out + err).decode(errors="replace"))
             return subprocess.CompletedProcess(command, child.returncode, out.decode(), err.decode())
         return subprocess.run(command, cwd=self.root, env=self.env, stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -303,6 +342,80 @@ class PreflightFixture(unittest.TestCase):
         self.assertIn(tag, result.stderr)
         self.assertFalse(self.marker.exists(), result.stdout + result.stderr)
         self.assertEqual(before, self.ledger.read_bytes())
+
+
+class WatchCaptureObservationTests(unittest.TestCase):
+    def test_capture_waits_for_real_refusal_then_observes_or_fails_closed(self):
+        """Drive only the existing capture helper, never a real CLI or child."""
+        for mode in ("ready-after-six", "never-ready", "early-exit"):
+            with self.subTest(mode=mode):
+                clock = {"now": 0.0}
+
+                class OwnedChild:
+                    def __init__(self):
+                        self.returncode = None
+                        self.ready = False
+                        self.requests = []
+                        self.actions = []
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, *exc):
+                        return False
+
+                    def poll(self):
+                        return self.returncode
+
+                    def terminate(self):
+                        self.actions.append("terminate")
+                        self.returncode = -15
+
+                    def kill(self):
+                        self.actions.append("kill")
+                        self.returncode = -9
+
+                    def communicate(self, timeout):
+                        self.requests.append(timeout)
+                        diagnostic = (b"preflight failed; approved hashes were not changed: "
+                                      b"EFF E-3: dirty fixture\n")
+                        err = diagnostic if self.ready else b"startup only\n"
+                        if self.returncode is not None:
+                            return b"", err
+                        if mode == "early-exit":
+                            self.returncode = 0
+                            return b"ordinary exit\n", b""
+                        if mode == "ready-after-six" and len(self.requests) == 2:
+                            self.ready = True
+                            err = diagnostic
+                        if not self.ready:
+                            clock["now"] += 6.0
+                        raise subprocess.TimeoutExpired([], timeout, output=b"", stderr=err)
+
+                child = OwnedChild()
+                observer = mock.Mock(root=ROOT, env={})
+                observer.fail = self.fail
+                with mock.patch.object(subprocess, "Popen", return_value=child) as launch, \
+                        mock.patch(__name__ + ".time", mock.Mock(monotonic=lambda: clock["now"])):
+                    if mode == "ready-after-six":
+                        result = PreflightFixture.cli(observer, "--watch", watch=True)
+                        self.assertTrue(child.ready, "capture must reach the real refusal")
+                        self.assertIn("EFF E-3", result.stderr)
+                        self.assertEqual(-15, result.returncode)
+                        self.assertEqual(2, child.requests[-2], "observe a full two seconds after readiness")
+                        self.assertEqual(10, child.requests[-1], "preserve the original drain bound")
+                    elif mode == "never-ready":
+                        with self.assertRaisesRegex(AssertionError, "watch did not reach EFF E-3") as missing:
+                            PreflightFixture.cli(observer, "--watch", watch=True)
+                        self.assertIn("startup only", str(missing.exception))
+                        self.assertFalse(child.ready)
+                    else:
+                        with self.assertRaisesRegex(AssertionError, "watch exited unexpectedly"):
+                            PreflightFixture.cli(observer, "--watch", watch=True)
+                    self.assertEqual(1, launch.call_count)
+                    self.assertEqual(subprocess.DEVNULL, launch.call_args.kwargs["stdin"])
+                    self.assertIsNotNone(child.returncode, "always finish the owned child before leaving capture")
+                    self.assertNotIn("kill", child.actions, "ordinary TERM cleanup must not escalate")
 
 
 class PreflightDirectTests(PreflightFixture):
