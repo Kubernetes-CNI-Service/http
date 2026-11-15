@@ -2770,6 +2770,7 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
 FROZEN_QUIET_MODULES = tuple("test_cases.test_" + name for name in (
     "backup_bounded_process_workflow", "collector_retrieval", "config_sync_authority",
     "config_sync_authority_workflow", "docker_management_ssh_key",
+    "eth_activity_cycle_handoff_workflow",
     "f01_recovery_project_key_backup_durable_workflow",
     "f01_recovery_staging_sftp_encrypted_workflow", "ibsw3_native_cpld_bridge",
     "ibsw3_native_os_event_clock", "ibsw3_scp_parent_content_owner", "ibsw3_scp_source_binding",

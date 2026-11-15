@@ -9,7 +9,8 @@
   "runtime_skips": "the suite's only class-level runtime skip site (static census of every test module: PrivateDocumentationContractTests.setUpClass raises SkipTest(PRIVATE_TIER_SKIP_REASON) when the ignored private tier is absent); per-test skipTest calls and decorator skips run as skipped cases and are not listed",
   "dev_rederivation": "v3.1.4 RV31-141/142 canonical data re-derivation: actual clean HEAD 972eba15928cb21f62ba975d2de4bc164c8b55af, tree df3eeacf4c7ce2e011d6e8cbb997f80638fc6d10; census SHA256 d17f6af41409c0930028ddd10250fad1599615118352c6fe5001b7ead95f3abb, 442 modules/7126 occurrences. Policy retains 18 quiet modules and actual 18 expanded quiet cases; no current timing or full-proof conclusion.",
   "tlrt": "Historical policy retained: test_load_release_transaction has no dedicated lane; the earlier 2.9-second note is not this source's measurement.",
-  "ufm": "Keep the original three contiguous nonquiet UFM slices, five free lanes and same-lane group; actual boundaries/row counts/predictions come only from this census and unchanged minmax_dp, not old 111/19/36 or FP-311b times."
+  "ufm": "Keep the original three contiguous nonquiet UFM slices, five free lanes and same-lane group; actual boundaries/row counts/predictions come only from this census and unchanged minmax_dp, not old 111/19/36 or FP-311b times.",
+  "eth_quiet_adjustment": "Owner-approved RV31-142 A.6 single-module scheduling adjustment after N full: move both ETH handoff tests from w0 into existing serial phase B. Prior dev_rederivation records the earlier 18 quiet modules; current policy has 19 whole quiet modules and the same 18 quiet cases. All other lane cuts, weights, slices, same-lane groups, deadlines and canonical methods are retained. No new minmax/reweight run or green full is claimed."
  },
  "lane_deadline_seconds": 9000,
  "phase_a": [
@@ -74,8 +75,7 @@
     "test_cases.test_docker_destructive_confirmation",
     "test_cases.test_docker_destructive_confirmation_workflow",
     "test_cases.test_documentation_catalog",
-    "test_cases.test_download_cli_contract",
-    "test_cases.test_eth_activity_cycle_handoff_workflow"
+    "test_cases.test_download_cli_contract"
    ]
   },
   {
@@ -490,6 +490,7 @@
    "test_cases.test_config_sync_authority",
    "test_cases.test_config_sync_authority_workflow",
    "test_cases.test_docker_management_ssh_key",
+   "test_cases.test_eth_activity_cycle_handoff_workflow",
    "test_cases.test_f01_recovery_project_key_backup_durable_workflow",
    "test_cases.test_f01_recovery_staging_sftp_encrypted_workflow",
    "test_cases.test_ibsw225_three_component_workflow::test_cases.test_ibsw225_three_component_workflow.ThreeComponentWorkflowTests.test_nine_devices_five_real_workers_overlap_after_native_canary",
@@ -536,6 +537,7 @@
   ]
  ],
  "phase_b_reasons": {
+  "test_cases.test_eth_activity_cycle_handoff_workflow": "RV31-142：本次正式全量ETH真实workflow触发夹具传入的10秒期限，17字节stderr哈希吻合timeout after 10s；owner明确允许全量单独运行。按A.6将整个两方法模块移至现有wq，避免与phase A并行；保原accepted/negative、内10/外90/9000及所有方法，不保证quiet必绿，不宣称性能变慢原因已定。",
   "test_cases.test_backup_bounded_process_workflow": "DEV 普查：真实 Python 子进程在 1.0 s 产品预算下运行，超时会改变预期退出码；另有 assertLess(elapsed, 1.5)（:409-421）",
   "test_cases.test_bootstrap_config_fetch_workflow::test_cases.test_bootstrap_config_fetch_workflow.RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated": "BOOT：沿用 TEST（V14r b1 超时）；DEV 仍是真实 15 s bash 超时（test_bootstrap_config_fetch_contract.py:226-228）",
   "test_cases.test_collection_cycle_handoff_workflow::test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed": "HANDOFF：历史安静依据：沿用 TEST（V8c 中 'accepted' != 'missing_marker'）；原DEV记录内层10s、外层30s（原:664、:1186-1202）。本轮Q072/R577仅将prod direct/persisted外层改90s、all改110s，air及显式sigkill仍30s；内层plan/collect10s、生产coordinator/full9000与quiet成员不变。本字段不冒本轮实测。",
