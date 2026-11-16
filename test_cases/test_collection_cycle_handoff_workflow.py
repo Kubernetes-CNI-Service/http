@@ -581,7 +581,7 @@ try:
                 result = coordinator(
                     gate,
                     artifact_bindings=bindings,
-                    timeout=10,
+                    timeout=30,
                     lock_wait=0,
                 )
             else:
@@ -1094,6 +1094,44 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertTrue(payload["returned"], payload)
         self.assertTrue(probe["blocked"], "another cron must not enter between phases")
+
+    def test_persisted_fixture_budget_is_thirty_without_changing_other_inner_deadlines(self):
+        """R611: inspect the actual embedded callsites, not a copied deadline oracle."""
+        import ast
+
+        tree = ast.parse(BOOTSTRAP)
+        persisted = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                     and isinstance(node.test, ast.Compare)
+                     and isinstance(node.test.left, ast.Name) and node.test.left.id == "action"
+                     and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)
+                     and len(node.test.comparators) == 1
+                     and isinstance(node.test.comparators[0], ast.Constant)
+                     and node.test.comparators[0].value == "persisted"]
+        self.assertEqual(1, len(persisted), "the real persisted branch must be unique")
+        coordinators = [node for node in ast.walk(persisted[0]) if isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name) and node.func.id == "coordinator"]
+        self.assertEqual(1, len(coordinators), "observe the actual persisted coordinator call")
+        slots = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Subscript)
+                 and isinstance(node.func.value, ast.Name) and node.func.value.id == "worker"
+                 and isinstance(node.func.slice, ast.Constant)
+                 and node.func.slice.value == "run_collection_slots"]
+        self.assertEqual(1, len(slots), "the separate non-persisted slot call must stay unique")
+        contexts = [node.value for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "context"
+                            for target in node.targets) and isinstance(node.value, ast.Dict)]
+        self.assertEqual(1, len(contexts), "observe the existing sigkill context")
+        context = {key.value: value for key, value in zip(contexts[0].keys, contexts[0].values)
+                   if isinstance(key, ast.Constant)}
+        expected = (
+            ("persisted", {key.arg: key.value for key in coordinators[0].keywords}.get("timeout"), 30),
+            ("non-persisted", {key.arg: key.value for key in slots[0].keywords}.get("timeout"), 10),
+            ("sigkill", context.get("timeout"), 10),
+        )
+        for label, actual, seconds in expected:
+            with self.subTest(branch=label):
+                self.assertIsInstance(actual, ast.Constant)
+                self.assertEqual(seconds, actual.value)
 
     def test_fixture_outer_deadline_preserves_scope_and_sigkill_contract(self):
         """Only the owner-approved outer wait varies; no collector is launched."""

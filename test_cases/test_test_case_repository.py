@@ -559,8 +559,11 @@ class Version314RegistrationTests(unittest.TestCase):
         "w0": [],
         "w1": [name for name in FLEET if name != "test_troot_checkscript_env_control"],
         "w2": [],
-        "w3": [*DEPLOYMENT, "test_project_pointer_contract", "test_project_pointer_entry_workflow"],
+        "w3": [name for name in DEPLOYMENT if name != "test_initial_setup_jump_sessions"]
+              + ["test_project_pointer_contract", "test_project_pointer_entry_workflow"],
         "w4": ["test_troot_checkscript_env_control"],
+        # v3.1.5 R611 moves this one timing-sensitive module; exact uniqueness stays.
+        "wq": ["test_initial_setup_jump_sessions"],
     }
 
     def setUp(self):

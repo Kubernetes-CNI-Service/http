@@ -2768,21 +2768,29 @@ class ValidationTimingDiagnosticTests(unittest.TestCase):
 # lost its failing case and runs in parallel; DEV adds the host-wide runtime-guard users and the DEV
 # timing hazards found by the census.
 FROZEN_QUIET_MODULES = tuple("test_cases.test_" + name for name in (
-    "backup_bounded_process_workflow", "collector_retrieval", "config_sync_authority",
+    "backup_bounded_process_workflow", "collection_cycle_handoff_workflow",
+    "collector_retrieval", "config_sync_authority",
     "config_sync_authority_workflow", "docker_management_ssh_key",
+    "cron_operator_identity",
     "eth_activity_cycle_handoff_workflow",
     "f01_recovery_project_key_backup_durable_workflow",
     "f01_recovery_staging_sftp_encrypted_workflow", "ibsw3_native_cpld_bridge",
     "ibsw3_native_os_event_clock", "ibsw3_scp_parent_content_owner", "ibsw3_scp_source_binding",
+    "ibsw3_transfer_method_selector",
     "ibsw3_stdin_owned_cpld_protocol", "monitor_authority_semantic_workflow",
+    "initial_setup_bare_expiry_readonly", "initial_setup_handoff_transport",
+    "initial_setup_ib_phase_protocol", "initial_setup_jump_sessions",
+    "initial_setup_main_caller_precommit", "initial_setup_oob_credentials",
+    "initial_setup_pty_cleanup", "initial_setup_target_credentials_workflow",
+    "initial_setup_target_outcome_summary", "monitor_legacy_tracker_retirement_workflow",
     "monitor_stack_review", "req10b_services_keys_workflow", "req10c_auto_workflow",
+    "runner_preflight", "switch_status_workflow", "ufm_monitor_cron_workflow",
+    "ufm_req7_ib_cycle_workflow", "ufm_worker_collection", "ztp_group_handoff_display",
     "ztp_monitor_watch_resilience", "ztp_release_core_review",
 ))
 FROZEN_QUIET_CASES = (
     "test_cases.test_bootstrap_config_fetch_workflow::"
     "test_cases.test_bootstrap_config_fetch_workflow.RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated",
-    "test_cases.test_collection_cycle_handoff_workflow::"
-    "test_cases.test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_runtime_snapshot_mutation_between_plan_and_full_fails_closed",
     "test_cases.test_ibsw225_three_component_workflow::"
     "test_cases.test_ibsw225_three_component_workflow.ThreeComponentWorkflowTests.test_nine_devices_five_real_workers_overlap_after_native_canary",
     "test_cases.test_manual_applied_config::"
@@ -2807,8 +2815,6 @@ FROZEN_QUIET_CASES = (
     "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_echoes_and_accepts_y",
     "test_cases.test_ufm_setup_upgrade::"
     "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_without_a_terminal_is_no",
-    "test_cases.test_ufm_worker_collection::"
-    "test_cases.test_ufm_worker_collection.UfmWorkerCollectionWorkflowTest.test_the_worker_plan_reaches_the_ufm_phase_and_the_switch_result_still_qualifies",
     "test_cases.test_ztp_applied_receipt::"
     "test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_receipt_stage_without_blocking",
     "test_cases.test_ztp_applied_receipt::"
