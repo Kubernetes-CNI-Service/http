@@ -9,8 +9,9 @@ OOB Leaf snapshot is modelled as unavailable, so the run writes its snapshot dir
 is a temporary directory; no external command other than `ssh-keygen -l` may run.
 
 Expected values, written from the sources, never from the implementation:
-- 详细工作指导 v3.1.3 WP-8 表 8-1 (:915-924) and :926 (O8): with --project-dir <P> the CSV is <P>/ib.csv, never
-  02-devices_config.csv (v3.1.1 AP-c); the P2P <P>/p2p.xlsx; the global <P>/01-global.yaml; the public keys every
+- 详细工作指导 v3.1.3 WP-8 表 8-1 (:915-924) and :926 (O8): with --project-dir <P> the execution CSV is
+  <P>/ib.csv (v3.1.1 AP-c); D1b M4 reads <P>/02-devices_config.csv only for inventory qualification.
+  The P2P is <P>/p2p.xlsx; the global is <P>/01-global.yaml; the public keys are every
   non-empty *.pub at <P>'s root, an empty one skipped (the set 01-a-setup.py::_process_pubkeys links); the
   neutral defaults <P>/infiniband/bringup/xdr-initial-setup/infra-neutral.conf.  The bridges beside the script
   reach only the active project (:891), so no file of the active project is read.  Report, snapshots and cache
@@ -83,6 +84,9 @@ ACTIVE_NEUTRAL = {"DNS": "203.0.113.54", "NTP": "time.active.example.test", "TIM
 SNAPSHOT_FAILURE = "fixture: the OOB Leaf snapshot is not modelled"
 WARNING = "WARNING: no usable *.pub keys found; no IB public key will be installed."   # v15 :5549
 KEYGEN = ["ssh-keygen", "-l", "-E", "sha256", "-f", "/dev/stdin"]
+PUBLIC_TARGET_SETTING = "$" + "6$PUBLICsalt$" + "A" * 86
+PUBLIC_TARGET_INPUT = "PUBLIC-project-target-example"
+PUBLIC_TARGET_PROMPTS = ("IB target password (admin): ", "Confirm IB target password: ")
 
 _RECORDED: list[str] | None = None   # paths opened by the run being recorded
 _HOOKED = False
@@ -131,7 +135,7 @@ def write_project(project: Path, name: str) -> None:
         else:
             system = item["ib"]["system"]
             # A well-formed SHA-512 target hash, assembled so no hash literal sits in the source (public audit).
-            system["aaa"] = {"user": {"admin": {"password": "$" + "6$PUBLICsalt$" + "A" * 86}}}
+            system["aaa"] = {"user": {"admin": {"password": PUBLIC_TARGET_SETTING}}}
             # DNS names the project; NTP and the time zone fall back to the neutral defaults.
             system["dns"] = {"server": [DNS[name]]}
             system["ntp"] = {"server": []}
@@ -140,7 +144,9 @@ def write_project(project: Path, name: str) -> None:
     (project / "01-global.yaml").write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     lines = (EXAMPLE / "02-devices_config.csv.example").read_text(encoding="utf-8").splitlines()
     header = lines[0]
-    oob = next(line for line in lines if line.startswith(OOB_LEAF + ",eth,"))
+    # I-037 route 3: a real OOB jump attachment must have an explicit jump role.
+    oob = next(line for line in lines if line.startswith(OOB_LEAF + ",eth,")).replace(
+        OOB_LEAF + ",eth,", OOB_LEAF + ",eth_jump,", 1)
     first = next(line for line in lines if line.startswith(IB_FIRST + ",ib,"))
     second = first
     for old, new in ((IB_FIRST, IB_SECOND), ("203.0.113.21", "203.0.113.31"), ("203.0.113.22", "203.0.113.32"),
@@ -165,8 +171,9 @@ def write_project(project: Path, name: str) -> None:
 
 
 class _Run:
-    def __init__(self, cwd: Path, code, refusal, read: set[Path], installs: int) -> None:
-        self.cwd, self.code, self.refusal, self.read, self.installs = cwd, code, refusal, read, installs
+    def __init__(self, cwd: Path, code, refusal, opened: tuple[Path, ...], installs: int) -> None:
+        self.cwd, self.code, self.refusal, self.opened, self.installs = cwd, code, refusal, opened, installs
+        self.read = set(opened)
         logs = cwd / "xdr-initial-setup-logs"
         reports = sorted(logs.glob("initial-setup-report*.log"))
         self.report_path = reports[0] if len(reports) == 1 else None
@@ -222,12 +229,14 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         return Path(directory.name).resolve()
 
-    def run_main(self, cwd: Path, *options: str, plan: bool = True, mode: str = "management") -> _Run:
-        """main() of the copied script in this process from cwd: never a device, a prompt or the real HOME."""
+    def run_main(self, cwd: Path, *options: str, plan: bool = True, mode: str = "management",
+                 allow_i039: bool = False) -> _Run:
+        """Run the copied MAIN with no device, terminal or real HOME."""
         global _RECORDED
         app = self.app
         real_popen = subprocess.Popen
         installs = []
+        prompts, qualifications = [], []
 
         def keygen_only(argv, *args, **kwargs):
             # The cache generator validates each key with `ssh-keygen -l` (P1); nothing else may run.
@@ -238,7 +247,30 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         def forbidden(*args, **kwargs):
             raise AssertionError("fixture: no terminal, device session or wait in this run")
 
+        def startup_prompt(prompt):
+            index = len(prompts)
+            self.assertTrue(index < len(PUBLIC_TARGET_PROMPTS) and prompt == PUBLIC_TARGET_PROMPTS[index],
+                            "only the two exact I-039 startup prompts may be modeled")
+            prompts.append(prompt)
+            return PUBLIC_TARGET_INPUT
+
+        def verify_fixture_target(supplied, setting):
+            matched = supplied == PUBLIC_TARGET_INPUT and setting == PUBLIC_TARGET_SETTING
+            qualifications.append(matched)
+            return matched
+
+        def assert_qualified():
+            self.assertEqual(PUBLIC_TARGET_PROMPTS, tuple(prompts))
+            self.assertEqual([True], qualifications, "the PUBLIC project target is qualified before OOB")
+
+        def probe_key(*args, **kwargs):
+            if allow_i039:
+                assert_qualified()
+            return "key"
+
         def snapshot_unavailable(*args, **kwargs):
+            if allow_i039:
+                assert_qualified()
             raise app.SetupError(SNAPSHOT_FAILURE)
 
         def install(*args, **kwargs):
@@ -263,11 +295,17 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(Path, "home", return_value=home))
             stack.enter_context(mock.patch.object(app.subprocess, "Popen", new=keygen_only))
             for owner, name in ((app.pty, "fork"), (app.os, "execvp"), (app, "interactive_run"),
-                                (app.getpass, "getpass"), (app.time, "sleep")):
+                                (app.time, "sleep")):
                 stack.enter_context(mock.patch.object(owner, name, new=forbidden))
+            stack.enter_context(mock.patch.object(app.getpass, "getpass",
+                                                  new=startup_prompt if allow_i039 else forbidden))
+            if allow_i039:
+                self.assertFalse(plan, "this modeled qualification is for runtime checks only")
+                stack.enter_context(mock.patch.object(app, "verify_password_hash", new=verify_fixture_target))
+                stack.enter_context(mock.patch("builtins.input", new=forbidden))
             stack.enter_context(mock.patch.object(app, "key_install_command", new=install))
             # Read-only check: SSH replaced at the OOB Leaf; its key login answers, its snapshot does not.
-            stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="key"))
+            stack.enter_context(mock.patch.object(app, "probe_ethernet_key", new=probe_key))
             stack.enter_context(mock.patch.object(app, "_new_jump_sessions", legacy_jump_sessions_factory(app)))
             stack.enter_context(mock.patch.object(app, "collect_ethernet_interfaces", new=snapshot_unavailable))
             stack.enter_context(redirect_stdout(io.StringIO()))
@@ -285,8 +323,10 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
                 if app.REPORT_HANDLE is not None:
                     app.REPORT_HANDLE.close()
                     app.REPORT_HANDLE = None
-        read = {Path(os.path.realpath(os.path.join(cwd, path))) for path in recorded}
-        return _Run(cwd, code, refusal, read, len(installs))
+        if allow_i039:
+            assert_qualified()
+        opened = tuple(Path(os.path.realpath(os.path.join(cwd, path))) for path in recorded)
+        return _Run(cwd, code, refusal, opened, len(installs))
 
     def assert_outputs_under_cwd(self, run: _Run) -> None:
         self.assertIsNotNone(run.report_path, "表 8-1: the report is under the current directory")
@@ -297,18 +337,41 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
 
     def test_project_dir_reads_ib_csv_not_02(self):
         other = self.project(OTHER)
-        self.assertTrue((other / "ib.csv").is_file() and not (other / "ib.csv").is_symlink())
-        self.assertNotEqual((other / "02-devices_config.csv").read_bytes(), (other / "ib.csv").read_bytes())
-        run = self.run_main(self.fresh_cwd(), "--project-dir", str(other))
-        # O8, v3.1.1 AP-c: the project's own ib.csv, never 02-devices_config.csv.
-        self.assertEqual(str(other / "ib.csv"), run.value("Input CSV: "))
+        subset, master = other / "ib.csv", other / "02-devices_config.csv"
+        self.assertTrue(subset.is_file() and not subset.is_symlink())
+        self.assertNotEqual(master.read_bytes(), subset.read_bytes())
+        comparison_opens = []
+        real_compare = self.app._compare_inventory
+
+        def compare(ib_csv, project, *, checked_by_caller=False):
+            self.assertEqual((subset, other), (ib_csv, project))
+            self.assertFalse(checked_by_caller)
+            start = len(_RECORDED)
+            result = real_compare(ib_csv, project, checked_by_caller=checked_by_caller)
+            comparison_opens.extend(_RECORDED[start:])
+            return result
+
+        with mock.patch.object(self.app, "_compare_inventory", side_effect=compare) as qualification:
+            run = self.run_main(self.fresh_cwd(), "--project-dir", str(other))
+        # AP-c still gives execution the independent subset, not the M4 master.
+        qualification.assert_called_once()
+        self.assertEqual(str(subset), run.value("Input CSV: "))
         self.assertIsNone(run.refusal)
         self.assertEqual(0, run.code)
-        self.assertEqual(str(other / "ib.csv"), run.cache["ib_csv"])
-        self.assertEqual(sha256(other / "ib.csv"), run.cache["cache_authority"]["ib_csv_sha256"])
+        self.assertEqual(str(subset), run.cache["ib_csv"])
+        self.assertEqual(sha256(subset), run.cache["cache_authority"]["ib_csv_sha256"])
+        self.assertEqual({"status": "compared", "subset_sha256": sha256(subset),
+                          "master_sha256": sha256(master)}, run.cache["inventory_check"])
         self.assertEqual(1, run.cache["ib_candidate_count"])
         self.assertEqual([IB_FIRST], [target["ib"]["hostname"] for target in run.cache["targets"]])
-        self.assertNotIn(other / "02-devices_config.csv", run.read)
+        master_opens = [path for path in run.opened if path == master.resolve()]
+        inside_comparison = [Path(os.path.realpath(os.path.join(run.cwd, path))) for path in comparison_opens]
+        self.assertTrue(master_opens, "M4 actually reads the selected project's own master")
+        self.assertEqual(master_opens, [path for path in inside_comparison if path == master.resolve()],
+                         "the master is opened only inside the real inventory comparison")
+        foreign_projects = [self.project(name) for name in (ACTIVE, KEYLESS, *CACHED.values())]
+        self.assertEqual([], sorted(str(path) for path in run.read
+                                   if any(path.is_relative_to(root) for root in foreign_projects)))
 
     def test_project_dir_reads_the_projects_own_files(self):
         other, active = self.project(OTHER), self.project(ACTIVE)
@@ -318,7 +381,7 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         infra = self.space.http / "infra/infra-neutral.conf"
         self.assertEqual(infra.read_bytes(), (other / NEUTRAL).read_bytes())
         cwd = self.fresh_cwd()
-        run = self.run_main(cwd, "--project-dir", str(other), plan=False)
+        run = self.run_main(cwd, "--project-dir", str(other), plan=False, allow_i039=True)
         self.assertEqual(str(other / "ib.csv"), run.value("Input CSV: "))
         self.assertEqual(str((other / "p2p.xlsx").resolve()), run.value("Input P2P: "))
         self.assertIsNone(run.refusal)
@@ -403,19 +466,74 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         self.assert_cache_follows_project_keys("management")
 
     def test_project_dir_cache_on_an_oob_leaf_in_auto_mode_follows_project_keys(self):
-        # Auto mode on the OOB Leaf itself: its cache reuse never re-reads the keys with validation, so only
-        # load_target_cache's own check of the project-root key directory notices the newer key.
+        # Cache v6: the management server produces it; a Leaf may only consume it.
         app = self.app
+        project = self.project(CACHED["auto"])
+        cwd = self.fresh_cwd()
+        cache = cwd / "xdr-initial-setup-logs" / "initial-setup-targets.json"
+        checksum = cache.with_name(cache.name + ".sha256")
+
+        def run_on(mode, serial):
+            report = cwd / f"leaf-cache-{serial}.log"
+            return self.run_main(cwd, "--project-dir", str(project), "--report", str(report), mode=mode)
+
+        def explicit_report(serial):
+            return (cwd / f"leaf-cache-{serial}.log").read_text(encoding="utf-8").splitlines()
+
+        initial = run_on("management", 1)
+        self.assertIsNone(initial.refusal)
+        self.assertEqual(0, initial.code)
+        self.assertEqual(6, initial.cache["version"])
+        self.assertEqual(usable_keys(project), sorted(initial.keys()))
+        self.assertEqual(2, len(initial.keys()))
+        self.assertIn(f"Target cache: generated {cache}", explicit_report(1))
+        original = (cache.read_bytes(), checksum.read_bytes())
+
         with mock.patch.object(app.socket, "gethostname", return_value=OOB_LEAF), \
                 mock.patch.object(app.socket, "getfqdn", return_value=OOB_LEAF):
-            self.assert_cache_follows_project_keys("auto")
+            reused = run_on("auto", 2)
+            self.assertIsNone(reused.refusal)
+            self.assertEqual(0, reused.code)
+            self.assertEqual(sorted(initial.keys()), sorted(reused.keys()))
+            self.assertIn(f"Target cache: reused {cache}", explicit_report(2))
+            self.assertEqual(original, (cache.read_bytes(), checksum.read_bytes()))
+            added = project / "operator-new.pub"
+            added.write_text(ACTIVATE_WORKFLOW.public_key(67, "PUBLIC-new-operator"), encoding="ascii")
+            newer = cache.stat().st_mtime_ns + 1
+            os.utime(added, ns=(newer, newer))
+            self.assertGreater(added.stat().st_mtime_ns, cache.stat().st_mtime_ns)
+            refused = run_on("auto", 3)
+            self.assertIsNone(refused.code)
+            self.assertEqual("target cache version, checksum, or input identity is invalid; "
+                             "regenerate version 6 on the management server",
+                             refused.refusal)
+            self.assertEqual(original, (cache.read_bytes(), checksum.read_bytes()))
+            self.assertFalse(any(line.startswith("Target cache: ") for line in explicit_report(3)),
+                             "the diagnostic report cannot attest Leaf reuse or generation")
+
+        renewed = run_on("management", 4)
+        self.assertIsNone(renewed.refusal)
+        self.assertEqual(0, renewed.code)
+        self.assertIn(f"Target cache: generated {cache}", explicit_report(4))
+        self.assertEqual(usable_keys(project), sorted(renewed.keys()))
+        self.assertIn("operator-new.pub", [name for name, _ in renewed.keys()])
+        revised = (cache.read_bytes(), checksum.read_bytes())
+        self.assertNotEqual(original, revised)
+        with mock.patch.object(app.socket, "gethostname", return_value=OOB_LEAF), \
+                mock.patch.object(app.socket, "getfqdn", return_value=OOB_LEAF):
+            latest = run_on("auto", 5)
+        self.assertIsNone(latest.refusal)
+        self.assertEqual(0, latest.code)
+        self.assertIn(f"Target cache: reused {cache}", explicit_report(5))
+        self.assertEqual(sorted(renewed.keys()), sorted(latest.keys()))
+        self.assertEqual(revised, (cache.read_bytes(), checksum.read_bytes()))
 
     def test_default_bases_without_project_dir(self):
         other, active = self.project(OTHER), self.project(ACTIVE)
         cwd = self.fresh_cwd()
         shutil.copyfile(other / "ib.csv", cwd / "ib.csv")
         shutil.copyfile(other / "p2p.xlsx", cwd / "p2p.xlsx")
-        run = self.run_main(cwd, plan=False)
+        run = self.run_main(cwd, plan=False, allow_i039=True)
         self.assertIsNone(run.refusal, ":913: different directories are reported, not refused")
         self.assertEqual(str(cwd / "ib.csv"), run.value("Input CSV: "))
         self.assertEqual(str(cwd / "p2p.xlsx"), run.value("Input P2P: "))

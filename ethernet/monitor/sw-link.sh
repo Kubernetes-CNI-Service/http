@@ -75,7 +75,7 @@ if [[ "$SW_TYPE" == "SPX" ]]; then
     # only the configured/admin state and may remain up while the link is down.
     nv show interface \
         | grep "^swp.*s[0-7]" \
-        | awk -F "IPv4" '{print $1}' \
+        | awk -F "IPv[46]" '{print $1}' \
         | awk '{print $1,$3,$7,$8}' > "$d"
 
     for i in $(awk '{print $1}' "$d"); do
@@ -84,7 +84,7 @@ if [[ "$SW_TYPE" == "SPX" ]]; then
         nv show interface "$i" counter         > "$c"
 
         ber=$(awk '$1=="effective-ber" {print $2; exit}' "$a")
-        error=$(awk '$1=="effective-error" {print $2; exit}' "$a")
+        error=$(awk '$1=="effective-errors" {print $2; exit}' "$a")
         carrier=$(awk '$1=="carrier-transitions" {print $2; exit}' "$b")
         change_date=; change_time=
         read -r change_date change_time < <(
@@ -120,11 +120,11 @@ elif [[ "$SW_TYPE" == "IB" ]]; then
         nv show interface "$i" counter         > "$c"
 
         ber=$(awk '$1=="effective-ber" {print $2; exit}' "$a")
-        error=$(awk '$1=="effective-error" {print $2; exit}' "$a")
+        error=$(awk '$1=="effective-errors" {print $2; exit}' "$a")
         carrier=$(awk '$1=="carrier-down-count" {print $2; exit}' "$c")
         qp1_receive=; qp1_transmit=
         read -r qp1_receive qp1_transmit < <(
-            awk '$1=="qp1-drops-Receive" {print $2, $3; exit}' "$c"
+            awk '$1=="qp1-drops" {print $2, $3; exit}' "$c"
         )
         state=$(awk -v iface="$i" '$1==iface {print $2; exit}' "$d")
 
@@ -152,7 +152,7 @@ elif [[ "$SW_TYPE" == "NVLINK" ]]; then
         nv show interface "$i" link counters   > "$c"
 
         ber=$(awk '$1=="effective-ber" {print $2; exit}' "$a")
-        error=$(awk '$1=="effective-error" {print $2; exit}' "$a")
+        error=$(awk '$1=="effective-errors" {print $2; exit}' "$a")
         link_downed=$(awk '$1=="link-downed" {print $2; exit}' "$c")
         qp1_drops=$(awk '$1=="qp1-drops" {print $2; exit}' "$c")
         state=$(awk -v iface="$i" '$1==iface {print $2; exit}' "$d")

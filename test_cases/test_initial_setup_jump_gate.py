@@ -7,6 +7,7 @@ model. Real scheduler/record/attention paths execute; clocks never really wait.
 from __future__ import annotations
 
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -99,24 +100,40 @@ class JumpGateTests(unittest.TestCase):
 
     def execute_stage_failure(self, stage):
         app, failure = self.app, self.failure()
+        # O5 still runs in this device-local stage test. Only its explicit
+        # link-local read receives the MAC for the independent CSV fixture.
+        checked_task = replace(self.task, target=replace(
+            self.target, ib=replace(self.ib, eth0_mac="02:00:00:00:00:17")))
+        setter = ["nv", "set", "interface", "eth0", "link", "state", "up"]
+
+        def stage_command(_target, _neighbor, _eth_user, _eth_pass, _ib_user, _current, _timeout, command, **_kwargs):
+            if command == ["ip", "addr", "show", "eth0"]:
+                return app.SessionResult(
+                    "2: eth0: <UP> mtu 1500 state UP\n"
+                    "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n", 0)
+            if stage == "day0" and command == setter:
+                raise failure
+            return app.SessionResult(READBACK, 0)
+
         models = {
             'inspect_ib_device': (app.SessionResult(READBACK, 0), 'PUBLIC-IB-Current-71!', True),
             'run_initial_stage': (READBACK, True), 'base_stage_needed': True,
-            '_management_network_commands': [['nv', 'set', 'interface', 'eth0', 'link', 'state', 'up']],
-            '_require_empty_pending': None, '_stage_ib_command': app.SessionResult(READBACK, 0),
+            '_management_network_commands': [setter],
+            '_require_empty_pending': None,
             'verify_state': None, '_verify_management_network_state': None,
             'verify_ipv4_login': None, 'run_service_stage': (True, True),
             'run_key_stage': True, 'run_management_direct_checks': [],
         }
         point = {'authentication': 'inspect_ib_device', 'initial': 'run_initial_stage',
-                 'day0': '_stage_ib_command', 'ipv4_readiness': 'verify_ipv4_login',
+                 'day0': None, 'ipv4_readiness': 'verify_ipv4_login',
                  'services': 'run_service_stage', 'public_keys': 'run_key_stage'}[stage]
         with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(app, "_stage_ib_command", side_effect=stage_command))
             for name, value in models.items():
                 stack.enter_context(mock.patch.object(app, name,
                     side_effect=failure if name == point else None, return_value=value))
             stack.enter_context(mock.patch.object(app, 'log'))
-            return app.execute_ib_task(self.task, self.args, None, 'PUBLIC-Initial-72!', None, [], None, True)
+            return app.execute_ib_task(checked_task, self.args, None, 'PUBLIC-Initial-72!', None, [], None, True)
 
     def test_every_stage_jump_timeout_has_one_category(self):
         for stage in ('authentication', 'initial', 'day0', 'ipv4_readiness', 'services', 'public_keys'):
@@ -145,7 +162,10 @@ class JumpGateTests(unittest.TestCase):
         self.assertTrue(hasattr(self.app, 'FAILURE_KIND_CATEGORY'), 'guide :520 requires one ordered table')
         # r508 WP5 items7/8 + K4: append the approved readonly pending row;
         # preserve the original four rows/order and exact equality, never subset.
-        expected = ('DIRECT_SSH_NETWORK', 'OOB_JUMP_UNREACHABLE', 'OOB_JUMP_AUTHENTICATION', 'TARGET_HOST_KEY_CHANGED',
+        # I-037 rule 7 adds a separate initial-direct status, distinct from
+        # the legacy final Stage 5 direct SSH network-probe status.
+        expected = ('DIRECT_SSH_NETWORK', 'DIRECT_LOGIN_NETWORK', 'OOB_JUMP_UNREACHABLE',
+                    'OOB_JUMP_AUTHENTICATION', 'TARGET_HOST_KEY_CHANGED',
                     'HOST_KEY_REFRESH_PENDING')
         self.assertEqual(expected, tuple(self.app.FAILURE_KIND_CATEGORY))
         table = dict(self.app.FAILURE_KIND_CATEGORY, FUTURE_DECLARED_KIND='FAILED_FUTURE_DECLARED_KIND')

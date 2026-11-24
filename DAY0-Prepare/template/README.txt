@@ -403,11 +403,13 @@ README.txt
     ztp/config/nvos/template/99-output-ib_nvl -----> DAY0-Prepare/<项目>/99-output-ib_nvl
     DAY0-Prepare/<项目>/99-output-ib_nvl/latest -----> <最新完整发布目录>
     ztp/config/nvos/latest_yaml -----> ztp/config/nvos/template/99-output-ib_nvl/latest
+    infiniband/bringup/xdr-initial-setup/latest_yaml -----> ztp/config/nvos/latest_yaml
     infiniband/bringup/ndr/ndr-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/ndr-upgrade-logs
     infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/xdr-initial-setup-logs
     infiniband/bringup/xdr-upgrade/xdr-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/xdr-upgrade-logs
     infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs -----> DAY0-Prepare/<项目>/99-output-ib_nvl/bringup/ufm-setup-upgrade-logs
-  latest_yaml 是固定 HTTP 入口；项目内 latest 优先指向同一时间戳的 -combine 目录。
+  ztp/config/nvos/latest_yaml 是固定 HTTP 入口，由 ZTP 发布器维护；项目内 latest 优先指向同一时间戳的 -combine 目录。
+  initial-setup 旁的 latest_yaml 别名由 setup 创建，不是发布器新增的一套入口；目标尚未发布时别名可以暂时悬空。
 
 99-output-dhcp/
   作用：保存 c1-generate_dhcp.py 生成的 DHCP 主配置、设备 hosts 文件和发布清单。

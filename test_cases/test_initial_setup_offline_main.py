@@ -31,6 +31,11 @@ Fixture rewrites (guide :835, class 4 of :765; no assertion is weakened):
   real responder (modelled on test_initial_setup_strict_stage_skeleton.py, not imported);
 - the fake Leaf answers v15's new read-only `ip -j address show` (V15-OOB-SPINE.md:99) with an
   SVI that owns IPv4, so the v15 Leaf path is taken (V15-OOB-SPINE.md:54).
+
+v315 r629 WP2 / R652: only the named source/cable expectations below migrate:
+CSV_EUI64 replaces ND/FDB-derived selection, bridge VLAN is independent input,
+and DOWN with no learned MAC follows ping/recheck then cable failure. Historical
+method IDs stay; worker/stage/summary and authorization expectations stay fixed.
 """
 
 from __future__ import annotations
@@ -81,6 +86,12 @@ def global_text() -> str:
 
 def host(index: int) -> str:
     return f"example-ib{index:03d}"
+
+
+def interface_receipt(last: int) -> str:
+    return ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            f"    link/ether 02:00:00:00:00:{last:02x} brd ff:ff:ff:ff:ff:ff\n"
+            f"    inet 192.0.2.{last}/24 scope global eth0\n")
 
 
 class _Session:
@@ -139,6 +150,9 @@ class OfflineMainTests(unittest.TestCase):
                 writer.writerow([host(index + 1), "ib", f"192.0.2.{index + 10}",
                                  "24", "192.0.2.1", f"02:00:00:00:00:{index + 10:02x}", "", "", ""])
             writer.writerow([JUMP, "eth_jump", "198.51.100.10", "", "", "", "", "", ""])
+        # r629 WP1/M4: this PUBLIC project's authority is its own same input,
+        # not a forwarded checked flag or a foreign repository master.
+        (root / "02-devices_config.csv").write_bytes((root / "ib.csv").read_bytes())
         (root / "p2p.dot").write_text("\n".join(
             f'"{host(index + 1)}":"eth0" -- "{JUMP}":"swp{index + 1}"'
             for index in range(count)) + "\n")
@@ -225,6 +239,18 @@ class OfflineMainTests(unittest.TestCase):
         phase_reads = app.multiprocessing.get_context("fork").Value("i", 0)
         # FX3 second caliber: every IB session the fake transport serves through the jump.
         ib_sessions = app.multiprocessing.get_context("fork").Value("i", 0)
+        target_prompts = []
+        approved_prompts = ("IB target password (admin): ", "Confirm IB target password: ")
+        verification_trace = []
+        saw_oob = []
+
+        def project_prompt(prompt):
+            if len(target_prompts) >= len(approved_prompts) or prompt != approved_prompts[len(target_prompts)]:
+                raise AssertionError("Only the two I-039 startup prompts are allowed")
+            target_prompts.append(prompt)
+            # In this fixture the project and initially supplied value coincide.
+            return FACTORY
+
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             home = root / "home"
@@ -238,6 +264,10 @@ class OfflineMainTests(unittest.TestCase):
                 argv.append("--verbose")
 
             def ethernet(device, user, password, command, timeout, **kwargs):
+                self.assertEqual(tuple(target_prompts), approved_prompts, "I-039 qualifies before OOB")
+                if not saw_oob:
+                    self.assertEqual(verification_trace, [True], "exactly one valid project qualification before OOB")
+                    saw_oob.append(True)
                 command = tuple(command)
                 if command == ("hostname",):
                     return JUMP + "\n"
@@ -250,8 +280,18 @@ class OfflineMainTests(unittest.TestCase):
                             "41: ib-mgmt1000@br_default: <UP> mtu 1500 master oob\n"
                             "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n")
                 if command == ("bridge", "fdb", "show"):
+                    # The historical all-blocked/selected-blocked fixture now
+                    # models an unlearned cable as well as DOWN. O4 still runs
+                    # its fixed ping then rereads this same absent FDB result.
                     return "\n".join(f"02:00:00:00:00:{i+10:02x} dev swp{i+1} vlan 1000 master br_default"
-                                     for i in range(count)) + "\n"
+                                     for i in range(count) if link_up and i + 1 not in blocked_ports) + "\n"
+                if command == ("bridge", "vlan", "show"):
+                    return "port vlan-id\n" + "".join(
+                        f"swp{i+1} 1000 PVID Egress Untagged\n" for i in range(count))
+                if command in tuple(
+                        ("ip", "vrf", "exec", "oob", "ping", "-6", "-c", "2", "-W", "1",
+                         f"fe80::ff:fe00:{i+10:x}%ib-mgmt1000") for i in range(count)):
+                    return ""
                 if command == ("ip", "neighbor"):
                     return "\n".join(f"fe80::{i+10:x} dev ib-mgmt1000 lladdr 02:00:00:00:00:{i+10:02x} REACHABLE"
                                      for i in range(count) if not (nd_missing and i == 0)) + "\n"
@@ -302,12 +342,16 @@ class OfflineMainTests(unittest.TestCase):
                     session.feed(EXPIRY)
                     session.feed("(current) UNIX password: ")
                     return session.result(1)
-                nonce_body = body_for(addresses.get(peer))
+                nonce_body = body_for(addresses[peer] if peer in addresses else direct_only[peer])
                 session.feed(f"\n__HTTP_IB_BEGIN_{nonce}__\n{nonce_body}__HTTP_IB_END_{nonce}__=0\n{end}0\n")
                 return session.result(0)
 
-            addresses = {f"fe80::{i+10:x}": i + 10 for i in range(count)}
-            addresses["fe80::ff:fe00:a"] = 10
+            # Independent RFC modified-EUI64 vectors for the documented CSV
+            # 02:00:00:00:00:0a.. MACs; stale ND no longer chooses the endpoint.
+            addresses = {f"fe80::ff:fe00:{i+10:x}": i + 10 for i in range(count)}
+            # I-037 rule 3: these CSV devices have no P2P jump connection and
+            # are deliberately visible only on their configured IPv4 endpoints.
+            direct_only = {f"192.0.2.{i+10}": i + 10 for i in range(count, count + unmapped_count)}
 
             def transport(argv, responder, timeout, **kwargs):
                 if not link_up:
@@ -316,6 +360,7 @@ class OfflineMainTests(unittest.TestCase):
                 auth, frame = AUTH_RE.search(text), FRAME_RE.search(text)
                 nested = re.search(r"admin@\[?(fe80::[0-9a-f:]+)", text)
                 direct = re.search(r"admin@192\.0\.2\.(\d+)", text)
+                ipv4_peer = "192.0.2." + direct.group(1) if direct else None
                 if nested:
                     with ib_sessions.get_lock():
                         ib_sessions.value += 1
@@ -325,9 +370,12 @@ class OfflineMainTests(unittest.TestCase):
                 session = _Session(responder)
                 try:
                     if auth is not None:
-                        if not nested:
-                            raise AssertionError("Expected a nested IB phase session: " + text)
-                        return phase_session(session, nested.group(1), *auth.groups())
+                        if nested:
+                            return phase_session(session, nested.group(1), *auth.groups())
+                        if (ipv4_peer in direct_only and list(argv[:2]) == ["sh", "-c"]
+                                and "ip vrf exec" not in text):
+                            return phase_session(session, ipv4_peer, *auth.groups())
+                        raise AssertionError("Unexpected synthetic IB phase endpoint")
                     if not frame:
                         raise AssertionError("Expected nonce-framed read command: " + text)
                     if nested:
@@ -335,16 +383,18 @@ class OfflineMainTests(unittest.TestCase):
                         peer = nested.group(1)
                     elif direct:
                         last = int(direct.group(1))
-                        peer = "192.0.2." + direct.group(1)
+                        peer = ipv4_peer
+                        self.assertTrue(last in range(10, count + 10) or peer in direct_only)
                         if last == 10 and direct_script_error:
                             raise ValueError("synthetic unexpected script error")
-                        with direct_hits.get_lock():
-                            direct_hits[last - 10] += 1
-                            attempt = direct_hits[last - 10]
-                        if last == 10 and attempt <= direct_network_failures:
-                            session.close()
-                            return app.SessionResult(
-                                "ssh: connect to host 192.0.2.10 port 22: No route to host", 255)
+                        if peer not in direct_only:
+                            with direct_hits.get_lock():
+                                direct_hits[last - 10] += 1
+                                attempt = direct_hits[last - 10]
+                            if last == 10 and attempt <= direct_network_failures:
+                                session.close()
+                                return app.SessionResult(
+                                    "ssh: connect to host 192.0.2.10 port 22: No route to host", 255)
                     else:
                         raise AssertionError("Unexpected synthetic SSH destination: " + text)
                     if responder(f"admin@{peer}'s password: ") != FACTORY:
@@ -353,6 +403,10 @@ class OfflineMainTests(unittest.TestCase):
                         payload = "service disabled\nstatus aborted\nconfig-save enabled enabled\n"
                     elif "nv config show -o commands" in text:
                         payload = body_for(last)
+                    elif "ip addr show eth0" in text:
+                        payload = interface_receipt(last)
+                    elif "ip route" in text:
+                        payload = "default via 192.0.2.1 dev eth0\n"
                     else:
                         raise AssertionError("Unexpected non-read command in check-only: " + text)
                     nonce = frame.group(1)
@@ -382,8 +436,15 @@ class OfflineMainTests(unittest.TestCase):
             stack.enter_context(patch.object(app.time, "sleep", return_value=None))
             initial = stack.enter_context(patch.object(app, "resolve_initial_ib_password",
                                                        return_value=FACTORY))
-            stack.enter_context(patch.object(getpass, "getpass",
-                                             side_effect=AssertionError("No password prompt expected")))
+            stack.enter_context(patch.object(getpass, "getpass", side_effect=project_prompt))
+            def fake_hash_verification(supplied, stored):
+                matches = supplied == FACTORY and stored == GLOBAL_HASH
+                verification_trace.append(matches)
+                return matches
+
+            stack.enter_context(patch.object(
+                app, "verify_password_hash", side_effect=fake_hash_verification,
+            ))
             stack.enter_context(patch.object(builtins, "input",
                                              side_effect=AssertionError("No authorization prompt expected")))
             try:
@@ -397,6 +458,9 @@ class OfflineMainTests(unittest.TestCase):
             snapshot = root / "snapshots" / (JUMP + ".snapshot.txt")
             self.assertTrue(snapshot.is_file())
             self.assertIn("Device hostname: " + JUMP, snapshot.read_text())
+            self.assertEqual(tuple(target_prompts), approved_prompts)
+            self.assertTrue(saw_oob)
+            self.assertTrue(all(verification_trace), "later safe checks must keep using the same project authority")
             self.assertEqual(initial.call_count, int(link_up))
             if link_up:
                 # Fixture check, not a v15 expectation: with the project global the management run
@@ -418,7 +482,7 @@ class OfflineMainTests(unittest.TestCase):
         self.assertEqual(evidence["workers"], 0)
         self.assertEqual(evidence["result"], "INCOMPLETE")
         self.assertEqual(len(evidence["records"]), 3)
-        self.assertIn("SKIPPED_LINK_DOWN: 3", output)
+        self.assertIn("SKIPPED_CABLE_CHECK_FAILED: 3", output)
         self.assertIn("IB IPv6 SSH via OOB: NOT_REACHED=3", output)
         self.assertNotIn("OPERATION COUNTERS", output)
         self.assertIn("No IB switch login was attempted. The current IB configuration remains unknown.", output)
@@ -443,24 +507,32 @@ class OfflineMainTests(unittest.TestCase):
         self.assertIn("CHECKED_EXISTING_CONFIGURATION: 17", output)
         self.assertFalse(any(row["metrics"].get("nvue_write_commands", 0)
                              for row in evidence["records"].values()))
+        # Each device takes the old phase and ZTP reads, plus O5's LL identity read.
         self.assertEqual(sum(row["metrics"].get("ib_ssh_attempts", 0)
-                             for row in evidence["records"].values()), 34)
+                             for row in evidence["records"].values()), 17 * 3)
         self.assertEqual(sum(row["metrics"].get("direct_ssh_attempts", 0)
                              for row in evidence["records"].values()), 17)
 
     # v15 OfflineMainWorkflowTests.test_scheduler_selection_counts_csv_total_and_distinguishes_unmapped_from_blocked
-    # (test_desktop_initial_setup.py:1687).
+    # (test_desktop_initial_setup.py:1687). D1b I-037 rule 3 replaces the two old unmapped
+    # cases with eligible management-direct devices. The two blocked jump targets remain blocked.
     def test_scheduler_selection_counts_csv_total_and_distinguishes_unmapped_from_blocked(self):
         code, evidence, output = self.run_workflow(17, True, unmapped_count=2, blocked_ports=(1, 2))
         self.assertEqual(code, 2, output)
         self.assertEqual(evidence["csv_ib_candidates"], 19)
-        self.assertEqual(evidence["p2p_management_targets"], 17)
-        self.assertEqual(len(evidence["records"]), 17)
+        self.assertEqual(evidence["p2p_management_targets"], 19)
+        self.assertEqual(len(evidence["records"]), 19)
         self.assertEqual(sum(row["outcome"] == "SKIPPED" for row in evidence["records"].values()), 2)
-        selection = "IB selection: total-ib=19 filtered-ib=4 ready-ib=15 (prerequisite-blocked=2 unmapped=2)"
+        self.assertEqual([self.record(evidence, index)["outcome"] for index in (1, 2)], ["SKIPPED", "SKIPPED"])
+        self.assertEqual([self.record(evidence, index)["outcome"] for index in (18, 19)],
+                         ["ALREADY_CONFIGURED", "ALREADY_CONFIGURED"])
+        selection = "IB selection: total-ib=19 filtered-ib=2 ready-ib=17 (prerequisite-blocked=2 unmapped=0)"
         self.assertIn(selection, output)
-        self.assertLess(output.index(selection), output.index("Scheduler: ready-ib=15 workers=1"))
-        self.assertEqual(sum(row["status"] == "PASS" for row in evidence["direct_rows"]), 15)
+        self.assertLess(output.index(selection), output.index("Scheduler: ready-ib=17 workers=2"))
+        self.assertEqual(sum(row["status"] == "PASS" for row in evidence["direct_rows"]), 17)
+        self.assertEqual([(row["hostname"], row["ip"], row["status"])
+                          for row in evidence["direct_rows"] if row["hostname"] in {host(18), host(19)}],
+                         [(host(18), "192.0.2.27", "PASS"), (host(19), "192.0.2.28", "PASS")])
         self.assertFalse(any(row["writes_attempted"] for row in evidence["records"].values()))
 
     # v15 OfflineMainWorkflowTests.test_real_worker_pipeline_recovers_on_third_direct_read_without_device_writes
@@ -510,7 +582,7 @@ class OfflineMainTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(evidence["workers"], 2)
         self.assertEqual(evidence["result"], "SUCCESS")
-        self.assertEqual(self.record(evidence, 1)["neighbor"]["address_source"], "FDB_EUI64_CANDIDATE")
+        self.assertEqual(self.record(evidence, 1)["neighbor"]["address_source"], "CSV_EUI64")
         self.assertEqual(self.record(evidence, 1)["neighbor"]["ipv6"], "fe80::ff:fe00:a")
         self.assertEqual({row["outcome"] for row in evidence["records"].values()}, {"ALREADY_CONFIGURED"})
         self.assertFalse(any(row["writes_attempted"] for row in evidence["records"].values()))
@@ -523,7 +595,7 @@ class OfflineMainTests(unittest.TestCase):
         self.assertEqual(evidence["result"], "INCOMPLETE")
         self.assertEqual(self.record(evidence, 1)["outcome"], "FAILED")
         self.assertEqual(sum(row["outcome"] == "ALREADY_CONFIGURED" for row in evidence["records"].values()), 16)
-        self.assertEqual(self.record(evidence, 1)["neighbor"]["address_source"], "FDB_EUI64_CANDIDATE")
+        self.assertEqual(self.record(evidence, 1)["neighbor"]["address_source"], "CSV_EUI64")
         self.assertFalse(any(row["writes_attempted"] for row in evidence["records"].values()))
 
     # v15 OfflineMainWorkflowTests.test_derived_ssh_expired_password_is_blocked_in_readonly_without_rotation
@@ -583,8 +655,8 @@ class OfflineMainTests(unittest.TestCase):
         with self.subTest(case="one-device-sessions"):
             self.assertEqual(total(evidence), self.workflow_sessions[1])
         code, evidence, output = self.run_workflow(17, True)
-        # Fixture check: each device has one phase authentication read and one plain ZTP read.
-        self.assertEqual(self.workflow_sessions, (17, 34))
+        # Each device has one phase authentication read, O5 link-local identity, and one plain ZTP read.
+        self.assertEqual(self.workflow_sessions, (17, 17 * 3))
         with self.subTest(case="seventeen-devices-sessions"):
             self.assertEqual(total(evidence), self.workflow_sessions[1])
 
@@ -608,6 +680,7 @@ class RefusalExitCodeTests(unittest.TestCase):
                     "41: ib-mgmt1000@br_default: <UP> mtu 1500 master oob\n"
                     "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n"),
                 ("bridge", "fdb", "show"): "02:00:00:00:00:0a dev swp1 vlan 1000 master br_default\n",
+                ("bridge", "vlan", "show"): "port vlan-id\nswp1 1000 PVID Egress Untagged\n",
                 ("ip", "neighbor"): "fe80::a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\n",
                 ("ip", "-j", "address", "show"): json.dumps([{
                     "ifname": "ib-mgmt1000", "flags": ["BROADCAST", "MULTICAST", "UP"], "operstate": "UP",
@@ -623,16 +696,20 @@ class RefusalExitCodeTests(unittest.TestCase):
             text = " ".join(argv)
             frame = FRAME_RE.search(text)
             nested = re.search(r"admin@\[?(fe80::[0-9a-f:]+)", text)
-            if (frame is None or nested is None
-                    or not ("nv show system ztp" in text or "nv config show -o commands" in text)):
+            commands = ("nv show system ztp", "nv config show -o commands", "ip addr show eth0")
+            selected = tuple(command for command in commands if command in text)
+            if frame is None or nested is None or len(selected) != 1:
                 writes.append(text)
                 raise AssertionError("Unexpected device command: " + text)
             reads.append(text)
             if responder(f"admin@{nested.group(1)}'s password: ") != FACTORY:
                 raise AssertionError("the IB read must answer with the selected IB credential")
             # An unconfigured device: only the factory defaults, ZTP still decides.
-            payload = ("service enabled\nstatus in-progress\n" if "nv show system ztp" in text
-                       else "nv set system hostname nvos\nnv set service lldp state enabled\n")
+            payload = {
+                "nv show system ztp": "service enabled\nstatus in-progress\n",
+                "nv config show -o commands": "nv set system hostname nvos\nnv set service lldp state enabled\n",
+                "ip addr show eth0": interface_receipt(10),
+            }[selected[0]]
             nonce = frame.group(1)
             return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{payload}__HTTP_IB_END_{nonce}__=0\n", 0)
 

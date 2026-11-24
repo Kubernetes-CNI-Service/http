@@ -78,12 +78,14 @@ class SshArgvCensusTests(unittest.TestCase):
         # to initial50ad. WP5 removal reuses outer_ssh_command, not a raw builder.
         # Old nested-inclusive O14 traversal counts both enclosing management
         # functions and bare attempt_once. Stage labels are not SSH argv.
+        # Approved r757:717 adds the D1b direct argv builder, not its callers.
         expected = {
             "outer_ssh_command", "jump_master_control_argv", "_start_jump_master",
-            "nested_ssh_command", "_probe_ipv4_login", "verify_ipv4_login",
+            "nested_ssh_command", "_probe_ipv4_read_once", "verify_ipv4_login",
             "probe_ethernet_key", "verify_management_direct_ssh",
             "verify_management_key_possession", "attempt_once",
             "observe_managed_initial_configuration",
+            "direct_ssh_command",
         }
         tree = ast.parse(INITIAL_SETUP.read_text(encoding="utf-8"))
         self.assertEqual(expected, _ssh_argv_literal_callers(tree))
@@ -153,13 +155,30 @@ class EthJumpTransportContractTests(unittest.TestCase):
         )
 
     def framed_probe_answer(self, outer):
-        """Fake device for the v15 password-only IPv4 probe (class-4 fixture, table 6-1 row 9,
-        guide :752): it runs the framed command and answers inside the v15 command frame."""
+        """Fixed PUBLIC fresh identity replies; only the original two framed reads."""
         def answer(*_args, **_kwargs):
             script = outer.call_args.args[2][-1]
-            marker = re.search(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", script).group(1)
+            frame = shlex.split(script)
+            self.assertEqual(["sh", "-c"], frame[:2])
+            self.assertEqual(3, len(frame))
+            markers = re.findall(r"__HTTP_IB_BEGIN_([a-f0-9]{32})__", frame[2])
+            self.assertEqual(1, len(markers))
+            marker = markers[0]
+            prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+            suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                      + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+            self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix))
+            body = frame[2][len(prefix):-len(suffix)]
+            replies = {
+                "ip addr show eth0": ("2: eth0: <UP> mtu 1500 state UP\n"
+                    "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n"
+                    "    inet 203.0.113.2/24 scope global eth0\n"),
+                "ip route": "default via 203.0.113.1 dev eth0\n",
+            }
+            self.assertIn(body, replies)
             return self.module.SessionResult(
-                "\n__HTTP_IB_BEGIN_" + marker + "__\n\n__HTTP_IB_END_" + marker + "__=0\n", 0)
+                "\n__HTTP_IB_BEGIN_" + marker + "__\n" + replies[body]
+                + "__HTTP_IB_END_" + marker + "__=0\n", 0)
         return answer
 
     def test_f02_nvl_declared_initial_setup_is_not_silently_skipped(self):
@@ -450,7 +469,7 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 ("nv", "show", "interface"): "interface-data\n",
                 ("ip", "-d", "link", "show"): "link-data\n",
                 ("bridge", "fdb", "show"): "fdb-data\n",
-                ("ip", "neighbor"): "neighbor-data\n",
+                ("bridge", "vlan", "show"): "port vlan-id\nswp7 100 PVID Egress Untagged\n",
                 ("ifquery", "vlan100"): "vrf blue\n",
             }[tuple(command)]
 
@@ -474,6 +493,11 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 "each collector dispatch must pass typed argv to run_on_ethernet",
             )
             self.assertTrue(all(type(item) is str for item in remote_argv))
+        # O18 uses port membership, not an ND cache, for the Ethernet collector.
+        self.assertEqual([
+            ("hostname",), ("nv", "show", "interface"), ("ip", "-d", "link", "show"),
+            ("bridge", "fdb", "show"), ("bridge", "vlan", "show"), ("ifquery", "vlan100"),
+        ], [tuple(argv) for argv in observed])
 
     def test_interface_vrf_defaults_only_for_semantic_no_output(self):
         with mock.patch.object(
@@ -610,7 +634,7 @@ class EthJumpTransportContractTests(unittest.TestCase):
     def test_ipv4_verification_dispatches_typed_argv(self):
         ib = self.module.Device(
             "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-            "203.0.113.1", "", "", "",
+            "203.0.113.1", "02:00:00:00:00:17", "", "",
         )
         target = self.module.Target(ib, self.ethernet(), "swp7", "eth0")
         # Class-4 fixture (table 6-1 row 9, guide :752): the v15 probe waits 10 s before each
@@ -624,17 +648,17 @@ class EthJumpTransportContractTests(unittest.TestCase):
             self.module.verify_ipv4_login(
                 target, "default", "admin", "secret", "admin", 10, ib_password="secret",
             )
-        remote_argv = outer.call_args.args[2]
-        self.assertIsInstance(
-            remote_argv,
-            (list, tuple),
-            "verify_ipv4_login must pass typed argv to outer_ssh_command",
-        )
+        self.assertEqual(2, outer.call_count)
+        for call in outer.call_args_list:
+            self.assertIsInstance(
+                call.args[2], (list, tuple),
+                "verify_ipv4_login must pass typed argv to outer_ssh_command",
+            )
 
     def test_ipv4_verification_password_probe_runs_only_framed_true(self):
         valid_ib = self.module.Device(
             "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-            "203.0.113.1", "", "", "",
+            "203.0.113.1", "02:00:00:00:00:17", "", "",
         )
         valid_target = self.module.Target(valid_ib, self.ethernet(), "swp7", "eth0")
         # Class-4 fixture as above (framed answer, no 10 s waits, explicit IB credential).
@@ -646,28 +670,25 @@ class EthJumpTransportContractTests(unittest.TestCase):
             self.module.verify_ipv4_login(
                 valid_target, "default", "admin", "secret", "admin", 10, ib_password="secret",
             )
-        # Table 6-1 row 9 (guide :752; 06 D1a-C, D1a-06; owner Q-032 default): the v15 branch
-        # probes with its own password-only, -tt, framed ssh (v15 reference verify_ipv4_login
-        # :2932-2985, nested argv :2945-2953, _framed_script :432-440) instead of the DEV probe
-        # through ib_command_argv; the IB side still runs only `true`.
-        nested = outer.call_args.args[2]
-        self.assertEqual(
-            ["ip", "vrf", "exec", "default", "ssh", "-tt",
+        # Historical method ID is retained. Approved fresh identity replaces only true;
+        # the original password-only/-tt/options and complete management frame remain exact.
+        self.assertEqual(2, outer.call_count)
+        expected_prefix = ["ip", "vrf", "exec", "default", "ssh", "-tt",
              "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
              "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
              "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
              "-o", "PreferredAuthentications=password,keyboard-interactive",
-             "admin@203.0.113.2"],
-            nested[:-1],
-        )
-        marker = re.search(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", nested[-1]).group(1)
-        self.assertEqual(
-            ["sh", "-c",
-             'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; true; task_rc=$?; '
-             'printf "\\n__HTTP_IB_END_' + marker + '__=%s\\n" "$task_rc"; exit "$task_rc"'],
-            shlex.split(nested[-1]),
-        )
-        self.assertIs(True, outer.call_args.kwargs.get("tty"))
+             "admin@203.0.113.2"]
+        for call, command in zip(outer.call_args_list, ("ip addr show eth0", "ip route")):
+            nested = call.args[2]
+            self.assertEqual(expected_prefix, nested[:-1])
+            marker = re.search(r"__HTTP_IB_BEGIN_([a-f0-9]{32})__", nested[-1]).group(1)
+            self.assertEqual(
+                ["sh", "-c", 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                 + command + '; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                 + '__=%s\\n" "$task_rc"; exit "$task_rc"'], shlex.split(nested[-1]),
+            )
+            self.assertIs(True, call.kwargs.get("tty"))
 
     def test_non_strict_stages_never_log_in_to_ib_with_the_ethernet_password(self):
         # 06 D1a-I (pre-review b-9); v3.1.3 guide 1.3 row 8 (the DEV legacy flow that changed IB
@@ -807,22 +828,26 @@ class EthJumpTransportContractTests(unittest.TestCase):
         # r508 WP1 master adds _start_jump_master; WP3 moves the outer/probe
         # calls to _probe_ipv4_login; WP5 unique closed remove adds only that
         # function to outer/interactive. The ib set and second O14 pin stay exact.
+        # v3.1.5 r757:1064: update only the independently reviewed direct callers.
+        # Outer and the separate private-phase contract stay unchanged.
         self.assertEqual(
-            {"nested_ssh_command", "run_on_ethernet", "_probe_ipv4_login",
+            {"nested_ssh_command", "run_on_ethernet", "_probe_ipv4_read_once",
              "remove_jump_known_hosts_entries"},
             callers["outer_ssh_command"],
         )
         self.assertEqual(
             {"_execute_ib_phase", "attempt_once", "run_on_ethernet", "run_on_ib",
-             "_probe_ipv4_login", "verify_management_direct_ssh", "_start_jump_master",
-             "remove_jump_known_hosts_entries"},
+             "_probe_ipv4_read_once", "verify_management_direct_ssh", "_start_jump_master",
+             "remove_jump_known_hosts_entries", "_execute_ib_direct_phase",
+             "_run_direct_key_read", "_run_on_ib_direct"},
             callers["interactive_run"],
         )
         self.assertEqual(
             {
-                "_run_authorized_ib_command", "_service_profile", "_validate_cache_profile",
+                "_run_authorized_ib_command_core", "_service_profile", "_validate_cache_profile",
                 "desired_service_commands", "key_install_command", "nested_ssh_command",
                 "verify_ipv4_login", "verify_management_direct_ssh",
+                "direct_ssh_command", "readonly_key_command", "_ib_write_category",
             },
             callers["ib_command_argv"],
             "every NVOS dispatch boundary must reuse the closed typed enforcer",
@@ -994,6 +1019,8 @@ class EthJumpTransportContractTests(unittest.TestCase):
         import inspect
         import io
         from functools import wraps
+        from types import SimpleNamespace
+        from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
         from test_cases.test_initial_setup_target_password_policy import (
             required_external_kat, project_global,
         )
@@ -1058,10 +1085,17 @@ class EthJumpTransportContractTests(unittest.TestCase):
         # They reach the authorized helper through _stage_ib_command, the one switch point added
         # by D1a2 (06 D1a2-08; D1a2 report 1.2; map D32d :284 and section 9 item 1): strict
         # tasks go to _run_authorized_ib_command, any other task to run_on_ib.  Both levels stay
-        # closed.
+        # closed. D1b adds inspect's endpoint re-read; D6's early ZTP read stays
+        # inside the already-counted execute_ib_task. D7 shares the direct
+        # IPv4 read with its fence, replacing the old nested read plus its
+        # enclosing caller with one top-level reader. D7 adds four bounded
+        # replace consumers (restore/ZTP, synchronous, deferred, and cleanup).
         self.assertEqual({"_stage_ib_command"}, incoming("_run_authorized_ib_command"))
         self.assertEqual(
-            {"execute_ib_task", "run_initial_stage", "run_key_stage", "run_service_stage"},
+            {"execute_ib_task", "run_initial_stage", "run_key_stage", "run_service_stage",
+             "inspect_ib_device", "_read_direct_ipv4_command",
+             "_restore_replace_services_and_verify_ztp", "run_replace_stage",
+             "_run_replace_deferred_stage", "_try_cleanup_deferred_apply_failure"},
             incoming("_stage_ib_command"),
         )
         real_enforcer = app.ib_command_argv
@@ -1071,9 +1105,18 @@ class EthJumpTransportContractTests(unittest.TestCase):
         real_interactive = app.interactive_run
         real_native = app.verify_password_hash
         real_password = app.ProjectPasswordPolicy.password
+        real_permit = app.obtain_write_permit
         current, oob = "PUBLIC-IB-Current-79!", "PUBLIC-Outer-Only-81!"
+        mac, stamp = "02:11:22:33:44:55", "20261117-040000"
         setter = ["nv", "set", "system", "hostname", "EXAMPLE-IB01"]
+        backup = ["sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", stamp]
+        receipt_path = f"/home/PUBLIC/current_{stamp}.yaml"
         blocked = ["nv", "config", "replace"]
+
+        def command_role(argv):
+            self.assertTrue(type(argv) is list and (argv == setter or argv == backup),
+                            "only the independently expected setter or backup vector may be served")
+            return "setter" if argv == setter else "backup"
 
         for case in ("admitted-setter", "invalid-replace"):
             with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="closed-management-") as folder:
@@ -1083,24 +1126,24 @@ class EthJumpTransportContractTests(unittest.TestCase):
                 original_global = global_path.read_bytes()
                 ib = app.Device(
                     "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-                    "203.0.113.1", "", "", "",
+                    "203.0.113.1", mac, "", "",
                 )
                 target = app.Target(ib, self.ethernet(), "swp7", "eth0")
-                neighbor = app.Neighbor(
-                    "fe80::1", "swp7", "02:11:22:33:44:55", "default",
-                )
+                neighbor = app.Neighbor("fe80::1", "swp7", mac, "default")
                 command = setter if case == "admitted-setter" else blocked
                 sentinel = RuntimeError("PUBLIC final ordinary PTY boundary stop")
                 seen = {"events": [], "native": [], "bindings": [], "enforcer": 0,
-                        "fetch": 0, "outer": None}
+                        "fetch": 0, "carriers": {}, "markers": {}, "nested_role": None,
+                        "permits": [], "dispatch": []}
+                state = coordinator = None
 
                 @wraps(real_enforcer)
                 def enforce(argv):
                     seen["enforcer"] += 1
                     seen["events"].append("enforcer-entry")
                     result = real_enforcer(argv)
-                    seen["bindings"].append(type(result) is list and result == setter)
-                    seen["events"].append("enforcer-return")
+                    role = command_role(result)
+                    seen["events"].append(role + "-enforcer-return")
                     return result
 
                 @wraps(real_native)
@@ -1119,18 +1162,23 @@ class EthJumpTransportContractTests(unittest.TestCase):
                     seen["fetch"] += 1
                     return real_password(policy)
 
+                def permit(category):
+                    seen["permits"].append(category)
+                    return real_permit(category)
+
                 @wraps(real_ib)
                 def ordinary(*args, **kwargs):
                     bound = inspect.signature(real_ib).bind(*args, **kwargs)
                     bound.apply_defaults()
                     values = bound.arguments
-                    seen["events"].append("ordinary-entry")
+                    role = command_role(values["ib_command"])
+                    seen["events"].append(role + "-ordinary-entry")
                     seen["bindings"].append(
                         values["target"] is target and values["neighbor"] is neighbor
-                        and values["ib_command"] == setter
                         and values["ethernet_password"] == oob
                         and values["ib_default_password"] == current
                         and values["allow_password_change"] is False
+                        and values["password_only"] is (role == "backup")
                         and values["_phase_operation"] is None
                     )
                     return real_ib(*args, **kwargs)
@@ -1140,48 +1188,91 @@ class EthJumpTransportContractTests(unittest.TestCase):
                     bound = inspect.signature(real_nested).bind(*args, **kwargs)
                     bound.apply_defaults()
                     values = bound.arguments
-                    seen["events"].append("nested-entry")
+                    role = command_role(values["ib_command"])
+                    seen["events"].append(role + "-nested-entry")
                     seen["bindings"].append(
                         values["target"] is target and values["neighbor"] is neighbor
-                        and values["ib_command"] == setter
                         and values["_phase"] is None and values["local"] is False
+                        and values["password_only"] is (role == "backup")
                     )
-                    return real_nested(*args, **kwargs)
+                    self.assertIsNone(seen["nested_role"])
+                    seen["nested_role"] = role
+                    try:
+                        return real_nested(*args, **kwargs)
+                    finally:
+                        seen["nested_role"] = None
 
                 @wraps(real_outer)
                 def outer(*args, **kwargs):
                     bound = inspect.signature(real_outer).bind(*args, **kwargs)
                     bound.apply_defaults()
                     values = bound.arguments
-                    seen["events"].append("outer-entry")
+                    role = seen["nested_role"]
+                    self.assertIn(role, ("setter", "backup"))
+                    self.assertNotIn(role, seen["carriers"])
+                    seen["events"].append(role + "-outer-entry")
                     seen["bindings"].append(
                         values["ethernet"] is target.ethernet
                         and values["user"] == "admin" and values["local"] is False
                         and values["tty"] is True and type(values["remote_argv"]) is list
                     )
+                    remote = values["remote_argv"]
+                    self.assertTrue(remote[-2] == f"admin@{neighbor.ipv6}",
+                                    "the modeled inner endpoint must stay bound to the selected neighbor")
+                    frame = shlex.split(remote[-1])
+                    self.assertTrue(len(frame) == 3 and frame[:2] == ["sh", "-c"],
+                                    "the original carrier must contain one framed command")
+                    markers = re.findall(r"__HTTP_IB_BEGIN_([a-f0-9]{32})__", frame[2])
+                    self.assertEqual(1, len(markers))
+                    marker = markers[0]
+                    prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                    suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                              + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                    self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix),
+                                    "the frame must retain its exact start and completion status")
+                    self.assertEqual(role, command_role(shlex.split(frame[2][len(prefix):-len(suffix)])))
                     result = real_outer(*args, **kwargs)
-                    seen["outer"] = result
-                    seen["events"].append("outer-return")
+                    seen["carriers"][role] = result
+                    seen["markers"][role] = marker
+                    seen["events"].append(role + "-outer-return")
                     return result
 
                 @wraps(real_interactive)
                 def stop(*args, **kwargs):
                     bound = inspect.signature(real_interactive).bind(*args, **kwargs)
                     responder = bound.arguments["responder"]
-                    seen["events"].append("interactive-entry")
+                    roles = [role for role, carrier in seen["carriers"].items()
+                             if bound.arguments["command"] is carrier]
+                    self.assertEqual(1, len(roles), "dispatch uses the exact previously constructed carrier")
+                    role = roles[0]
+                    seen["dispatch"].append(role)
+                    seen["events"].append(role + "-interactive-entry")
                     seen["bindings"].append(
-                        bound.arguments["command"] is seen["outer"]
-                        and type(responder) is app.NestedResponder
+                        type(responder) is app.NestedResponder
                         and responder._phase is None
                         and responder.ib_default_password == current
                         and responder.ethernet_password == oob
                         and responder.allow_password_change is False
                     )
+                    if role == "backup":
+                        self.assertEqual(["backup"], seen["dispatch"])
+                        self.assertEqual(["config_backup"], seen["permits"])
+                        self.assertEqual("RUNNING", state.backup_state)
+                        marker = seen["markers"]["backup"]
+                        return app.SessionResult(
+                            f"\n__HTTP_IB_BEGIN_{marker}__\npath={receipt_path}\nbytes=137\n"
+                            f"__HTTP_IB_END_{marker}__=0\n", 0)
+                    self.assertEqual(["backup", "setter"], seen["dispatch"])
+                    self.assertEqual(["config_backup", "nvue"], seen["permits"])
+                    self.assertEqual("VERIFIED", state.backup_state)
+                    self.assertEqual({"path": receipt_path, "bytes": 137}, state.backup_receipt)
                     raise sentinel
 
-                with mock.patch.object(app, "ib_command_argv", new=enforce), \
+                with contextlib.ExitStack() as fixture, \
+                        mock.patch.object(app, "ib_command_argv", new=enforce), \
                         mock.patch.object(app, "verify_password_hash", new=native), \
                         mock.patch.object(app.ProjectPasswordPolicy, "password", new=fetch), \
+                        mock.patch.object(app, "obtain_write_permit", new=permit), \
                         mock.patch.object(app, "run_on_ib", new=ordinary), \
                         mock.patch.object(app, "nested_ssh_command", new=nested), \
                         mock.patch.object(app, "outer_ssh_command", new=outer), \
@@ -1196,6 +1287,28 @@ class EthJumpTransportContractTests(unittest.TestCase):
                         "genuine policy constructor failed on qualified input; details suppressed",
                     )
                     policy = born[0]
+                    if case == "admitted-setter":
+                        # O5: use independent PUBLIC link-local readback and the actual identity parser.
+                        fixture.enter_context(mock.patch.dict(sys.modules))
+                        for name in list(sys.modules):
+                            if name == "tools" or name.startswith("tools."):
+                                del sys.modules[name]
+                        fixture.enter_context(mock.patch.object(sys, "path", [str(ROOT), *sys.path]))
+                        fixture.enter_context(mock.patch.object(app, "_TOOLS_ROOT", None))
+                        addr = ("2: eth0: <UP> mtu 1500 state UP\n"
+                                "    link/ether 02:11:22:33:44:55 brd ff:ff:ff:ff:ff:ff\n")
+                        identity = app._check_ib_identity(target, addr, "", via_ipv4=False)
+                        self.assertIs(True, identity["ok"])
+                        task = app.PreparedIBTask(target, neighbor, oob, False)
+                        state = app._IBConfigWriteState(task, "admin", "admin", stamp, True,
+                            endpoint=neighbor, current_password=current, identity_verified=identity["ok"])
+                        self.assertEqual("NEW", state.backup_state)
+                        coordinator = app.RuntimeCoordinator(SimpleNamespace(apply=True, yes=True),
+                            policy, current, [task], app.RuntimeInputAuthority([global_path]))
+                        coordinator.current_target = target
+                        fixture.enter_context(mock.patch.object(app, "_TASK_IB_CONFIG", state))
+                        fixture.enter_context(mock.patch.object(app, "_ACTIVE_COORDINATOR", coordinator))
+                        fixture.enter_context(mock.patch.object(app, "_JUMP_SESSIONS", None))
                     result = capture(lambda: app._run_authorized_ib_command(
                         target, neighbor, "admin", oob, "admin", current, 10,
                         command, _password_policy=policy,
@@ -1217,16 +1330,18 @@ class EthJumpTransportContractTests(unittest.TestCase):
                     self.assertTrue(bool(seen["native"]) and all(seen["native"])
                                     and seen["fetch"] > 0,
                                     "actual project IB target/native verification was not reached")
+                    self.assertEqual(["backup", "setter"], seen["dispatch"])
+                    self.assertEqual(["config_backup", "nvue"], seen["permits"])
+                    self.assertTrue(coordinator.writes_attempted, "the actual coordinator issued permits")
+                    self.assertEqual(1, coordinator.metrics.get("config_backup_attempts"))
+                    self.assertEqual(1, coordinator.metrics.get("nvue_write_commands"))
                     events = seen["events"]
-                    self.assertTrue(
-                        "enforcer-return" in events and "native-return" in events
-                        and "ordinary-entry" in events and "outer-return" in events
-                        and "interactive-entry" in events
-                        and events.index("enforcer-return") < events.index("native-return")
-                        < events.index("ordinary-entry") < events.index("outer-return")
-                        < events.index("interactive-entry"),
-                        "typed admission/native authority must precede the sole external dispatch",
-                    )
+                    ordered = ("setter-enforcer-return", "native-return", "setter-ordinary-entry",
+                               "setter-outer-return", "backup-interactive-entry", "setter-interactive-entry")
+                    self.assertTrue(all(event in events for event in ordered))
+                    positions = [events.index(event) for event in ordered]
+                    self.assertEqual(sorted(positions), positions,
+                                     "typed admission, project authority and backup precede setter dispatch")
                 else:
                     self.assertTrue(
                         type(result[1]) is app.SetupError
@@ -1238,6 +1353,9 @@ class EthJumpTransportContractTests(unittest.TestCase):
                     self.assertTrue(seen["enforcer"] == 1 and seen["fetch"] == 0
                                     and seen["native"] == [],
                                     "invalid replace must fail at real enforcer before target or native")
+                    self.assertEqual([], seen["permits"])
+                    self.assertEqual([], seen["dispatch"])
+                    self.assertEqual({}, seen["carriers"])
 
 if __name__ == "__main__":
     unittest.main()

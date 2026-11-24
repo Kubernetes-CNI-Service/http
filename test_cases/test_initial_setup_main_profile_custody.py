@@ -190,7 +190,8 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
     def _new_witness():
         return dict(consent=[], stage=[], classifier=[], returned_diff=[], diff_entry=[], timeline=[],
                     selector=[], network_constructor=[], helper=[], helper_reads=[], calls=[],
-                    native=[], fetch=[], gate=[], slots=[], reaps=[], fixture_reaps=[], product_depth=0)
+                    native=[], fetch=[], gate=[], helper_all=[], helper_metadata=[], metadata_gate=[],
+                    slots=[], reaps=[], fixture_reaps=[], product_depth=0)
 
     def _prepare(self, folder):
         f = self.fixture(folder, case="readonly-initial", credential="initial")
@@ -221,6 +222,7 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
     def _protected(self, f):
         regular = (
             f["source"], f["global_path"], f["csv"], f["p2p"],
+            f["root"] / "infiniband/02-devices_config.csv",
             f["root"] / "infra/infra-neutral.conf",
             f["tool"] / "infra-neutral.conf",
             f["root"] / "infiniband/publickey/laptop.pub",
@@ -230,6 +232,58 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
         links = (f["tool"] / "01-global.yaml", f["tool"] / "publickey")
         return tuple(_held_regular(path) for path in regular), tuple(
             _held_alias(path, f["root"]) for path in links)
+
+    def _model_readonly_key_peer(self, f, *, cases=("readonly-initial",)):
+        from test_cases.test_initial_setup_bringup_results import EXPECTED_READONLY_KEY_SCRIPT
+
+        if cases not in (("readonly-initial",), ("readonly-target",)):
+            raise AssertionError("unknown readonly key fixture case")
+        # Independent D6 program literal and the existing, independently seeded PUBLIC fixture.
+        script_sha = hashlib.sha256(EXPECTED_READONLY_KEY_SCRIPT.encode()).hexdigest()
+        required = (base.public_key(17, "laptop") + base.public_key(18, "management")).encode("ascii")
+        unrelated = ("# PUBLIC original line must remain exact\n"
+                     + base.public_key(19, "foreign-original")).encode("ascii")
+        def identities(content):
+            return {tuple(line.split()[:2]) for line in content.splitlines() if line and not line.startswith(b"#")}
+        required_ids, unrelated_ids = identities(required), identities(unrelated)
+        if len(required_ids) != 2 or len(unrelated_ids) != 1 or not required_ids.isdisjoint(unrelated_ids):
+            raise AssertionError("readonly key fixture no longer models missing required keys")
+        required_sha, unrelated_sha = (hashlib.sha256(value).hexdigest() for value in (required, unrelated))
+        extension = f'''
+_custody_original_business = business
+def _custody_readonly_key(command):
+    return (len(command) >= 3 and command[:2] == ["sh", "-c"]
+            and hashlib.sha256(command[2].encode()).hexdigest() == {script_sha!r})
+def business(command, S):
+    if not _custody_readonly_key(command):
+        return _custody_original_business(command, S)
+    if (len(command) != 5 or command[3] != "--"
+            or C.get("caller_case") not in {cases!r}
+            or not S.get("peer_identity_read") or S["peer_ipv4"]):
+        raise ValueError("readonly custody key command outside its qualified task")
+    wire = base64.b64decode(command[4], validate=True)
+    if (base64.b64encode(wire).decode("ascii") != command[4]
+            or hashlib.sha256(wire).hexdigest() != {required_sha!r}
+            or wire != C["key_lines"].encode("ascii")):
+        raise ValueError("readonly custody key input is not the complete independent PUBLIC vector")
+    original = (root / "remote-home/.ssh/authorized_keys").read_bytes()
+    if hashlib.sha256(original).hexdigest() != {unrelated_sha!r}:
+        raise ValueError("readonly custody key target no longer has the independent original fixture")
+    record("readonly-key-check", rc=34)
+    return "", 34
+'''
+        frame_site = "    command, frame = unframe(nested[-1])\n"
+        frame_check = '''    if _custody_readonly_key(command) and (
+            type(frame) is not str or re.fullmatch(r"[0-9a-f]{32}", frame) is None
+            or phase_nonce is not None or destination != "admin@fe80::ff:fe00:17"):
+        raise ValueError("readonly custody key check lacks its ordinary LL frame")
+'''
+        marker = "\ndef run():\n"
+        original = f["stub"].read_text(encoding="utf-8")
+        if original.count(marker) != 1 or original.count(frame_site) != 1:
+            raise AssertionError("readonly custody peer fixture seams changed")
+        qualified = original.replace(marker, extension + marker, 1)
+        f["stub"].write_text(qualified.replace(frame_site, frame_site + frame_check, 1), encoding="utf-8")
 
     def _delete_owned_cache_pair(self, f):
         cache = f["cache"]
@@ -312,6 +366,8 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
     def _one_case(self, branch, case):
         with tempfile.TemporaryDirectory(prefix="main-profile-custody-") as folder:
             f = self._prepare(folder)
+            if case == "MATCH":
+                self._model_readonly_key_peer(f)
             app = f["app"]
             protected = self._protected(f)
             if branch == "GENUINE_GENERATE":
@@ -321,12 +377,14 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
             before = self.events(f)
             entries = {name: 0 for name in ENTRY_NAMES}
             entries["policy.password"] = 0
+            startup_native = []
             observed = dict(loads=0, saves=0, actual_miss=0, actual_success=0,
                             published=0, publication=None, authority=None,
                             profile_changed=None,
                             actual_result=None, target_reference=None,
-                            target_snapshot=None, producer_profile=False)
+                            target_snapshot=None, producer_profile=False, records=[])
             real_load, real_save = app.load_target_cache, app.save_target_cache
+            real_execute = app.execute_ib_task
 
             def require(value):
                 # Independent fixture is already qualified. A real loader or
@@ -380,15 +438,32 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
                     return function(*args, **kwargs)
                 return call
 
+            @wraps(real_execute)
+            def execute(*args, **kwargs):
+                record = real_execute(*args, **kwargs)
+                observed["records"].append(record)
+                return record
+
+            @wraps(app.ProjectPasswordPolicy.password)
+            def observe_password(policy):
+                entries["policy.password"] += 1
+                before_native = len(f["caller"]["native"])
+                before_selector = entries["_authenticate_ib_read"] == 0
+                value = real_password(policy)
+                if before_selector:
+                    startup_native.append(len(f["caller"]["native"]) - before_native)
+                return value
+
+            real_password = app.ProjectPasswordPolicy.password
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.object(app, "load_target_cache", new=load))
                 stack.enter_context(mock.patch.object(app, "save_target_cache", new=save))
+                stack.enter_context(mock.patch.object(app, "execute_ib_task", new=execute))
                 for name in ENTRY_NAMES:
                     stack.enter_context(mock.patch.object(
                         app, name, new=observer(name, getattr(app, name))))
                 stack.enter_context(mock.patch.object(
-                    app.ProjectPasswordPolicy, "password",
-                    new=observer("policy.password", app.ProjectPasswordPolicy.password)))
+                    app.ProjectPasswordPolicy, "password", new=observe_password))
                 result = self._safe_invoke(f)
 
             # All private byte comparisons use safe boolean diagnostics.
@@ -418,25 +493,55 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
                             "actual reuse/miss/producer path was not reached")
             fresh = self.events(f)[len(before):]
             self.assertTrue(not any(event["kind"] in
-                            ("mutation", "apply-y", "save", "key-shell", "ipv4-read", "pam-target")
+                            ("mutation", "apply-y", "save", "key-shell", "config-backup",
+                             "ipv4-read", "ipv4-route-read", "pam-target")
                             for event in fresh),
                             "check-only profile custody performed a business write")
             self.assertTrue(not any(path.exists() for path in
                             (f["credentials"], f["marker"], f["terminal"])),
                             "check-only profile custody persisted credentials/watch/terminal state")
-            self.assertTrue(not result["hashes"] and "TARGET" not in result["prompts"],
-                            "profile custody acquired native/Target permission")
             if case == "MATCH":
                 self.assertTrue(observed["profile_changed"] is False,
                                 "matching control changed the profile")
-                # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): the check-only run
-                # still has public keys to install, so it ends INCOMPLETE (2).
+                # I-039 qualifies the already-matched project once before opening OOB.
+                # The probe, LL O5 read and D6 read-only key check each recheck that authority.
+                self.assertEqual([1], startup_native)
+                self.assertEqual(["TARGET", "TARGET", "OOB"], result["prompts"])
+                self.assertTrue(len(result["hashes"]) == 4 and all(
+                    row["target"] is True and row["IB"] is True and row["supplied_bad"] is False
+                    for row in result["hashes"]),
+                    "only startup, the project-first probe, O5 and the D6 key read may qualify")
+                # D67-O8: the ordinary read proves required keys are absent, without installing.
                 self.assertTrue(result["error"] is None and result["rc"] == 2,
                                 "matching check-only with remaining work must end INCOMPLETE (2)")
                 self.assertTrue(len(f["caller"]["selector"]) == 1
                                 and f["caller"]["selector"][0]["initial"] is True
-                                and f["caller"]["selector"][0]["target"] is False,
+                                and f["caller"]["selector"][0]["target"] is False
+                                and f["caller"]["selector"][0]["native"] == 2
+                                and f["caller"]["selector"][0]["fetch"] == 2,
                                 "matching control did not select actual INITIAL current")
+                metadata = [row for row in f["caller"]["helper_all"] if row["metadata"]]
+                self.assertTrue(len(metadata) == 1
+                                and metadata[0]["command"] == ("ip", "addr", "show", "eth0")
+                                and metadata[0]["returned"] is True
+                                and metadata[0]["current_initial"] is True
+                                and metadata[0]["current_oob"] is False
+                                and metadata[0]["outer_oob"] is True
+                                and metadata[0]["native_before"] == 2
+                                and metadata[0]["native_after"] == 3,
+                                "only the exact successful O5 link-local read may use the admitted INITIAL role")
+                self.assertEqual(1, sum(event["kind"] == "identity-addr-read" for event in fresh))
+                self.assertEqual([34], [event.get("rc") for event in fresh if event["kind"] == "readonly-key-check"])
+                key_checks = [row for row in f["caller"]["helper_all"] if row["command"] == ("KEY-SHELL",)]
+                self.assertTrue(len(key_checks) == 1 and key_checks[0]["returned"] is True
+                                and key_checks[0]["native_before"] == 3 and key_checks[0]["native_after"] == 4,
+                                "only the authenticated readonly key check may requalify after O5")
+                records = observed["records"]
+                self.assertTrue(len(records) == 1 and records[0]["outcome"] == "CHECK_ONLY"
+                                and records[0]["stage_status"]["public_keys"] == "PLANNED_NOT_APPLIED"
+                                and records[0]["needs_change"] is True and records[0]["writes_attempted"] is False
+                                and records[0]["backup"] is None,
+                                "real MAIN must retain the missing-key plan without any write")
                 # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59): the
                 # v15 check-only report reads no pending diff.
                 self.assertTrue(f["caller"]["timeline"] == ["selector-return"],
@@ -444,6 +549,8 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
                 self.assertTrue(f["caller"]["returned_diff"] == [],
                                 "matching control readonly report read a pending diff")
             else:
+                self.assertTrue(startup_native == [] and not result["hashes"] and "TARGET" not in result["prompts"],
+                                "a rejected profile must not acquire native/Target permission")
                 self.assertTrue(observed["profile_changed"] is True,
                                 "negative control did not substitute a legal profile")
                 error = result["error"]
@@ -453,10 +560,11 @@ class MainProfileCustodyWorkflowTests(unittest.TestCase):
                                 "profile mismatch did not yield the fixed chain-free project error")
                 self.assertTrue(all(value == 0 for value in entries.values()),
                                 "profile mismatch reached an IB/native/Target/consent entry")
+                self.assertTrue(not observed["records"], "profile mismatch dispatched a device task")
                 self.assertTrue(not any(event["kind"] in
                                 ("nested-dispatch", "inner-answer", "inner-rejected",
                                  "pam-start", "pam-readonly-refusal", "non-auth-refusal",
-                                 "caller-show", "caller-diff")
+                                 "caller-show", "caller-diff", "identity-addr-read", "readonly-key-check")
                                 for event in fresh),
                                 "profile mismatch reached an actual inner transport boundary")
                 self.assertTrue(not f["caller"]["selector"] and not f["caller"]["calls"]

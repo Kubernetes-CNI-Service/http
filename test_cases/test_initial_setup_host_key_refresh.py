@@ -27,7 +27,10 @@ class HostKeyRefreshEntryTests(unittest.TestCase):
         for options in ((), ("--plan",), ("--generate-json",), ("--apply", "--yes")):
             with self.subTest(options=options), ExitStack() as stack:
                 calls = []
+                original_import = app._import_tools
                 def require(name):
+                    if name != "tools.login_path":
+                        return original_import(name)
                     calls.append(name)
                     raise app.SetupError("tools.login_path is missing: PUBLIC required entry")
                 stack.enter_context(mock.patch.object(app, "_import_tools", side_effect=require))

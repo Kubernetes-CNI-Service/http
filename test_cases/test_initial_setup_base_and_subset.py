@@ -1,5 +1,5 @@
 """Direct: initial-setup's Initial/Network stages accept a configuration that contains the
-expected values, keep extra configuration, and inspect/rotate the IB password in v15 order.
+expected values, keep extra configuration, and inspect/rotate the IB password.
 
 Expectation source: v15 CURRENT-CONTRACT.md:54 ("期望配置被包含即可通过，额外配置保留；真冲突或不明
 pending 不盲目覆盖") and :49-:50 (credential order), taken from the v15 delivered tests
@@ -11,6 +11,9 @@ log-review gap no DEV test pins, guide :818 "缺的补").  Expectations are not 
 merged implementation.
 
 Decided changes against the v15 assertions (each also cited at the test):
+- I039 (v3.1.5 r660; R667 migration registration): qualify the project target before
+  device I/O, try it first, then the distinct initial value after typed authentication
+  rejection; preserve current-password fallback, PAM and fresh readback protections.
 - T15 (guide :2301): a write stage starts only on an empty pending diff (DEV), so v15's
   validate_owned_pending test is rewritten against the merged refusal, which refuses every
   non-empty pending diff (owned or unrelated) before any write.
@@ -120,7 +123,9 @@ class BaseAndSubsetTests(unittest.TestCase):
         self.assertEqual(app.classify_auto_day0(target().ib, state), "terminal")
         with self.assertRaises(app.SetupError):
             app.verify_state(target().ib, state)
-        self.assertTrue(app.force_day0_needed(target().ib, state))
+        # D67-O1: the third old oracle now refuses the nonempty wrong address.
+        with self.assertRaisesRegex(app.SetupError, "eth0 address"):
+            app.force_day0_needed(target().ib, state)
 
     # v15 DesiredConfigurationSubsetTests.test_wrong_singleton_hostname_or_missing_gateway_is_not_success (test_desktop_initial_setup.py:489)
     def test_wrong_singleton_hostname_or_missing_gateway_is_not_success(self):
@@ -197,19 +202,21 @@ class BaseAndSubsetTests(unittest.TestCase):
                                      authorized=authorized, local=False)
 
     @contextlib.contextmanager
-    def policy(self):
+    def policy(self, *, supplied=False):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(app, "verify_password_hash", side_effect=verify_hash):
             path = Path(directory) / "01-global.yaml"
             path.write_text(global_text())
-            yield app.ProjectPasswordPolicy(path, "admin")
+            yield app.ProjectPasswordPolicy(path, "admin", target_password=PASSWORD if supplied else None)
 
     # v15 InspectFlowTests.test_factory_change_then_password_only_fresh_login (test_desktop_initial_setup.py:202)
     def test_factory_change_then_password_only_fresh_login(self):
         required = app.SessionResult("", 0, password_change_required=True)
         changed = app.SessionResult("", 0, password_changed=True)
         with self.policy() as policy, \
-             patch.object(app, "run_on_ib", side_effect=[required, changed, app.SessionResult(CONFIG, 0)]) as run, \
+             patch.object(app, "run_on_ib", side_effect=[
+                 app.IBAuthenticationError("PUBLIC project credential rejected"), required, changed,
+                 app.SessionResult(CONFIG, 0)]) as run, \
              patch.object(app.getpass, "getpass", side_effect=[PASSWORD, PASSWORD]), \
              patch.object(app, "confirm_first_device_change", return_value=True), \
              patch.object(app, "log"):
@@ -217,22 +224,26 @@ class BaseAndSubsetTests(unittest.TestCase):
         self.assertEqual(result.output, CONFIG)
         self.assertEqual(credential, PASSWORD)
         self.assertTrue(authorized)
+        self.assertEqual(4, run.call_count)
+        self.assertTrue([call.args[5] for call in run.call_args_list] ==
+                        [PASSWORD, "admin", "admin", PASSWORD], "project / initial / PAM / fresh credential roles")
         self.assertFalse(run.call_args_list[0].kwargs["allow_password_change"])
-        self.assertEqual(run.call_args_list[1].kwargs["ib_new_password"], PASSWORD)
-        self.assertTrue(run.call_args_list[2].kwargs["password_only"])
-        self.assertEqual(run.call_args_list[2].args[5], PASSWORD)
+        self.assertEqual(run.call_args_list[2].kwargs["ib_new_password"], PASSWORD)
+        self.assertTrue(run.call_args_list[3].kwargs["password_only"])
+        self.assertEqual(run.call_args_list[3].args[5], PASSWORD)
 
     # v15 InspectFlowTests.test_already_changed_target_password_no_rotation (test_desktop_initial_setup.py:215)
     def test_already_changed_target_password_no_rotation(self):
         with self.policy() as policy, \
-             patch.object(app, "run_on_ib", side_effect=[
-                 app.IBAuthenticationError("authentication rejected"), app.SessionResult(CONFIG, 0)]) as run, \
+             patch.object(app, "run_on_ib", side_effect=[app.SessionResult(CONFIG, 0)]) as run, \
              patch.object(app.getpass, "getpass", side_effect=[PASSWORD, PASSWORD]), \
              patch.object(app, "confirm_first_device_change") as confirm, \
              patch.object(app, "log"):
             result, credential, authorized = self.inspect(policy)
         self.assertEqual(credential, PASSWORD)
         self.assertEqual(result.output, CONFIG)
+        self.assertEqual(1, run.call_count)
+        self.assertTrue(run.call_args_list[0].args[5] == PASSWORD, "project credential is the first device read")
         confirm.assert_not_called()
         self.assertTrue(all(not call.kwargs.get("allow_password_change", False)
                             for call in run.call_args_list))
@@ -242,17 +253,20 @@ class BaseAndSubsetTests(unittest.TestCase):
         with self.policy() as policy, \
              patch.object(app, "run_on_ib", side_effect=[
                  app.IBAuthenticationError("rejected"), app.IBAuthenticationError("rejected"),
-                 app.SessionResult(CONFIG, 0)]), \
+                 app.SessionResult(CONFIG, 0)]) as run, \
              patch.object(app.getpass, "getpass", side_effect=[PASSWORD, PASSWORD, secret("historical")]), \
              patch.object(app, "confirm_first_device_change") as confirm, \
              patch.object(app, "log"):
             with self.assertRaisesRegex(app.SetupError, "does not match"):
                 self.inspect(policy)
         confirm.assert_not_called()
+        self.assertEqual(3, run.call_count)
+        self.assertTrue([call.args[5] for call in run.call_args_list] ==
+                        [PASSWORD, "admin", secret("historical")], "known credentials precede the once-current source")
 
     # v15 InspectFlowTests.test_readonly_expiry_no_new_password_no_confirmation (test_desktop_initial_setup.py:234)
     def test_readonly_expiry_no_new_password_no_confirmation(self):
-        with self.policy() as policy, \
+        with self.policy(supplied=True) as policy, \
              patch.object(app, "run_on_ib", return_value=app.SessionResult("", 0, password_change_required=True)), \
              patch.object(app.getpass, "getpass") as prompt, \
              patch.object(app, "confirm_first_device_change") as confirm, \
@@ -266,6 +280,7 @@ class BaseAndSubsetTests(unittest.TestCase):
     def test_failed_fresh_login_no_day0_commands(self):
         with self.policy() as policy, \
              patch.object(app, "run_on_ib", side_effect=[
+                 app.IBAuthenticationError("PUBLIC project credential rejected"),
                  app.SessionResult("", 0, password_change_required=True),
                  app.SessionResult("", 0, password_changed=True),
                  app.IBAuthenticationError("fresh login failed")]) as run, \
@@ -274,6 +289,9 @@ class BaseAndSubsetTests(unittest.TestCase):
              patch.object(app, "log"):
             with self.assertRaises(app.SetupError):
                 self.inspect(policy)
+        self.assertEqual(4, run.call_count)
+        self.assertTrue([call.args[5] for call in run.call_args_list] ==
+                        [PASSWORD, "admin", "admin", PASSWORD], "failed fresh read cannot enter Day0")
         self.assertTrue(all(call.args[7] == ["nv", "config", "show", "-o", "commands"]
                             for call in run.call_args_list))
 
@@ -373,6 +391,9 @@ class BaseAndSubsetTests(unittest.TestCase):
         def query(*values, **kwargs):
             command = values[7]
             commands.append(command)
+            if command == ["ip", "addr", "show", "eth0"]:
+                return app.SessionResult("2: eth0: <UP> mtu 1500 state UP\n"
+                                         "    link/ether 02:00:00:00:00:10\n", 0)
             return app.SessionResult("service disabled\n" if command == ["nv", "show", "system", "ztp"] else "", 0)
         with patch.object(app, "inspect_ib_device",
                           return_value=(app.SessionResult(current, 0), secret("ib"), True)), \
@@ -387,6 +408,12 @@ class BaseAndSubsetTests(unittest.TestCase):
         self.assertEqual(row["outcome"], "ALREADY_CONFIGURED", row)
         self.assertEqual(row["stage_status"]["services"], "ALREADY_PRESENT")
         self.assertFalse(any(c[:2] == ["nv", "set"] for c in commands))
+        self.assertIn(["ip", "addr", "show", "eth0"], commands)
+        self.assertFalse(any(c[:2] in (["nv", "unset"], ["sh", "-c"])
+                             or c[:3] in (["nv", "config", "apply"], ["nv", "config", "save"],
+                                          ["nv", "config", "replace"]) for c in commands))
+        self.assertIs(row["writes_attempted"], False)
+        self.assertIsNone(row["backup"])
 
 
 if __name__ == "__main__":

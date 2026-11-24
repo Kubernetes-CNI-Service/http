@@ -137,6 +137,14 @@ def write_inventory(path, jump):
 
 
 class EthJumpZeroConfigContractTests(unittest.TestCase):
+    def _initial_inventory_no_global_abort(self, path):
+        # v315 r617 O21/O22 affect INITIAL only. LOAD/SETUP calls and their
+        # independent errors below remain the old full inventory contract.
+        try:
+            return INITIAL.load_devices(path)
+        except INITIAL.SetupError as error:
+            self.fail("O21/O22 must retain the initial-only inventory: " + str(error))
+
     def test_generator_native_handoff_requires_explicit_server_role(self):
         guidance = "\n".join(GENERATOR._production_handoff_rows(lambda text="": text))
         native = next(
@@ -447,10 +455,13 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                 errors, _warnings = SETUP._validate_eth_csv(str(path))
                 self.assertTrue(any(label in item and value in item for item in errors), errors)
                 self.assertFalse(any("配置意图" in item for item in errors), errors)
-                with self.assertRaises(INITIAL.SetupError) as caught:
-                    INITIAL.load_devices(path)
-                self.assertIn(label, str(caught.exception))
-                self.assertIn(value, str(caught.exception))
+                _ib, transit = self._initial_inventory_no_global_abort(path)
+                self.assertEqual({"example-jump01"}, set(transit))
+                self.assertTrue(hasattr(transit["example-jump01"], "input_issues"))
+                issues = repr([(item.field, item.value, item.problem)
+                               for item in transit["example-jump01"].input_issues])
+                self.assertIn(label, issues)
+                self.assertIn(value, issues)
 
 
     def test_unknown_jump_spellings_do_not_extend_any_role_registry(self):
@@ -482,8 +493,14 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                 ordinary = public_jump_row()
                 ordinary[1] = kind
                 write_inventory(path, ordinary)
-                with self.assertRaisesRegex(INITIAL.SetupError, "login address is required"):
-                    INITIAL.load_devices(path)
+                ib, transit = self._initial_inventory_no_global_abort(path)
+                targets = INITIAL.build_targets(
+                    [INITIAL.Link("EXAMPLE-IB01", "eth0", "EXAMPLE-JUMP01", "swp7")], ib, transit)
+                self.assertEqual(1, len(targets))
+                self.assertIsNone(targets[0].ethernet)
+                self.assertTrue(hasattr(targets[0], "route"))
+                self.assertEqual(("direct", "PEER_NOT_JUMP"),
+                                 (targets[0].route.path, targets[0].route.reason))
 
 
     def test_inventory_without_endpoint_refuses_remote_transport_before_io(self):
@@ -587,8 +604,12 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                     # login candidates and no eth0_ip are refused when the inventory is read
                     # (v15 reference eth_jump_login_address :835).  The unpopulated row keeps the
                     # DEV I19 expectation: admitted with an empty login address.
-                    with self.assertRaisesRegex(INITIAL.SetupError, "multiple VLAN login addresses"):
-                        INITIAL.load_devices(path)
+                    # O2/O22 supersede the old T13 read-time rejection above.
+                    _ib, transit = self._initial_inventory_no_global_abort(path)
+                    self.assertTrue(hasattr(transit["example-jump01"], "jump_candidates"))
+                    self.assertEqual((("203.0.113.1", "JUMP_VLAN100"),
+                                      ("203.0.113.2", "JUMP_VLAN200")),
+                                     tuple((c.address, c.entry) for c in transit["example-jump01"].jump_candidates))
                 else:
                     _ib, transit = INITIAL.load_devices(path)
                     self.assertEqual({"example-jump01"}, set(transit))
@@ -611,10 +632,15 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                             errors, _warnings = SETUP._validate_eth_csv(str(path))
                             self.assertTrue(any(label in e and value in e for e in errors), errors)
                             self.assertFalse(any("配置意图" in e for e in errors), errors)
-                            with self.assertRaises(INITIAL.SetupError) as caught:
-                                INITIAL.load_devices(path)
-                            self.assertIn(label, str(caught.exception))
-                            self.assertIn(value, str(caught.exception))
+                            _ib, transit = self._initial_inventory_no_global_abort(path)
+                            jump_device = transit["example-jump01"]
+                            self.assertTrue(hasattr(jump_device, "jump_candidates"))
+                            self.assertEqual((("203.0.113.1", "JUMP_VLAN100"),),
+                                             tuple((c.address, c.entry) for c in jump_device.jump_candidates))
+                            self.assertTrue(hasattr(jump_device, "input_issues"))
+                            issues = repr([(item.field, item.value, item.problem) for item in jump_device.input_issues])
+                            self.assertIn(label, issues)
+                            self.assertIn(value, issues)
 
 
     def test_inventory_bond_mac_groups_validate_each_token_without_companions(self):
@@ -659,10 +685,12 @@ class EthJumpZeroConfigContractTests(unittest.TestCase):
                 self.assertTrue(any("bond_mac" in e and bad in e for e in errors), errors)
                 self.assertFalse(any("配置意图" in e for e in errors), errors)
             with self.subTest(stage="bad", reader="INITIAL"):
-                with self.assertRaises(INITIAL.SetupError) as caught:
-                    INITIAL.load_devices(path)
-                self.assertIn("bond_mac", str(caught.exception))
-                self.assertIn(bad, str(caught.exception))
+                _ib, transit = self._initial_inventory_no_global_abort(path)
+                self.assertTrue(hasattr(transit["example-jump01"], "input_issues"))
+                issues = repr([(item.field, item.value, item.problem)
+                               for item in transit["example-jump01"].input_issues])
+                self.assertIn("bond_mac", issues)
+                self.assertIn(bad, issues)
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import ExitStack
 import errno
 from pathlib import Path
+import shlex
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -35,9 +36,19 @@ def credential(role):
     return "-".join(("PUBLIC", "WP3", role, "71!"))
 
 
-def success(app):
+def success(app, command):
+    # Independent PUBLIC wire facts, not output from a producer/parser.
+    replies = {
+        ("ip", "addr", "show", "eth0"): (
+            "2: eth0: <UP> mtu 1500 state UP\n"
+            "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+            "    inet 192.0.2.10/24 scope global eth0\n"),
+        ("ip", "route"): "default via 192.0.2.1 dev eth0\n",
+    }
+    if command not in replies:
+        raise AssertionError("PUBLIC readiness model accepts only its two fixed reads")
     return app.SessionResult("__HTTP_IB_BEGIN_" + MARKER + "__\n"
-                             "__HTTP_IB_END_" + MARKER + "__=0\n", 0)
+                             + replies[command] + "__HTTP_IB_END_" + MARKER + "__=0\n", 0)
 
 
 def strict_policy(app, directory):
@@ -61,6 +72,28 @@ class Ipv4ReadinessTests(unittest.TestCase):
     def verify(self, **kwargs):
         return self.app.verify_ipv4_login(target(self.app), "oob", "cumulus", credential("outer"),
                                           "admin", 2, ib_password=credential("current"), **kwargs)
+
+    def fresh_command(self, argv):
+        carrier = shlex.split(argv[-1])
+        safe = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+        self.assertEqual(["sh", "-c"], carrier[:2])
+        self.assertEqual(3, len(carrier))
+        self.assertTrue(carrier[2].startswith(safe))
+        inner = shlex.split(carrier[2][len(safe):])
+        self.assertEqual(["ip", "vrf", "exec", "oob", "ssh"], inner[:5])
+        self.assertEqual("admin@192.0.2.10", inner[-2])
+        framed = shlex.split(inner[-1])
+        self.assertEqual(["sh", "-c"], framed[:2])
+        self.assertEqual(3, len(framed))
+        prefix = 'printf "\\n__HTTP_IB_BEGIN_' + MARKER + '__\\n"; '
+        suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + MARKER
+                  + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+        self.assertTrue(framed[2].startswith(prefix) and framed[2].endswith(suffix))
+        body = framed[2][len(prefix):-len(suffix)]
+        command = tuple(shlex.split(body))
+        self.assertEqual(body, shlex.join(command))
+        self.assertIn(command, (("ip", "addr", "show", "eth0"), ("ip", "route")))
+        return command
 
     def test_default_policy_is_15_10_9(self):
         self.api()
@@ -118,17 +151,25 @@ class Ipv4ReadinessTests(unittest.TestCase):
                                       label="EXAMPLE-IB01", sleep=lambda _: None)
 
     def test_each_probe_checks_master_only_after_its_wait(self):
-        events = []
-        replies = iter((self.app.SessionResult("Connection refused", 255), success(self.app)))
+        events, commands = [], []
+        def answer(argv, *_args):
+            command = self.fresh_command(argv)
+            commands.append(command)
+            events.append(("probe", None))
+            return (self.app.SessionResult("Connection refused", 255) if len(commands) == 1
+                    else success(self.app, command))
         with mock.patch.object(self.app.time, "sleep", side_effect=lambda seconds: events.append(("sleep", seconds))), \
                 mock.patch.object(self.app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
                 mock.patch.object(self.app, "_jump_control_path_for",
                                   side_effect=lambda *args, **kwargs: events.append(("master", None))), \
                 mock.patch.object(self.app, "interactive_run",
-                                  side_effect=lambda *args: (events.append(("probe", None)), next(replies))[1]):
+                                  side_effect=answer):
             self.verify()
         self.assertEqual([("sleep", 15), ("master", None), ("probe", None),
-                          ("sleep", 10), ("master", None), ("probe", None)], events)
+                          ("sleep", 10), ("master", None), ("probe", None),
+                          ("master", None), ("probe", None)], events)
+        self.assertEqual([("ip", "addr", "show", "eth0"),
+                          ("ip", "addr", "show", "eth0"), ("ip", "route")], commands)
 
     def test_existing_fatal_signals_never_retry(self):
         for output in ("Permission denied (password).", "Password has expired", "command not found",
@@ -215,15 +256,35 @@ class Ipv4ReadinessTests(unittest.TestCase):
                 args = SimpleNamespace(eth_user="cumulus", ib_user="admin", connect_timeout=2,
                                        apply=apply, force=False, execution_mode="management")
                 current = app.SessionResult("PUBLIC-state", 0)
+                ztp = "service disabled\nstatus aborted\nconfig-save enabled\n"
+                identity_read = ("ip", "addr", "show", "eth0")
+                ztp_read = ("nv", "show", "system", "ztp")
+                stage_calls = []
+                def stage(*values, **kwargs):
+                    command = tuple(values[7])
+                    stage_calls.append(command)
+                    if command == identity_read:
+                        # Real LP/O5 qualification; not a mocked identity result.
+                        return app.SessionResult(
+                            "2: eth0: <UP> mtu 1500 state UP\n"
+                            "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+                            "    inet 192.0.2.10/24 scope global eth0\n", 0)
+                    if command == ztp_read:
+                        return app.SessionResult(ztp, 0)
+                    self.assertIn(command, (("nv", "config", "apply", "-y"),
+                                            ("nv", "config", "save"),
+                                            ("nv", "config", "show", "-o", "commands")))
+                    return current
                 stack.enter_context(mock.patch.object(app, "inspect_ib_device",
                                                       return_value=(current, credential("current"), True)))
                 stack.enter_context(mock.patch.object(app, "parse_nvue_state", return_value=state))
                 stack.enter_context(mock.patch.object(app, "base_stage_needed", side_effect=[False, needs_network]))
                 # Initial does run in both cases: it must not itself select first_delay=15.
-                stack.enter_context(mock.patch.object(app, "run_initial_stage", return_value=("PUBLIC-state", True)))
+                initial = stack.enter_context(mock.patch.object(
+                    app, "run_initial_stage", return_value=("PUBLIC-state", True)))
                 stack.enter_context(mock.patch.object(app, "_management_network_commands", return_value=[]))
                 stack.enter_context(mock.patch.object(app, "_require_empty_pending"))
-                write = stack.enter_context(mock.patch.object(app, "_stage_ib_command", return_value=current))
+                stage_boundary = stack.enter_context(mock.patch.object(app, "_stage_ib_command", side_effect=stage))
                 stack.enter_context(mock.patch.object(app, "verify_state"))
                 stack.enter_context(mock.patch.object(app, "_verify_management_network_state"))
                 verify = stack.enter_context(mock.patch.object(app, "verify_ipv4_login"))
@@ -231,6 +292,8 @@ class Ipv4ReadinessTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(app, "run_key_stage", return_value=True))
                 stack.enter_context(mock.patch.object(app, "run_management_direct_checks", return_value=[]))
                 result = app.execute_ib_task(task, args, None, credential("initial"), None, [], None)
+                initial.assert_called_once()
+                self.assertEqual(ztp, initial.call_args.kwargs["initial_ztp_output"])
                 if apply:
                     verify.assert_called_once()
                     selected = verify.call_args.kwargs.get("readiness_policy")
@@ -240,7 +303,13 @@ class Ipv4ReadinessTests(unittest.TestCase):
                 else:
                     verify.assert_not_called()
                     self.assertEqual("NOT_REQUESTED", result["stage_status"]["ipv4_readiness"])
-                self.assertEqual(3 if needs_network and apply else 0, write.call_count)
+                # WP-6: identity then one operational ZTP read; only real Network work adds the three commands.
+                expected = [identity_read, ztp_read]
+                if needs_network and apply:
+                    expected += [("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                                 ("nv", "config", "show", "-o", "commands")]
+                self.assertEqual(expected, stage_calls)
+                self.assertEqual(len(expected), stage_boundary.call_count)
 
 
 if __name__ == "__main__":

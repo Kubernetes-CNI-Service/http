@@ -66,7 +66,7 @@ def peer_program():
 
 
 @contextmanager
-def observe(f, mode):
+def observe(f, mode, project_target):
     """External, active-owned-boundary observations; never fake a core result."""
     real_fork, real_read, real_write = APP.pty.fork, os.read, os.write
     real_close, real_fstat, real_wait = os.close, os.fstat, os.waitpid
@@ -79,7 +79,10 @@ def observe(f, mode):
                 bare_read=False, prefix_after_current=False, coalesced_read=False,
                 forbidden_pam_text=False, after_bare_input=False,
                 deadline_armed=False, fetch=0, password=0, native=0, prompt=0,
-                signals=[], product_reaps=[], fixture_reaps=[])
+                signals=[], product_reaps=[], fixture_reaps=[],
+                before_dispatch=None, at_bare=None)
+    def qualification_counts():
+        return (seen["fetch"], seen["password"], seen["native"], seen["prompt"])
     def error(stage):
         if stage not in seen["errors"]:
             seen["errors"].append(stage)
@@ -144,6 +147,8 @@ def observe(f, mode):
         if start is not None:
             seen["nonce"] = start.group(1)
         if BARE in prefix:
+            if not seen["bare_read"]:
+                seen["at_bare"] = qualification_counts()
             seen["bare_read"] = True
             seen["prefix_after_current"] |= seen["current_inputs"] == 1
         if seen["nonce"] is not None:
@@ -162,7 +167,7 @@ def observe(f, mode):
             if seen["bare_read"] and part not in (b"\x03", b"\x03\n"):
                 seen["after_bare_input"] = True
             pending = progress.get(fd, b"") + part
-            wanted = f["initial"].encode("utf-8") + b"\n"
+            wanted = project_target.encode("utf-8") + b"\n"
             if pending == wanted:
                 seen["current_inputs"] += 1
                 progress[fd] = b""
@@ -195,6 +200,8 @@ def observe(f, mode):
         return call
     @wraps(real_interactive)
     def interactive(*args, **kwargs):
+        if seen["before_dispatch"] is None:
+            seen["before_dispatch"] = qualification_counts()
         seen["depth"] += 1
         try:
             return real_interactive(*args, **kwargs)
@@ -250,11 +257,13 @@ class BareExpiryReadonlyTests(unittest.TestCase):
         return f
 
     def run_case(self, f, mode):
-        with observe(f, mode) as seen:
+        target = self.kat["PASSWORD"]
+        with observe(f, mode, target) as seen:
             policy = APP.ProjectPasswordPolicy(
-                f["global_path"], "admin", target_password=self.kat["PASSWORD"], interactive=False)
+                f["global_path"], "admin", target_password=target, interactive=False)
             out = basis.IndependentIBPhaseProtocolDraftTests.drive(
-                self, f, selector=True, policy=policy, timeout=mode == DELAYED)
+                self, f, selector=True, policy=policy, timeout=mode == DELAYED,
+                expected_candidates=(target,))
         if (seen["errors"] or not seen["bare_read"] or not seen["prefix_after_current"]
                 or seen["nonce"] is None
                 or (mode == DELAYED and not seen["deadline_armed"])
@@ -267,8 +276,13 @@ class BareExpiryReadonlyTests(unittest.TestCase):
                         and requests[0]["operation"] == "auth-probe-readonly"
                         and requests[0]["nonce"] == seen["nonce"],
                         "bare expiry cannot create another credential operation")
-        self.assertTrue(seen["fetch"] == seen["password"] == seen["native"] == seen["prompt"] == 0,
-                        "bare expiry cannot acquire or verify a target")
+        self.assertIsNotNone(seen["before_dispatch"])
+        self.assertTrue(all(count > 0 for count in seen["before_dispatch"][:3])
+                        and seen["before_dispatch"][3] == 0,
+                        "I-039 qualifies the explicit project target before the first session, without prompting")
+        self.assertEqual(seen["at_bare"], (
+            seen["fetch"], seen["password"], seen["native"], seen["prompt"]),
+            "bare expiry cannot authorize another target fetch, validation or prompt")
         self.assertTrue(out["result"] is None,
                         "bare expiry cannot return password-change-required authority")
         self.assertTrue(type(out["error"]) is APP.SetupError

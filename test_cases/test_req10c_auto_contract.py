@@ -82,22 +82,22 @@ class Req10CAutoDirectTests(unittest.TestCase):
         global_file = p1 / "01-global.yaml"
         global_file.write_text("system:\n  timezone: UTC\n", encoding="ascii")
         csv = base / "ib.csv"
-        csv.write_text("fixture CSV\n", encoding="ascii")
+        csv.write_text(
+            "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+            "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:02,,,\n"
+            "EXAMPLE-LEAF01,eth,192.0.2.10,24,192.0.2.1,,,,\n", encoding="ascii")
         p2p = base / "p2p.dot"
-        p2p.write_text("fixture P2P\n", encoding="ascii")
+        p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-LEAF01":"swp7";\n', encoding="ascii")
+        qualification = base / "qualification"
+        qualification.mkdir()
+        (qualification / "02-devices_config.csv").write_bytes(csv.read_bytes())
+        compared = self.initial._compare_inventory(csv, qualification)
         cache = base / "targets.json"
-        ib = self.initial.Device(
-            "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-            "203.0.113.1", "", "", "",
-        )
-        eth = self.initial.Device(
-            "EXAMPLE-LEAF01", "eth", "192.0.2.10", "192.0.2.10/24",
-            "192.0.2.1", "", "", "",
-        )
-        target = self.initial.Target(ib, eth, "swp7", "eth0")
+        ib, ethernet = self.initial.load_devices(csv)
+        targets = self.initial.build_targets(self.initial.parse_p2p(p2p), ib, ethernet)
         self.initial.save_target_cache(
-            cache, csv, p2p, 1, [target], global_file=global_file,
-            services=None, public_keys=[],
+            cache, csv, p2p, 1, targets, global_file=global_file,
+            services=None, public_keys=[], inventory_check=compared,
         )
         return p1, p2, global_file, csv, p2p, cache
 
@@ -109,6 +109,22 @@ class Req10CAutoDirectTests(unittest.TestCase):
             f"{hashlib.sha256(raw).hexdigest()}  {cache.name}\n",
             encoding="ascii",
         )
+
+    def test_cache_fixture_has_real_compared_provenance_and_nonjump_direct_source(self):
+        with tempfile.TemporaryDirectory(prefix="req10c-qualified-public-") as directory:
+            try:
+                _, _, _, csv, p2p, cache = self.cache_fixture(Path(directory))
+            except self.initial.SetupError as error:
+                self.fail("the fixture must qualify its actual PUBLIC input before save: " + str(error))
+            payload = json.loads(cache.read_text())
+            master = Path(directory) / "qualification/02-devices_config.csv"
+            self.assertEqual({"status": "compared",
+                "subset_sha256": hashlib.sha256(csv.read_bytes()).hexdigest(),
+                "master_sha256": hashlib.sha256(master.read_bytes()).hexdigest()}, payload["inventory_check"])
+            self.assertEqual("direct", payload["routes"]["EXAMPLE-IB01"]["path"])
+            self.assertEqual("PEER_NOT_JUMP", payload["routes"]["EXAMPLE-IB01"]["reason"])
+            self.assertIsNone(payload["targets"][0]["ethernet"])
+            self.assertIsNotNone(self.initial.load_target_cache(cache, csv, p2p))
 
     def test_auto_day0_classification_never_treats_partial_config_as_complete(self) -> None:
         device = self.initial.Device(

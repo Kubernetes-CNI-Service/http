@@ -548,6 +548,19 @@ class ProjectPointerHistoricalDataTests(_ProjectPointerFixture):
     # verified 100c -> b841 diff, not from the subject's inverse region table.
     REGIONS = ((4282, 7461, 4282, 1146), (72022, 2562, 65707, 723))
 
+    def extraction_source(self):
+        # Complete accepted .4 bytes: D7 must not repin the old B DATA oracle.
+        environment = {name: os.environ[name] for name in ('TMPDIR', 'HTTP_TEST_OWNED_ROOT')}
+        environment.update(HOME=str(self.tree), PATH='/usr/bin:/bin:/usr/sbin:/sbin', GIT_OPTIONAL_LOCKS='0')
+        raw = subprocess.check_output(
+            ['/usr/bin/git', '--no-optional-locks', '-C', str(ROOT), 'show',
+             '7b1b18a5f87076c032007d1da3273bccc04f3f99:tools/project_contract.py'],
+            cwd=self.tree, env=environment, stdin=subprocess.DEVNULL, timeout=15,
+        )
+        self.assertEqual(hashlib.sha256(raw).hexdigest(),
+                         'b8410d455c55c9664bb3cb873dd9ff690e03cbfbc0f771e1dc76cf7c9b3ef89d')
+        return raw
+
     def old_source(self):
         environment = {name: os.environ[name] for name in ('TMPDIR', 'HTTP_TEST_OWNED_ROOT')}
         environment.update(HOME=str(self.tree), PATH='/usr/bin:/bin:/usr/sbin:/sbin', GIT_OPTIONAL_LOCKS='0')
@@ -578,7 +591,7 @@ class ProjectPointerHistoricalDataTests(_ProjectPointerFixture):
     def test_exact_inverse_restores_independent_old_bytes_and_refuses_all_unreviewed_layers(self):
         old = self.old_source()
         from test_cases import native_os_safe_image as os_image
-        current = (ROOT / 'tools/project_contract.py').read_bytes()
+        current = self.extraction_source()
         self.assertEqual(hashlib.sha256(current).hexdigest(),
                          'b8410d455c55c9664bb3cb873dd9ff690e03cbfbc0f771e1dc76cf7c9b3ef89d')
         bad = {'outside-prefix': b'# UNREVIEWED\n' + current,
@@ -600,3 +613,83 @@ class ProjectPointerHistoricalDataTests(_ProjectPointerFixture):
             for label, payload in bad.items():
                 with self.subTest(layer=label), self.assertRaises(AssertionError):
                     os_image._restore_project_pointer_layer(payload)
+
+
+class InitialSetupLatestYamlDataLayerTests(_ProjectPointerFixture):
+    # Independent D67-O10 B bytes, inserted in fixed complete .4 Git data.
+    OFFSET = 55588
+    ANCHOR = b'    # Publisher-owned pointers to the latest complete release (R-016 \xc2\xa73.4).\n'
+    ROW = (b'    SetupLinkSpec("infiniband/bringup/xdr-initial-setup/latest_yaml", "ztp/config/nvos/latest_yaml", "dir",\n'
+           b'                  "optional", writer="setup", base="repository"),\n')
+
+    def sources(self):
+        baseline = ProjectPointerHistoricalDataTests.extraction_source(self)
+        old = ProjectPointerHistoricalDataTests.old_source(self)
+        self.assertEqual(174, len(self.ROW))
+        self.assertEqual(1, baseline.count(self.ANCHOR))
+        self.assertEqual(self.ANCHOR, baseline[self.OFFSET:self.OFFSET + len(self.ANCHOR)])
+        expected = baseline[:self.OFFSET] + self.ROW + baseline[self.OFFSET:]
+        self.assertEqual(hashlib.sha256(expected).hexdigest(),
+                         'e3225c8152b38855d59f4e15033ff3f16395565030b6075cab13221ceacf32a7')
+        return baseline, old, expected
+
+    def strict_layer(self):
+        from test_cases import native_os_safe_image as os_image
+        layer = getattr(os_image, '_restore_initial_setup_latest_yaml_layer', None)
+        self.assertTrue(callable(layer), 'D7 requires one strict outer DATA seam, not a repinned B layer')
+        return os_image, layer
+
+    def test_exact_d7_outer_layer_restores_b_then_original_old_data(self):
+        baseline, old, expected = self.sources()
+        os_image, layer = self.strict_layer()
+        self.assertEqual(expected, (ROOT / 'tools/project_contract.py').read_bytes())
+        with mock.patch('subprocess.Popen', side_effect=AssertionError('inverse DATA must not execute')):
+            self.assertEqual(baseline, layer(expected))
+            self.assertEqual(old, os_image._restore_project_pointer_layer(expected))
+            self.assertEqual(old, os_image._restore_project_pointer_layer(baseline))
+            self.assertEqual(old, os_image._restore_project_pointer_layer(old))
+
+    def test_strict_d7_outer_layer_refuses_missing_and_unreviewed_data(self):
+        baseline, old, expected = self.sources()
+        _os_image, layer = self.strict_layer()
+        at, size = self.OFFSET, len(self.ROW)
+        first, second = self.ROW.splitlines(keepends=True)
+        bad = {
+            'missing': baseline, 'old-history': old,
+            'duplicate': expected[:at] + self.ROW + expected[at:],
+            'half-field': expected[:at] + self.ROW.replace(b'"optional"', b'"publisher"', 1) + expected[at + size:],
+            'truncated': expected[:at + size - 1] + expected[at + size:],
+            'reordered': expected[:at] + second + first + expected[at + size:],
+            'outside-prefix': b'# UNREVIEWED\n' + expected,
+            'outside-suffix': expected + b'# UNREVIEWED\n',
+            'outside-middle': expected[:32] + bytes([expected[32] ^ 1]) + expected[33:],
+            'wrong-type': expected.decode('utf-8'), 'none': None,
+        }
+        with mock.patch('subprocess.Popen', side_effect=AssertionError('inverse DATA must not execute')):
+            for label, payload in bad.items():
+                with self.subTest(layer=label), self.assertRaises(AssertionError):
+                    layer(payload)
+
+    def test_d7_whole_current_vectors_still_require_exact_pointer_dependency(self):
+        _baseline, old, expected = self.sources()
+        os_image, _layer = self.strict_layer()
+        from test_cases import native_bios_safe_image as bios_image
+        files = {path: (ROOT / path).read_bytes() for path in os_image.PRODUCTION_PINS}
+        files['tools/project_contract.py'] = expected
+        pointer = (ROOT / 'tools/project_pointer.py').read_bytes()
+        self.assertEqual('aa2c3ad58d383327d32e61376de1cdb32dc7456fdc339650634c209f87ee9419',
+                         hashlib.sha256(pointer).hexdigest())
+        files['tools/project_pointer.py'] = pointer
+        with mock.patch('subprocess.Popen', side_effect=AssertionError('current-vector DATA must not execute')):
+            for name, verify in (('OS', os_image._native_os_reviewed_source_bytes),
+                                 ('BIOS', bios_image._verified_source_vector)):
+                with self.subTest(source=name, vector='whole-current'):
+                    self.assertEqual(old, verify(files)['tools/project_contract.py'])
+                for label, payload in (('missing', None), ('wrong', b'UNREVIEWED NEW\n'), ('type', 'not bytes')):
+                    bad = dict(files)
+                    if payload is None:
+                        del bad['tools/project_pointer.py']
+                    else:
+                        bad['tools/project_pointer.py'] = payload
+                    with self.subTest(source=name, vector=label), self.assertRaises(AssertionError):
+                        verify(bad)

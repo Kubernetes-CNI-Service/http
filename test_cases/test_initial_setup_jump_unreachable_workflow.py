@@ -63,6 +63,8 @@ class PublicWorld(existing._World):
                                       + '__HTTP_IB_END_' + nonce + '__=0\n', 0)
 
     def ethernet_output(self, jump, command):
+        if command == ['bridge', 'vlan', 'show']:
+            return 'port vlan-id\nswp1 1000 PVID Egress Untagged\n'
         if command == ['ip', 'neighbor']:
             index = 0 if jump == 'EXAMPLE-JUMP01' else 1
             suffix = ('10', '12')[index]
@@ -73,6 +75,25 @@ class PublicWorld(existing._World):
         if re.search(r'\bnv (?:set|unset)\b|\bnv config (?:apply|save)\b', text):
             self.writes.append(text)
             raise AssertionError('read-only workflow must not write an IB')
+        frame = re.search(r'__HTTP_IB_BEGIN_([0-9a-f]{32})__', text)
+        if frame is not None:
+            nonce = frame.group(1)
+
+            def framed_read(command):
+                return ('printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; ' + command
+                        + '; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce
+                        + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+
+            if framed_read('ip addr show eth0') in text:
+                address, mac = {
+                    'example-ib01.example.test': ('192.0.2.11', '02:00:00:00:00:10'),
+                    'example-ib02.example.test': ('192.0.2.12', '02:00:00:00:00:12'),
+                }[device.hostname]
+                return ('2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n'
+                        '    link/ether ' + mac + ' brd ff:ff:ff:ff:ff:ff\n'
+                        '    inet ' + address + '/24 scope global eth0\n')
+            if framed_read('ip route') in text:
+                return 'default via 192.0.2.1 dev eth0\n'
         if 'nv show system ztp' in text:
             return 'service disabled\nstatus aborted\nconfig-save enabled enabled\n'
         if 'nv config diff' in text or ('true' in text and 'nv ' not in text):
@@ -124,6 +145,7 @@ class JumpUnreachableWorkflowTests(unittest.TestCase):
             home.mkdir()
             world = PublicWorld(self, app, root, jump_passwords={'EXAMPLE-JUMP01': '', 'EXAMPLE-JUMP02': ''},
                                 ib_password=PUBLIC_CURRENT, configured=True, global_text=GLOBAL)
+            (root / '02-devices_config.csv').write_bytes((root / 'ib.csv').read_bytes())
             world.by_link_local = {'fe80::ff:fe00:10': world.devices[existing.IBS[0][0]],
                                    'fe80::ff:fe00:12': world.devices[existing.IBS[1][0]]}
             clock_path, blocked_path = root / 'clock', root / 'blocked'
@@ -132,7 +154,7 @@ class JumpUnreachableWorkflowTests(unittest.TestCase):
             config, state = root / 'config.json', root / 'state.json'
             commands = [['hostname'], ['nv', 'show', 'interface'], ['ip', '-d', 'link', 'show'],
                         ['bridge', 'fdb', 'show'], ['ip', 'neighbor'], ['ip', '-j', 'address', 'show'],
-                        ['ifquery', 'vlan1000']]
+                        ['ifquery', 'vlan1000'], ['bridge', 'vlan', 'show']]
             outputs = {address: {shlex.join(command): world.ethernet_output(host, command) for command in commands}
                        for host, address in existing.JUMPS}
             config.write_text(json.dumps({'outputs': outputs, 'hostname': dict((ip, host) for host, ip in existing.JUMPS)}))
@@ -247,7 +269,7 @@ if '-O' in a:
             if app.REPORT_HANDLE is not None:
                 app.REPORT_HANDLE.close()
                 app.REPORT_HANDLE = None
-            self.assertEqual(5, json.loads((root / 'targets.json').read_text())['version'])
+            self.assertEqual(6, json.loads((root / 'targets.json').read_text())['version'])
             reader, writer = os.pipe()
             os.write(writer, json.dumps({'jump_passwords': {}, 'nvos_initial_password': PUBLIC_CURRENT,
                                          'ib_target_password': PUBLIC_CURRENT}).encode())

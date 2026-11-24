@@ -2,9 +2,9 @@
 
 ## 在整体架构中的位置
 
-`initial-setup.py` 让新装的 NVOS IB 交换机第一次可以被管理：它按项目的 CSV 和 P2P 找到每台 IB 接在哪台
-Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经 IPv6 link-local 登录 IB，完成初始设置、
-管理口地址和网关、主机名、DNS/NTP/时区和公钥，最后从管理服务器直连核对。之后的 NVOS ZTP、备份和监控都以此为前提。
+`initial-setup.py` 让新装的 NVOS IB 交换机第一次可以被管理。它按项目 CSV 和 P2P 逐台归类：
+连到已登记跳板的 IB 沿原跳板路径；没有管理口连线、对端不是跳板或被 `--direct-access` 明确选中的设备，
+由管理服务器直连。配置完毕仍从管理服务器核对，之后的 NVOS ZTP、备份和监控都以此为前提。
 它不替代 `DAY0-Prepare/11-load.py` 的配置生成和服务启动。整体场景见仓库根目录的 `user-manual.html`。
 
 本脚本以现场使用的 v15 为底，并入了仓库版的项目口令核对、管理网核验等功能。`--version` 打印仓库版本串
@@ -24,21 +24,22 @@ Ethernet OOB Leaf 的哪个口，从这台 Leaf（或 Leaf 上联的 Spine）经
 
 ## 工作流程
 
-1. 读输入：`ib.csv` 里 `type=ib` 的是候选 IB；`type=eth`、`ethernet`、`eth_jump` 等 Ethernet 设备提供 OOB 登录地址。
-   P2P 给出每台 IB 管理口（`eth0`、`mgmt`、`management`、`bmc` 都算管理口）连在哪台 Ethernet 的哪个口。解析结果写进
-   目标缓存（版本 5），输入没变时直接复用。
-2. OOB 登录方式：每台要用到的 Ethernet 先用公钥建立本次复用连接（`BatchMode`）；公钥被拒的才要口令，先问
+1. 读输入：`ib.csv` 里 `type=ib` 的是候选 IB，仅类型以 `jump` 结尾的 Ethernet 行才作跳板。
+   P2P 仍记录已知管理口连线（`eth0`、`mgmt`、`management`、`bmc` 都算管理口）；无该设备连线不等于清单漏项。
+   版本 6 目标缓存同时保留原始连线和归类输入，不把本次显式直连覆盖写成原始连线。
+2. OOB 登录方式：只为走跳板的目标建立 OOB 会话；每台要用到的 Ethernet 先用公钥建立本次复用连接（`BatchMode`）；公钥被拒的才要口令，先问
    「是否全部使用同一个口令 [Y/n]」，回车或 y 只输一次，n 则逐台输入。经管道给口令见「`--credentials-fd`」一节。
-3. 先采集全部 OOB 快照，再处理 IB：每台 Ethernet 只采集一次，取实际主机名（必须与 CSV 里这个登录地址对应的主机名
-   一致，短名和同名 FQDN 算一致）、`nv show interface`、`ip -d link show`、`bridge fdb show`、`ip neighbor`，
+3. 先采集所用 OOB 的快照，再处理 IB：直连目标不进入跳板快照队列，不占跳板并发；每台实际用到的跳板只采集一次，取实际主机名（必须与 CSV 里这个登录地址对应的主机名
+   一致，短名和同名 FQDN 算一致）、`nv show interface`、`ip -d link show`、`bridge fdb show`、`bridge vlan show`，
    原样存成快照文件；某台 Ethernet 连不上或认证失败，只影响接在它下面的 IB。
-4. 逐台判断 IB 能不能登录（只用快照，不再登录 Ethernet）：
+4. 跳板路径逐台判断 IB 能不能登录（只用快照，不再登录 Ethernet）；跳板失败不自动换成直连。
+   管理服务器的直连路径按本机接口判断：同网段先用 IPv6 link-local，只有符合重试条件的网络失败才改试 CSV IPv4；
+   不同网段或无法确认同网段时用 CSV IPv4。Leaf 本地不能执行直连目标，对这类设备记录跳过。
    - P2P 对应的 `swpX` 在 `nv show interface` 里的第 3 列 Oper Status 必须是 `up`；不是就跳过这台，不查 FDB、不登录；
    - 端口是 bond 成员时改查 bond master；在 FDB 里取这个口学到的动态 MAC（`permanent` 的本机 MAC 不算）；
-   - CSV 填了 `eth0_mac` 时与 FDB 的 MAC 比较，不一致就跳过这台，不登录 IB；
-   - 用 MAC 在 `ip neighbor` 里找 IPv6 link-local 地址和所在的 VLAN/SVI；`ifquery <SVI>` 里写了 `vrf <名字>` 就用这个
-     VRF，否则用 `default`；neighbor 表里没有时，只在 CSV MAC 与 FDB 唯一对上时按 EUI-64 推出一个候选地址，候选不等于
-     已核实的登录。
+   - 由 CSV 的 `eth0_mac` 按 EUI-64 算出 IPv6 link-local，不从邻居表选地址；按预期端口的 VLAN 选 SVI 和 VRF。没有邻居条目不预先阻断，仍须核对线路和设备身份。
+   - 线路核对以动态 FDB 为准；未学到的设备先按跳板成组探测，再读一次该跳板的 FDB。默认线路检查未通过则跳过；
+     `--ignore-cable-check` 允许经预期端口的 VLAN 继续，不改用实际发现位置，也不跳过登录后的身份核对。
 5. 选跳板：目标 VLAN 在 Leaf 上有自己的 SVI 且 SVI 有 IPv4 时，从 Leaf 登录 IB；只有 Leaf 上没有这个 SVI 或 SVI 没有
    IPv4 时，才改由 Leaf 上联的 Spine 登录：
    - Spine 必须在 CSV 里登记为 `type=eth_jump`，并且出现在这台 Leaf 的 `nv show interface` 里状态为 UP 的 LLDP 邻居中；
@@ -114,17 +115,12 @@ root 等待父进程不创建它；在 OOB Leaf 本机执行的命令不创建 m
 hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw
 ```
 
-- IB：`eth0_ip`、第一个 `netmask`、`eth0_gw` 必填。
-- IB 的 `eth0_mac` 可选（经 Spine 登录时必填）；支持冒号、短横线、Cisco 点分格式或连续 12 位十六进制。
-  提供后与 P2P 指定 OOB Leaf 接口学到的 FDB 动态 MAC 比较，不一致时这台不登录、不配置，提示 CSV MAC 可能有误或接错了口。
-  未提供或填写 `NA` 时不做这项比较，Summary 里列出没有 MAC 的设备。
-- IB：设置了 `eth1_ip` 时，第二个 `netmask` 和 `eth1_gw` 必须有效；第二个 netmask 为空时沿用第一个 netmask。
+- `eth0_ip`、第一组 `netmask` 和 `eth0_gw` 是每台 IB 必填。有效的 `eth0_mac` 也必填；支持冒号、短横线、Cisco 点分格式或连续 12 位十六进制。缺失或错误的必填值使该台跳过并在结果中记录。
+- eth1 可选；第二个 netmask 为空时沿用第一个 netmask。有效地址但未填写网关时只配置地址。无效的 eth1 项只记非阻断提示，且不配置对应项。
 - `eth0_gw` 必须属于 eth0 网段，`eth1_gw` 必须属于 eth1 网段。
-- Ethernet（含 `eth_jump`）：`eth0_ip` 是登录这台交换机的地址。
+- Ethernet 只有类型以 jump 结尾才是跳板候选；没有有效登录候选时只停用该跳板。其它 Ethernet 行不按跳板校验登录地址。
 - CSV 中重复出现的两个 `netmask` 列按位置分别对应 eth0 和 eth1。
-- IB hostname 和 eth0/eth1 IPv4 地址必须全局唯一；hostname 必须符合标准 DNS hostname 格式，接口地址不能使用网段地址
-  或广播地址。
-- gateway 可以由多台 IB 设备共享，但不能与任何 IB 接口地址重复；同一 IPv4 子网不能声明不同 gateway。
+- IB hostname 不是唯一或合法的全局主机名时拒绝整次。接口地址不能使用网段地址或广播地址；可共享网关不得与接口地址重复。相同子网的网关冲突按受影响范围处理：eth0 冲突跳过受影响设备，eth1 冲突只提示并不配置冲突项，其他设备照常。
 
 ### P2P
 
@@ -159,7 +155,7 @@ LLDPq 中的纯数字 Ethernet 端口（例如 `15`）自动转换为 Cumulus �
 - 报告开头的 `Input sources:` 一行写明 CSV、P2P 来自哪个目录，global、公钥、中性默认值来自哪个目录；
   两者不同时这一行会注明，但只是提示，不拒绝运行。
 - 现场从脚本目录运行时，当前目录就是脚本所在目录，所有输入、输出都落在当前激活的项目里。
-- 没有 global 时也能 `--apply`：Infra Services 阶段记 SKIP，其余照做；IB 要求强制改密时因为没有可核对的目标密码而拒绝这台。
+- 仅 patch 模式在没有 global 时也能 `--apply`：Infra Services 阶段记 SKIP，其余照做；IB 要求强制改密时因为没有可核对的目标密码而拒绝这台。
 
 ### 设备名怎样对应
 
@@ -260,12 +256,36 @@ Authorize this change and subsequent eligible IB devices? [y/N]:
 不访问任何设备，因此也不能确认实际选到哪台 Spine。`--generate-json`（旧名 `--generate-json-only` 仍可用）不能与
 `--plan` 或 `--apply` 同时使用。
 
+### 整份替换模式（D7）
+
+默认 `--config-mode patch` 不变。显式 `--config-mode replace` 用于管理服务器的独立入口，不支持 OOB Leaf 本地运行、
+内部 managed 入口或 `--generate-json`。写入仍须当前项目的受管输入和目标口令核验；没有有效 global 不进入替换写路径。
+
+不给 `--project-dir` 时通过 `<脚本目录>/latest_yaml` 找发布件；给了则从该项目自己的 `99-output-ib_nvl/latest` 取，
+其 `current-release.json` 位于项目的 `99-output-ztp/`。运行前检查 `.published-complete`、`release-manifest.json`、
+当前项目输入和发布目录/摘要是否一致；整体验证失败时整批退出码 2、零设备写入，先按提示重跑 load。
+整体验证通过后，某台缺少或未通过资格检查的 YAML 记 `YAML_MISSING_OR_INVALID`，不回退到 patch；其余合格设备可以继续。
+
+`--plan` 只预览，不访问设备；计划和在线只读检查都逐台显示“整份替换（会清掉 yaml 以外的配置）”。
+replace 实际只读检查不写设备配置；有合格替换目标时为 `WOULD_REPLACE` / `CHECK_ONLY`，整次 `INCOMPLETE`、退出码 2。
+只读仍可生成本地报告、快照等证据；入口验证失败与正常未执行替换要按报告区分。
+
+应用时，首次实际改动的原确认只问一次并显示同一警示；`--yes` 只跳过交互，不绕过任何校验或许可。
+每台的顺序是：核对身份 → 备份 → 关闭并核对 ZTP → 整份替换 → 应用并保存（经 IPv4 时用新会话核对完成回执）
+→ 补回缺项 → 再核对 ZTP → 公钥 → IPv4 就绪。最后的 IPv4 检查先等 15 秒；中途回执成功不等于最后的核验已完成。
+
+仅确证本次 replace 或 apply 失败时才按原许可尝试 detach，保留设备侧替换文件：`FAILED_DETACHED` 和
+`FAILED_DETACH_FAILED` 分开报告。文件准备失败、save 失败或结果不明不据此清理；已写后补回失败或再核 ZTP 失败不自动重放。
+逐台 JSON（含 `summary.json` 中的记录）用 `replace` 内的 `verdict`、`file`、`sha256`、`reason` 说明选择与结论；
+用 `writes_attempted` 和 `verified_complete` 区分已经尝试写入与最终核验完成，不把设备配置内容公开在结果字段里。
+
 ### 常用参数
 
 | 参数 | 说明 |
 |---|---|
 | `--version` | 打印版本串后以 0 退出，不读输入、不加锁、不写报告 |
 | `--project-dir <项目>` | 按项目自己的文件名读输入（见上表） |
+| `--devices <名单>` | 按 CSV 选择本次 IB；未匹配项在设备登录前拒绝，不默认为全部 |
 | `--ib-csv`、`--p2p` | 显式指定 CSV、P2P |
 | `--eth-user`、`--ib-user` | Ethernet 用户（默认 `cumulus`）、NVOS 用户（默认 `admin`） |
 | `--oob-spines <名字>[,<名字>...]` | 指定可以当跳板的 Spine（CSV 里的 `eth_jump` 名字）；默认短名以 `oob-spine` 开头的 `eth_jump` |
@@ -273,7 +293,7 @@ Authorize this change and subsequent eligible IB devices? [y/N]:
 | `--max-workers <n>` | worker 上限，1～16，默认 16；只能调低 |
 | `--task-timeout <秒>` | 每台 IB 的期限，1～86400，默认 1800，不含等操作员输入的时间 |
 | `--verbose` | 终端也打印完整的设备日志块和阶段事件；不加时终端只打进度和 Summary，报告始终完整 |
-| `--force` | 只补缺的 Network 字段，不覆盖冲突 |
+| `--force` | 与默认相同：只补缺的 Network 字段，不覆盖冲突 |
 | `--report`、`--snapshot-dir`、`--target-cache` | 报告、快照目录、目标缓存的位置（默认见「输出」） |
 | `--execution-mode auto\|management\|ethernet` | 执行位置；`--local-ethernet-hostname <CSV 主机名>` 在本机主机名对不上时指定本机是 CSV 里哪台 |
 | `--credentials-fd <n>` | 从继承的管道读口令（见下一节） |
@@ -312,8 +332,8 @@ python3 initial-setup.py --execution-mode ethernet --local-ethernet-hostname <�
 
 ### 在 OOB Leaf 上本地运行
 
-Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在管理服务器上生成（版本 5），用 `--execution-mode ethernet`
-时缺缓存或缓存校验不过直接报错。脚本按下面的同目录布局拷，`tools/` 下不放 `__init__.py`，也不放 `project_contract.py`、`operator_identity.py`：
+Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在管理服务器上生成（版本 6），用 `--execution-mode ethernet`
+时缺缓存、缓存校验不过或带 `--direct-access` 都会拒绝。脚本按下面的同目录布局拷，`tools/` 下不放 `__init__.py`，也不放 `project_contract.py`、`operator_identity.py`：
 
 ```text
 <目录>/initial-setup.py
@@ -327,6 +347,9 @@ Leaf 上不需要整棵代码树，也不需要 PyYAML；目标缓存要先在�
 `<目录>/tools/` 存在时脚本按这个布局 import；同时又在仓库
 布局里（`<仓库>/tools/device_identity.py` 存在）、或两种布局都不成立时，以 2 退出并写出两种
 布局各要的文件，不猜。Leaf 上本地运行不认项目，也不判身份。
+
+管理服务器生成缓存时已比对本次子清单与总清单，Leaf 只接受带合格比对记录且绑定同份输入的缓存。
+`--inventory-checked` 是上层流程已完成同一清单比对时传递的内部标记，不是操作员绕过清单检查的选项。
 
 本机主机密钥刷新库只编辑调用方指定的操作员 `~/.ssh/known_hosts`，拒绝其他文件和该文件的链接。
 管理服务器的两种直连核验可在 `--apply` 下接入已认证设备的指纹回调：核实一致后只删目标地址的全部旧记录，重试一次并再核对新指纹；只读不删。
@@ -416,9 +439,9 @@ cron 行部署后每 10 分钟以参数错误退出、往 `auto-cron.log` 追加
 
 | 退出码 | 意思 |
 |---|---|
-| 0 | SUCCESS：全部 IB 完成要求的设置并通过管理服务器直连核对；`--version`、`--help`、`--plan`、`--generate-json` 正常结束也是 0 |
+| 0 | SUCCESS：本次选中的全部 IB 完成要求的设置并通过管理服务器直连核对；`--version`、`--help`、`--plan`、`--generate-json` 正常结束也是 0 |
 | 1 | FAILED：脚本或公共流程出错（运行中项目输入被改、worker 异常、批次停止、操作员拒绝首次改动确认等） |
-| 2 | 入口错误（参数、输入校验、`--credentials-fd` 缺键或不合法、身份拒绝、运行锁以外的守卫错误），或 INCOMPLETE：正常跑完但还有设备没做完——某台失败或跳过、只读检查发现要配置、CSV 里有 IB 没有 P2P 管理链路、没有做管理服务器直连核对 |
+| 2 | 入口错误（参数、输入校验、`--credentials-fd` 缺键或不合法、身份拒绝、运行锁以外的守卫错误），或 INCOMPLETE：本次选中的目标未齐、某台失败或跳过、只读发现需配置、或未通过所需直连核对。没有 P2P 管理连线本身不算失败；核对实际逐台结果。 |
 | 75 | 运行锁被占（另一个 initial-setup 或升级在跑），什么都没做 |
 | 128+n | root 运行、切到项目属主执行时，子进程被信号 n 结束 |
 
@@ -439,17 +462,18 @@ cron 行部署后每 10 分钟以参数错误退出、往 `auto-cron.log` 追加
 - `devices-<YYYYmmdd-HHMMSS>-<随机后缀>/`：本次运行的证据目录，与报告在同一个目录，时间戳与报告文件名里的相同（用
   `--report` 时取本次运行开始的时间）。里面有每台 IB 的设备日志 `<IB 主机名>.log` 和结构化记录 `<IB 主机名>.json`，以及
   整次的 `summary.json`（权限 0600：项目、版本、模式、结果、逐台记录、管理服务器直连结果、OOB 快照失败、Spine 跳板选择）。
-- `initial-setup-targets.json` 和 `initial-setup-targets.json.sha256`：CSV/P2P 解析后的目标缓存（版本 5）。CSV、P2P、管理端
+  选中设备只在 `records` 或 `selection.unmapped` 中出现一次。没有 P2P 管理连线本身不算失败，也不直接归为 unmapped；看本次归类和逐台结果。
+- `initial-setup-targets.json` 和 `initial-setup-targets.json.sha256`：CSV/P2P 解析后的目标缓存（版本 6）。CSV、P2P、管理端
   `01-global.yaml` 和公钥的内容、生成器源码和 Python 运行时身份都没变、校验文件也对得上时直接复用，否则重新生成；回拨
   mtime 掩盖不了字节变化。管理服务器上缺当前 global 时缓存失效；OOB Leaf 上可以用管理服务器预先烘进缓存、仍通过来源校验的
-  配置，Leaf 上不需要 YAML 文件或 PyYAML。旧缓存（版本不对或没有校验文件）会重新生成。用 `--target-cache <路径>` 指定
+  配置，Leaf 上不需要 YAML 文件或 PyYAML。旧缓存（版本不对或没有校验文件）由管理服务器重新生成，Leaf 不重建。用 `--target-cache <路径>` 指定
   别的文件时，校验文件是同名加 `.sha256`。
 - `initial-setup-ethernet-snapshots/`：每台 Ethernet 的 `<主机名>.snapshot.txt`（采集时间、CSV 主机名、实际主机名、登录 IP、
-  执行位置，以及 `nv show interface`、`ip -d link show`、`bridge fdb show`、`ip neighbor` 的原始输出），走 Spine 判断时的
+  执行位置，以及 `nv show interface`、`ip -d link show`、`bridge fdb show`、`bridge vlan show` 的原始输出），走 Spine 判断时的
   `<主机名>.addresses.json`，以及 `spine-jump-routes.json`。每台采集成功后原子覆盖旧文件，失败时不留半成品。用
   `--snapshot-dir <目录>` 指定别的位置。`--plan` 和 `--generate-json` 不访问设备，不生成快照。
 
-link、FDB、neighbor 和接口 VRF 是设备的实时状态，每次运行都重新采集。只读检查不写设备配置，但会更新上面这些本地文件，
+link、FDB、VLAN 和接口 VRF 是设备的实时状态，每次运行都重新核对。只读检查不写设备配置，但会更新上面这些本地文件，
 SSH 的 `known_hosts` 也可能新增主机密钥（`StrictHostKeyChecking=accept-new`）。
 
 ## 安全规则
@@ -457,10 +481,9 @@ SSH 的 `known_hosts` 也可能新增主机密钥（`StrictHostKeyChecking=accep
 - 未指定 `--apply` 时不执行首次改密、任何 `nv set` 或 `nv config apply/save`；只生成本地 JSON、报告、快照，并执行只读
   设备命令。
 - `--apply` 在第一台实际变更前确认；拒绝时整次停下、不改设备（以 1 退出）。`--apply --yes` 明确跳过交互确认。
-- Network 字段只缺一部分或与 CSV 冲突时，这台在任何写入之前拒绝；`--force` 只补缺、不覆盖。设备上有不明的待提交改动时
-  不写。
-- 一台 IB 匹配多条管理链路、端口没有动态 MAC、MAC 没有唯一的 IPv6 link-local neighbor，或 CSV 地址无效时，明确报错且
-  不配置这台。
+- patch 默认只补缺；`--force` 与默认相同。真实冲突在写入前拒绝该台，不覆盖原值。设备上有不明的待提交改动时不写。
+- 有公钥时只读核对一次，无公钥不读取；不回传 `authorized_keys`，也不写设备配置。
+- 一台 IB 匹配多条管理链路、必填 CSV 输入无效或不能核对设备身份时，明确记录且不配置该台。线路检查根据本节前述 FDB 与已选入口判定。
 - 改密或写入结果不确定时停下这台、标为要人工核对，不自动重放。
 - 初始密码、目标密码、当前密码和 OOB 口令都不打印、不写进报告和 JSON。
 

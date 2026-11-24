@@ -80,10 +80,20 @@ class InitialHandoffRealReaderTransportWorkflowTests(unittest.TestCase):
                     self.assertTrue(any("eth0_ip" in error and "999.0.2.1" in error
                                         for error in errors), errors)
                 with self.subTest(reader="INITIAL"):
-                    with self.assertRaises(INITIAL.SetupError) as caught:
-                        INITIAL.load_devices(path)
-                    self.assertIn("eth0_ip", str(caught.exception))
-                    self.assertIn("999.0.2.1", str(caught.exception))
+                    # v315 r617 O10/O22: only INITIAL becomes per-jump; both
+                    # independent LOAD/SETUP rejections above remain untouched.
+                    try:
+                        _ib, transit = INITIAL.load_devices(path)
+                    except INITIAL.SetupError as error:
+                        self.fail("O22 must retain the unavailable jump: " + str(error))
+                    device = transit["example-jump01"]
+                    self.assertEqual("", device.login_ip)
+                    self.assertTrue(hasattr(device, "jump_candidates"))
+                    self.assertEqual((), device.jump_candidates)
+                    self.assertTrue(hasattr(device, "input_issues"))
+                    issues = repr([(item.field, item.value, item.problem) for item in device.input_issues])
+                    self.assertIn("eth0_ip", issues)
+                    self.assertIn("999.0.2.1", issues)
             external.assert_not_called()
 
     def test_qualified_inventory_reaches_real_carrier_and_cleans_only_prompt_lines(self):

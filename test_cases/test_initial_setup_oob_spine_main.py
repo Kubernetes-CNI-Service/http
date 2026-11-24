@@ -38,6 +38,11 @@ Fixture rewrites (guide :835 and :765 class 4; no assertion was relaxed):
   test_initial_setup_credentials_fd_workflow.py `_PhaseSession`/`_World`) and the strict probe;
   everything else is v15's fake unchanged.  Pending diffs stay empty, as v15's fake already
   answered (T15, guide :2301).
+
+v315 r629 WP2 / R652: VLAN snapshots and cable failure replace the named old
+ND/MAC source expectations only. Missing CSV MAC is observed through the real
+input producer, including same-owned M4 authority; Spine selection, workers,
+stages, authorization and summary assertions retain their independent contract.
 """
 
 from __future__ import annotations
@@ -60,6 +65,7 @@ from unittest.mock import patch
 
 from test_cases.module_loader import load_script
 from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
+from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
 
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
@@ -173,9 +179,10 @@ class OobSpineMainTests(unittest.TestCase):
         interfaces = {leaf.hostname: interface_table(peers if peers is not None else [
             ("swp49", a.hostname, "up"), ("swp50", b.hostname, "up")])}
         leaf_fdb = fdb("02:00:00:00:ff:ff" if bad_mac else MAC1) + fdb(MAC2, "swp2", second_vlan)
+        # r629 O1/O11: the physical VLAN observation, not ND, is authoritative.
         tables = {leaf.hostname: (links(leaf_svi), leaf_fdb,
-                                  "fe80::10 dev vlan1000 lladdr %s REACHABLE\n" % MAC1 +
-                                  "fe80::12 dev vlan1000 lladdr %s REACHABLE\n" % MAC2)}
+                                  "port vlan-id\nswp1 1000 PVID Egress Untagged\n"
+                                  "swp2 %s PVID Egress Untagged\n" % second_vlan)}
         failures, outcomes, records, fetched = {}, {}, {}, []
         passwords = {leaf.hostname: secret("leaf")}
         specs = spine_specs or {a.hostname: addresses(), b.hostname: addresses()}
@@ -195,9 +202,23 @@ class OobSpineMainTests(unittest.TestCase):
                 passwords[dev.hostname] = dev.hostname + "-password"
                 interfaces[dev.hostname] = interface_table()
                 tables[dev.hostname] = ((spine_links or {}).get(dev.hostname, links()), "", "")
+
+        def cable_io(dev, user, password, command, timeout, **kwargs):
+            # Only the new fixed read/ping boundary is modelled; every other
+            # command remains an error, never a real SSH fallback.
+            if dev.hostname == leaf.hostname and command == ["bridge", "fdb", "show"]:
+                return leaf_fdb
+            allowed = [
+                ["ip", "vrf", "exec", "oob", "ping", "-6", "-c", "2", "-W", "1", address + "%" + svi]
+                for address in ("fe80::ff:fe00:10", "fe80::ff:fe00:12")
+                for svi in ("vlan1000", "vlan2000")]
+            if dev.hostname in {leaf.hostname, a.hostname, b.hostname} and command in allowed:
+                return ""
+            raise AssertionError((dev.hostname, command))
         args = SimpleNamespace(eth_user="cumulus", ib_user="admin", connect_timeout=5)
         chooser = patch.object(app, "choose_oob_spine", side_effect=lambda rows: rows[-1])
         with chooser as choose, patch.object(app, "interface_vrf", return_value="oob"), \
+                patch.object(app, "run_on_ethernet", side_effect=cable_io), \
                 contextlib.redirect_stdout(io.StringIO()):
             tasks = app.prepare_routed_ib_tasks(targets, args, passwords, set(), interfaces,
                                                 tables, failures, outcomes, records, spines=spines,
@@ -259,15 +280,25 @@ class OobSpineMainTests(unittest.TestCase):
     def test_bad_access_mac_never_bypassed_by_spine(self):
         tasks, rows, _, _ = self.run_route(targets=[target(1)], bad_mac=True)
         self.assertEqual(tasks, [])
-        self.assertEqual(rows["ib01.example.test"]["category"], "SKIPPED_MAC_MISMATCH")
+        self.assertEqual(rows["ib01.example.test"]["category"], "SKIPPED_CABLE_CHECK_FAILED")
 
     # v15 SpineRoutingWorkflowTests.test_one_missing_inventory_mac_does_not_block_other_ib_on_same_leaf
     # (test_v15_oob_spine.py:274).  V15-OOB-SPINE.md:61; CURRENT-CONTRACT.md:36.
     def test_one_missing_inventory_mac_does_not_block_other_ib_on_same_leaf(self):
-        missing = replace(target(1), ib=replace(target(1).ib, eth0_mac=""))
-        tasks, rows, _, _ = self.run_route(targets=[missing, target(2)])
-        self.assertEqual([t.target.ib.hostname for t in tasks], ["ib02.example.test"])
-        self.assertEqual(rows["ib01.example.test"]["category"], "SKIPPED_INVENTORY_MAC_UNAVAILABLE")
+        # O11/R652: retain the two-device isolation through the real CSV/M4
+        # producer; a manually invalid Device does not establish input issues.
+        from test_cases.test_initial_setup_cable_check import (
+            _World, IB1, IB2, JA, SP, MAC1, LEAF_NO_SVI, VLANS)
+        with _World(self) as world:
+            world.spine_leaf = True
+            world.write_inventory()
+            world.tables[JA] = (LEAF_NO_SVI, world.tables[JA][1], VLANS)
+            for source in (world.csv, world.master):
+                source.write_text(source.read_text().replace(MAC1, "", 1))
+            world.invoke()
+            self.assertEqual([t.target.ib.hostname for t in world.prepared], [IB2])
+            self.assertEqual(world.records[IB1]["category"], "SKIPPED_INPUT_INCOMPLETE")
+            self.assertEqual(SP, world.prepared[0].target.ethernet.hostname)
 
     # v15 SpineRoutingWorkflowTests.test_address_collection_error_does_not_trigger_fallback
     # (test_v15_oob_spine.py:280).  V15-OOB-SPINE.md:57; CURRENT-CONTRACT.md:28.
@@ -393,12 +424,15 @@ class OobSpineMainTests(unittest.TestCase):
                                           ("oob-spine01", "198.51.100.21"),
                                           ("oob-spine02", "198.51.100.22")):
                     writer.writerow([hostname, "eth_jump", address, "", "", ""])
+            # Real M4 authority for exactly this owned input, not a checked flag.
+            (root / "02-devices_config.csv").write_bytes((root / "ib.csv").read_bytes())
             (root / "p2p.dot").write_text("\n".join('"%s":"eth0" -- "oob-leaf01":"swp%d"' %
                                                     (d.hostname, n) for n, d in enumerate(devices, 1)) + "\n")
             by_ll = {app.mac_to_link_local(d.eth0_mac): d for d in devices}
             by_ip = {d.login_ip: d for d in devices}
             configured = {d.hostname: not apply for d in devices}
             hits, writes = [], []
+            identity_reads, backup_stamps = set(), {}
             argv = [str(INITIAL), "--project-dir", str(root), "--ib-csv", str(root / "ib.csv"),
                     "--p2p", str(root / "p2p.dot"), "--target-cache", str(root / "targets.json"),
                     "--report", str(root / "report.log"), "--snapshot-dir", str(root / "snapshots"),
@@ -423,6 +457,9 @@ class OobSpineMainTests(unittest.TestCase):
                                           (n + 10, n) for n in range(3, count + 1))
                 if command == ["bridge", "fdb", "show"]:
                     return "".join(fdb(d.eth0_mac, "swp%d" % n) for n, d in enumerate(devices, 1))
+                if command == ["bridge", "vlan", "show"]:
+                    return "port vlan-id\n" + "".join(
+                        "swp%d 1000 PVID Egress Untagged\n" % n for n in range(1, count + 1))
                 if command == ["ip", "neighbor"]:
                     return "".join("%s dev vlan1000 lladdr %s REACHABLE\n" %
                                    (app.mac_to_link_local(d.eth0_mac), d.eth0_mac) for d in devices)
@@ -436,6 +473,7 @@ class OobSpineMainTests(unittest.TestCase):
                 if re.search(r"\bnv (?:set|unset)\b|\bnv config (?:apply|save)\b", text):
                     if not apply:
                         raise AssertionError("Unexpected device write in CHECK_ONLY")
+                    self.assertIn(dev.hostname, backup_stamps, "O13 backup precedes the first NVUE write")
                     writes.append(text)
                     self.assertIn("cumulus@198.51.100.21", text)
                     if "nv config save" in text:
@@ -493,7 +531,64 @@ class OobSpineMainTests(unittest.TestCase):
                 dev = by_ll.get(peer) or by_ip.get(peer)
                 if not dev:
                     raise AssertionError(peer)
-                return app.SessionResult("__HTTP_IB_BEGIN_" + nonce + "__\n" + payload(dev, text) +
+                if any(probe in text for probe in ("ip addr show eth0", "ip route", "IB configuration backup failed")):
+                    # Decode the fixed PUBLIC read/backup carrier; never execute its contents.
+                    jump_ip = "198.51.100.10" if leaf_svi else "198.51.100.22" if unreachable_spine else "198.51.100.21"
+                    self.assertEqual(command[0], "ssh")
+                    self.assertEqual(command[-2], "cumulus@" + jump_ip)
+                    self.assertIs(type(responder), app.NestedResponder)
+                    self.assertEqual(responder.ib_destination, "admin@" + peer)
+                    carrier = shlex.split(command[-1])
+                    safe_path = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+                    self.assertEqual(carrier[:2], ["sh", "-c"])
+                    self.assertEqual(len(carrier), 3)
+                    self.assertTrue(carrier[2].startswith(safe_path))
+                    inner = shlex.split(carrier[2][len(safe_path):])
+                    self.assertEqual(inner[:5], ["ip", "vrf", "exec", "oob", "ssh"])
+                    self.assertEqual(inner[-2], "admin@" + peer)
+                    self.assertRegex(nonce, r"^[0-9a-f]{32}$")
+                    frame = shlex.split(inner[-1])
+                    self.assertEqual(frame[:2], ["sh", "-c"])
+                    self.assertEqual(len(frame), 3)
+                    prefix = f'printf "\\n__HTTP_IB_BEGIN_{nonce}__\\n"; '
+                    suffix = f'; task_rc=$?; printf "\\n__HTTP_IB_END_{nonce}__=%s\\n" "$task_rc"; exit "$task_rc"'
+                    self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix))
+                    stage_text = frame[2][len(prefix):-len(suffix)]
+                    stage = shlex.split(stage_text)
+                    self.assertEqual(stage_text, shlex.join(stage))
+                    addr = ["ip", "addr", "show", "eth0"]
+                    addr_body = f"2: eth0: <UP> mtu 1500 state UP\n    link/ether {dev.eth0_mac}\n"
+                    if by_ll.get(peer) is dev:
+                        self.assertEqual(inner[5:7], ["-6", "-tt"])
+                        self.assertEqual(inner[-4:-1], ["-B", "vlan1000", "admin@" + peer])
+                        if stage == addr:
+                            identity_reads.add(dev.hostname)
+                            body = addr_body
+                        else:
+                            self.assertEqual(len(stage), 5)
+                            self.assertEqual(stage[:4], ["sh", "-c", EXPECTED_BACKUP_SCRIPT, "--"])
+                            stamp = stage[4]
+                            self.assertRegex(stamp, r"^[0-9]{8}-[0-9]{6}$")
+                            self.assertEqual(inner[-8:-4], ["-o", "PubkeyAuthentication=no", "-o",
+                                "PreferredAuthentications=password,keyboard-interactive"])
+                            self.assertTrue(apply, "CHECK_ONLY must not request a backup")
+                            self.assertIn(dev.hostname, identity_reads, "backup requires earlier O5 readback")
+                            self.assertNotIn(dev.hostname, backup_stamps, "only one backup per device")
+                            backup_stamps[dev.hostname] = stamp
+                            body = f"path=/home/admin/current_{stamp}.yaml\nbytes=47\n"
+                    else:
+                        # The actual post-save IPv4 readiness stage asks for two fresh reads.
+                        self.assertIs(by_ip.get(peer), dev)
+                        self.assertNotIn("-6", inner)
+                        self.assertNotIn("-B", inner)
+                        self.assertTrue(apply and configured[dev.hostname])
+                        self.assertIn(dev.hostname, backup_stamps)
+                        self.assertIn(stage, (addr, ["ip", "route"]))
+                        body = (addr_body + f"    inet {dev.eth0_prefix} scope global eth0\n" if stage == addr
+                                else f"default via {dev.eth0_gateway} dev eth0\n")
+                else:
+                    body = payload(dev, text)
+                return app.SessionResult("__HTTP_IB_BEGIN_" + nonce + "__\n" + body +
                                          "__HTTP_IB_END_" + nonce + "__=0\n", 0)
             home = root / "home"
             home.mkdir()
@@ -527,8 +622,10 @@ class OobSpineMainTests(unittest.TestCase):
                     self.assertTrue(writes)
                     self.assertTrue(any("nv config apply -y" in text for text in writes))
                     self.assertTrue(all(configured.values()))
+                    self.assertEqual(set(backup_stamps), {d.hostname for d in devices})
                 else:
                     self.assertEqual(writes, [])
+                    self.assertEqual(backup_stamps, {})
                 if iteration:
                     self.assertIn("Target cache: reused", output)
                 report = max(root.rglob("summary.json"), key=lambda p: p.stat().st_mtime)
@@ -546,6 +643,13 @@ class OobSpineMainTests(unittest.TestCase):
                     self.assertEqual(row["jump"]["hostname"], selected_jump)
                     self.assertEqual(row["stage_status"]["day0"], "VERIFIED" if apply else "ALREADY_PRESENT")
                     self.assertEqual(row["stage_status"]["direct_ssh"], "VERIFIED")
+                    if apply:
+                        stamp = backup_stamps[row["hostname"]]
+                        self.assertTrue(report.parent.name.startswith(f"devices-{stamp}-"))
+                        self.assertEqual(row["backup"], {"path": f"/home/admin/current_{stamp}.yaml", "bytes": 47})
+                        self.assertEqual(row["stage_status"]["ipv4_readiness"], "VERIFIED")
+                        self.assertIs(row["identity"]["via_ipv4"], True)
+                        self.assertIs(row["identity"]["ok"], True)
                 if not leaf_svi:
                     self.assertEqual(len(facts["spine_jump_routes"]), 1)
                     self.assertEqual(facts["spine_jump_routes"][0]["spine"], selected_jump)

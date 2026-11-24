@@ -200,17 +200,20 @@ class OobSpineCandidateTests(unittest.TestCase):
     # v15 CandidateDirectTests.test_spine_nd_must_match_mac_and_selected_interface
     # (test_v15_oob_spine.py:177).  V15-OOB-SPINE.md:72; CURRENT-CONTRACT.md:37.
     def test_spine_nd_must_match_mac_and_selected_interface(self):
+        # r629 O1 / R652: preserve the historical ND counterexamples but no
+        # longer use them as the address or login-identity authority.
         t = target()
         other = "fe80::999 dev vlan2000 lladdr %s REACHABLE\n" % MAC1
         result = app._spine_neighbor(t, ("", "", other), "vlan1000", "oob", MAC1)
         self.assertEqual(result.ipv6, "fe80::ff:fe00:10")
-        self.assertEqual(result.address_source, "FDB_EUI64_CANDIDATE")
+        self.assertEqual(result.address_source, "CSV_EUI64")
         valid = "fe80::1234 dev vlan1000 lladdr %s REACHABLE\n" % MAC1
         self.assertEqual(app._spine_neighbor(t, ("", "", valid), "vlan1000", "oob", MAC1).ipv6,
-                         "fe80::1234")
+                         "fe80::ff:fe00:10")
         conflict = "fe80::ff:fe00:10 dev vlan1000 lladdr 02:00:00:00:ff:ff REACHABLE\n"
-        with self.assertRaisesRegex(app.SetupError, "conflicting"):
-            app._spine_neighbor(t, ("", "", conflict), "vlan1000", "oob", MAC1)
+        result = app._spine_neighbor(t, ("", "", conflict), "vlan1000", "oob", MAC1)
+        self.assertEqual(("fe80::ff:fe00:10", "vlan1000", MAC1, "CSV_EUI64"),
+                         (result.ipv6, result.interface, result.mac, result.address_source))
 
 
 if __name__ == "__main__":

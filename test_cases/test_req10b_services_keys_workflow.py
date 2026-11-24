@@ -176,14 +176,27 @@ def strict_global_text(kat: dict) -> str:
     return GLOBAL.replace(anchor, block, 1)
 
 
-def _public_command(argv) -> tuple[str, ...]:
+def _public_command(argv, app) -> tuple[str, ...]:
     command = tuple(argv)
-    return ("KEY-SHELL",) if command[:2] == ("sh", "-c") else command
+    if command[:2] != ("sh", "-c"):
+        return command
+    if len(command) == 5 and command[3] == "--" and type(command[4]) is str:
+        if command[2] == app._KEY_INSTALL_SCRIPT:
+            try:
+                valid = bool(base64.b64decode(command[4], validate=True))
+            except ValueError:
+                valid = False
+            if valid:
+                return ("KEY-SHELL",)
+        elif (command[2] == app._CONFIG_BACKUP_SCRIPT
+              and re.fullmatch(r"[0-9]{8}-[0-9]{6}", command[4])):
+            return ("CONFIG-BACKUP", command[4])
+    raise AssertionError("PUBLIC adapter: unknown closed shell command")
 
 
 @contextmanager
 def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
-                               empty_pending_diff=True):
+                               empty_pending_diff=True, raw_backup=False):
     """PUBLIC device boundary for the present-global management path of one main() run.
 
     Since 50efbbd a manual/auto management run with a present project global
@@ -211,10 +224,18 @@ def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
       * transport    - real PTY transport attempts (must stay zero);
       * held_setters - setter lines for the facts this model holds (none for
                        held_rows=()).
+      * events      - all real helper/device entries, with separate actual
+                      helper and device-stack depth, parent id and policy identity.
+
+    raw_backup=False preserves the original one-to-one model. Only explicit
+    raw opt-in admits one CONFIG-BACKUP child of IB01's first DNS helper; its
+    parent and full child are retained, not collapsed into the key label.
     """
+    if type(raw_backup) is not bool:
+        raise AssertionError("PUBLIC adapter: raw backup opt-in must be boolean")
     witness = {"policies": [], "phases": [], "helper": [], "device": [], "transport": 0,
-               "held_setters": held_fact_setters(held_rows)}
-    depth = [0]
+               "held_setters": held_fact_setters(held_rows), "events": [], "raw_backup": raw_backup}
+    helper_stack, device_stack = [], []
     real_init = app.ProjectPasswordPolicy.__init__
     real_helper = app._run_authorized_ib_command
     phase_signature = inspect.signature(app._execute_ib_phase)
@@ -249,12 +270,21 @@ def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
 
     def helper(*args, **kwargs):
         command = args[7] if len(args) > 7 else kwargs["ib_command"]
-        witness["helper"].append(_public_command(command))
-        depth[0] += 1
+        public = _public_command(command, app)
+        target = args[0] if args else kwargs["target"]
+        number = len(witness["events"])
+        event = {"kind": "helper", "id": number, "command": public,
+                 "hostname": getattr(getattr(target, "ib", None), "hostname", None),
+                 "policy": kwargs.get("_password_policy"), "helper_id": number,
+                 "helper_depth": len(helper_stack) + 1, "device_depth": len(device_stack),
+                 "parent_device": device_stack[-1]["id"] if device_stack else None}
+        witness["helper"].append(public)
+        witness["events"].append(event)
+        helper_stack.append(event)
         try:
             return real_helper(*args, **kwargs)
         finally:
-            depth[0] -= 1
+            helper_stack.pop()
 
     def device(*args, **kwargs):
         operation = kwargs.get("_phase_operation")
@@ -265,26 +295,59 @@ def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
                 f"a private {operation!r} phase request reached the device boundary"
             )
         command = args[7] if len(args) > 7 else kwargs["ib_command"]
-        witness["device"].append((_public_command(command), depth[0] > 0))
-        if tuple(command) == ZTP_SHOW and held_rows:
-            # The model holds the Initial facts, so ZTP is disabled (T17, guide :2303).
-            return app.SessionResult(ZTP_DISABLED, 0)
-        result = inner(*args, **kwargs)
-        if tuple(command) == STRICT_DIFF and empty_pending_diff:
-            # No pre-existing uncommitted change on the modeled device.
-            return app.SessionResult("", 0)
-        if (tuple(command) == STRICT_READ and held_rows
-                and type(result.output) is str and result.output.strip()):
-            lines = result.output.splitlines()
-            missing = [row for row in held_rows if row not in lines]
-            if missing:
-                body = result.output if result.output.endswith("\n") else result.output + "\n"
-                result = app.SessionResult(
-                    body + "\n".join(missing) + "\n", result.exit_code,
-                    result.password_changed, result.password_change_required,
-                    result.password_change_attempted, result.ib_authentication_rejected,
-                )
-        return result
+        public = _public_command(command, app)
+        target = args[0] if args else kwargs["target"]
+        parent = helper_stack[-1] if helper_stack else None
+        event = {"kind": "device", "id": len(witness["events"]), "command": public,
+                 "hostname": getattr(getattr(target, "ib", None), "hostname", None),
+                 "policy": parent["policy"] if parent else None,
+                 "helper_id": parent["id"] if parent else None, "helper_depth": len(helper_stack),
+                 "device_depth": len(device_stack) + 1,
+                 "parent_device": device_stack[-1]["id"] if device_stack else None}
+        witness["device"].append((public, bool(helper_stack)))
+        witness["events"].append(event)
+        if public[:1] == ("CONFIG-BACKUP",) or device_stack:
+            if not raw_backup:
+                raise AssertionError("PUBLIC adapter: recursive backup requires raw opt-in")
+            dns = ("nv", "set", "system", "dns", "server", "203.0.113.53")
+            dns_helpers = [item for item in witness["events"] if item["kind"] == "helper"
+                           and item["hostname"] == "EXAMPLE-IB01" and item["command"] == dns]
+            children = [item for item in witness["events"] if item["kind"] == "device"
+                        and item["command"][:1] == ("CONFIG-BACKUP",)]
+            if not (public[:1] == ("CONFIG-BACKUP",) and event["hostname"] == "EXAMPLE-IB01"
+                    and len(helper_stack) == 1 and len(device_stack) == 1
+                    and parent["command"] == dns and parent["hostname"] == "EXAMPLE-IB01"
+                    and dns_helpers and parent is dns_helpers[0] and len(children) == 1
+                    and device_stack[-1]["command"] == dns
+                    and device_stack[-1]["hostname"] == "EXAMPLE-IB01"
+                    and device_stack[-1]["helper_id"] == parent["id"]
+                    and len(witness["policies"]) == 1
+                    and parent["policy"] is witness["policies"][0]["instance"]
+                    and device_stack[-1]["policy"] is parent["policy"]):
+                raise AssertionError("PUBLIC adapter: raw backup child binding refused")
+        device_stack.append(event)
+        try:
+            if tuple(command) == ZTP_SHOW and held_rows:
+                # The model holds the Initial facts, so ZTP is disabled (T17, guide :2303).
+                return app.SessionResult(ZTP_DISABLED, 0)
+            result = inner(*args, **kwargs)
+            if tuple(command) == STRICT_DIFF and empty_pending_diff:
+                # No pre-existing uncommitted change on the modeled device.
+                return app.SessionResult("", 0)
+            if (tuple(command) == STRICT_READ and held_rows
+                    and type(result.output) is str and result.output.strip()):
+                lines = result.output.splitlines()
+                missing = [row for row in held_rows if row not in lines]
+                if missing:
+                    body = result.output if result.output.endswith("\n") else result.output + "\n"
+                    result = app.SessionResult(
+                        body + "\n".join(missing) + "\n", result.exit_code,
+                        result.password_changed, result.password_change_required,
+                        result.password_change_attempted, result.ib_authentication_rejected,
+                    )
+            return result
+        finally:
+            device_stack.pop()
 
     def transport(*_args, **_kwargs):
         witness["transport"] += 1
@@ -301,7 +364,7 @@ def strict_management_boundary(test, app, *, kat, held_rows=STRICT_HELD_ROWS,
 
 
 def assert_strict_management_path(test, witness, *, global_path, devices,
-                                  interactive=True, note="") -> None:
+                                  interactive=True, note="", raw_backup=False) -> None:
     """Path witness: strict policy once, phase per device, writes via the adapter.
 
     `note` (see held_failure_note) is appended to every failure message, so a
@@ -332,10 +395,63 @@ def assert_strict_management_path(test, witness, *, global_path, devices,
     test.assertTrue(all(inside for _, inside in writes),
                     "every business command must reach the adapter through the authorized helper"
                     + suffix)
-    test.assertEqual([command for command in witness["helper"] if command != STRICT_READ],
-                     [command for command, _ in writes],
-                     "authorized business commands and adapter-observed writes must match one to one"
-                     + suffix)
+    if not raw_backup:
+        test.assertEqual([command for command in witness["helper"] if command != STRICT_READ],
+                         [command for command, _ in writes],
+                         "authorized business commands and adapter-observed writes must match one to one"
+                         + suffix)
+    else:
+        # Account for EVERY legacy event first. A child is explained below,
+        # never removed from either original list or silently folded into KEY.
+        test.assertIs(True, witness["raw_backup"], "raw witness requires explicit opt-in" + suffix)
+        events = witness["events"]
+        test.assertEqual(list(range(len(events))), [event["id"] for event in events])
+        helpers = [event for event in events if event["kind"] == "helper"]
+        device_events = [event for event in events if event["kind"] == "device"]
+        test.assertEqual(len(events), len(helpers) + len(device_events))
+        test.assertEqual(witness["helper"], [event["command"] for event in helpers])
+        test.assertEqual(witness["device"], [(event["command"], event["helper_depth"] > 0)
+                                           for event in device_events])
+        test.assertTrue(all(event["helper_depth"] == 1 and event["device_depth"] == 0
+                            and event["parent_device"] is None and event["policy"] is policy
+                            for event in helpers), "raw helper binding/depth differs" + suffix)
+        top, children = [], []
+        by_id = {event["id"]: event for event in events}
+        for event in device_events:
+            if event["device_depth"] == 1:
+                test.assertIsNone(event["parent_device"])
+                if event["command"] not in (STRICT_READ, STRICT_DIFF):
+                    top.append(event)
+                    parent = by_id.get(event["helper_id"])
+                    test.assertTrue(parent in helpers and event["helper_depth"] == 1
+                        and parent["id"] < event["id"] and parent["command"] == event["command"]
+                        and parent["hostname"] == event["hostname"] and event["policy"] is policy,
+                        "raw top-level helper/device binding differs" + suffix)
+            else:
+                children.append(event)
+        test.assertEqual([command for command in witness["helper"] if command != STRICT_READ],
+                         [event["command"] for event in top],
+                         "raw top-level helper/device calls must match one to one" + suffix)
+        test.assertEqual([event["id"] for event in helpers if event["command"] != STRICT_READ],
+                         [event["helper_id"] for event in top],
+                         "raw top-level helper/device IDs must match one to one" + suffix)
+        test.assertEqual(1, len(children), "raw requires one explicit backup child" + suffix)
+        child = children[0]
+        dns = ("nv", "set", "system", "dns", "server", "203.0.113.53")
+        dns_helpers = [event for event in helpers if event["command"] == dns
+                       and event["hostname"] == "EXAMPLE-IB01"]
+        test.assertTrue(bool(dns_helpers), "raw DNS parent was not reached" + suffix)
+        parent_helper = dns_helpers[0]
+        parent_device = by_id.get(child["parent_device"])
+        test.assertTrue(child["command"][:1] == ("CONFIG-BACKUP",)
+            and len(child["command"]) == 2 and re.fullmatch(r"[0-9]{8}-[0-9]{6}", child["command"][1])
+            and child["hostname"] == "EXAMPLE-IB01" and child["helper_depth"] == 1
+            and child["device_depth"] == 2 and child["helper_id"] == parent_helper["id"]
+            and child["policy"] is policy and parent_device in top
+            and parent_device["command"] == dns and parent_device["hostname"] == "EXAMPLE-IB01"
+            and parent_device["helper_id"] == parent_helper["id"]
+            and parent_helper["id"] < parent_device["id"] < child["id"],
+            "raw backup parent/child causal binding differs" + suffix)
     # Only facts this run's device model actually holds (none when held_rows=()).
     test.assertEqual([], [command for command, _ in witness["device"]
                           if " ".join(command) in witness["held_setters"]],
@@ -520,8 +636,14 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 csv_path.write_text("hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
                     "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
                     "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n")
+                master_csv = (
+                    "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                    "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                    "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n"
+                )
+                (project / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+                (project / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
                 self.assertEqual(0, self.run_initial(tool, csv_path, p2p, cache, "--generate-json"))
-                (project / "02-devices_config.csv").write_bytes(csv_path.read_bytes())
                 (project / "01-global.yaml").write_text(GLOBAL)
                 apache, dhcp, air = project / "apache.log", project / "dhcp.log", project / "air.json"
                 apache.write_text(""); dhcp.write_text(""); air.write_text('{"nodes": {}}')
@@ -599,10 +721,18 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         ib_csv.write_text(
             "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
             "eth1_ip,netmask,eth1_gw\n"
-            "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,,,,\n"
+            "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n"
             "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n",
             encoding="utf-8",
         )
+        master_csv = (
+            "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,"
+            "eth1_ip,netmask,eth1_gw\n"
+            "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n"
+            "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,\n"
+        )
+        (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+        (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
         p2p = root / "p2p.dot"
         p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-JUMP01":"7";\n', encoding="utf-8")
         pubdir = root / "infiniband/publickey"
@@ -674,6 +804,13 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             ib_csv.write_text("hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
                               "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
                               "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n")
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,,\n"
+            )
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             private = root / ".ssh/id_ed25519"
             private.parent.mkdir(mode=0o700)
             private.write_text("fixture identity")
@@ -693,6 +830,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                      "ntp": ["ntp.ubuntu.com", "time.ib.example.test"], "timezone": "Asia/Taipei",
                      "key_fingerprints": sorted([fingerprint(laptop), fingerprint(management)])}
             expected_input = hashlib.sha256(json.dumps(basis, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
             for cycle in (1, 2, 3, 4, 5):
                 if cycle == 4:
                     ib_csv.write_text(ib_csv.read_text().replace("203.0.113.3", "203.0.113.2"))
@@ -711,11 +849,20 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     if cycle == 2:
                         raise self.initial.SetupError("independent transport failure")
                     command = tuple(args[7])
-                    if (len(command) == 5 and command[:2] == ("sh", "-c")
-                            and command[2] == self.initial._KEY_INSTALL_SCRIPT and command[3] == "--"):
+                    if args[0].ib.hostname != "EXAMPLE-IB01":
+                        raise AssertionError("PUBLIC managed model: unknown IB endpoint")
+                    if command == ("ip", "addr", "show", "eth0"):
+                        return self.initial.SessionResult(
+                            "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                            "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
+                    if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                         # The key stage verifies the device's closed install receipt.
                         return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
-                    return self.initial.SessionResult(state, 0)
+                    if command == STRICT_READ:
+                        return self.initial.SessionResult(state, 0)
+                    if command == STRICT_DIFF:
+                        return self.initial.SessionResult("", 0)
+                    raise AssertionError("PUBLIC managed model: unknown IB command")
                 def batch_observer(target, user, key, timeout, services, keys):
                     if cycle == 3:
                         ib_csv.write_text(ib_csv.read_text().replace("203.0.113.2", "203.0.113.3"))
@@ -723,8 +870,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                             "config_verified": True, "interface": "eth0", "transport_ip": "203.0.113.2",
                             "mac_plain": "020000000001", "live_state_sha256": hashlib.sha256(state.encode()).hexdigest(),
                             "input_sha256": expected_input, "observation_sha256": "b" * 64, "reason": ""}
-                neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")
                 with ExitStack() as stack:
+                    if cycle in (4, 5):
+                        from tools import ib_bringup_runtime_guard as runtime_guard
+
+                        guard_path = root / "private-runtime.lock"
+                        original_guard_path = runtime_guard._RUNTIME_GUARD_PATH
+                        if cycle == 4:
+                            self.assertFalse(os.path.lexists(guard_path))
+                        stack.enter_context(mock.patch.object(
+                            runtime_guard, "_RUNTIME_GUARD_PATH", guard_path))
                     # The modeled device already uses the project target, which the initial
                     # credential names: with --apply v15 requires the current IB password to
                     # equal the project global (P3c map 4.5 P1 :356; owner Q-035 (a)).
@@ -732,10 +887,14 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                         os.environ, {"NVOS_INITIAL_PASSWORD": strict_kat(self.initial)["PASSWORD"]}))
                     for name, value in (("local_ethernet_keys", set()), ("prompt_ethernet_passwords", {"example-jump01": "fixture"}),
                             ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "table")),
-                            ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                            ("collect_ethernet_network_tables", (
+                                "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                                "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                                "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                                "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                                "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")),
                             ("save_ethernet_snapshot", root / "snapshot"), ("interface_status_line", "swp7 up"),
-                            ("interface_oper_status", "up"), ("fdb_port_for_interface", "swp7"),
-                            ("neighbor_for_port", neighbor), ("interface_vrf", "default"),
+                            ("interface_oper_status", "up"), ("interface_vrf", "default"),
                             # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check
                             # is a transport outside this PUBLIC model.
                             ("verify_ipv4_login", None)):
@@ -752,6 +911,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                               managed_entry=authority.managed_initial_main if cycle in (4, 5) else None,
                                               managed_tool_inputs=current_tool if cycle == 5 else None,
                                               managed_strict=witnesses if cycle in (4, 5) else None)
+                    if cycle in (4, 5):
+                        self.assertTrue(guard_path.is_file())
+                        guard_info = guard_path.stat()
+                        self.assertEqual((root, os.getuid(), 1),
+                                         (guard_path.parent, guard_info.st_uid, guard_info.st_nlink))
+                        with runtime_guard._runtime_instance_guard() as descriptor:
+                            held = os.fstat(descriptor)
+                            self.assertEqual((guard_info.st_dev, guard_info.st_ino),
+                                             (held.st_dev, held.st_ino))
+                if cycle in (4, 5):
+                    self.assertEqual(original_guard_path, runtime_guard._RUNTIME_GUARD_PATH)
                 self.assertEqual(1, len(witnesses))
                 assert_strict_management_path(self, witnesses[0], global_path=global_path, devices=("EXAMPLE-IB01",))
                 current = authority.read_method_current(storage, "EXAMPLE-IB01")
@@ -775,8 +945,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 base = Path(directory).resolve()
                 root, tool, _, csv_path, p2p, _, cache, _, _ = self.fixture(str(base / "project"))
                 csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
-                    .replace("203.0.113.1,,,,\n", "203.0.113.1,,,,,initial-setup\n")
+                    .replace("EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n",
+                             "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n")
                     .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+                master_csv = (
+                    "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                    "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                    "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,,\n"
+                )
+                (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+                (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
                 foreign = base / "foreign"
                 foreign.mkdir()
                 if case == "csv":
@@ -789,12 +967,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     p2p = outside_p2p
                 if case == "cache": cache = foreign / "out/targets.json"
                 extra = ["--snapshot-dir", str(foreign / "snapshots")] if case == "snapshot" else []
+                expected_foreign = {"csv": foreign / "ib.csv", "p2p": foreign / "p2p.dot",
+                                    "cache": foreign / "out/targets.json", "snapshot": foreign / "snapshots"}[case]
                 before = {str(path.relative_to(foreign)): path.read_bytes() for path in foreign.rglob("*") if path.is_file()}
                 cycle = authority.ManagedInitialMethodCycle(root.resolve(), self.initial)
-                with self.assertRaises((self.initial.SetupError, authority.AuthorityError, ValueError)), \
-                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()):
+                with self.assertRaises((self.initial.SetupError, authority.AuthorityError, ValueError)) as rejected, \
+                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()), \
+                        mock.patch.object(cycle, "admit_paths", wraps=cycle.admit_paths) as admit:
                     self.run_initial(tool, csv_path, p2p, cache, "--apply", "--yes", "--execution-mode", "management", *extra,
                                      method_cycle=cycle)
+                admit.assert_called_once()
+                self.assertIn(str(expected_foreign), str(rejected.exception))
                 self.assertFalse((root / "out").exists(), "reject before local report/cache publication")
                 self.assertFalse((root / "99-output-ztp").exists(), "reject before minting a method era")
                 self.assertEqual(before, {str(path.relative_to(foreign)): path.read_bytes() for path in foreign.rglob("*") if path.is_file()})
@@ -806,13 +989,31 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 root, tool, _, csv_path, p2p, _, cache, _, _ = self.fixture(directory)
                 if method:
                     csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
-                        .replace("203.0.113.1,,,,\n", "203.0.113.1,,,,," + method + "\n")
+                        .replace("EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n",
+                                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,," + method + "\n")
                         .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+                    master_csv = (
+                        "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                        "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,," + method + "\n"
+                        "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,,\n"
+                    )
+                    (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+                    (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
                 # Neither an incompatible/default method nor check-only mode
                 # may create the method namespace or ancillary output dirs.
                 cycle = authority.ManagedInitialMethodCycle(root.resolve(), self.initial)
-                with self.assertRaises(self.initial.SetupError):
+                with self.assertRaises(self.initial.SetupError) as rejected, \
+                        mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()):
                     self.run_initial(tool, csv_path, p2p, cache, "--plan" if method == "initial-setup" else "--apply", method_cycle=cycle)
+                if method == "ztp":
+                    self.assertIn("声明 ztp", str(rejected.exception))
+                    self.assertIn("与当前 initial-setup 执行者不兼容", str(rejected.exception))
+                elif method == "initial-setup":
+                    self.assertIn("managed method authority requires management --apply, not plan/generation/ethernet mode",
+                                  str(rejected.exception))
+                else:
+                    self.assertIn("managed initial-setup requires an explicit per-device config_method column",
+                                  str(rejected.exception))
                 self.assertFalse(cache.parent.exists(), "admission must precede report/cache writes")
                 self.assertFalse((root / "99-output-ztp").exists())
 
@@ -832,8 +1033,17 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             base = Path(directory).resolve()
             root, tool, global_path, csv_path, p2p, _, cache, laptop, management = self.fixture(str(base / "project"))
             csv_path.write_text(csv_path.read_text().replace("eth1_gw\n", "eth1_gw,config_method\n")
-                .replace("203.0.113.1,,,,\n", "203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n")
+                .replace("EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n",
+                         "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n")
                 .replace("192.0.2.10,,,,,,\n", "192.0.2.10,,,,,,,\n"))
+            master = root / "02-devices_config.csv"
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,,\n"
+            )
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            master.write_text(master_csv, encoding="utf-8")
             decoy = base / "decoy"
             (decoy / "infiniband/bringup/xdr-initial-setup").mkdir(parents=True)
             (decoy / "01-global.yaml").write_text(GLOBAL.replace("203.0.113.53", "198.51.100.99"), encoding="utf-8")
@@ -848,9 +1058,32 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 opened.append(Path(os.path.realpath(path)))
                 return original_open(path, *args, **kwargs)
 
+            # This input-source test stops before device IO. Only its unrelated
+            # password prerequisite is modeled; real MAIN still compares the
+            # selected global binding against its actual admitted cache.
+            policy_calls = {"construct": 0, "password": 0}
+            case = self
+
+            class PublicInputSourcePolicy:
+                def __init__(policy, path, user, **options):
+                    policy_calls["construct"] += 1
+                    case.assertEqual(1, policy_calls["construct"])
+                    case.assertEqual(global_path.resolve(), Path(path).resolve())
+                    case.assertEqual("admin", user)
+                    case.assertEqual({}, options)
+                    case.assertEqual(GLOBAL.encode("utf-8"), Path(path).read_bytes())
+                    policy.binding = (str(global_path.resolve()), None, None,
+                                      hashlib.sha256(GLOBAL.encode("utf-8")).hexdigest())
+
+                def password(policy):
+                    policy_calls["password"] += 1
+                    case.assertEqual(1, policy_calls["password"])
+                    return "PUBLIC-WP8-unused-target"
+
             # Any refusal is caught here so that what was opened is judged first; the stop text is checked last.
             with self.assertRaises((self.initial.SetupError, authority.AuthorityError, ValueError)) as stopped, \
                     mock.patch.object(Path, "open", record_open), \
+                    mock.patch.object(self.initial, "ProjectPasswordPolicy", PublicInputSourcePolicy), \
                     mock.patch.object(self.initial, "prompt_ethernet_passwords",
                                       side_effect=self.initial.SetupError(stop)):
                 self.run_initial(tool, csv_path, p2p, cache, "--apply", "--yes", "--execution-mode", "management",
@@ -858,6 +1091,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             self.assertEqual([], sorted(str(path) for path in opened if path.is_relative_to(decoy)),
                              ":912: no file of the --project-dir project is opened on the managed path")
             payload = json.loads(cache.read_text(encoding="utf-8"))
+            self.assertEqual({"status": "compared",
+                              "subset_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
+                              "master_sha256": hashlib.sha256(master.read_bytes()).hexdigest()},
+                             payload["inventory_check"])
             self.assertEqual(str(global_path.resolve()), payload["global"])
             self.assertEqual(hashlib.sha256(global_path.read_bytes()).hexdigest(),
                              payload["cache_authority"]["global_sha256"])
@@ -872,6 +1109,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             self.assertNotIn(str(decoy), sources[0])
             self.assertIn(f"Public-key input: {tool / 'publickey'}; usable entries=2", report)
             self.assertEqual(stop, str(stopped.exception), "the run got past the cache and the report header")
+            self.assertEqual({"construct": 1, "password": 1}, policy_calls)
 
     def run_initial(self, tool: Path, ib_csv: Path, p2p: Path,
                     cache: Path, *extra: str, method_cycle=None, managed_entry=None, managed_tool_inputs=None,
@@ -888,7 +1126,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 # Ordinary runs really use a Leaf layout, including D3's three
                 # required modules, rather than falling back to repository tools.
                 (tool / "tools").mkdir(exist_ok=True)
-                for name in ("device_identity", "hostname_ranges", "login_path"):
+                for name in ("device_identity", "hostname_ranges", "login_path", "inventory_subset"):
                     shutil.copyfile(ROOT / "tools" / (name + ".py"), tool / "tools" / (name + ".py"))
                 stack.enter_context(mock.patch.object(self.initial, "_TOOLS_ROOT", None))
                 stack.enter_context(mock.patch.object(sys, "path", list(sys.path)))
@@ -932,7 +1170,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     if module.__name__ == "_http_managed_initial_setup":
                         for name in ("local_ethernet_keys", "prompt_ethernet_passwords", "collect_ethernet_interfaces",
                                      "collect_ethernet_network_tables", "save_ethernet_snapshot", "interface_status_line",
-                                     "interface_oper_status", "fdb_port_for_interface", "neighbor_for_port", "interface_vrf",
+                                     "interface_oper_status", "interface_vrf",
                                      "run_on_ib", "verify_management_key_possession", "observe_managed_initial_configuration",
                                      "verify_management_direct_ssh", "verify_ipv4_login"):
                             setattr(module, name, getattr(self.initial, name))
@@ -966,7 +1204,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def run_strict(self, tool: Path, ib_csv: Path, p2p: Path, cache: Path, *extra: str,
                    global_path: Path, devices: tuple[str, ...],
-                   held_rows=STRICT_HELD_ROWS) -> int:
+                   held_rows=STRICT_HELD_ROWS, raw_backup=False) -> int:
         """One present-global management P2 run, then its strict-path witness.
 
         A SetupError from the run is held until the witness is checked, so a run
@@ -978,7 +1216,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         result = None
         kat = strict_kat(self.initial)
         with strict_management_boundary(self, self.initial, kat=kat,
-                                        held_rows=held_rows) as witness:
+                                        held_rows=held_rows, raw_backup=raw_backup) as witness:
             try:
                 result = self.run_initial(tool, ib_csv, p2p, cache, *extra)
             except self.initial.SetupError as error:
@@ -987,6 +1225,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             self, witness, global_path=global_path, devices=devices,
             # --credentials-fd never prompts, so its policy is not interactive (WP-5, R-012 8.3).
             interactive="--credentials-fd" not in extra,
+            raw_backup=raw_backup,
             note=held_failure_note(failure, tuple(value for value in kat.values()
                                                  if type(value) is str)),
         )
@@ -1017,11 +1256,18 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 global_path.unlink()
             commands: list[tuple[str, ...]] = []
             shows = 0
+            key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
 
             def device_boundary(*args, **_kwargs):
                 nonlocal shows
                 command = tuple(args[7])
                 commands.append(command)
+                if args[0].ib.hostname != "EXAMPLE-IB01":
+                    raise AssertionError("PUBLIC single-device model: unknown IB endpoint")
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
                 if command == ("nv", "config", "show", "-o", "commands"):
                     shows += 1
                     output = first_state if shows == 1 else verified_state
@@ -1033,13 +1279,22 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                         output if strict else with_held_rows(output, STRICT_HELD_ROWS), 0)
                 if command == ZTP_SHOW:
                     return self.initial.SessionResult(ZTP_DISABLED, 0)
-                if (len(command) == 5 and command[:2] == ("sh", "-c")
-                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
-                        and command[3] == "--"):
+                if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
-                return self.initial.SessionResult("", 0)
+                if command in {
+                    STRICT_DIFF,
+                    ("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"),
+                    ("nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"),
+                    ("nv", "set", "system", "hostname", "EXAMPLE-IB01"),
+                    ("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                    ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                    ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                    ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"),
+                    ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                }:
+                    return self.initial.SessionResult("", 0)
+                raise AssertionError("PUBLIC single-device model: unknown IB command")
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             local_jump = {"example-jump01"} if "ethernet" in extra else set()
             payload = (strict_fd_payload(strict_kat(self.initial)) if strict else
                        {"nvos_initial_password": "initial-password", "ib_target_password": PUBLIC_FD_TARGET})
@@ -1050,12 +1305,15 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("local_ethernet_keys", local_jump),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (
+                        "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                        "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                        "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                        "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                     ("verify_ipv4_login", None),
                 ):
@@ -1100,7 +1358,8 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             payload = json.loads(cache.read_text(encoding="utf-8"))
             # Table 6-1 row 6 (guide :749): cache version 5 (v15 CURRENT-CONTRACT.md
             # 「cache version 5 只保存有输入校验的静态目标」).
-            self.assertEqual(5, payload["version"])
+            # v315 r617 WP1 :558 explicitly advances this existing P1 fixture to6.
+            self.assertEqual(6, payload["version"])
             values = set(scalar_strings(payload))
             for expected in (*EXPECTED_IB["dns"], *EXPECTED_IB["ntp"], EXPECTED_IB["timezone"]):
                 self.assertIn(expected, values)
@@ -1348,7 +1607,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             report = (cache.parent / "report.log").read_text(encoding="utf-8")
             for command in (
                 "nv set interface eth0 ipv4 address 203.0.113.2/24",
-                "nv set interface eth0-1 ipv4 gateway 203.0.113.1",
+                "nv set interface eth0 ipv4 gateway 203.0.113.1",
                 "nv set system hostname EXAMPLE-IB01",
                 "nv set system dns server 203.0.113.53",
                 "nv set system ntp server ntp.ubuntu.com",
@@ -1368,7 +1627,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_configured_day0_still_enters_independent_service_transaction(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-configured-p2-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             commands: list[tuple[str, ...]] = []
             current = (
@@ -1382,30 +1641,46 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 "nv set system ntp server time.ib.example.test\n"
                 "nv set system date-time timezone Asia/Taipei\n"
             )
+            key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
 
             def device_boundary(*args, **_kwargs):
                 command = tuple(args[7])
                 commands.append(command)
+                if args[0].ib.hostname != "EXAMPLE-IB01":
+                    raise AssertionError("PUBLIC configured model: unknown IB endpoint")
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
                 if command == ("nv", "config", "show", "-o", "commands"):
                     applied = ("nv", "config", "apply", "-y") in commands
                     return self.initial.SessionResult(current + (services if applied else ""), 0)
-                if (len(command) == 5 and command[:2] == ("sh", "-c")
-                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
-                        and command[3] == "--"):
+                if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
-                return self.initial.SessionResult("", 0)
+                if command in {
+                    STRICT_DIFF,
+                    ("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                    ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                    ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                    ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"),
+                    ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                }:
+                    return self.initial.SessionResult("", 0)
+                raise AssertionError("PUBLIC configured model: unknown IB command")
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}), \
                  mock.patch.object(self.initial, "local_ethernet_keys", return_value=set()), \
                  mock.patch.object(self.initial, "prompt_ethernet_passwords", return_value={"example-jump01": "eth-password"}), \
                  mock.patch.object(self.initial, "collect_ethernet_interfaces", return_value=("EXAMPLE-JUMP01", "interface table")), \
-                 mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=("links", "fdb", "neighbors")), \
+                 mock.patch.object(self.initial, "collect_ethernet_network_tables", return_value=(
+                     "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                     "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                     "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                     "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                     "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")), \
                  mock.patch.object(self.initial, "save_ethernet_snapshot", return_value=cache.parent / "snapshot.txt"), \
                  mock.patch.object(self.initial, "interface_status_line", return_value="swp7 up"), \
                  mock.patch.object(self.initial, "interface_oper_status", return_value="up"), \
-                 mock.patch.object(self.initial, "fdb_port_for_interface", return_value="swp7"), \
-                 mock.patch.object(self.initial, "neighbor_for_port", return_value=neighbor), \
                  mock.patch.object(self.initial, "interface_vrf", return_value="default"), \
                  mock.patch.object(self.initial, "verify_ipv4_login"), \
                  credentials_fd(strict_fd_payload(strict_kat(self.initial))) as fd_argv, \
@@ -1445,7 +1720,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             day0 = [
                 "nv set interface eth0 ipv4 address 203.0.113.2/24",
-                "nv set interface eth0-1 ipv4 gateway 203.0.113.1",
+                "nv set interface eth0 ipv4 gateway 203.0.113.1",
                 "nv set system hostname EXAMPLE-IB01",
             ]
             day0_argv = [tuple(line.split()) for line in day0]
@@ -1467,10 +1742,27 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             authorized = ssh_dir / "authorized_keys"
             authorized.write_text(laptop + management, encoding="ascii")
             original_keys = (authorized.stat().st_ino, authorized.read_bytes())
+            links = (
+                "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            )
+            fdb = (
+                "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                "02:00:00:00:00:02 dev swp8 master bridge dynamic\n"
+            )
+            vlans = "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n"
+            key_command = (
+                "sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--",
+                base64.b64encode((laptop + management).encode("ascii")).decode("ascii"),
+            )
 
             def device_boundary(*args, **_kwargs):
                 command = tuple(args[7])
                 rounds[-1].append(command)
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
                 if command == ("nv", "config", "show", "-o", "commands"):
                     # A wiped device still has an independently known factory
                     # hostname. Empty transport output is UNKNOWN, not evidence
@@ -1485,6 +1777,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                             running.append(line)
                     pending.clear()
                 elif command[:2] == ("sh", "-c"):
+                    self.assertEqual(key_command, command, "only the complete PUBLIC key-install request may run")
                     result = subprocess.run(
                         command, cwd=root,
                         env={"HOME": str(device_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
@@ -1494,7 +1787,6 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return self.initial.SessionResult(result.stdout, result.returncode)
                 return self.initial.SessionResult("", 0)
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
                 ipv4_verify = stack.enter_context(mock.patch.object(self.initial, "verify_ipv4_login"))
@@ -1502,12 +1794,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("local_ethernet_keys", set()),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (links, fdb, vlans)),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                     ("run_on_ib", mock.DEFAULT),
                 ):
@@ -1671,7 +1961,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         Expected values come from the stage requirements recorded in
         test_cases/REAL_ENVIRONMENT.md, not from the implementation: missing
         Initial values (auto-save, ztp config-save) are set to enabled; a fresh
-        single-gateway device gets eth0 address, the eth0-1 gateway, eth0-1 link
+        single-gateway device gets eth0 address, the eth0 gateway, eth0-1 link
         up, eth0-1 type eth and its CSV hostname; the services are restored; a
         rerun writes nothing.  Only end-state facts are asserted, never how many
         transactions the product uses.  The device model holds no row on the
@@ -1689,7 +1979,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             ]
             network = [
                 "nv set interface eth0 ipv4 address 203.0.113.2/24",
-                "nv set interface eth0-1 ipv4 gateway 203.0.113.1",
+                "nv set interface eth0 ipv4 gateway 203.0.113.1",
                 "nv set interface eth0-1 link state up",
                 "nv set interface eth0-1 type eth",
                 "nv set system hostname EXAMPLE-IB01",
@@ -1712,10 +2002,27 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             authorized = device_home / ".ssh/authorized_keys"
             authorized.write_text(laptop + management, encoding="ascii")
             original_keys = (authorized.stat().st_ino, authorized.read_bytes())
+            links = (
+                "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            )
+            fdb = (
+                "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                "02:00:00:00:00:02 dev swp8 master bridge dynamic\n"
+            )
+            vlans = "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n"
+            key_command = (
+                "sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--",
+                base64.b64encode((laptop + management).encode("ascii")).decode("ascii"),
+            )
 
             def device_boundary(*args, **_kwargs):
                 command = tuple(args[7])
                 rounds[-1].append(command)
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
                 if command == STRICT_READ:
                     return self.initial.SessionResult("\n".join(running) + "\n", 0)
                 if command == ZTP_SHOW:
@@ -1735,6 +2042,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                             running.append(line)
                     pending.clear()
                 elif command[:2] == ("sh", "-c"):
+                    self.assertEqual(key_command, command, "only the complete PUBLIC key-install request may run")
                     result = subprocess.run(
                         command, cwd=root,
                         env={"HOME": str(device_home), "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
@@ -1744,7 +2052,6 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return self.initial.SessionResult(result.stdout, result.returncode)
                 return self.initial.SessionResult("", 0)
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
                 # The IPv4 SSH check is a transport outside this PUBLIC model.
@@ -1753,12 +2060,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("local_ethernet_keys", set()),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (links, fdb, vlans)),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                 ):
                     stack.enter_context(mock.patch.object(self.initial, name, return_value=value))
@@ -1910,15 +2215,72 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             "nv set system date-time timezone Asia/Taipei\n"
         )
         with tempfile.TemporaryDirectory(prefix="req10b-selected-ib-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.fixture(directory)
+            _, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.fixture(directory)
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             global_path.unlink()
             phase = ["before any task"]
-            answers: list[tuple[str, str]] = []
+            answers: list[tuple[tuple[str, ...], str, str]] = []
             commands: list[tuple[str, ...]] = []
             unexpected: list[list[str]] = []
             shows = 0
             real_phase = initial.task_phase
+            real_clock = initial.time
+            links = (
+                "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            )
+            fdb = (
+                "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                "02:00:00:00:00:02 dev swp8 master bridge dynamic\n"
+            )
+            vlans = "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n"
+            address = (
+                "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n"
+                "    inet 203.0.113.2/24 scope global eth0\n"
+            )
+            key_command = (
+                "sh", "-c", initial._KEY_INSTALL_SCRIPT, "--",
+                base64.b64encode((laptop + management).encode("ascii")).decode("ascii"),
+            )
+            # Independent WP4 prechange program, SHA256
+            # 7c1a6e279773a41477e0e7a061d8ecf828273157b785aca844361a14ff3344b6.
+            # This is compared as text and never executed or read from Desktop at runtime.
+            backup_script = (
+                "set -eu\n"
+                "umask 077\n"
+                "fail() { printf '%s\\n' 'IB configuration backup failed' >&2; exit 1; }\n"
+                "[ \"$#\" -eq 1 ] || fail\n"
+                "stamp=$1\n"
+                "case \"$stamp\" in\n"
+                "    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n"
+                "    *) fail ;;\n"
+                "esac\n"
+                "case \"${HOME-}\" in /*) ;; *) fail ;; esac\n"
+                "backup=\"$HOME/current_${stamp}.yaml\"\n"
+                "[ ! -e \"$backup\" ] && [ ! -L \"$backup\" ] || fail\n"
+                "tmp=\n"
+                "trap 'if [ -n \"$tmp\" ]; then rm -f -- \"$tmp\"; fi' EXIT\n"
+                "trap 'exit 1' HUP INT TERM\n"
+                "tmp=$(mktemp \"${backup}.tmp.XXXXXX\" 2>/dev/null) || fail\n"
+                "chmod 600 \"$tmp\" || fail\n"
+                "nv config show > \"$tmp\" 2>/dev/null || fail\n"
+                "[ -s \"$tmp\" ] || fail\n"
+                "bytes=$(wc -c < \"$tmp\" | tr -d '[:space:]') || fail\n"
+                "case \"$bytes\" in ''|*[!0-9]*) fail ;; esac\n"
+                "[ \"$bytes\" -gt 0 ] || fail\n"
+                "ln -T -- \"$tmp\" \"$backup\" 2>/dev/null || fail\n"
+                "rm -f -- \"$tmp\" || fail\n"
+                "tmp=\n"
+                "printf 'path=%s\\nbytes=%s\\n' \"$backup\" \"$bytes\"\n"
+            )
+
+            class LocalClock:
+                def sleep(self, delay):
+                    return None
+
+                def __getattr__(self, name):
+                    return getattr(real_clock, name)
 
             def task_phase(name):
                 phase[0] = name
@@ -1932,31 +2294,86 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                                           STRICT_HELD_ROWS)
                 if command == ZTP_SHOW:
                     return ZTP_DISABLED
-                if command[:3] == ("sh", "-c", initial._KEY_INSTALL_SCRIPT):
+                if command == ("ip", "addr", "show", "eth0"):
+                    return address
+                if command == ("ip", "route"):
+                    return "default via 203.0.113.1 dev eth0\n"
+                if command == key_command:
                     return "IBSW_PUBLIC_KEYS_UPDATED\n"
-                return ""
+                if (len(command) == 5 and command[:4] == ("sh", "-c", backup_script, "--")
+                        and re.fullmatch(r"[0-9]{8}-[0-9]{6}", command[4])):
+                    return "path=/home/PUBLIC-EXAMPLE-IB01/current_" + command[4] + ".yaml\nbytes=137\n"
+                if command in {
+                    STRICT_DIFF,
+                    ("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                    ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                    ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                    ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"),
+                    ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                }:
+                    return ""
+                raise AssertionError("PUBLIC non-strict model: unknown IB command")
 
             def transport(command, responder, timeout, **_kwargs):
                 # Leaf-local: sh -c 'export PATH=...; exec <ssh to the IB> <sh -c framed command>'.
-                if list(command[:2]) != ["sh", "-c"] or "; exec " not in command[2]:
+                try:
+                    self.assertIs(type(command), list)
+                    self.assertEqual(3, len(command))
+                    self.assertTrue(all(type(word) is str for word in command))
+                    self.assertEqual(["sh", "-c"], command[:2])
+                    self.assertEqual({}, _kwargs)
+                    safe_path = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+                    self.assertTrue(command[2].startswith(safe_path))
+                    nested = shlex.split(command[2][len(safe_path):])
+                    self.assertEqual(safe_path + shlex.join(nested), command[2])
+                    password_options = ["-o", "PubkeyAuthentication=no", "-o",
+                                        "PreferredAuthentications=password,keyboard-interactive"]
+                    common = ["ip", "vrf", "exec", "default", "ssh"]
+                    options = ["-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+                               "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                               "-o", "NumberOfPasswordPrompts=1"]
+                    destination = nested[-2]
+                    if destination == "admin@fe80::ff:fe00:1":
+                        header = [*common, "-6", "-tt", *options]
+                        tail = ["-B", "swp7", destination]
+                        self.assertIn(nested[:-1], (header + tail, header + password_options + tail))
+                        self.assertEqual(60, timeout)
+                    else:
+                        self.assertEqual("admin@203.0.113.2", destination)
+                        self.assertEqual([*common, "-tt", *options, *password_options, destination], nested[:-1])
+                        self.assertEqual(45, timeout)
+                    remote = shlex.split(nested[-1])
+                    self.assertEqual(3, len(remote))
+                    self.assertEqual(["sh", "-c"], remote[:2])
+                    self.assertEqual(shlex.join(remote), nested[-1])
+                    marker_match = re.match(r'^printf "\\n__HTTP_IB_BEGIN_([0-9a-f]{32})__\\n"; ', remote[2])
+                    self.assertIsNotNone(marker_match)
+                    marker = marker_match.group(1)
+                    prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                    suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                              + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                    self.assertTrue(remote[2].startswith(prefix) and remote[2].endswith(suffix))
+                    text = remote[2][len(prefix):-len(suffix)]
+                    ib_command = tuple(shlex.split(text))
+                    self.assertEqual(shlex.join(ib_command), text)
+                    self.assertIs(type(responder), initial.NestedResponder)
+                    self.assertIsNone(responder._phase)
+                    self.assertEqual(destination, responder.ib_destination)
+                    self.assertEqual(ethernet, responder.ethernet_password)
+                    self.assertEqual(selected, responder.ib_default_password)
+                    self.assertIs(False, responder.allow_password_change)
+                    self.assertIsNone(responder.ib_new_password)
+                    body = device_output(ib_command)
+                    prompt = f"{destination}'s password: "
+                    answers.append((ib_command, phase[0], responder(prompt)))
+                    commands.append(ib_command)
+                    return initial.SessionResult(
+                        f"{prompt}\n__HTTP_IB_BEGIN_{marker}__\n{body}"
+                        f"__HTTP_IB_END_{marker}__=0\n", 0)
+                except BaseException:
                     unexpected.append(list(command))
-                    return initial.SessionResult("", 255)
-                nested = shlex.split(command[2].split("; exec ", 1)[1])
-                if not nested[-2].startswith("admin@"):
-                    unexpected.append(list(command))
-                    return initial.SessionResult("", 255)
-                framed = shlex.split(nested[-1])[2]
-                marker = re.search(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", framed).group(1)
-                ib_command = tuple(shlex.split(
-                    framed.split('__\\n"; ', 1)[1].rsplit("; task_rc=$?", 1)[0]))
-                prompt = f"{nested[-2]}'s password: "
-                answers.append((phase[0], responder(prompt)))
-                commands.append(ib_command)
-                return initial.SessionResult(
-                    f"{prompt}\n__HTTP_IB_BEGIN_{marker}__\n{device_output(ib_command)}"
-                    f"__HTTP_IB_END_{marker}__=0\n", 0)
+                    raise
 
-            neighbor = initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             payload = {"nvos_initial_password": selected, "ib_target_password": PUBLIC_FD_TARGET}
             with ExitStack() as stack:
                 fd_argv = stack.enter_context(credentials_fd(payload))
@@ -1964,18 +2381,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("local_ethernet_keys", {"example-jump01"}),
                     ("prompt_ethernet_passwords", {"example-jump01": ethernet}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (links, fdb, vlans)),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                 ):
                     stack.enter_context(mock.patch.object(initial, name, return_value=value))
                 stack.enter_context(mock.patch.object(initial, "interactive_run", new=transport))
                 stack.enter_context(mock.patch.object(initial, "task_phase", new=task_phase))
-                stack.enter_context(mock.patch.object(initial.time, "sleep", return_value=None))
+                stack.enter_context(mock.patch.object(initial, "time", new=LocalClock()))
                 try:
                     self.run_initial(tool, ib_csv, p2p, cache, "--apply", "--yes", *fd_argv,
                                      "--execution-mode", "ethernet")
@@ -1990,13 +2405,16 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         self.assertIn("Services SUCCESS: desired values verified", report)
         self.assertIn(("nv", "set", "system", "dns", "server", "203.0.113.53"), commands)
         self.assertTrue(any(command[:3] == ("sh", "-c", initial._KEY_INSTALL_SCRIPT) for command in commands))
-        # The authentication read selects the IB credential (v15 order: the initial one first).
-        self.assertEqual([selected], [answer for name, answer in answers
-                                      if name == "IB authentication/readback"])
+        # Authentication read, O5 and the first ZTP read use the same selected IB
+        # credential, in that order, before Initial/Network proceeds (WP-6).
+        self.assertEqual(
+            [(STRICT_READ, selected), (("ip", "addr", "show", "eth0"), selected), (ZTP_SHOW, selected)],
+            [(command, answer) for command, name, answer in answers if name == "IB authentication/readback"],
+        )
         for stage, prefix in (("services", "Infra Services"), ("keys", "IB public keys"),
                               ("ipv4", "IPv4 readiness")):
             with self.subTest(stage=stage):
-                logins = [answer for name, answer in answers if name.startswith(prefix)]
+                logins = [answer for command, name, answer in answers if name.startswith(prefix)]
                 self.assertTrue(logins, f"the {stage} stage logs in to IB")
                 self.assertEqual([selected] * len(logins), logins,
                                  f"the {stage} stage answers IB with the selected IB credential, "
@@ -2039,7 +2457,7 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
 
     def test_force_fills_target_address_without_removing_existing_address(self) -> None:
-        # Requirement change: an old address alone is not a Day-0 conflict.
+        # D67-O1: a nonempty address set without the CSV target is a conflict.
         services = (
             "nv set system dns server 203.0.113.53\n"
             "nv set system ntp server ntp.ubuntu.com\n"
@@ -2057,10 +2475,34 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             "nv set interface eth0-1 ipv4 gateway 203.0.113.1\n"
             "nv set system hostname EXAMPLE-IB01\n" + services
         )
-        result, commands, report, _, _ = self.drive_one_device(first, verified, "--force")
-        self.assertEqual(0, result, report)
-        self.assertIn(("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"), commands)
-        self.assertEqual(1, commands.count(("nv", "config", "save")))
+        summaries = []
+        real_run_initial = self.run_initial
+
+        def capture_summary(tool, ib_csv, p2p, cache, *extra, **kwargs):
+            result = real_run_initial(tool, ib_csv, p2p, cache, *extra, **kwargs)
+            if "--generate-json" not in extra:
+                paths = list(cache.parent.rglob("summary.json"))
+                self.assertEqual(1, len(paths), "one actual per-run structured summary")
+                summaries.append(json.loads(paths[0].read_text(encoding="utf-8")))
+            return result
+
+        with mock.patch.object(self, "run_initial", side_effect=capture_summary):
+            result, commands, report, _, _ = self.drive_one_device(first, verified, "--force")
+        self.assertEqual(2, result, report)
+        self.assertNotIn(("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"), commands)
+        self.assertEqual(0, commands.count(("nv", "config", "save")))
+        self.assertFalse(any(command[:2] in {("nv", "set"), ("sh", "-c")}
+                             or command in {("nv", "config", "apply", "-y"), ("nv", "config", "save")}
+                             for command in commands), "conflict permits no setter, apply/save or backup shell")
+        self.assertEqual(1, len(summaries))
+        record = summaries[0]["records"]["example-ib01"]
+        self.assertEqual(("FAILED", "BLOCKED_NETWORK_CONFLICT", False),
+                         (record["outcome"], record["category"], record["writes_attempted"]))
+        self.assertEqual([{"field": "eth0 address", "expected": "203.0.113.2/24",
+                           "actual": ["198.51.100.2/24"]}], record["conflicts"])
+        self.assertTrue(any(line.lstrip().startswith("CONFLICT") and "eth0 address" in line
+                            and "203.0.113.2/24" in line and "198.51.100.2/24" in line
+                            for line in report.splitlines()), "explicit conflict facts stay in the CONFLICT line")
         self.assertFalse(any(command[:2] in {("nv", "unset"), ("nv", "reset")}
                              or command[:3] in {("nv", "config", "replace"), ("nv", "config", "reset")}
                              for command in commands))
@@ -2207,11 +2649,19 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_key_failure_on_first_device_does_not_block_second_device(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-key-continue-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             with ib_csv.open("a", encoding="utf-8") as stream:
-                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
+                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n")
             with p2p.open("a", encoding="utf-8") as stream:
                 stream.write('"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n')
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n"
+                "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,\n"
+                "EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n"
+            )
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             attempted: list[str] = []
             state = (
@@ -2226,29 +2676,48 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
             def boundary(target, *_args, **_kwargs):
                 command = tuple(_args[6])
-                if "authorized_keys" in " ".join(command):
+                addresses = {
+                    "EXAMPLE-IB01": (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n"),
+                    "EXAMPLE-IB02": (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:02 brd ff:ff:ff:ff:ff:ff\n"),
+                }
+                if target.ib.hostname not in addresses:
+                    raise AssertionError("PUBLIC key-failure model: unknown IB endpoint")
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(addresses[target.ib.hostname], 0)
+                key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
+                if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                     attempted.append(target.ib.hostname)
                     if target.ib.hostname == "EXAMPLE-IB01":
                         raise self.initial.SetupError("injected key installation failure")
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
+                if command == STRICT_DIFF:
+                    return self.initial.SessionResult("", 0)
+                if command != STRICT_READ:
+                    raise AssertionError("PUBLIC key-failure model: unknown IB command")
                 output = state.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
                     "EXAMPLE-IB01", target.ib.hostname
                 )
                 return self.initial.SessionResult(output, 0)
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
                 for name, value in (
                     ("local_ethernet_keys", set()),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (
+                        "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                        "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                        "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                        "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                     # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check is a
                     # transport outside this PUBLIC model.
@@ -2271,11 +2740,19 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
 
     def test_service_failure_on_first_device_continues_to_second_device(self) -> None:
         with tempfile.TemporaryDirectory(prefix="req10b-service-continue-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             with ib_csv.open("a", encoding="utf-8") as stream:
-                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
+                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n")
             with p2p.open("a", encoding="utf-8") as stream:
                 stream.write('"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n')
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n"
+                "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,\n"
+                "EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n"
+            )
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             attempted: list[str] = []
             applied: set[str] = set()
@@ -2294,11 +2771,33 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
             def boundary(target, *_args, **_kwargs):
                 command = tuple(_args[6])
                 name = target.ib.hostname
-                if (len(command) == 5 and command[:2] == ("sh", "-c")
-                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
-                        and command[3] == "--"):
+                addresses = {
+                    "EXAMPLE-IB01": (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n"),
+                    "EXAMPLE-IB02": (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:02 brd ff:ff:ff:ff:ff:ff\n"),
+                }
+                if name not in addresses:
+                    raise AssertionError("PUBLIC service-failure model: unknown IB endpoint")
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(addresses[name], 0)
+                key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
+                if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
-                if command[:5] == ("nv", "set", "system", "dns", "server"):
+                if command == STRICT_DIFF:
+                    return self.initial.SessionResult("", 0)
+                if command not in {
+                    STRICT_READ,
+                    ("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                    ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                    ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                    ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"),
+                    ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                }:
+                    raise AssertionError("PUBLIC service-failure model: unknown IB command")
+                if command == ("nv", "set", "system", "dns", "server", "203.0.113.53"):
                     attempted.append(name)
                     if name == "EXAMPLE-IB01":
                         raise self.initial.SetupError("injected service failure")
@@ -2311,19 +2810,21 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     output += services
                 return self.initial.SessionResult(output, 0)
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
                 stack.enter_context(mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}))
                 for name, value in (
                     ("local_ethernet_keys", set()),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (
+                        "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                        "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                        "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                        "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                     # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check is a
                     # transport outside this PUBLIC model.
@@ -2354,12 +2855,55 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
         text, but the device's raw output (the marker) must never appear, and
         the second device still completes.
         """
+        import hmac
+
+        # Frozen PUBLIC program from the independent WP4 preimplementation
+        # 7c1a6e27 document, not the current product constant or a desktop read.
+        backup_script = (
+            "set -eu\n"
+            "umask 077\n"
+            "fail() { printf '%s\\n' 'IB configuration backup failed' >&2; exit 1; }\n"
+            "[ \"$#\" -eq 1 ] || fail\n"
+            "stamp=$1\n"
+            "case \"$stamp\" in\n"
+            "    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n"
+            "    *) fail ;;\n"
+            "esac\n"
+            "case \"${HOME-}\" in /*) ;; *) fail ;; esac\n"
+            "backup=\"$HOME/current_${stamp}.yaml\"\n"
+            "[ ! -e \"$backup\" ] && [ ! -L \"$backup\" ] || fail\n"
+            "tmp=\n"
+            "trap 'if [ -n \"$tmp\" ]; then rm -f -- \"$tmp\"; fi' EXIT\n"
+            "trap 'exit 1' HUP INT TERM\n"
+            "tmp=$(mktemp \"${backup}.tmp.XXXXXX\" 2>/dev/null) || fail\n"
+            "chmod 600 \"$tmp\" || fail\n"
+            "nv config show > \"$tmp\" 2>/dev/null || fail\n"
+            "[ -s \"$tmp\" ] || fail\n"
+            "bytes=$(wc -c < \"$tmp\" | tr -d '[:space:]') || fail\n"
+            "case \"$bytes\" in ''|*[!0-9]*) fail ;; esac\n"
+            "[ \"$bytes\" -gt 0 ] || fail\n"
+            "ln -T -- \"$tmp\" \"$backup\" 2>/dev/null || fail\n"
+            "rm -f -- \"$tmp\" || fail\n"
+            "tmp=\n"
+            "printf 'path=%s\\nbytes=%s\\n' \"$backup\" \"$bytes\"\n"
+        )
+        self.assertEqual(846, len(backup_script.encode("utf-8")))
+        self.assertEqual("7c1a6e279773a41477e0e7a061d8ecf828273157b785aca844361a14ff3344b6",
+                         hashlib.sha256(backup_script.encode("utf-8")).hexdigest())
         with tempfile.TemporaryDirectory(prefix="req10b-raw-output-guard-") as directory:
-            _, tool, global_path, ib_csv, p2p, _, cache, _, _ = self.strict_fixture(directory)
+            root, tool, global_path, ib_csv, p2p, _, cache, laptop, management = self.strict_fixture(directory)
             with ib_csv.open("a", encoding="utf-8") as stream:
-                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,,,,\n")
+                stream.write("EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n")
             with p2p.open("a", encoding="utf-8") as stream:
                 stream.write('"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n')
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,\n"
+                "EXAMPLE-JUMP01,eth,192.0.2.10,,,,,,\n"
+                "EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:02,,,\n"
+            )
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             self.assertEqual(0, self.run_initial(tool, ib_csv, p2p, cache, "--generate-json"))
             marker = "PUBLIC-RAW-DEVICE-OUTPUT-" + os.urandom(6).hex()
             real_run_on_ib = self.initial.run_on_ib
@@ -2378,24 +2922,113 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 "nv set system date-time timezone Asia/Taipei\n"
             )
 
+            key_payload = base64.b64encode((laptop + management).encode("ascii")).decode("ascii")
+            backup_frames = []
+
             def boundary(target, *args, **kwargs):
                 command = tuple(args[6])
                 name = target.ib.hostname
-                if (len(command) == 5 and command[:2] == ("sh", "-c")
-                        and command[2] == self.initial._KEY_INSTALL_SCRIPT
-                        and command[3] == "--"):
+                addresses = {
+                    "EXAMPLE-IB01": "2: eth0: <UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n",
+                    "EXAMPLE-IB02": "2: eth0: <UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:02 brd ff:ff:ff:ff:ff:ff\n",
+                }
+                if name not in addresses:
+                    raise AssertionError("PUBLIC raw model: unknown IB endpoint")
+                if command == ("ip", "addr", "show", "eth0"):
+                    return self.initial.SessionResult(addresses[name], 0)
+                if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
-                if command[:5] == ("nv", "set", "system", "dns", "server"):
+                if (name == "EXAMPLE-IB01" and len(command) == 5
+                        and command[:4] == ("sh", "-c", backup_script, "--")
+                        and re.fullmatch(r"[0-9]{8}-[0-9]{6}", command[4])):
+                    # Real recursive category/permit/receipt parser, not a
+                    # fabricated state or a locally executed backup program.
+                    return real_run_on_ib(target, *args, **kwargs)
+                dns = ("nv", "set", "system", "dns", "server", "203.0.113.53")
+                if command == dns:
                     attempted.append(name)
                     if name == "EXAMPLE-IB01":
-                        # Real run_on_ib; only its PTY answer is modeled.
+                        # Preserve the original failed DNS answer/marker.
                         answer = self.initial.SessionResult("nv: error: " + marker + "\n", 1)
-                        with mock.patch.object(self.initial, "interactive_run", return_value=answer):
+
+                        def remote(argv, responder, timeout, **options):
+                            self.assertIs(type(argv), list)
+                            self.assertTrue(all(type(word) is str for word in argv))
+                            self.assertEqual({}, options)
+                            self.assertEqual(60, timeout)
+                            self.assertEqual(["ssh", "-tt", "-o", "ConnectTimeout=10",
+                                "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=2",
+                                "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR",
+                                "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                                "cumulus@192.0.2.10"], argv[:-1])
+                            carrier = shlex.split(argv[-1])
+                            self.assertEqual(3, len(carrier))
+                            self.assertEqual(["sh", "-c"], carrier[:2])
+                            self.assertEqual(shlex.join(carrier), argv[-1])
+                            safe = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+                            self.assertTrue(carrier[2].startswith(safe))
+                            inner_text = carrier[2][len(safe):]
+                            inner = shlex.split(inner_text)
+                            self.assertEqual(shlex.join(inner), inner_text)
+                            framed = shlex.split(inner[-1])
+                            self.assertEqual(3, len(framed))
+                            self.assertEqual(["sh", "-c"], framed[:2])
+                            self.assertEqual(shlex.join(framed), inner[-1])
+                            markers = re.findall(r"__HTTP_IB_BEGIN_([0-9a-f]{32})__", framed[2])
+                            self.assertEqual(1, len(markers))
+                            nonce = markers[0]
+                            self.assertEqual([nonce], re.findall(r"__HTTP_IB_END_([0-9a-f]{32})__", framed[2]))
+                            prefix = 'printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; '
+                            suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce
+                                      + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                            self.assertTrue(framed[2].startswith(prefix) and framed[2].endswith(suffix))
+                            text = framed[2][len(prefix):-len(suffix)]
+                            vector = shlex.split(text)
+                            backup = (len(vector) == 5 and vector[:4] == ["sh", "-c", backup_script, "--"]
+                                      and re.fullmatch(r"[0-9]{8}-[0-9]{6}", vector[4]) is not None)
+                            self.assertTrue(backup or vector == list(dns), "PUBLIC raw transport: unknown command")
+                            self.assertEqual(shlex.join(vector), text)
+                            header = ["ip", "vrf", "exec", "default", "ssh", "-6", "-tt",
+                                "-o", "ConnectTimeout=10", "-o", "StrictHostKeyChecking=accept-new",
+                                "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                                "-o", "NumberOfPasswordPrompts=1"]
+                            if backup:
+                                header += ["-o", "PubkeyAuthentication=no", "-o",
+                                           "PreferredAuthentications=password,keyboard-interactive"]
+                            self.assertEqual(header + ["-B", "swp7", "admin@fe80::ff:fe00:1"], inner[:-1])
+                            self.assertIs(type(responder), self.initial.NestedResponder)
+                            self.assertIsNone(responder._phase)
+                            self.assertEqual("eth-password", responder.ethernet_password)
+                            self.assertTrue(hmac.compare_digest(responder.ib_default_password,
+                                strict_kat(self.initial)["PASSWORD"]), "selected current credential binding differs")
+                            self.assertEqual("admin@fe80::ff:fe00:1", responder.ib_destination)
+                            self.assertIs(False, responder.allow_password_change)
+                            self.assertIsNone(responder.ib_new_password)
+                            if not backup:
+                                return answer
+                            stamp = vector[4]
+                            backup_frames.append(stamp)
+                            body = "path=/home/PUBLIC-EXAMPLE-IB01/current_" + stamp + ".yaml\nbytes=137\n"
+                            return self.initial.SessionResult("__HTTP_IB_BEGIN_" + nonce + "__\n" + body
+                                + "__HTTP_IB_END_" + nonce + "__=0\n", 0)
+
+                        with mock.patch.object(self.initial, "interactive_run", new=remote):
                             try:
                                 return real_run_on_ib(target, *args, **kwargs)
                             except self.initial.SetupError as error:
                                 raw_failures.append(str(error))
                                 raise
+                if command not in {
+                    STRICT_READ, STRICT_DIFF,
+                    ("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                    ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                    ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                    ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"),
+                    ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
+                }:
+                    raise AssertionError("PUBLIC raw model: unknown IB command")
                 if command == ("nv", "config", "apply", "-y"):
                     applied.add(name)
                 output = day0.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
@@ -2405,7 +3038,6 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     output += services
                 return self.initial.SessionResult(output, 0)
 
-            neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:17")
             with ExitStack() as stack:
                 from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
                 stack.enter_context(mock.patch.object(self.initial, "_new_jump_sessions", legacy_jump_sessions_factory(self.initial)))
@@ -2414,12 +3046,15 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("local_ethernet_keys", set()),
                     ("prompt_ethernet_passwords", {"example-jump01": "eth-password"}),
                     ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "interface table")),
-                    ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                    ("collect_ethernet_network_tables", (
+                        "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n",
+                        "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+                        "02:00:00:00:00:02 dev swp8 master bridge dynamic\n",
+                        "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n")),
                     ("save_ethernet_snapshot", cache.parent / "snapshot.txt"),
                     ("interface_status_line", "swp7 up"),
                     ("interface_oper_status", "up"),
-                    ("fdb_port_for_interface", "swp7"),
-                    ("neighbor_for_port", neighbor),
                     ("interface_vrf", "default"),
                     # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check is a
                     # transport outside this PUBLIC model.
@@ -2431,7 +3066,8 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                 result = self.run_strict(tool, ib_csv, p2p, cache, "--apply", "--yes",
                                          *fd_argv,
                                          global_path=global_path,
-                                         devices=("EXAMPLE-IB01", "EXAMPLE-IB02"))
+                                         devices=("EXAMPLE-IB01", "EXAMPLE-IB02"), raw_backup=True)
+            self.assertEqual(1, len(backup_frames), "the unique raw backup transport was reached")
             report = (cache.parent / "report.log").read_text(encoding="utf-8")
             # Table 6-1 rows 1 and 11 (guide :744, :754): INCOMPLETE, exit 2 (v15 RUNBOOK.md
             # 「失败设备继续、最终 incomplete 非零」).
@@ -2617,6 +3253,133 @@ class StrictManagementBoundaryControlTests(unittest.TestCase):
                                           devices=("EXAMPLE-IB01",), note=note)
         self.assertIn("SetupError", str(caught.exception))
         self.assertIn(fixed, str(caught.exception))
+
+
+class StrictBackupRecursionModelTests(unittest.TestCase):
+    """Pure PUBLIC causal controls; no KAT, policy backend, SSH or shell."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.initial = load_script("req10b_backup_recursion_controls", INITIAL)
+
+    def model(self, *, raw_backup=False, hostname="EXAMPLE-IB01",
+              parent=("nv", "set", "system", "dns", "server", "203.0.113.53"),
+              inside_helper=True, children=1):
+        from types import SimpleNamespace
+
+        app = self.initial
+        target = SimpleNamespace(ib=SimpleNamespace(hostname=hostname))
+        endpoint = object()
+        stamp = "20261118-120000"
+        backup = ["sh", "-c", app._CONFIG_BACKUP_SCRIPT, "--", stamp]
+        prefix = (target, endpoint, "cumulus", "PUBLIC-OOB", "admin", "PUBLIC-CURRENT", 5)
+
+        def public_init(policy, path, user):
+            # Explicit model of construction, not a real credential policy.
+            policy.interactive = True
+            self.assertEqual("admin", user)
+
+        def public_helper(*args, **kwargs):
+            self.assertIs(policy, kwargs.get("_password_policy"))
+            return app.run_on_ib(*args, local=False)
+
+        def public_device(*args, **kwargs):
+            command = tuple(args[7])
+            if command == STRICT_READ or command == tuple(backup):
+                return app.SessionResult("PUBLIC model response\n", 0)
+            if command == parent:
+                result = None
+                for _ in range(children):
+                    result = app.run_on_ib(*prefix, backup, local=False,
+                                          allow_password_change=False, password_only=True)
+                return result
+            raise AssertionError("PUBLIC recursion control: unknown command")
+
+        with tempfile.TemporaryDirectory(prefix="req10b-backup-control-") as directory:
+            global_path = Path(directory) / "01-global.yaml"
+            with mock.patch.object(app.ProjectPasswordPolicy, "__init__", new=public_init), \
+                 mock.patch.object(app, "_run_authorized_ib_command", new=public_helper), \
+                 mock.patch.object(app, "run_on_ib", new=public_device), \
+                 strict_management_boundary(self, app, kat={}, held_rows=(),
+                                            raw_backup=raw_backup) as witness:
+                policy = app.ProjectPasswordPolicy(global_path, "admin")
+                # This is the adapter's real readonly phase call, not an
+                # invented AUTH command or a hand-appended phase record.
+                app._execute_ib_phase(*prefix, list(STRICT_READ), local=False,
+                    _phase_operation="auth-probe-readonly", _password_policy=policy)
+                if inside_helper:
+                    app._run_authorized_ib_command(*prefix, list(parent), _password_policy=policy)
+                else:
+                    app.run_on_ib(*prefix, list(parent), local=False)
+            return witness, global_path, policy
+
+    def test_default_adapter_rejects_recursive_backup(self):
+        parameters = inspect.signature(strict_management_boundary).parameters
+        self.assertIn("raw_backup", parameters)
+        self.assertIs(False, parameters["raw_backup"].default)
+        with self.assertRaisesRegex(AssertionError, "recursive backup requires raw opt-in"):
+            self.model()
+
+    def test_raw_opt_in_keeps_full_parent_child_witness(self):
+        witness, global_path, policy = self.model(raw_backup=True)
+        dns = ("nv", "set", "system", "dns", "server", "203.0.113.53")
+        child = ("CONFIG-BACKUP", "20261118-120000")
+        self.assertEqual([dns], witness["helper"])
+        self.assertEqual([(STRICT_READ, False), (dns, True), (child, True)], witness["device"])
+        keys = ("kind", "id", "command", "hostname", "helper_id", "helper_depth",
+                "device_depth", "parent_device")
+        self.assertEqual([
+            ("device", 0, STRICT_READ, "EXAMPLE-IB01", None, 0, 1, None),
+            ("helper", 1, dns, "EXAMPLE-IB01", 1, 1, 0, None),
+            ("device", 2, dns, "EXAMPLE-IB01", 1, 1, 1, None),
+            ("device", 3, child, "EXAMPLE-IB01", 1, 1, 2, 2),
+        ], [tuple(event[key] for key in keys) for event in witness["events"]])
+        self.assertIsNone(witness["events"][0]["policy"])
+        self.assertTrue(all(event["policy"] is policy for event in witness["events"][1:]),
+                        "parent and child retain the same PUBLIC model policy identity")
+        assert_strict_management_path(self, witness, global_path=global_path,
+                                      devices=("EXAMPLE-IB01",), raw_backup=True)
+
+    def test_raw_opt_in_rejects_wrong_parent_or_extra_child(self):
+        cases = (
+            {"parent": ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com")},
+            {"hostname": "EXAMPLE-IB02"},
+            {"inside_helper": False},
+            {"children": 2},
+        )
+        for index, changes in enumerate(cases):
+            with self.subTest(case=index), self.assertRaisesRegex(
+                AssertionError, "raw backup child binding refused",
+            ):
+                self.model(raw_backup=True, **changes)
+
+        with self.subTest(case="same-command-helper-id-not-bijective"):
+            witness, global_path, policy = self.model(raw_backup=True)
+            assert_strict_management_path(self, witness, global_path=global_path,
+                                          devices=("EXAMPLE-IB01",), raw_backup=True)
+            dns = ("nv", "set", "system", "dns", "server", "203.0.113.53")
+            child = ("CONFIG-BACKUP", "20261118-120000")
+            # Independent counterexample: both DNS tops name helper 1,
+            # while the identical-command helper 4 has no device at all.
+            # The original sole backup child remains under device 2/helper 1.
+            witness["helper"].append(dns)
+            witness["device"].append((dns, True))
+            witness["events"].extend([
+                {"kind": "helper", "id": 4, "command": dns,
+                 "hostname": "EXAMPLE-IB01", "policy": policy, "helper_id": 4,
+                 "helper_depth": 1, "device_depth": 0, "parent_device": None},
+                {"kind": "device", "id": 5, "command": dns,
+                 "hostname": "EXAMPLE-IB01", "policy": policy, "helper_id": 1,
+                 "helper_depth": 1, "device_depth": 1, "parent_device": None},
+            ])
+            self.assertEqual([dns, dns], witness["helper"])
+            self.assertEqual([(STRICT_READ, False), (dns, True), (child, True), (dns, True)],
+                             witness["device"])
+            with self.assertRaisesRegex(
+                AssertionError, "raw top-level helper/device IDs must match one to one",
+            ):
+                assert_strict_management_path(self, witness, global_path=global_path,
+                                              devices=("EXAMPLE-IB01",), raw_backup=True)
 
 
 if __name__ == "__main__":

@@ -226,17 +226,27 @@ class ManagedInitialMethodCycle:
         self._check_project()
         return images
 
-    def start(self, tool, cache, csv_path, p2p, targets, services, keys):
+    def start(self, tool, cache, csv_path, p2p, targets, services, keys, *, selected_names=None):
         if self.tickets or not targets or any(target.ib.dev_type != "ib" for target in targets):
             raise AuthorityError("managed initial cycle has incompatible or reused targets")
         names = [target.ib.hostname.casefold() for target in targets]
         if len(names) != len(set(names)):
             raise AuthorityError("managed initial cycle has duplicate device identities")
+        selected = targets
+        if selected_names is not None:
+            if (type(selected_names) is not tuple or not selected_names
+                    or any(type(name) is not str for name in selected_names)):
+                raise AuthorityError("managed initial selection must be a nonempty tuple of names")
+            requested = [name.casefold() for name in selected_names]
+            if len(requested) != len(set(requested)) or not set(requested).issubset(names):
+                raise AuthorityError("managed initial selection has duplicate or unknown names")
+            # Only tickets are narrowed; every current-input recheck stays full.
+            selected = [target for target in targets if target.ib.hostname.casefold() in requested]
         self.tool, self.cache, self.csv, self.p2p = map(Path, (tool, cache, csv_path, p2p))
         self.targets = list(targets)
         self.services, self.keys = copy.deepcopy(services), copy.deepcopy(keys)
         try:
-            for target in targets:
+            for target in selected:
                 operation = "initial-" + uuid.uuid4().hex
                 ticket = begin_method(self.root, target.ib.hostname, operation,
                                       operation + ":" + target.ib.hostname, "initial_setup_managed")
@@ -247,7 +257,7 @@ class ManagedInitialMethodCycle:
             self.initial.key_install_command(keys)
             self.images = self._inputs()
             self.expected = {target.ib.hostname.casefold(): self.initial.initial_method_input_digest(target, services, keys)
-                             for target in targets}
+                             for target in selected}
         except Exception:
             self.close()
             raise

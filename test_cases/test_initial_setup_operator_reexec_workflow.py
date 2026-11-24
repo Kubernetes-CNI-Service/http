@@ -39,7 +39,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 INITIAL = ROOT / "infiniband/bringup/xdr-initial-setup/initial-setup.py"
 TOOLS = ("device_identity", "operator_identity", "project_contract", "credentials_fd",
-         "login_path", "hostname_ranges", "project_pointer")
+         "login_path", "hostname_ranges", "project_pointer", "inventory_subset")
 WHITELIST = {"PATH", "LANG", "LC_ALL", "TERM", "HOME", "USER", "LOGNAME", "HTTP_ZTP_ROOT_PARENT"}
 JUMP = "example-oob-leaf01"
 IB = "example-ib001"
@@ -137,7 +137,8 @@ if scenario == "sigint":
             "    bridge forward_delay 1500 vlan_filtering 1\\n41: ib-mgmt1000@br_default: <UP> mtu 1500 master oob\\n"
             "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\\n"),
         ("bridge", "fdb", "show"): "02:00:00:00:00:0a dev swp1 vlan 1000 master br_default\\n",
-        ("ip", "neighbor"): "fe80::a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\\n",
+        ("bridge", "vlan", "show"): "port vlan-id\\nswp1 1000 PVID Egress Untagged\\n",
+        ("ip", "neighbor"): "fe80::ff:fe00:a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\\n",
         ("ip", "-j", "address", "show"): json.dumps([{"ifname": "ib-mgmt1000", "flags": ["UP"], "operstate": "UP",
             "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24, "scope": "global"},
                           {"family": "inet6", "local": "fe80::1", "prefixlen": 64, "scope": "link"}]}]),
@@ -332,6 +333,8 @@ class InitialSetupOperatorReexecWorkflowTests(unittest.TestCase):
                     writer.writerow([JUMP, "eth_jump", "198.51.100.10", "", "", ""])
             else:
                 (self.work / name).write_text(text)
+        # No --project-dir here: preserve pointer-based reexec, and supply the repository M4 master.
+        (self.tree / "infiniband" / "02-devices_config.csv").write_bytes((self.work / "ib.csv").read_bytes())
         (self.record / "sigint.json").write_text(json.dumps({"jump": JUMP, "initial": secret("initial")}))
         args = ["--execution-mode", "management", "--ib-csv", str(self.work / "ib.csv"),
                 "--p2p", str(self.work / "p2p.dot"), "--target-cache", str(self.work / "tasks.json"),

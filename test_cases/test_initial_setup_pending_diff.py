@@ -25,7 +25,7 @@ def target():
 
 class PendingConfigurationRecoveryTests(unittest.TestCase):
     pending = ("nv set interface eth0 ipv4 address 192.0.2.10/24\n"
-               "nv set interface eth0-1 ipv4 gateway 192.0.2.1\n"
+               "nv set interface eth0 ipv4 gateway 192.0.2.1\n"
                "nv set interface eth0-1 type eth\n"
                "nv set system hostname ew-leaf001\n")
 
@@ -76,8 +76,84 @@ class PendingConfigurationRecoveryTests(unittest.TestCase):
                     self.run_command(body)
 
     def test_status_exception_does_not_extend_to_other_commands(self):
-        with self.assertRaises(app.SetupError):
-            self.run_command(self.pending, command=["nv", "config", "apply", "-y"])
+        from contextlib import ExitStack
+        import shlex
+        import sys
+        from types import SimpleNamespace
+        from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
+
+        t = target()
+        n = app.Neighbor("fe80::10", "vlan1000", t.ib.eth0_mac, "oob")
+        oob, stamp = "PUBLIC-OOB-example", "20261117-040000"
+        apply = ["nv", "config", "apply", "-y"]
+        backup = ["sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", stamp]
+        apply_marker, backup_marker = "ab" * 16, "cd" * 16
+        receipt = {"path": f"/home/PUBLIC/current_{stamp}.yaml", "bytes": 137}
+        dispatched = []
+
+        def transport(argv, _responder, _timeout):
+            outer = shlex.split(argv[-1])
+            self.assertTrue(len(outer) == 3 and outer[:2] == ["sh", "-c"])
+            nested = shlex.split(outer[2].split("; exec ", 1)[1])
+            self.assertEqual("admin@fe80::10", nested[-2])
+            frame = shlex.split(nested[-1])
+            self.assertTrue(len(frame) == 3 and frame[:2] == ["sh", "-c"])
+            if not dispatched:
+                name, command, marker, status = "backup", backup, backup_marker, 0
+                self.assertEqual("RUNNING", state.backup_state)
+                self.assertEqual(1, coordinator.metrics.get("config_backup_attempts"))
+                self.assertIsNone(coordinator.metrics.get("nvue_write_commands"))
+                body = f"path={receipt['path']}\nbytes={receipt['bytes']}\n"
+            else:
+                self.assertEqual(["backup"], dispatched, "no repeated backup or apply")
+                name, command, marker, status = "apply", apply, apply_marker, 1
+                self.assertEqual("VERIFIED", state.backup_state)
+                self.assertEqual(receipt, state.backup_receipt)
+                self.assertEqual(1, coordinator.metrics.get("nvue_write_commands"))
+                body = self.pending
+            prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+            suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                      + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+            self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix)
+                            and shlex.split(frame[2][len(prefix):-len(suffix)]) == command,
+                            "only the exact modeled backup/apply vector may be dispatched")
+            dispatched.append(name)
+            return app.SessionResult(
+                f"__HTTP_IB_BEGIN_{marker}__\n{body}__HTTP_IB_END_{marker}__={status}\n", status)
+
+        with ExitStack() as context:
+            context.enter_context(patch.dict(sys.modules))
+            for name in list(sys.modules):
+                if name == "tools" or name.startswith("tools."):
+                    del sys.modules[name]
+            context.enter_context(patch.object(sys, "path", [str(ROOT), *sys.path]))
+            context.enter_context(patch.object(app, "_TOOLS_ROOT", None))
+            identity = app._check_ib_identity(
+                t, "2: eth0: <UP> mtu 1500 state UP\n"
+                   "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n",
+                "", via_ipv4=False)
+            self.assertIs(True, identity["ok"])
+            task = app.PreparedIBTask(t, n, oob, False)
+            state = app._IBConfigWriteState(task, "admin", "cumulus", stamp, True,
+                endpoint=n, current_password=PASSWORD, identity_verified=identity["ok"])
+            self.assertEqual("NEW", state.backup_state)
+            coordinator = app.RuntimeCoordinator(SimpleNamespace(apply=True, yes=True), None, PASSWORD,
+                                                 [task], app.RuntimeInputAuthority([]))
+            coordinator.current_target = t
+            context.enter_context(patch.object(app, "_TASK_IB_CONFIG", state))
+            context.enter_context(patch.object(app, "_ACTIVE_COORDINATOR", coordinator))
+            context.enter_context(patch.object(app, "_JUMP_SESSIONS", None))
+            # The setter carrier is constructed first, but the backup is dispatched first.
+            context.enter_context(patch.object(app.os, "urandom", side_effect=[
+                bytes.fromhex(apply_marker), bytes.fromhex(backup_marker)]))
+            interactive = context.enter_context(patch.object(app, "interactive_run", side_effect=transport))
+            with self.assertRaises(app.SetupError) as rejected:
+                app.run_on_ib(t, n, "cumulus", oob, "admin", PASSWORD, 5, apply)
+            self.assertTrue(str(rejected.exception).startswith(
+                "nested SSH to ew-leaf001 via oob-leaf001 failed, exit=1:"),
+                "apply status one must reach and fail at the ordinary transport boundary")
+            self.assertEqual(2, interactive.call_count)
+        self.assertEqual(["backup", "apply"], dispatched)
         with self.assertRaises(app.SetupError):
             self.run_command(self.pending, transport_status=2, frame_status=2)
 
@@ -104,9 +180,7 @@ class PendingConfigurationRecoveryTests(unittest.TestCase):
             "nv set interface eth0 type eth\n",
             "nv set interface eth1 type eth\n",
             "nv set interface eth0-1 type eth\n",
-            "nv set interface eth0-1 ipv4 gateway 192.0.2.1\n",
             "nv set interface eth0 ipv4 gateway 192.0.2.1\n",
-            "nv set interface eth1 ipv4 gateway 192.0.2.1\n",
             "nv set interface eth0 ipv4 address 192.0.2.10/24\n",
             "nv set system hostname ew-leaf001\n",
         )
@@ -116,6 +190,34 @@ class PendingConfigurationRecoveryTests(unittest.TestCase):
                 self.assertEqual(body, result.output)
                 self.assertEqual(1, result.exit_code)
                 self.assertIs(int, type(result.exit_code))
+
+        gateway_bodies = (
+            "nv set interface eth0-1 ipv4 gateway 192.0.2.1\n",
+            "nv set interface eth1 ipv4 gateway 192.0.2.1\n",
+        )
+        original_owned = app._validate_owned_pending
+        for body in gateway_bodies:
+            with self.subTest(kind="single-unrequested-gateway", body=body):
+                with patch.object(app, "_validate_owned_pending", wraps=original_owned) as ownership:
+                    with self.assertRaises(app.SetupError):
+                        self.run_command(body)
+                self.assertEqual(1, ownership.call_count, "single refusal must reach the real owned-pending guard")
+                self.assertEqual(body, ownership.call_args.args[1])
+        single = target()
+        ib = app.Device("ew-leaf001", "ib", "192.0.2.10", "192.0.2.10/24",
+                        "192.0.2.1", "02:00:00:00:00:10", "192.0.2.11/24", "192.0.2.1")
+        dual_same = app.Target(ib, single.ethernet, "swp1", "eth0")
+        with patch(__name__ + ".target", return_value=dual_same):
+            for body in gateway_bodies:
+                with self.subTest(kind="dual-same-owned-gateway", body=body):
+                    with patch.object(app, "_validate_owned_pending", wraps=original_owned) as ownership:
+                        result = self.run_command(body)
+                    self.assertEqual(1, ownership.call_count, "dual positive must reach the real owned-pending guard")
+                    self.assertIs(ib, ownership.call_args.args[0])
+                    self.assertEqual(body, ownership.call_args.args[1])
+                    self.assertEqual(body, result.output)
+                    self.assertEqual(1, result.exit_code)
+                    self.assertIs(int, type(result.exit_code))
 
     def test_handoff_pending_is_bound_to_both_csv_addresses_and_gateways(self):
         # Only the PUBLIC fixture constructor changes. Production Target/Device,

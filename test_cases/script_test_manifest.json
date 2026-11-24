@@ -62,7 +62,8 @@
         "test_cases.test_public_project_fixture_workflow",
         "test_cases.test_shared_artifact_bundle",
         "test_cases.test_upload_package_contract",
-        "test_cases.test_reference_only_selector_workflow"
+        "test_cases.test_reference_only_selector_workflow",
+        "test_cases.test_initial_setup_latest_yaml_link_workflow"
       ]
     },
     {
@@ -238,7 +239,18 @@
         "test_cases.test_login_path",
         "test_cases.test_initial_setup_host_key_refresh",
         "test_cases.test_initial_setup_host_key_refresh_workflow",
-        "test_cases.test_project_pointer_contract"
+        "test_cases.test_project_pointer_contract",
+        "test_cases.test_initial_setup_inputs_and_routes",
+        "test_cases.test_initial_setup_cable_check",
+        "test_cases.test_initial_setup_direct_transport",
+        "test_cases.test_initial_setup_direct_transport_workflow",
+        "test_cases.test_initial_setup_direct_observers",
+        "test_cases.test_initial_setup_identity_and_backup",
+        "test_cases.test_initial_setup_login_path_workflow",
+        "test_cases.test_initial_setup_bringup_results",
+        "test_cases.test_initial_setup_bringup_results_workflow",
+        "test_cases.test_initial_setup_config_mode",
+        "test_cases.test_initial_setup_replace_workflow"
       ]
     },
     {
@@ -337,7 +349,9 @@
         "test_cases.test_ibdiagnet_analyzer_shipping_workflow",
         "test_cases.test_collection_lock_owner",
         "test_cases.test_cron_operator_identity",
-        "test_cases.test_cron_operator_identity_workflow"
+        "test_cases.test_cron_operator_identity_workflow",
+        "test_cases.test_monitor_c4_contract",
+        "test_cases.test_monitor_c4_workflow"
       ]
     },
     {
@@ -742,7 +756,8 @@
     "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-ibdiagnet/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
-    "DAY0-Prepare/template/ib.csv"
+    "DAY0-Prepare/template/ib.csv",
+    "test_cases/initial_setup_jump_fixture.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -2541,6 +2556,77 @@
       ],
       "tests": [
         "test_cases.test_project_pointer_contract"
+      ]
+    },
+    {
+      "id": "initial_setup_inputs_and_routes_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_inputs_and_routes"
+      ]
+    },
+    {
+      "id": "initial_setup_cable_check_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_cable_check"
+      ]
+    },
+    {
+      "id": "initial_setup_direct_transport_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_direct_transport",
+        "test_cases.test_initial_setup_direct_observers"
+      ]
+    },
+    {
+      "id": "initial_setup_identity_and_backup_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_identity_and_backup"
+      ]
+    },
+    {
+      "id": "initial_setup_bringup_results_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_bringup_results"
+      ]
+    },
+    {
+      "id": "initial_setup_config_mode_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_config_mode"
+      ]
+    },
+    {
+      "id": "monitor_c4_contract_direct",
+      "paths": [
+        "ethernet/monitor/sw-info.sh",
+        "ethernet/monitor/sw-link.sh",
+        "infiniband/monitor/sw-info.sh",
+        "infiniband/monitor/sw-link.sh",
+        "nvlink/monitor/sw-info.sh",
+        "nvlink/monitor/sw-link.sh",
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_c4_contract"
       ]
     }
   ],
@@ -4487,6 +4573,80 @@
       "tests": [
         "test_cases.test_project_pointer_entry_workflow"
       ]
+    },
+    {
+      "id": "initial_setup_login_path_and_identity",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/login_path.py",
+        "tools/inventory_subset.py",
+        "tools/hostname_ranges.py",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_login_path_workflow",
+        "test_cases.test_initial_setup_direct_transport_workflow",
+        "test_cases.test_initial_setup_direct_observers"
+      ]
+    },
+    {
+      "id": "initial_setup_bringup_results",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/hostname_ranges.py",
+        "tools/device_identity.py",
+        "ztp/config_sync_authority.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_bringup_results_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_replace_from_latest",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "ztp/config/cumulus/template/90-c2-generate_configs.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_replace_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_latest_yaml_bridge_packaging",
+      "members": [
+        "DAY0-Prepare/01-a-setup.py",
+        "DAY0-Prepare/02-unsetup.py",
+        "infra/docker/activate.py",
+        "tools/project_contract.py",
+        "tools/project_pointer.py",
+        "tools/_package_common.py",
+        "tools/tar-for-upload.py",
+        "tools/sync-code.py",
+        "tools/deploy-upload-archive.py",
+        "tools/deployment_prewrite_guard.py",
+        "ztp/config/cumulus/d-hostname2mac.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_latest_yaml_link_workflow"
+      ]
+    },
+    {
+      "id": "monitor_c4_raw_to_views_and_status",
+      "members": [
+        "ethernet/monitor/sw-info.sh",
+        "ethernet/monitor/sw-link.sh",
+        "infiniband/monitor/sw-info.sh",
+        "infiniband/monitor/sw-link.sh",
+        "nvlink/monitor/sw-info.sh",
+        "nvlink/monitor/sw-link.sh",
+        "monitor/generate-monitor-html.py",
+        "monitor/issue-tracker/switch-status.py",
+        "ethernet/monitor/cron.sh"
+      ],
+      "tests": [
+        "test_cases.test_monitor_c4_workflow"
+      ]
     }
   ],
   "path_rules": [
@@ -5251,6 +5411,29 @@
         "test_cases.test_upload_package_contract",
         "test_cases.test_project_contracts",
         "test_cases.test_ibdiagnet_analyzer_shipping_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/initial_setup_jump_fixture.py"
+      ],
+      "tests": [
+        "test_cases.test_ibsw225_managed_outer_guard_workflow",
+        "test_cases.test_initial_setup_bringup_results_workflow",
+        "test_cases.test_initial_setup_credentials_fd_workflow",
+        "test_cases.test_initial_setup_host_key_refresh_workflow",
+        "test_cases.test_initial_setup_jump_sessions",
+        "test_cases.test_initial_setup_offline_main",
+        "test_cases.test_initial_setup_oob_spine_main",
+        "test_cases.test_initial_setup_operator_reexec",
+        "test_cases.test_initial_setup_operator_reexec_workflow",
+        "test_cases.test_initial_setup_project_names_workflow",
+        "test_cases.test_initial_setup_replace_workflow",
+        "test_cases.test_initial_setup_strict_stage_skeleton",
+        "test_cases.test_initial_setup_summary_output",
+        "test_cases.test_initial_setup_target_credentials_workflow",
+        "test_cases.test_initial_setup_worker_queue",
+        "test_cases.test_req10b_services_keys_workflow"
       ]
     }
   ]

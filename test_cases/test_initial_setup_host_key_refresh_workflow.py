@@ -309,6 +309,11 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
     Real local synthetic keygen/files; only device transport, native hash and
     interactive input boundaries are replaced. No native/KAT or real SSH.
     """
+    # Independent EUI-64 vector for the PUBLIC CSV MAC 02:00:00:00:00:10.
+    LINK_LOCAL = "fe80::ff:fe00:10"
+    SCOPED_LINK_LOCAL = "fe80::ff:fe00:10%vlan1000"
+    GLOBAL_HASH = "$" + "6$PUBLICsalt$" + "A" * 86
+
     @classmethod
     def setUpClass(cls):
         hostkeys.LocalHostKeyRefreshTests.setUpClass.__func__(cls)
@@ -322,20 +327,20 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
         neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
         neutral.parent.mkdir(parents=True)
         neutral.write_text("DNS=192.0.2.53\nNTP=192.0.2.123\nTIMEZONE=Etc/UTC\n")
-        setting = "$" + "6$PUBLICsalt$" + "A" * 86
         (root / "01-global.yaml").write_text("schema_version: 2\nswitches:\n- ib:\n    system:\n"
-            "      aaa:\n        user:\n          admin:\n            pass" + "word: " + setting + "\n")
+            "      aaa:\n        user:\n          admin:\n            pass" + "word: " + self.GLOBAL_HASH + "\n")
         with (root / "ib.csv").open("w", newline="") as handle:
             writer = csv.writer(handle)
             writer.writerow(["hostname", "type", "eth0_ip", "netmask", "eth0_gw", "eth0_mac"])
             writer.writerow(["example-ib01", "ib", "192.0.2.10", "24", "192.0.2.1", "02:00:00:00:00:10"])
             writer.writerow(["EXAMPLE-JUMP01", "eth_jump", "198.51.100.10", "", "", ""])
+        (root / "02-devices_config.csv").write_bytes((root / "ib.csv").read_bytes())
         (root / "p2p.dot").write_text('"example-ib01":"eth0" -- "EXAMPLE-JUMP01":"swp1"\n')
         return [str(self.app.__file__), "--project-dir", str(root), "--p2p", str(root / "p2p.dot"),
                 "--target-cache", str(root / "tasks.json"), "--report", str(root / "report.log"),
                 "--snapshot-dir", str(root / "snapshots"), "--execution-mode", "management"]
 
-    def run_main(self, *, project_password=False, forced=False, readonly=False, local_conflict=False,
+    def run_main(self, *, project_password=True, forced=False, readonly=False, local_conflict=False,
                  linklocal_conflict=False, ipv4_unready=False, unverifiable=False, confirm=None):
         app = self.app
         with tempfile.TemporaryDirectory(prefix="wp5-real-main-") as directory, ExitStack() as stack:
@@ -349,14 +354,17 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
                       "192.0.2.12 " + self.keys["old"][0] + "\n")
             jump_path.write_text(before)
             if linklocal_conflict:
-                jump_path.write_text(before.replace("192.0.2.10", "fe80::10%vlan1000"))
+                jump_path.write_text(before.replace("192.0.2.10", self.SCOPED_LINK_LOCAL))
             local_path = home / ".ssh/known_hosts"
             local_path.write_text(before if local_conflict else "")
             argv = self.project(root) + ([] if readonly else ["--apply", *(["--yes"] if confirm is None else [])])
             if forced:
                 argv += ["--refresh-host-key", "example-ib01"]
-            current = readiness.credential("target" if project_password else "factory")
+            # Frozen PUBLIC device states; the only transition follows the
+            # complete authorized PAM exchange, never a rejected login.
+            device_state = ("target", False) if project_password else ("factory", True)
             auth_roles, reads, removals, ipv4 = [], [], [], []
+            phase_events, phase_nonces = [], set()
             actual_run = subprocess.run
 
             def keygen_lookup(address):
@@ -372,7 +380,8 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
                     ("nv", "show", "interface"): "swp1 up up\n",
                     ("ip", "-d", "link", "show"): "1: swp1: <UP> mtu 1500 master br_default\n40: br_default: <UP> mtu 1500\n    bridge vlan_filtering 1\n41: vlan1000@br_default: <UP> mtu 1500 master oob\n    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n",
                     ("bridge", "fdb", "show"): "02:00:00:00:00:10 dev swp1 vlan 1000 master br_default\n",
-                    ("ip", "neighbor"): "fe80::10 dev vlan1000 lladdr 02:00:00:00:00:10 REACHABLE\n",
+                    ("bridge", "vlan", "show"): "port vlan-id\nswp1 1000 PVID Egress Untagged\n",
+                    ("ip", "neighbor"): self.LINK_LOCAL + " dev vlan1000 lladdr 02:00:00:00:00:10 REACHABLE\n",
                     ("ip", "-j", "address", "show"): json.dumps([{"ifname": "vlan1000", "flags": ["UP"], "operstate": "UP", "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24}, {"family": "inet6", "local": "fe80::1", "prefixlen": 64}]}]),
                     ("ifquery", "vlan1000"): "iface vlan1000\n    vrf oob\n",
                 }
@@ -392,24 +401,70 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
                 return hostkeys.warning(address, path=str(path), fingerprint=self.keys["new"][1]).replace(
                     ":7\r\n", ":2\r\n").replace(":9\r\n", ":3\r\n")
 
+            def has_old_key(path, address):
+                old = {address + " " + self.keys[key][0] for key in ("old", "rsa")}
+                return any(line in old for line in path.read_text().splitlines())
+
+            def remember_new_key(path, address):
+                line = address + " " + self.keys["new"][0]
+                if line not in path.read_text().splitlines():
+                    with path.open("a") as handle:
+                        handle.write(line + "\n")
+
+            def identity_reply(command, marker):
+                """Only the two complete framed PUBLIC identity reads qualify."""
+                frame_argv = shlex.split(command[-1])
+                self.assertEqual(["sh", "-c"], frame_argv[:2])
+                self.assertEqual(3, len(frame_argv))
+                outer_prefix = ("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec ")
+                if frame_argv[2].startswith(outer_prefix):
+                    nested_argv = shlex.split(frame_argv[2][len(outer_prefix):])
+                    self.assertEqual(["ip", "vrf", "exec"], nested_argv[:3])
+                    self.assertEqual("ssh", nested_argv[4])
+                    frame_argv = shlex.split(nested_argv[-1])
+                    self.assertEqual(["sh", "-c"], frame_argv[:2])
+                    self.assertEqual(3, len(frame_argv))
+                reads = {
+                    ("ip", "addr", "show", "eth0"): (
+                        "2: eth0: <UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+                        "    inet 192.0.2.10/24 scope global eth0\n"),
+                    ("ip", "route"): "default via 192.0.2.1 dev eth0\n",
+                }
+                for read, payload in reads.items():
+                    expected = ('printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                                + shlex.join(read)
+                                + '; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                                + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                    if frame_argv[2] == expected:
+                        return payload
+                return None
+
             def transport(command, responder, timeout, **kwargs):
+                nonlocal device_state
                 text = " ".join(command)
                 if "ssh-keygen -f" in text:
                     self.assertIn(hostkeys.KNOWN_HOSTS, text)
-                    address = "fe80::10%vlan1000" if "fe80::10%vlan1000" in text else "192.0.2.10"
+                    address = self.SCOPED_LINK_LOCAL if self.SCOPED_LINK_LOCAL in text else "192.0.2.10"
                     p = actual_run(["ssh-keygen", "-f", str(jump_path), "-R", address],
                                    capture_output=True, text=True, timeout=10)
                     removals.append("jump")
                     return app.SessionResult((p.stdout + p.stderr).replace(str(jump_path), hostkeys.KNOWN_HOSTS), p.returncode)
                 frame = re.search(r"__HTTP_IB_BEGIN_([a-f0-9]{32})__", text)
                 auth = re.search(r"__HTTP_IB_AUTH_([a-f0-9]{32})_(auth-probe-readonly|password-change|post-change-read)__=BEGIN", text)
-                nested = "admin@fe80::10" in text
+                nested = ("admin@" + self.LINK_LOCAL) in text
                 if auth:
-                    if linklocal_conflict and "fe80::10%vlan1000" in jump_path.read_text():
-                        return app.SessionResult(warning(hostkeys.KNOWN_HOSTS, "fe80::10%vlan1000"), 255)
+                    if linklocal_conflict and has_old_key(jump_path, self.SCOPED_LINK_LOCAL):
+                        return app.SessionResult(warning(hostkeys.KNOWN_HOSTS, self.SCOPED_LINK_LOCAL), 255)
                     nonce, operation = auth.groups()
-                    self.assertEqual("auth-probe-readonly", operation)
+                    self.assertIn(operation, ("auth-probe-readonly", "password-change", "post-change-read"))
                     phase, output = responder._phase, ""
+                    self.assertIs(type(phase), app._IBPhase)
+                    self.assertEqual((nonce, operation, "admin@" + self.LINK_LOCAL,
+                                      "cumulus@198.51.100.10"),
+                                     (phase.nonce, phase.operation, phase.endpoint, phase.outer_endpoint))
+                    self.assertNotIn(nonce, phase_nonces, "every phase must be a fresh session")
+                    phase_nonces.add(nonce)
                     reader, writer = os.pipe()
                     try:
                         def feed(value):
@@ -417,48 +472,100 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
                             output += value
                             phase.observe(output)
                             reply = responder(output)
+                            if responder.password_change_blocked:
+                                # Same external cancellation observation as
+                                # strict_stage_skeleton._Session/interactive_run.
+                                # There is no PTY child or credential write here.
+                                self.assertEqual("auth-probe-readonly", operation)
+                                self.assertFalse(responder.allow_password_change)
+                                self.assertEqual("\x03", reply)
+                                phase.cancel_requested = True
+                                return reply
                             if reply is not None:
                                 phase.write_reply(writer, reply, responder, time.monotonic() + 60)
-                                os.read(reader, 65536)
+                                written = os.read(reader, 65536)
+                                self.assertTrue(written == reply.encode("utf-8") + b"\n",
+                                                "PUBLIC phase reply must complete its actual pipe write")
                             return reply
                         feed(f"\n__HTTP_IB_AUTH_{nonce}_{operation}__=BEGIN\n")
-                        answer = feed("admin@fe80::10's password: ")
-                        auth_roles.append("target" if answer == readiness.credential("target") else "factory")
-                        if answer != current:
-                            feed(f"\nadmin@fe80::10: Permission denied (password).\n__HTTP_IB_AUTH_{nonce}_{operation}__=EXIT:255\n")
+                        answer = feed("admin@" + self.LINK_LOCAL + "'s password: ")
+                        qualified = {readiness.credential("target"): "target",
+                                     readiness.credential("factory"): "factory"}
+                        self.assertTrue(answer in qualified, "unexpected synthetic credential role")
+                        auth_roles.append(qualified[answer])
+                        accepted_role, expired = device_state
+                        if answer != readiness.credential(accepted_role):
+                            self.assertEqual("auth-probe-readonly", operation,
+                                             "PAM/fresh read must not retry a rejected credential")
+                            phase_events.append((operation, qualified[answer], "rejected"))
+                            feed(f"\nadmin@{self.LINK_LOCAL}: Permission denied (password).\n__HTTP_IB_AUTH_{nonce}_{operation}__=EXIT:255\n")
                             return app.SessionResult(output, 255)
+                        if operation == "password-change":
+                            self.assertEqual(("factory", True), device_state)
+                            self.assertTrue(responder.allow_password_change)
+                            self.assertIsNotNone(app._ACTIVE_COORDINATOR)
+                            self.assertTrue(app._ACTIVE_COORDINATOR.authorized)
+                            self.assertEqual(1, app._ACTIVE_COORDINATOR.metrics.get("password_change_sessions", 0))
+                            old = feed("\nYour password has expired.\n(current) UNIX password: ")
+                            new = feed("\nNew password: ")
+                            again = feed("\nRetype new password: ")
+                            self.assertTrue(old == readiness.credential("factory")
+                                            and new == readiness.credential("target")
+                                            and again == readiness.credential("target"),
+                                            "PAM must consume only the fixed current/project PUBLIC roles")
+                            feed(f"\npasswd: password updated successfully\n__HTTP_IB_AUTH_{nonce}_{operation}__=EXIT:0\n")
+                            self.assertTrue(phase.pam_current_done and phase.new_done and phase.confirm_done)
+                            self.assertTrue(phase.updated)
+                            device_state = ("target", False)
+                            phase_events.append((operation, "factory", "changed"))
+                            return app.SessionResult(output, 0,
+                                password_change_attempted=responder.password_change_attempted)
+                        self.assertFalse(responder.allow_password_change)
+                        if expired:
+                            self.assertEqual("auth-probe-readonly", operation)
+                            self.assertEqual("\x03", feed(
+                                "\nYour password has expired.\n(current) UNIX password: "))
+                            self.assertFalse(phase.new_done or phase.confirm_done)
+                            phase_events.append((operation, "factory", "expired-cancelled"))
+                            return app.SessionResult(output, 255,
+                                password_change_required=responder.password_change_blocked)
+                        if operation == "post-change-read":
+                            self.assertEqual(("target", False), device_state)
+                            self.assertEqual("changed", phase_events[-1][2])
                         if linklocal_conflict:
-                            with jump_path.open("a") as handle:
-                                handle.write("fe80::10%vlan1000 " + self.keys["new"][0] + "\n")
+                            remember_new_key(jump_path, self.SCOPED_LINK_LOCAL)
                         feed(f"\n__HTTP_IB_BEGIN_{nonce}__\n{body}__HTTP_IB_END_{nonce}__=0\n__HTTP_IB_AUTH_{nonce}_{operation}__=EXIT:0\n")
+                        phase_events.append((operation, accepted_role, "readback"))
                         return app.SessionResult(output, 0)
                     finally:
                         os.close(reader)
                         os.close(writer)
-                # DEV strict readiness sends true directly (no readback frame),
-                # unlike the generic direct/read commands below. Keep its real shape.
-                if not nested and "198.51.100.10" in text:
-                    ipv4.append(1)
-                    if ipv4_unready:
-                        return app.SessionResult("ssh: connect to host 192.0.2.10 port 22: Connection refused", 255)
-                    if "192.0.2.10" in jump_path.read_text():
-                        return app.SessionResult(warning(hostkeys.KNOWN_HOSTS), 255)
-                    with jump_path.open("a") as handle:
-                        handle.write("192.0.2.10 " + self.keys["new"][0] + "\n")
-                    return app.SessionResult("", 0)
                 self.assertIsNotNone(frame, "normal IB read commands retain the actual frame")
                 marker = frame.group(1)
+                identity = identity_reply(command, marker)
+                # O5/D4 require a fresh framed MAC/IPv4/gateway readback,
+                # not the former empty success from a bare true command.
+                if not nested and "198.51.100.10" in text:
+                    self.assertIsNotNone(identity, "IPv4 readiness accepts only its two fixed identity reads")
+                    ipv4.append("route" if identity.startswith("default via ") else "address")
+                    if ipv4_unready:
+                        return app.SessionResult("ssh: connect to host 192.0.2.10 port 22: Connection refused", 255)
+                    if has_old_key(jump_path, "192.0.2.10"):
+                        return app.SessionResult(warning(hostkeys.KNOWN_HOSTS), 255)
+                    remember_new_key(jump_path, "192.0.2.10")
+                    return app.SessionResult(f"__HTTP_IB_BEGIN_{marker}__\n{identity}__HTTP_IB_END_{marker}__=0\n", 0)
                 if nested and "cat /etc/ssh/ssh_host_ed25519_key.pub" in text:
-                    self.assertEqual(current, responder("admin@fe80::10's password: "))
+                    self.assertEqual(readiness.credential(device_state[0]),
+                                     responder("admin@" + self.LINK_LOCAL + "'s password: "))
                     reads.append("ED25519")
                     payload = self.keys["old" if unverifiable else "new"][0] + "\n"
-                elif not nested and local_conflict and "192.0.2.10" in local_path.read_text():
+                elif not nested and local_conflict and has_old_key(local_path, "192.0.2.10"):
                     return app.SessionResult(warning(local_path), 255)
                 else:
                     if not nested and local_conflict:
-                        with local_path.open("a") as handle:
-                            handle.write("192.0.2.10 " + self.keys["new"][0] + "\n")
-                    payload = "service disabled\nstatus aborted\nconfig-save enabled enabled\n" if "nv show system ztp" in text else body
+                        remember_new_key(local_path, "192.0.2.10")
+                    payload = (identity if identity is not None else
+                        "service disabled\nstatus aborted\nconfig-save enabled enabled\n" if "nv show system ztp" in text else body)
                 return app.SessionResult(f"__HTTP_IB_BEGIN_{marker}__\n{payload}__HTTP_IB_END_{marker}__=0\n", 0)
 
             stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(home), "TMPDIR": str(root)}))
@@ -469,7 +576,11 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(app, "probe_ethernet_key", return_value="key"))
             stack.enter_context(mock.patch.object(app, "run_on_ethernet", side_effect=ethernet))
             stack.enter_context(mock.patch.object(app, "interactive_run", side_effect=transport))
-            stack.enter_context(mock.patch.object(app, "verify_password_hash", return_value=True))
+            stack.enter_context(mock.patch.object(
+                app, "verify_password_hash",
+                side_effect=lambda supplied, stored: (
+                    supplied == readiness.credential("target") and stored == self.GLOBAL_HASH),
+            ))
             stack.enter_context(mock.patch.object(app, "resolve_initial_ib_password", return_value=readiness.credential("factory")))
             stack.enter_context(mock.patch.object(app.getpass, "getpass", return_value=readiness.credential("target")))
             consent = stack.enter_context(mock.patch("builtins.input", return_value="y" if confirm else "n"))
@@ -485,19 +596,42 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
             self.assertEqual(1, len(summaries))
             evidence = json.loads(summaries[0].read_text())
             self.confirmation_calls = consent.call_count
+            self.phase_events = phase_events
+            self.phase_session_count = len(phase_nonces)
             return code, evidence, out.getvalue(), auth_roles, reads, removals, ipv4
 
     def test_reset_device_reruns_to_success_in_both_password_states(self):
+        # Factory expiry must use the real three-phase protocol and permit;
+        # an already-project-ready device must never rotate its password.
         for project_password in (False, True):
             with self.subTest(project_password=project_password):
                 code, evidence, output, auth, reads, removals, ipv4 = self.run_main(project_password=project_password)
                 self.assertEqual(0, code, output)
                 record = evidence["records"]["example-ib01"]
                 self.assertNotEqual("FAILED_OOB_IPV4_READINESS", record["category"])
-                self.assertEqual(["factory", "target"] if project_password else ["factory"], auth)
+                # I-039: the project credential gets the first chance.
+                self.assertEqual(["target"] if project_password else
+                                 ["target", "factory", "factory", "target"], auth)
+                expected_phases = ([("auth-probe-readonly", "target", "readback")]
+                    if project_password else [
+                        ("auth-probe-readonly", "target", "rejected"),
+                        ("auth-probe-readonly", "factory", "expired-cancelled"),
+                        ("password-change", "factory", "changed"),
+                        ("post-change-read", "target", "readback"),
+                    ])
+                self.assertEqual(expected_phases, self.phase_events)
+                self.assertEqual(len(expected_phases), self.phase_session_count)
+                self.assertTrue(record["writes_attempted"], "the real host-key removal is a device write")
+                self.assertEqual(1, record["metrics"].get("host_key_remove_attempts", 0))
+                for metric in ("nvue_write_commands", "public_key_install_attempts", "config_backup_attempts"):
+                    self.assertEqual(0, record["metrics"].get(metric, 0),
+                                     "already-configured device must not perform " + metric)
+                self.assertEqual(0 if project_password else 1,
+                                 record["metrics"].get("password_change_sessions", 0))
                 self.assertEqual(["ED25519"], reads)
                 self.assertEqual(["jump"], removals)
-                self.assertEqual(2, len(ipv4))
+                self.assertEqual(["address", "address", "route"], ipv4,
+                                 "failed address, then one complete IPv4 retry")
                 self.assertEqual(["jump"], [row["location"] for row in record["host_key"]])
                 self.assertEqual("verified", record["host_key"][0]["verification"])
                 self.assertNotIn("@@@@", json.dumps(evidence) + output)
@@ -528,10 +662,10 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
         self.assertEqual([], removals)
         code, evidence, output, auth, reads, removals, ipv4 = self.run_main(linklocal_conflict=True, forced=True)
         self.assertEqual(0, code, output)
-        self.assertEqual(["factory"], auth)
+        self.assertEqual(["target"], auth)
         self.assertEqual([], reads)
         self.assertEqual(["jump"], removals)
-        self.assertEqual("fe80::10%vlan1000", evidence["records"]["example-ib01"]["host_key"][0]["address"])
+        self.assertEqual(self.SCOPED_LINK_LOCAL, evidence["records"]["example-ib01"]["host_key"][0]["address"])
 
     def test_readonly_actual_main_records_pending_without_deletion(self):
         code, evidence, output, auth, reads, removals, ipv4 = self.run_main(readonly=True, local_conflict=True)

@@ -1257,6 +1257,8 @@ SETUP_LINK_SPECS = (
                   base="repository", view="bringup-input"),
     SetupLinkSpec("infiniband/bringup/ufm-setup-upgrade/p2p.xlsx", "infiniband/p2p.xlsx", "file", "required",
                   base="repository", view="bringup-input"),
+    SetupLinkSpec("infiniband/bringup/xdr-initial-setup/latest_yaml", "ztp/config/nvos/latest_yaml", "dir",
+                  "optional", writer="setup", base="repository"),
     # Publisher-owned pointers to the latest complete release (R-016 §3.4).
     SetupLinkSpec("ztp/config/cumulus/latest_yaml", "ztp/config/cumulus/template/99-output/latest", "dir",
                   "publisher", writer="publisher", base="repository", view="latest-yaml"),

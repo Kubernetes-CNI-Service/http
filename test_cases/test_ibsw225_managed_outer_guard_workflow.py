@@ -180,6 +180,13 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
                 "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n", encoding="utf-8")
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n"
+            )
+            (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             # Actual empty placeholders bypass ssh-keygen without forging a key.
             (pubdir / "laptop.pub").write_text("", encoding="ascii")
             (pubdir / "mgmt-server.pub").write_text("", encoding="ascii")
@@ -319,6 +326,13 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
                 "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n", encoding="utf-8")
+            master_csv = (
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n"
+            )
+            (project / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+            (project / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
             home = base / "home"
             (home / ".ssh").mkdir(parents=True, mode=0o700)
             private = home / ".ssh/id_ed25519"
@@ -399,13 +413,12 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                 ethernet = {
                     ("hostname",): "EXAMPLE-JUMP01\n",
                     ("nv", "show", "interface"): "Interface Admin Oper\nswp7 up up\n",
-                    # The access VLAN's Leaf SVI with IPv4 keeps the IB on the Leaf path (v15
-                    # CURRENT-CONTRACT.md:26-27「目标 VLAN 的真实 Leaf SVI 存在且具有 IPv4 时走原 Leaf
-                    # 路径」); v15 reads the Leaf addresses for that decision.
+                    # swp7 has no bridge master: preserve the original physical-port path.
                     ("ip", "-d", "link", "show"): ("7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9216\n"
                                                    "8: vlan1@bridge: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9216\n"
                                                    "    vlan protocol 802.1Q id 1 <REORDER_HDR>\n"),
                     ("bridge", "fdb", "show"): "02:00:00:00:00:01 dev swp7 vlan 1 master bridge\n",
+                    ("bridge", "vlan", "show"): "port vlan-id\nswp7 1 PVID Egress Untagged\n",
                     ("ip", "neighbor"): "fe80::1 dev swp7 lladdr 02:00:00:00:00:01 REACHABLE\n",
                     ("ifquery", "swp7"): "",
                     ("ip", "-j", "address", "show"): json.dumps([{
@@ -426,6 +439,10 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                         # Strict path's read-only pending probe: nothing uncommitted.
                         transports.append("pending_diff")
                         return initial.SessionResult("", 0)
+                    if command == ["ip", "addr", "show", "eth0"]:
+                        return initial.SessionResult(
+                            "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                            "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
                     self.assertEqual(command[:4], ["sh", "-c", initial._KEY_INSTALL_SCRIPT, "--"])
                     self.assertEqual(len(command), 5)
                     self.assertEqual(base64.b64decode(command[4]).decode(), "\n".join(expected_lines) + "\n")
@@ -587,8 +604,6 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
         project, storage = context["project"], context["storage"]
         receipt_path = storage / ".authority/example-ib01.method.json"
         original_receipt = receipt_path.read_bytes()
-        inventory = project / "02-devices_config.csv"
-        inventory.write_bytes(context["csv"].read_bytes())
         # Independent input to the existing release parser, not a mocked parser
         # or a claim that this test exercises the production release publisher.
         global_bytes = (b"schema_version: 2\ncommon:\n  mgmt:\n"

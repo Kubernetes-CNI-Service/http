@@ -379,8 +379,8 @@ class InitialSetupOperatorReexecTests(unittest.TestCase):
                             self.fail("Ctrl-C at the prompt escaped as KeyboardInterrupt")
                     self.assertIsNotNone(cancelled)
                     self.assertRegex(str(cancelled), r"cancelled$")
-            # The same prompt inside a real --apply run: the device asks for the target after an
-            # expired initial password; Ctrl-C there writes nothing and the run ends 2.
+            # I039 now obtains the project candidate before trying the initial credential.
+            # Ctrl-C at that real --apply prompt must still write nothing and end 2.
             world = _MainWorld(self, root, expired=True)
             prompts = []
 
@@ -391,6 +391,7 @@ class InitialSetupOperatorReexecTests(unittest.TestCase):
             code = world.run_guarded(["--apply", "--yes"], getpass_side_effect=interrupted_prompt)
             self.assertEqual(2, code, world.err)
             self.assertEqual(1, len(prompts), "the target prompt was reached and interrupted once")
+            self.assertEqual([], world.reads, "cancelled project-first admission must not try the IB")
             self.assertEqual([], world.writes)
             self.assertEqual(["guard"], world.guard_events)
 
@@ -452,6 +453,8 @@ class _MainWorld:
             writer.writerow(["hostname", "type", "eth0_ip", "netmask", "eth0_gw", "eth0_mac"])
             writer.writerow([IB, "ib", "192.0.2.10", "24", "192.0.2.1", "02:00:00:00:00:0a"])
             writer.writerow([JUMP, "eth_jump", "198.51.100.10", "", "", ""])
+        if script == INITIAL:
+            (root / "02-devices_config.csv").write_bytes((root / "ib.csv").read_bytes())
         (root / "p2p.dot").write_text(f'"{IB}":"eth0" -- "{JUMP}":"swp1"\n')
 
     def argv(self, *extra):
@@ -474,7 +477,8 @@ class _MainWorld:
                 "41: ib-mgmt1000@br_default: <UP> mtu 1500 master oob\n"
                 "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n"),
             ("bridge", "fdb", "show"): "02:00:00:00:00:0a dev swp1 vlan 1000 master br_default\n",
-            ("ip", "neighbor"): "fe80::a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\n",
+            ("bridge", "vlan", "show"): "port vlan-id\nswp1 1000 PVID Egress Untagged\n",
+            ("ip", "neighbor"): "fe80::ff:fe00:a dev ib-mgmt1000 lladdr 02:00:00:00:00:0a REACHABLE\n",
             ("ip", "-j", "address", "show"): json.dumps([{
                 "ifname": "ib-mgmt1000", "flags": ["BROADCAST", "MULTICAST", "UP"], "operstate": "UP",
                 "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24, "scope": "global"},
@@ -520,6 +524,7 @@ class _MainWorld:
         if peer is None:
             self.writes.append(text)
             raise AssertionError("Unexpected SSH destination: " + text)
+        self.test.assertEqual("fe80::ff:fe00:a", peer.group(1), "only the PUBLIC CSV-derived LL is modelled")
         feed, result = self.session(responder)
         if auth is not None:
             nonce, operation = auth.groups()
@@ -539,14 +544,30 @@ class _MainWorld:
                 return result(1)
             feed(f"\n__HTTP_IB_BEGIN_{nonce}__\n{CONFIGURED}__HTTP_IB_END_{nonce}__=0\n{end}0\n")
             return result(0)
-        if frame is None or not ("nv show system ztp" in text or "nv config show -o commands" in text):
+        identity_payload = None
+        if frame is not None:
+            nonce = frame.group(1)
+            for command, payload in (
+                ("ip addr show eth0", "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                 "    link/ether 02:00:00:00:00:0a brd ff:ff:ff:ff:ff:ff\n"
+                 "    inet 192.0.2.10/24 scope global eth0\n"),
+                ("ip route", "default via 192.0.2.1 dev eth0\n"),
+            ):
+                program = ('printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; ' + command
+                           + '; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce
+                           + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                if program in text:
+                    identity_payload = payload
+        if frame is None or not (identity_payload is not None or "nv show system ztp" in text
+                                 or "nv config show -o commands" in text):
             result(255)
             self.writes.append(text)
             raise AssertionError("Unexpected IB command: " + text)
         self.reads.append(text)
         if responder(f"admin@{peer.group(1)}'s password: ") != FACTORY:
             raise AssertionError("the IB read must answer with the selected IB credential")
-        payload = ("service disabled\nstatus aborted\nconfig-save enabled enabled\n"
+        payload = (identity_payload if identity_payload is not None else
+                   "service disabled\nstatus aborted\nconfig-save enabled enabled\n"
                    if "nv show system ztp" in text else CONFIGURED)
         nonce = frame.group(1)
         result(0)
@@ -603,7 +624,7 @@ class _MainWorld:
 class _ImportRecorder(importlib.abc.MetaPathFinder):
     """Fails and records any import of the names a Leaf directory must never need (O5, DEV README :275)."""
 
-    FORBIDDEN = ("yaml", "tools.project_contract", "tools.operator_identity")
+    FORBIDDEN = ("yaml", "tools.project_contract", "tools.operator_identity", "tools.inventory_subset")
 
     def __init__(self) -> None:
         self.hits = []
@@ -645,6 +666,15 @@ class LeafLayoutImportTests(unittest.TestCase):
             script = self.leaf(folder)
             app = load_script(f"initial_setup_operator_reexec_leaf_import_{os.getpid()}", script)
             world = _MainWorld(self, folder, app=app, script=script)
+            # A real management-layout P1, not the Leaf copy, performs M4 and mints v6.
+            management = _MainWorld(self, folder)
+            self.assertEqual(0, management.run_guarded(("--generate-json",)), management.err)
+            cache = json.loads((folder / "tasks.json").read_text())
+            self.assertEqual(6, cache["version"])
+            self.assertEqual("compared", cache["inventory_check"]["status"])
+            self.assertEqual({"status", "subset_sha256", "master_sha256"}, set(cache["inventory_check"]))
+            (folder / "02-devices_config.csv").unlink()
+            self.assertFalse((folder / "tools" / "inventory_subset.py").exists())
             leaf_mode = ("--execution-mode", "ethernet", "--local-ethernet-hostname", JUMP)
             host = (mock.patch.object(app.socket, "gethostname", return_value=JUMP),
                     mock.patch.object(app.socket, "getfqdn", return_value=JUMP))
@@ -652,10 +682,8 @@ class LeafLayoutImportTests(unittest.TestCase):
             os.write(writer, json.dumps({"jump_passwords": {JUMP: secret("leaf")},
                                          "nvos_initial_password": FACTORY}).encode())
             os.close(writer)
-            # The Leaf reads the target cache the management server generated (v15 contract).
-            with self.fresh_tools(), mock.patch.object(sys, "path", [str(folder), *sys.path]), \
-                    mock.patch.object(app, "_TOOLS_ROOT", None):
-                self.assertEqual(0, world.run_guarded(("--generate-json",)), world.err)
+            # The Leaf reads the management server's qualified cache without a local master.
+            self.assertFalse((folder / "02-devices_config.csv").exists())
             runs = (("help", ("--help",)), ("check-only", leaf_mode),
                     ("credentials-fd", (*leaf_mode, "--credentials-fd", str(reader))))
             for label, extra in runs:

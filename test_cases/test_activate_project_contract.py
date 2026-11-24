@@ -1146,17 +1146,33 @@ class WP4StatusTests(unittest.TestCase):
         self.assertNotIn("[ERROR]", printed)
 
     def test_publisher_rows_are_not_checked(self):
-        table = wp4_table()
-        publisher = [row.path for row in table.SETUP_LINK_SPECS if row.role == "publisher"]
-        self.assertTrue(publisher)
+        publisher = ("ztp/config/cumulus/latest_yaml", "ztp/config/nvos/latest_yaml")
+        alias = "infiniband/bringup/xdr-initial-setup/latest_yaml"
+        alias_text = "../../../ztp/config/nvos/latest_yaml"
+        self.assertEqual(alias_text, os.readlink(self.root / alias))
         for path in publisher:
             link = self.root / path
             link.parent.mkdir(parents=True, exist_ok=True)
             os.symlink("no-release-yet", link)
+        before = tree_state(self.root.parent)
+
+        # D67-O10 B: the setup-owned optional alias may mention the publisher as its literal target.
+        # Exempt exactly this row; the two publisher-owned paths still have no status of their own.
+        alias_detail = f"{alias}：目标缺失（{alias_text} 不是存在的目录）"
+        alias_line = f"  [LIST] {alias_detail}"
         printed = self.assert_status(0)
+        lines = printed.splitlines()
+        self.assertEqual(1, lines.count(alias_line), printed)
+        lines.remove(alias_line)
+        report = wp4_inspect(self.root)
+        self.assertEqual("目标缺失", report["links"][alias])
+        self.assertEqual(1, report["listed"].count(alias_detail))
+        self.assertEqual([], report["problems"])
         for path in publisher:
-            self.assertNotIn(path, printed)
-            self.assertNotIn(path, wp4_inspect(self.root)["links"])
+            self.assertNotIn(path, "\n".join(lines))
+            self.assertNotIn(path, report["links"])
+            self.assertFalse(any(path in row for row in report["listed"] if row != alias_detail))
+        self.assertEqual(before, tree_state(self.root.parent), "--status writes nothing")
 
     def test_ufm_image_link_under_http_image_is_right_i024(self):
         # I-024: a project with UFM, http/image present, setup's link ../../../image: right, not an escape.

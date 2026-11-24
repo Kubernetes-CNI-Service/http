@@ -265,9 +265,8 @@ NVL_KEY_COLS     = 2
 NVL_MAX_SNAPS    = 80
 NVL_WATCH_FIELDS = [
     "Effective-Error",
-    "Carrier-Down-Count",
-    "RX-Physical-Errors",
-    "TX-Physical-Errors",
+    "Link-Downed",
+    "QP1-Drops",
 ]
 
 # ── 日志 ──────────────────────────────────────────────────────────────────────
@@ -2664,21 +2663,30 @@ def parse_temp_table(text: str) -> list:
 
 
 def parse_firmware_versions(text: str) -> tuple[str, str, str]:
-    """从 ``nv show platform firmware`` 提取 BIOS、SSD 和 ASIC 版本。"""
+    """从每张表的 Actual FW 整列提取 BIOS、SSD 和 ASIC 版本。"""
     bios = ""
     ssd = ""
     asic = ""
+    actual_start = None
+    actual_end = None
     for line in text.splitlines():
+        actual_header = re.search(r"\bActual\s+FW\b", line)
+        part_header = re.search(r"\bPart\s+Number\b", line)
+        if actual_header and part_header and actual_header.start() < part_header.start():
+            actual_start, actual_end = actual_header.start(), part_header.start()
+            continue
         parts = line.split()
         if len(parts) < 2:
             continue
         component = parts[0].upper()
+        version = (line[actual_start:actual_end].strip()
+                   if actual_start is not None else parts[1])
         if component == "BIOS":
-            bios = parts[1]
+            bios = "NA" if version.casefold() == "not specified" else version
         elif component == "SSD":
-            ssd = parts[1]
+            ssd = version
         elif component == "ASIC" or component.startswith(("SPECTRUM", "QUANTUM")):
-            asic = parts[1]
+            asic = version
     return bios, ssd, asic
 
 
@@ -2979,6 +2987,7 @@ def parse_inventory(text: str) -> dict:
             break
 
     components = []
+    component_metadata = []
     if header_index is not None:
         for line in lines[header_index + 1:]:
             if not line.strip() or re.match(r"^[-\s]+$", line):
@@ -2995,6 +3004,16 @@ def parse_inventory(text: str) -> dict:
                 "type": type_value,
                 "state": state_value,
             })
+            component_metadata.append((fields[-4].casefold(), fields[-3].casefold()))
+
+    identified_psu = any(
+        component["type"] == "psu" and (model != "n/a" or serial != "n/a")
+        for component, (model, serial) in zip(components, component_metadata)
+    )
+    if identified_psu:
+        for component, (model, serial) in zip(components, component_metadata):
+            if component["type"] == "psu" and model == "n/a" and serial == "n/a":
+                component["state"] = "absent"
 
     counts = {"psu_ok": 0, "psu_fail": 0, "fan_ok": 0, "fan_fail": 0}
     for component in components:
@@ -3152,7 +3171,8 @@ def parse_info_file(
     # ── nv show system health ─────────────────────────────────────────────────
     # 实际格式：status      OK
     health_kv = parse_nv_kv(secs.get("nv show system health", ""))
-    info["health"] = health_kv.get("status", "unknown").lower()
+    health = health_kv.get("status", "unknown").strip().lower()
+    info["health"] = health if health in {"ok", "", "unknown", "n/a", "missing"} else "not ok"
 
     # ── nv show platform environment temperature ──────────────────────────────
     # 实际格式：Asic-Temp-Sensor  64.0  120.0  105.0  5  ok
@@ -3207,15 +3227,15 @@ def parse_info_file(
                     # total denominator, but do not inflate the red counter.
                     downs.append(m2.group(1))
     else:
-        # IB 格式：Interface  State  Speed  MTU  Type  ...  Logical State  Physical State
-        #   sw1p1  up  800G  4096  ib  ...  Active  LinkUp
+        # IB uses swNpN; only NVLink uses acpN. State and logical state both matter.
+        port_pattern = r"^(acp\d+)\s+(up|down)\b" if info["sw_type"] == "NVL" else r"^(sw\d+p\d+)\s+(up|down)\b"
         for line in secs.get("nv show interface", "").splitlines():
-            m2 = re.match(r"^(sw\d+p\d+)\s+(up|down)\b", line.strip(), re.IGNORECASE)
+            m2 = re.match(port_pattern, line.strip(), re.IGNORECASE)
             if m2:
                 total += 1
-                if re.search(r"\bActive\b", line):
+                if m2.group(2).lower() == "up" and re.search(r"\bActive\b", line):
                     up += 1
-                elif m2.group(2).lower() == "up":
+                else:
                     downs.append(m2.group(1))
 
     info["interfaces_up"]    = up
@@ -3729,7 +3749,10 @@ def render_eth_card(sw: dict) -> str:
 
     h = sw["health"].lower()
     h_cls = {"ok": "h-ok", "not ok": "h-err", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
-    h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
+    if sw["sw_type"] == "UFM":
+        h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
+    else:
+        h_lbl = "OK" if h == "ok" else "NOT OK"
 
     if h == "missing":
         attempted = bool(sw.get("collection_attempted", True))
@@ -3789,7 +3812,8 @@ def render_eth_card(sw: dict) -> str:
         i_cls = "i-warn" if down_count else "i-ok"
         i_html = f'<span class="{i_cls}">{up}/{total} up</span>'
         if down_count:
-            down_detail = "Admin up / Oper down:\n" + "\n".join(downs)
+            title = "Down接口" if sw["sw_type"] in {"IB", "NVL"} else "Admin up / Oper down"
+            down_detail = title + ":\n" + "\n".join(downs)
             if down_count > len(downs):
                 down_detail += f"\n… plus {down_count - len(downs)} more"
             i_html += (f' <span class="i-down" title="{escape(down_detail)}">'
@@ -4174,7 +4198,10 @@ def render_sw_list_row(sw: dict) -> str:
 
     h = sw["health"].lower()
     h_cls = {"ok": "h-ok", "not ok": "h-err", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
-    h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
+    if sw["sw_type"] == "UFM":
+        h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
+    else:
+        h_lbl = "OK" if h == "ok" else "NOT OK"
 
     if h == "missing":
         reason = escape(sw.get("collection_error") or "本批次未返回采集文件")
@@ -4211,7 +4238,8 @@ def render_sw_list_row(sw: dict) -> str:
         i_cls  = "i-warn" if down_count else "i-ok"
         i_html = f'<span class="{i_cls}">{up}/{total}</span>'
         if down_count:
-            down_detail = "Admin up / Oper down:\n" + "\n".join(downs)
+            title = "Down接口" if sw["sw_type"] in {"IB", "NVL"} else "Admin up / Oper down"
+            down_detail = title + ":\n" + "\n".join(downs)
             if down_count > len(downs):
                 down_detail += f"\n… plus {down_count - len(downs)} more"
             i_html += (f' <span class="i-down" title="{escape(down_detail)}">'
@@ -4669,6 +4697,8 @@ def build_link_content(snaps, headers, latest, latest_ts,
         "PFC-Receive":         "PFC-Rx",
         "PFC-Send":            "PFC-Tx",
         "Carrier-Down-Count":  "Carrier↓",
+        "Link-Downed":         "Link↓",
+        "QP1-Drops":           "QP1",
         "QP1-Drops-Receive":   "QP1-Rx",
         "QP1-Drops-Transmit":  "QP1-Tx",
     }

@@ -188,7 +188,7 @@ INITIAL = [
 ]
 NETWORK = [
  ["nv","set","interface","eth0","ipv4","address","203.0.113.2/24"],
- ["nv","set","interface","eth0-1","ipv4","gateway","203.0.113.1"],
+ ["nv","set","interface","eth0","ipv4","gateway","203.0.113.1"],
  ["nv","set","interface","eth0-1","link","state","up"],
  ["nv","set","interface","eth0-1","type","eth"],
  ["nv","set","system","hostname","EXAMPLE-IB01"],
@@ -199,6 +199,42 @@ SERVICES = [
  ["nv","set","system","ntp","server","time.ib.example.test"],
  ["nv","set","system","date-time","timezone","Asia/Taipei"],
 ]
+# Complete independent WP4 proposal literal, frozen before its producer.
+# This MODEL never executes it or returns configuration contents.
+EXPECTED_BACKUP_SCRIPT = (
+    'set -eu\n'
+    'umask 077\n'
+    "fail() { printf '%s\\n' 'IB configuration backup failed' >&2; exit 1; }\n"
+    '[ "$#" -eq 1 ] || fail\n'
+    'stamp=$1\n'
+    'case "$stamp" in\n'
+    '    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n'
+    '    *) fail ;;\n'
+    'esac\n'
+    'case "${HOME-}" in /*) ;; *) fail ;; esac\n'
+    'backup="$HOME/current_${stamp}.yaml"\n'
+    '[ ! -e "$backup" ] && [ ! -L "$backup" ] || fail\n'
+    'tmp=\n'
+    'trap \'if [ -n "$tmp" ]; then rm -f -- "$tmp"; fi\' EXIT\n'
+    "trap 'exit 1' HUP INT TERM\n"
+    'tmp=$(mktemp "${backup}.tmp.XXXXXX" 2>/dev/null) || fail\n'
+    'chmod 600 "$tmp" || fail\n'
+    'nv config show > "$tmp" 2>/dev/null || fail\n'
+    '[ -s "$tmp" ] || fail\n'
+    'bytes=$(wc -c < "$tmp" | tr -d \'[:space:]\') || fail\n'
+    'case "$bytes" in \'\'|*[!0-9]*) fail ;; esac\n'
+    '[ "$bytes" -gt 0 ] || fail\n'
+    'ln -T -- "$tmp" "$backup" 2>/dev/null || fail\n'
+    'rm -f -- "$tmp" || fail\n'
+    'tmp=\n'
+    'printf \'path=%s\\nbytes=%s\\n\' "$backup" "$bytes"\n'
+)
+def backup_stamp(command):
+    if (len(command) == 5 and command[:2] == ["sh", "-c"]
+            and command[2] == EXPECTED_BACKUP_SCRIPT and command[3] == "--"
+            and re.fullmatch(r"[0-9]{8}-[0-9]{6}", command[4])):
+        return command[4]
+    return None
 def public_command(command):
     # Only independent PUBLIC closed vectors can enter a durable event. Never
     # serialize a rejected candidate's raw argv, even before business admission.
@@ -207,9 +243,12 @@ def public_command(command):
         ["nv","config","diff","-o","commands"],
         ["nv","show","system","ztp"], ["nv","config","apply","-y"],
         ["nv","config","save"], ["true"],
+        ["ip","addr","show","eth0"], ["ip","route"],
     ]
     if command in known:
         return command
+    if backup_stamp(command) is not None:
+        return ["CONFIG-BACKUP"]
     if command[:2] == ["sh","-c"]:
         return ["KEY-SHELL"]
     return ["UNKNOWN-COMMAND"]
@@ -237,6 +276,35 @@ def show_state(S):
         ]
     return "\n".join(lines) + "\n"
 def business(command, S):
+    # Persist an independent pre-existing-vs-new Network distinction. A new
+    # apply must save before readiness; already-configured KEY-only may probe.
+    S.setdefault("peer_network_saved", S["network"])
+    if command == ["ip", "addr", "show", "eth0"]:
+        body = ("2: eth0: <UP> mtu 1500 state UP\n"
+                "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n")
+        if S["network"]:
+            body += "    inet 203.0.113.2/24 scope global eth0\n"
+        if S["peer_ipv4"]:
+            if not (S["initial"] and S["network"] and S["peer_network_saved"] and not S["pending"]):
+                raise ValueError("IPv4 readiness before configured saved Network")
+            S["peer_ipv4_addr"] = True
+            record("ipv4-read")
+        else:
+            S["peer_identity_read"] = True
+            record("identity-addr-read")
+        return body, 0
+    if command == ["ip", "route"]:
+        if not (S["peer_ipv4"] and S.pop("peer_ipv4_addr", False)):
+            raise ValueError("IPv4 route without this attempt's fresh address")
+        record("ipv4-route-read")
+        return "default via 203.0.113.1 dev eth0\n", 0
+    stamp = backup_stamp(command)
+    if stamp is not None:
+        if not S.get("peer_identity_read") or stamp in S.get("peer_backup_stamps", []):
+            raise ValueError("backup without fresh LL identity or reusing a prior backup")
+        S.setdefault("peer_backup_stamps", []).append(stamp)
+        record("config-backup", fresh_identity=True)
+        return "path=" + str(root / "remote-home" / ("current_" + stamp + ".yaml")) + "\nbytes=23\n", 0
     if command == ["nv","config","show","-o","commands"]:
         return show_state(S), 0
     if command == ["nv","config","diff","-o","commands"]:
@@ -262,12 +330,14 @@ def business(command, S):
         record("apply-y")
         return "", 0
     if command == ["nv","config","save"]:
+        if S["network"]:
+            S["peer_network_saved"] = True
         record("save")
         return "",0
     if command[:2] == ["sh","-c"]:
         return key_program(command)
     if command == ["true"]:
-        record("ipv4-read")
+        # Other original authentication uses remain legal, never fresh identity.
         return "",0
     record("rejected-business", reason="outside literal NVOS contract")
     return "PUBLIC command outside fixture contract\n",2
@@ -352,7 +422,7 @@ def run():
         return 255
     logical = unwrap(rest)
     if logical in (["hostname"],["nv","show","interface"],["ip","-d","link","show"],
-                   ["bridge","fdb","show"],["ip","neighbor"],["ifquery","vlan1"],
+                   ["bridge","fdb","show"],["bridge","vlan","show"],["ip","neighbor"],["ifquery","vlan1"],
                    ["ip","-j","address","show"]):
         payloads = {
           # v15 reads the Leaf's own addresses before any Spine step (D1a-19, guide :748):
@@ -365,9 +435,10 @@ def run():
           }]) + "\n",
           ("hostname",): "EXAMPLE-JUMP01\n",
           ("nv","show","interface"): "Interface Admin Oper\nswp7 up up\n",
-          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 state UP\n    link/ether 02:00:00:00:00:07\n8: vlan1@br_default: <UP> mtu 1500 state UP\n    vlan protocol 802.1Q id 1\n",
+          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 master br_default state UP\n    link/ether 02:00:00:00:00:07\n8: vlan1@br_default: <UP> mtu 1500 state UP\n    vlan protocol 802.1Q id 1\n",
           ("bridge","fdb","show"): "02:00:00:00:00:17 dev swp7 vlan 1 master br_default dynamic\n",
-          ("ip","neighbor"): "fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\n",
+          ("bridge","vlan","show"): "port              vlan-id\nswp7              1 PVID Egress Untagged\n",
+          ("ip","neighbor"): "fe80::ff:fe00:17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\n",
           ("ifquery","vlan1"): "iface vlan1\n    vrf default\n",
         }
         record("ethernet-read", command=logical)
@@ -377,7 +448,7 @@ def run():
     if nested[:4] != ["ip","vrf","exec","default"] or nested[4] != "ssh":
         raise ValueError("nested transport")
     destination = nested[-2]
-    if destination not in ("admin@fe80::17", "admin@203.0.113.2"):
+    if destination not in ("admin@fe80::ff:fe00:17", "admin@203.0.113.2"):
         raise ValueError("inner endpoint")
     inner_flags = nested[5:-2]
     allowed6 = ["-6","-tt","-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new",
@@ -445,12 +516,12 @@ def run():
             select.select([], [], [], 10)
             return 255
         if C["scenario"] == "after-pam-network":
-            emit("\nssh: connect to host fe80::17 port 22: Network is unreachable\n")
+            emit("\nssh: connect to host fe80::ff:fe00:17 port 22: Network is unreachable\n")
             record("non-auth-refusal", reason="network", operation=operation)
             if phase_nonce: emit("__HTTP_IB_AUTH_"+phase_nonce+"_"+operation+"__=EXIT:255\n")
             return 255
         errors = {
-          "network":"ssh: connect to host fe80::17 port 22: Network is unreachable\n",
+          "network":"ssh: connect to host fe80::ff:fe00:17 port 22: Network is unreachable\n",
           "hostkey":"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n",
           "pam-expired":"Your password has expired; password change required\n",
           "no-frame":"PUBLIC command returned without its frame\n",
@@ -465,6 +536,15 @@ def run():
                 with open(C["global_path"],"a") as file:
                     file.write("# PUBLIC changed after authenticated read, before next mutation\n")
                 S["global_changed"]=True;record("global-changed-after-read")
+        if command in (["ip", "addr", "show", "eth0"], ["ip", "route"]) or backup_stamp(command) is not None:
+            if frame is None:
+                raise ValueError("metadata and backup require their complete command frame")
+        S["peer_ipv4"] = destination == "admin@203.0.113.2"
+        if command != ["ip", "route"]:
+            S.pop("peer_ipv4_addr", None)
+        if (S["peer_ipv4"] and phase_nonce is not None
+                and command in (["ip", "addr", "show", "eth0"], ["ip", "route"])):
+            raise ValueError("IPv4 readiness unexpectedly used a phase operation")
         body, rc = business(command,S)
         state_path.write_text(json.dumps(S))
         response(body,rc,frame)
@@ -498,7 +578,7 @@ def emit_public_failure_summary(result, secrets):
         ("INITIAL-AUTOSAVE", ["nv", "set", "system", "config", "auto-save", "state", "enabled"]),
         ("INITIAL-ZTP", ["nv", "set", "system", "ztp", "config-save", "enabled"]),
         ("NETWORK-ADDRESS", ["nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"]),
-        ("NETWORK-GATEWAY", ["nv", "set", "interface", "eth0-1", "ipv4", "gateway", "203.0.113.1"]),
+        ("NETWORK-GATEWAY", ["nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"]),
         ("NETWORK-LINK", ["nv", "set", "interface", "eth0-1", "link", "state", "up"]),
         ("NETWORK-TYPE", ["nv", "set", "interface", "eth0-1", "type", "eth"]),
         ("NETWORK-HOSTNAME", ["nv", "set", "system", "hostname", "EXAMPLE-IB01"]),
@@ -616,6 +696,18 @@ class _OwnedTTY:
     def readline(self, *_args):
         raise AssertionError("unexpected direct stdin read outside getpass boundary")
 
+def _fixture_clock_patch(app, *, sleep, monotonic=None):
+    """Override this fixture's app reference, never shared stdlib functions."""
+    original = app.time
+    changes = {"sleep": sleep}
+    if monotonic is not None:
+        changes["monotonic"] = monotonic
+    class FixtureClock:
+        def __getattr__(self, name):
+            return changes[name] if name in changes else getattr(original, name)
+    return mock.patch.object(app, "time", new=FixtureClock())
+
+
 class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -650,7 +742,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
         self.assertTrue(own_source.read_bytes() == source, "owned source copy must be exact")
         leaf_tools = tool / "tools"
         leaf_tools.mkdir(mode=0o700)
-        for name in ("device_identity", "hostname_ranges", "login_path"):
+        for name in ("device_identity", "hostname_ranges", "login_path", "inventory_subset"):
             current_source = ROOT / "tools" / (name + ".py")
             source_identity, module_bytes = bound_file(current_source)
             owned_module = leaf_tools / (name + ".py")
@@ -673,6 +765,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
             "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:17,,,\n"
             "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n", encoding="ascii")
         self.assertEqual([9, 9, 9], [len(line.split(",")) for line in csv.read_text().splitlines()])
+        (root / "infiniband/02-devices_config.csv").write_bytes(csv.read_bytes())
         p2p = root / "p2p.dot"
         p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-JUMP01":"7";\n', encoding="ascii")
         pubdir = root / "infiniband/publickey"
@@ -913,7 +1006,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                 stack.enter_context(mock.patch.object(Path, "home", return_value=f["root"]))
                 stack.enter_context(mock.patch.object(app.getpass, "getpass", new=getpass))
                 stack.enter_context(mock.patch.object(builtins, "input", new=shared_selection))
-                stack.enter_context(mock.patch.object(app.time, "sleep", new=readiness_sleep))
+                stack.enter_context(_fixture_clock_patch(app, sleep=readiness_sleep, monotonic=clock if uncertain else None))
                 stack.enter_context(mock.patch.object(app.subprocess, "run", new=run))
                 stack.enter_context(mock.patch.object(app.os, "execvp", new=execvp))
                 stack.enter_context(mock.patch.object(app.pty, "fork", new=fork))
@@ -922,7 +1015,6 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
                 if uncertain:
                     stack.enter_context(mock.patch.object(app.os, "killpg", new=killpg))
                     stack.enter_context(mock.patch.object(app.os, "kill", new=kill))
-                    stack.enter_context(mock.patch.object(app.time, "monotonic", new=clock))
                 stack.enter_context(redirect_stdout(stdout))
                 stack.enter_context(redirect_stderr(stderr))
                 try:
@@ -991,13 +1083,19 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
         self.assertEqual(0, observation["rc"])
         cache = json.loads(f["cache"].read_text())
         # Table 6-1 row 6 (guide :749): v15 CURRENT-CONTRACT.md:20 "cache version 5".
-        self.assertEqual(5, cache["version"], "P1 writes the v15 offline cache version 5")
+        # v315 r617 WP1 :558 explicitly advances this existing P1 fixture to6.
+        self.assertEqual(6, cache["version"], "P1 writes the approved version6 offline cache")
+        self.assertEqual({"status": "compared",
+            "subset_sha256": hashlib.sha256(f["csv"].read_bytes()).hexdigest(),
+            "master_sha256": hashlib.sha256(
+                (f["root"] / "infiniband/02-devices_config.csv").read_bytes()).hexdigest()},
+            cache["inventory_check"])
         self.assertFalse(self.kat["PASSWORD"] in f["cache"].read_text(),
                          "P1 cache may not contain cleartext target")
         return cache
 
     def assert_no_new_writes(self, before, after):
-        writing = {"mutation", "apply-y", "save", "key-shell", "pam-target"}
+        writing = {"mutation", "apply-y", "save", "key-shell", "pam-target", "config-backup"}
         self.assertEqual([e for e in before if e["kind"] in writing],
                          [e for e in after if e["kind"] in writing])
 
@@ -1026,7 +1124,11 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
         self.assertTrue(any(e["kind"] == "key-shell" and e["actual_rc"] == 0 and
                             e["receipt"] in ("IBSW_PUBLIC_KEYS_UPDATED", "IBSW_PUBLIC_KEYS_UNCHANGED") for e in events),
                         "actual generated shell receipt must be consumed")
-        self.assertTrue(any(e["kind"] == "ipv4-read" for e in events))
+        self.assertEqual(["ipv4-read", "ipv4-route-read"],
+                         [e["kind"] for e in events if e["kind"] in ("ipv4-read", "ipv4-route-read")])
+        backups = [i for i, e in enumerate(events) if e["kind"] == "config-backup"]
+        self.assertEqual(1, len(backups), "one independent backup receipt before the first NVUE mutation")
+        self.assertLess(backups[0], next(i for i, e in enumerate(events) if e["kind"] == "mutation"))
         self.assertTrue("failed=0" in result["stdout"])
 
     def test_real_c2_p1_manual_pam_fresh_read_and_all_stage_consumers_use_project_target(self):
@@ -1058,7 +1160,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
             self.assertEqual(3, sum(e["kind"] == "apply-y" for e in events),
                              "Initial, Network and Services have independent -y commits")
             self.assertEqual(3, sum(e["kind"] == "save" for e in events))
-            self.assertEqual(["OOB", "TARGET", "TARGET"], result["prompts"])
+            self.assertEqual(["TARGET", "TARGET", "OOB"], result["prompts"])
             self.assertTrue(any(e["phase"] for e in events if e["kind"] == "inner-answer"),
                             "provisional phase protocol must be actual wire, not synthesized evidence")
             self.assertFalse(f["credentials"].exists())
@@ -1086,6 +1188,111 @@ class TargetFixtureLeafCompatibilityTests(unittest.TestCase):
         for name in ("device_identity", "hostname_ranges", "login_path"):
             (tools / (name + ".py")).write_bytes((ROOT / "tools" / (name + ".py")).read_bytes())
 
+    def test_legacy_master_none_responder_delegates_real_key_probe(self):
+        with tempfile.TemporaryDirectory(prefix="target-legacy-key-") as folder:
+            _, f = self.metadata_fixture(folder)
+            app = f["app"]
+            jump = app.Device("EXAMPLE-JUMP01", "eth_jump", "192.0.2.10", "192.0.2.10", "", "", "", "")
+            expected = ["ssh", "-o", "ConnectTimeout=2", "-o", "ServerAliveInterval=10",
+                        "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "LogLevel=ERROR", "-o", "BatchMode=yes",
+                        "-o", "PreferredAuthentications=publickey", "-o", "ControlMaster=no",
+                        "-o", "ControlPath=none", "cumulus@192.0.2.10",
+                        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"]
+            def public_probe(command, *args, **kwargs):
+                self.assertEqual(expected, command)
+                self.assertEqual((), args)
+                self.assertEqual(dict(text=True, capture_output=True, timeout=2, check=False), kwargs)
+                return subprocess.CompletedProcess(command, 0, "EXAMPLE-JUMP01\n", "")
+            with ExitStack() as scope:
+                for owner, name in ((app, "verify_password_hash"), (app, "interactive_run"),
+                                    (app.subprocess, "Popen"), (app.pty, "fork"),
+                                    (app.os, "execvp"), (app.tempfile, "mkdtemp"),
+                                    (app.getpass, "getpass")):
+                    scope.enter_context(mock.patch.object(owner, name, side_effect=AssertionError(
+                        "PUBLIC metadata legacy-master contract forbids external execution")))
+                run = scope.enter_context(mock.patch.object(app.subprocess, "run", side_effect=public_probe))
+                probe = scope.enter_context(mock.patch.object(app, "probe_ethernet_key", wraps=app.probe_ethernet_key))
+                sessions = legacy_jump_sessions_factory(app)(timeout=2)
+                answer = sessions.open_jump_master(jump, "cumulus", None)
+                probe.assert_called_once_with(jump, "cumulus", 2)
+                run.assert_called_once()
+                self.assertEqual("192.0.2.10", answer)
+                self.assertEqual({}, sessions.records, "a legacy key MODEL creates no real master record")
+                self.assertIsNone(sessions.jump_control_path(jump))
+
+    def test_legacy_master_password_mode_has_typed_address_and_does_not_reprobe(self):
+        with tempfile.TemporaryDirectory(prefix="target-legacy-password-") as folder:
+            _, f = self.metadata_fixture(folder)
+            app = f["app"]
+            jump = app.Device("EXAMPLE-JUMP01", "eth_jump", "192.0.2.10", "192.0.2.10", "", "", "", "")
+            expected = ["ssh", "-o", "ConnectTimeout=2", "-o", "ServerAliveInterval=10",
+                        "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", "LogLevel=ERROR", "-o", "BatchMode=yes",
+                        "-o", "PreferredAuthentications=publickey", "-o", "ControlMaster=no",
+                        "-o", "ControlPath=none", "cumulus@192.0.2.10",
+                        "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec hostname"]
+            def public_probe(command, *args, **kwargs):
+                self.assertEqual(expected, command)
+                self.assertEqual((), args)
+                self.assertEqual(dict(text=True, capture_output=True, timeout=2, check=False), kwargs)
+                return subprocess.CompletedProcess(command, 255, "", "Permission denied (publickey).\n")
+            with ExitStack() as scope:
+                for owner, name in ((app, "verify_password_hash"), (app, "interactive_run"),
+                                    (app.subprocess, "Popen"), (app.pty, "fork"),
+                                    (app.os, "execvp"), (app.tempfile, "mkdtemp"),
+                                    (app.getpass, "getpass")):
+                    scope.enter_context(mock.patch.object(owner, name, side_effect=AssertionError(
+                        "PUBLIC metadata legacy-master contract forbids external execution")))
+                run = scope.enter_context(mock.patch.object(app.subprocess, "run", side_effect=public_probe))
+                probe = scope.enter_context(mock.patch.object(app, "probe_ethernet_key", wraps=app.probe_ethernet_key))
+                sessions = legacy_jump_sessions_factory(app)(timeout=2)
+                with self.assertRaises(app.SshFailure) as caught:
+                    sessions.open_jump_master(jump, "cumulus", None)
+                error = caught.exception
+                self.assertIs(type(error), app.SshFailure)
+                self.assertIs(error.kind, app.SshFailureKind.JUMP_AUTHENTICATION)
+                self.assertEqual(("outer", "192.0.2.10", "EXAMPLE-JUMP01", "OOB_JUMP_AUTHENTICATION"),
+                                 (error.hop, error.address, error.jump, error.failure_kind))
+                self.assertEqual({"example-jump01": {"address": "192.0.2.10"}}, sessions.records)
+                responder = mock.Mock(side_effect=AssertionError("PUBLIC legacy MODEL must not query a responder"))
+                self.assertEqual("192.0.2.10", sessions.open_jump_master(
+                    jump, "cumulus", responder, candidates=("192.0.2.10",)))
+                responder.assert_not_called()
+                probe.assert_called_once_with(jump, "cumulus", 2)
+                run.assert_called_once()
+                self.assertEqual({"example-jump01": {"address": "192.0.2.10"}}, sessions.records)
+                self.assertIsNone(sessions.jump_control_path(jump))
+
+    def test_legacy_master_preserves_non_auth_failures_and_refuses_unknown_probe_mode(self):
+        for kind in ("setup", "network", "unknown-mode"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory(prefix="target-legacy-refuse-") as folder:
+                _, f = self.metadata_fixture(folder)
+                app = f["app"]
+                jump = app.Device("EXAMPLE-JUMP01", "eth_jump", "192.0.2.10", "192.0.2.10", "", "", "", "")
+                failure = (app.SetupError("PUBLIC independent host identity refusal") if kind == "setup" else
+                           app.SshFailure(app.SshFailureKind.JUMP_UNREACHABLE, "outer", "192.0.2.10", "EXAMPLE-JUMP01"))
+                with ExitStack() as scope:
+                    for owner, name in ((app, "verify_password_hash"), (app, "interactive_run"),
+                                        (app.subprocess, "run"), (app.subprocess, "Popen"),
+                                        (app.pty, "fork"), (app.os, "execvp"),
+                                        (app.tempfile, "mkdtemp"), (app.getpass, "getpass")):
+                        scope.enter_context(mock.patch.object(owner, name, side_effect=AssertionError(
+                            "PUBLIC metadata legacy-master contract forbids external execution")))
+                    probe = scope.enter_context(mock.patch.object(app, "probe_ethernet_key",
+                        **({"return_value": "PUBLIC-UNKNOWN-PROBE-MODE"} if kind == "unknown-mode"
+                           else {"side_effect": failure})))
+                    sessions = legacy_jump_sessions_factory(app)(timeout=2)
+                    with self.assertRaises(app.SetupError) as caught:
+                        sessions.open_jump_master(jump, "cumulus", None)
+                    if kind == "unknown-mode":
+                        self.assertIs(type(caught.exception), app.SetupError)
+                        self.assertEqual(("legacy jump key probe returned an unknown mode",), caught.exception.args)
+                    else:
+                        self.assertIs(failure, caught.exception, "non-auth failures must retain the original object")
+                    probe.assert_called_once_with(jump, "cumulus", 2)
+                    self.assertEqual({}, sessions.records, "no password fallback record after a non-auth failure")
+
     def test_shared_fixture_carries_three_exact_bound_leaf_modules(self):
         with tempfile.TemporaryDirectory(prefix="target-fixture-leaf-") as folder:
             _, f = self.metadata_fixture(folder)
@@ -1099,6 +1306,22 @@ class TargetFixtureLeafCompatibilityTests(unittest.TestCase):
                     self.assertEqual((before, expected), bound_file(original))
             self.assertFalse((Path(folder) / "tools").exists(), "do not create an ambiguous repository layout")
 
+    def test_management_fixture_carries_bound_inventory_reader_and_fixed_master(self):
+        # WP1 O12 management generation adds M4, not a fourth Leaf dependency.
+        # This class never calls the KAT owner's setUpClass/P1/native verifier.
+        with tempfile.TemporaryDirectory(prefix="target-fixture-inventory-") as folder:
+            _, f = self.metadata_fixture(folder)
+            original = ROOT / "tools/inventory_subset.py"
+            before, expected = bound_file(original)
+            own = f["tool"] / "tools/inventory_subset.py"
+            self.assertTrue(own.is_file(), "management fixture must carry the actual M4 reader")
+            self.assertEqual(expected, bound_file(own)[1])
+            self.assertEqual((before, expected), bound_file(original))
+            master = Path(folder) / "infiniband/02-devices_config.csv"
+            self.assertTrue(master.is_file(), "fixed repository master must be an owned PUBLIC input")
+            self.assertEqual(f["csv"].read_bytes(), master.read_bytes())
+            self.assertFalse((Path(folder) / "tools").exists())
+
     def test_real_leaf_loader_refuses_each_missing_dependency(self):
         for missing in ("device_identity", "hostname_ranges", "login_path"):
             with self.subTest(missing=missing), tempfile.TemporaryDirectory(prefix="target-fixture-missing-") as folder:
@@ -1107,6 +1330,46 @@ class TargetFixtureLeafCompatibilityTests(unittest.TestCase):
                 (f["tool"] / "tools" / (missing + ".py")).unlink()
                 with self.assertRaisesRegex(f["app"].SetupError, "tools[.]" + missing + " is missing:"):
                     f["app"]._import_tools("tools." + missing)
+
+    def test_management_inventory_prerequisites_refuse_before_profile_or_output(self):
+        for fault in ("reader", "master", "mismatch"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix="target-fixture-inventory-refuse-") as folder:
+                _, f = self.metadata_fixture(folder)
+                app = f["app"]
+                master = f["root"] / "infiniband/02-devices_config.csv"
+                if fault == "reader":
+                    (f["tool"] / "tools/inventory_subset.py").unlink()
+                    expected = r"tools[.]inventory_subset is missing:"
+                elif fault == "master":
+                    master.unlink()
+                    expected = r"cannot compare inventory CSV .* and 02 "
+                else:
+                    master.write_bytes(master.read_bytes().replace(b"203.0.113.2,", b"203.0.113.99,"))
+                    expected = r"inventory mismatch:"
+                argv = [str(f["source"]), "--generate-json", "--execution-mode", "management",
+                    "--ib-csv", str(f["csv"]), "--p2p", str(f["p2p"]),
+                    "--target-cache", str(f["cache"]), "--report", str(f["root"] / "report.log")]
+                with ExitStack() as scope:
+                    scope.enter_context(mock.patch.dict(sys.modules))
+                    for name in list(sys.modules):
+                        if name == "tools" or name.startswith("tools."):
+                            del sys.modules[name]
+                    scope.enter_context(mock.patch.object(sys, "path", [str(f["tool"]), *sys.path]))
+                    scope.enter_context(mock.patch.object(app, "_TOOLS_ROOT", None))
+                    scope.enter_context(mock.patch.object(sys, "argv", argv))
+                    profile = scope.enter_context(mock.patch.object(app, "_service_profile"))
+                    keys = scope.enter_context(mock.patch.object(app, "_public_key_profile"))
+                    sessions = scope.enter_context(mock.patch.object(app, "_new_jump_sessions"))
+                    scope.enter_context(mock.patch.object(app.subprocess, "Popen", side_effect=AssertionError("no child")))
+                    scope.enter_context(mock.patch.object(app, "interactive_run", side_effect=AssertionError("no transport")))
+                    scope.enter_context(redirect_stdout(io.StringIO()))
+                    with self.assertRaisesRegex(app.SetupError, expected):
+                        app.main()
+                    profile.assert_not_called()
+                    keys.assert_not_called()
+                    sessions.assert_not_called()
+                self.assertFalse(f["cache"].parent.exists())
+                self.assertFalse((f["root"] / "report.log").exists())
 
     def test_invoke_isolates_foreign_tools_and_restores_success_and_error_scope(self):
         for fail in (False, True):
@@ -1175,6 +1438,210 @@ class TargetFixtureIPv4ParserCompatibilityTests(unittest.TestCase):
     """Only the PUBLIC peer parser; no KAT, real termios, PTY or state IO."""
     CURRENT = ["-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
                "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
+
+    def test_public_physical_snapshot_binds_port_vlan_svi_and_csv_eui(self):
+        run_node = next(node for node in ast.parse(SSH_PROGRAM).body
+                        if isinstance(node, ast.FunctionDef) and node.name == "run")
+        dictionaries = [node.value for node in ast.walk(run_node)
+                        if isinstance(node, ast.Assign) and any(
+                            isinstance(target, ast.Name) and target.id == "payloads" for target in node.targets)]
+        self.assertEqual(1, len(dictionaries))
+        wanted = {("ip", "-d", "link", "show"), ("bridge", "fdb", "show"), ("bridge", "vlan", "show")}
+        payloads = {ast.literal_eval(key): ast.literal_eval(value)
+                    for key, value in zip(dictionaries[0].keys, dictionaries[0].values)
+                    if ast.literal_eval(key) in wanted}
+        links = ("7: swp7: <BROADCAST,UP> mtu 1500 master br_default state UP\n"
+                 "    link/ether 02:00:00:00:00:07\n"
+                 "8: vlan1@br_default: <UP> mtu 1500 state UP\n"
+                 "    vlan protocol 802.1Q id 1\n")
+        fdb = "02:00:00:00:00:17 dev swp7 vlan 1 master br_default dynamic\n"
+        vlans = "port              vlan-id\nswp7              1 PVID Egress Untagged\n"
+        self.assertEqual(links, payloads[("ip", "-d", "link", "show")],
+                         "the real peer link facts must agree with its FDB, access VLAN and SVI")
+        self.assertEqual(fdb, payloads[("bridge", "fdb", "show")])
+        self.assertEqual(vlans, payloads[("bridge", "vlan", "show")])
+        with ExitStack() as stack:
+            stack.enter_context(mock.patch.object(sys, "path", list(sys.path)))
+            stack.enter_context(mock.patch.dict(sys.modules))
+            for name in list(sys.modules):
+                if name == "tools" or name.startswith("tools."):
+                    del sys.modules[name]
+            paths = load_script("b1_physical_paths_" + format(id(self), "x"), ROOT / "tools/login_path.py")
+            self.assertEqual((ROOT / "tools/login_path.py").resolve(), Path(paths.__file__).resolve())
+            class ForbiddenIO:
+                def __getattr__(self, _name):
+                    raise AssertionError("pure B1 physical facts cannot perform external IO")
+            stack.enter_context(mock.patch.object(paths, "subprocess", new=ForbiddenIO()))
+            self.assertEqual(("br_default", "1", ("vlan1",)), paths._login_interface_facts(links, vlans, "swp7"))
+            cable = paths.check_cable("EXAMPLE-IB01", "02:00:00:00:00:17", ("EXAMPLE-JUMP01", "swp7"),
+                [paths.JumpTables("EXAMPLE-JUMP01", links, fdb, vlans)], cascade_ports=())
+            self.assertEqual(("MATCH", ("EXAMPLE-JUMP01", "swp7"), (("EXAMPLE-JUMP01", "swp7"),),
+                              (), "vlan1", "fe80::ff:fe00:17"),
+                             (cable.verdict, cable.expected, cable.actual, cable.extra_macs,
+                              cable.login_interface, cable.link_local))
+            self.assertEqual("fe80::ff:fe00:17", paths.link_local_from_mac("02:00:00:00:00:17"))
+            self.assertEqual("fe80::ff:fe00:18", paths.link_local_from_mac("02:00:00:00:00:18"))
+            self.assertNotEqual("fe80::17", cable.link_local, "an ND shorthand is not this CSV MAC's EUI-64")
+
+    def _observe_public_endpoint_frame(self, destination, flags):
+        class ReachedValidatedFrame(Exception):
+            pass
+        class PublicTTY:
+            ECHO, TCSANOW = 8, 0
+            @staticmethod
+            def tcgetattr(descriptor):
+                self.assertEqual(0, descriptor)
+                return [0, 0, 0, 8]
+            @staticmethod
+            def tcsetattr(descriptor, action, attrs):
+                self.assertEqual((0, 0, 0), (descriptor, action, attrs[3]))
+        class ForbiddenIO:
+            def __getattr__(self, _name):
+                raise AssertionError("PUBLIC endpoint parser cannot reach state, PTY, native or external IO")
+        inner = ["ip", "vrf", "exec", "default", "ssh", *flags, destination, "true"]
+        outer = ["-tt", "-o", "ConnectTimeout=2", "-o", "ServerAliveInterval=10",
+                 "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                 "cumulus@192.0.2.10", shlex.join(["sh", "-c",
+                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec " + shlex.join(inner)])]
+        model_sys = type(sys)("PUBLIC_eui_parser_sys")
+        model_sys.argv = ["owned-ssh.py", "PUBLIC-config-not-opened", *outer]
+        hits, events = [], []
+        def frame(text):
+            self.assertEqual("true", text)
+            hits.append("validated")
+            raise ReachedValidatedFrame()
+        def answer(prompt):
+            self.assertEqual("cumulus@192.0.2.10's password: ", prompt)
+            return "PUBLIC-OOB"
+        def record(kind, **facts):
+            events.append((kind, facts))
+        scope = dict(termios=PublicTTY, sys=model_sys, shlex=shlex, re=__import__("re"), json=json,
+                     C={"oob": "PUBLIC-OOB", "scenario": "normal"}, read_answer=answer,
+                     role=lambda value: {"oob": value == "PUBLIC-OOB"}, record=record,
+                     unframe=frame, os=ForbiddenIO(), subprocess=ForbiddenIO(), fcntl=ForbiddenIO())
+        nodes = [node for node in ast.parse(SSH_PROGRAM).body
+                 if isinstance(node, ast.FunctionDef) and node.name in ("unwrap", "unphase", "run")]
+        self.assertEqual(["unwrap", "unphase", "run"], [node.name for node in nodes])
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<PUBLIC EUI peer parser>", "exec"), scope)
+        observed = None
+        try:
+            scope["run"]()
+        except (ReachedValidatedFrame, ValueError) as error:
+            observed = error
+        self.assertEqual([("outer-answer", {"oob": True})], events)
+        return observed, hits, ReachedValidatedFrame
+
+    def test_public_peer_endpoint_accepts_only_this_csv_eui_or_original_ipv4(self):
+        ipv6 = ["-6", "-tt", "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                "-o", "NumberOfPasswordPrompts=1", "-B", "vlan1"]
+        ipv4 = ["-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none"]
+        for destination, flags, admitted in (
+                ("admin@fe80::ff:fe00:17", ipv6, True), ("admin@203.0.113.2", ipv4, True),
+                ("admin@fe80::17", ipv6, False), ("admin@fe80::ff:fe00:18", ipv6, False)):
+            with self.subTest(destination=destination):
+                observed, hits, reached = self._observe_public_endpoint_frame(destination, flags)
+                if admitted:
+                    self.assertIsInstance(observed, reached)
+                    self.assertEqual(["validated"], hits)
+                else:
+                    self.assertIsInstance(observed, ValueError)
+                    self.assertEqual("inner endpoint", str(observed))
+                    self.assertEqual([], hits)
+
+    def test_private_fixture_clock_changes_only_app_reference_and_restores_it(self):
+        factory = globals().get("_fixture_clock_patch")
+        self.assertTrue(callable(factory), "B1 needs one explicit private clock reference boundary")
+        original_sleep, original_monotonic, original_time = time.sleep, time.monotonic, time.time
+        class App:
+            pass
+        class PublicStop(Exception):
+            pass
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain):
+                app = App()
+                app.time = time
+                sleeps = []
+                def sleep(seconds):
+                    sleeps.append(seconds)
+                def monotonic():
+                    return 123.0
+                with self.assertRaises(PublicStop):
+                    with factory(app, sleep=sleep, monotonic=monotonic if uncertain else None):
+                        self.assertIs(original_sleep, time.sleep)
+                        self.assertIs(original_monotonic, time.monotonic)
+                        self.assertIs(original_time, app.time.time)
+                        self.assertIsNot(time, app.time)
+                        self.assertIs(sleep, app.time.sleep)
+                        app.time.sleep(15)
+                        if uncertain:
+                            self.assertEqual(123.0, app.time.monotonic())
+                        else:
+                            self.assertIs(original_monotonic, app.time.monotonic)
+                        raise PublicStop()
+                self.assertEqual([15], sleeps)
+                self.assertIs(time, app.time)
+                self.assertIs(original_sleep, time.sleep)
+                self.assertIs(original_monotonic, time.monotonic)
+
+    def test_literal_bridge_vlan_snapshot_returns_exact_public_table_without_inner_io(self):
+        table = "port              vlan-id\nswp7              1 PVID Egress Untagged\n"
+        events, output, inner_calls, frame_calls = [], [], [], []
+        class PublicTTY:
+            ECHO, TCSANOW = 8, 0
+            @staticmethod
+            def tcgetattr(descriptor):
+                self.assertEqual(0, descriptor)
+                return [0, 0, 0, 8]
+            @staticmethod
+            def tcsetattr(descriptor, action, attrs):
+                self.assertEqual((0, 0, 0), (descriptor, action, attrs[3]))
+        class ForbiddenIO:
+            def __getattr__(self, _name):
+                raise AssertionError("PUBLIC VLAN snapshot must not touch state, native or external IO")
+        logical = ["bridge", "vlan", "show"]
+        outer = ["-tt", "-o", "ConnectTimeout=2", "-o", "ServerAliveInterval=10",
+                 "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                 "cumulus@192.0.2.10", shlex.join(["sh", "-c",
+                 "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec bridge vlan show"])]
+        model_sys = type(sys)("PUBLIC_vlan_parser_sys")
+        model_sys.argv = ["owned-ssh.py", "PUBLIC-config-not-opened", *outer]
+        def answer(prompt):
+            self.assertEqual("cumulus@192.0.2.10's password: ", prompt)
+            return "PUBLIC-OOB"
+        def record(kind, **facts):
+            events.append((kind, facts))
+        def frame(_text):
+            frame_calls.append("unexpected-frame")
+            raise AssertionError("PUBLIC VLAN snapshot is not an inner IB frame")
+        scope = dict(termios=PublicTTY, sys=model_sys, shlex=shlex, re=__import__("re"),
+                     C={"oob": "PUBLIC-OOB", "scenario": "normal"}, read_answer=answer,
+                     role=lambda value: {"oob": value == "PUBLIC-OOB"}, record=record,
+                     emit=output.append, unframe=frame, os=ForbiddenIO(), subprocess=ForbiddenIO(), json=json)
+        nodes = [node for node in ast.parse(SSH_PROGRAM).body
+                 if isinstance(node, ast.FunctionDef) and node.name in ("unwrap", "unphase", "run")]
+        self.assertEqual(["unwrap", "unphase", "run"], [node.name for node in nodes])
+        # Only three definitions from the PUBLIC fixture, never its config reader.
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "<PUBLIC VLAN peer parser>", "exec"), scope)
+        original_unphase = scope["unphase"]
+        def observe_inner(command):
+            inner_calls.append("unexpected-inner")
+            return original_unphase(command)
+        scope["unphase"] = observe_inner
+        result = error = None
+        try:
+            result = scope["run"]()
+        except ValueError as caught:
+            error = caught
+        self.assertTrue(error is None, "PUBLIC peer must admit the exact outer VLAN snapshot, not an inner transport")
+        self.assertEqual(0, result)
+        self.assertEqual([("outer-answer", {"oob": True}), ("ethernet-read", {"command": logical})], events)
+        self.assertEqual(["\n" + table], output)
+        self.assertEqual([], inner_calls)
+        self.assertEqual([], frame_calls)
 
     def observe_parser(self, flags):
         class ReachedValidatedFrame(Exception):

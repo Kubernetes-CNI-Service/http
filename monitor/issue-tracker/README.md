@@ -158,6 +158,9 @@ python3 monitor/issue-tracker/switch-status.py --type ufm       # 只整理 UFM
 | UFM：经 VIP 读到的 HA 状态为 error（如节点离线）；没有 HA 状态时，ufm-enterprise 为 failed | High |
 | UFM：HA 状态为 warning（如在线 1/2、DRBD 断开）；没有 HA 状态时，ufm-enterprise 不是 active（只是 PSU/FAN 故障引起的 warning 不重复计） | Medium |
 
+- 普通交换机页面的 `NOT OK` 是显示标签，不是问题真源。仅共享 parser 将设备明确非 OK
+  的健康证据规范为 `not ok` 时，按原规则报告健康 High；未知、空或缺失的健康字段不因
+  标签新增健康 High。原 Not collected 和独立 PSU 问题的判定不变。
 - 有阈值的传感器在 Max 以下不报；没有阈值的传感器在 85°C 以下不报（页面在 70–85°C 标黄，这一段不报）。
 - 列与取值（来自标准模版第 2 行表头和数据验证）：Submitor 为 `CVT`，Status 为 `New`（BasicData「HW - NV Status」），Priority 取自 `Critical,High,Medium,Low`，Fabric 取自 BasicData 的 `OOB/Inband/Compute/Storage`。RU 和 Model 在模版里是按 Host Name 查 Inventory 表的公式，行里**不出现**这两列（文件的 `formula_columns` 列出它们），同步时不得覆盖。Rack 没有数据来源，留空；OOB IP 取 `02-devices_config.csv` 的 `eth0_ip`，SN 取本轮采集。Issue Description 用英文；Not collected 的采集时间写在 `devices[].issues[].collection`，不进描述。
 - Fabric：类型为 ib、nvl、spx（独立 SPX 网络）、server_ufm 的是 Compute。eth 与 eth_spx 是 inband/OOB 交换机，按 Cumulus 模版族判断：`border`、`oob-*`、`oobofoob-*` 为 OOB，`tan-*` 为 Inband；模版不说明时再看 hostname 中以 oob/border、tan、storage 开头的词；都没有时留空。

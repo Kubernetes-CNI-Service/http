@@ -91,6 +91,7 @@ class _World:
         self.argvs: list[list[str]] = []
         self.environments: list[dict] = []
         self.writes: list[str] = []
+        self.backups: list[str] = []
         self.rejected: list[str] = []
         with (root / "ib.csv").open("w", newline="", encoding="utf-8") as stream:
             writer = csv.writer(stream)
@@ -99,6 +100,8 @@ class _World:
                 writer.writerow([host, "ib", address, "24", "192.0.2.1", mac])
             for host, address in JUMPS:
                 writer.writerow([host, "eth_jump", address, "", "", ""])
+        # M4 admits the test CSV against the same synthetic project's master.
+        (root / "02-devices_config.csv").write_bytes((root / "ib.csv").read_bytes())
         (root / "p2p.dot").write_text("".join(
             f'"{host}":"eth0" -- "{jump}":"swp1"\n' for host, _a, _m, jump in IBS), encoding="utf-8")
         # WP-8 table 8-1 (guide :923): --project-dir reads the project's own neutral defaults here.
@@ -143,6 +146,8 @@ class _World:
                     "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n")
         if command == ["bridge", "fdb", "show"]:
             return f"{ib.eth0_mac} dev swp1 vlan 1000 master br_default\n"
+        if command == ["bridge", "vlan", "show"]:
+            return "port vlan-id\nswp1 1000 PVID Egress Untagged\n"
         if command == ["ip", "neighbor"]:
             return f"{self.app.mac_to_link_local(ib.eth0_mac)} dev vlan1000 lladdr {ib.eth0_mac} REACHABLE\n"
         if command == ["ip", "-j", "address", "show"]:
@@ -155,9 +160,10 @@ class _World:
         raise AssertionError(f"unexpected Ethernet command {command}")
 
     # -- IB side ---------------------------------------------------------------------------------
-    def ib_payload(self, device, text: str) -> str:
+    def ib_payload(self, device, text: str, *, identity_read=()) -> str:
         app = self.app
         if re.search(r"\bnv (?:set|unset)\b|\bnv config (?:apply|save)\b", text):
+            self.test.assertEqual(1, self.backups.count(device.hostname), "O13 must precede every NVUE write")
             self.writes.append(text)
             if "nv config save" in text:
                 self.configured[device.hostname] = True
@@ -166,6 +172,13 @@ class _World:
             return "service disabled\n"
         if "nv config diff" in text:
             return ""
+        if identity_read == ("ip", "addr", "show", "eth0"):
+            address = (f"    inet {device.login_ip}/24 scope global eth0\n"
+                       if self.configured[device.hostname] else "")
+            return ("2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                    f"    link/ether {device.eth0_mac} brd ff:ff:ff:ff:ff:ff\n" + address)
+        if identity_read == ("ip", "route"):
+            return "default via 192.0.2.1 dev eth0\n" if self.configured[device.hostname] else ""
         if "nv config show" in text:
             payload = ("\n".join(shlex.join(c) for c in app.desired_commands(device) if c[:2] == ["nv", "set"]) + "\n"
                        + SERVICE_LINES if self.configured[device.hostname] else "nv set system hostname nvos\n")
@@ -217,7 +230,29 @@ class _World:
             self.rejected.append(device.hostname)
             return app.SessionResult(prompt + f"\nadmin@{peer}: Permission denied (password).\n", 255,
                                      ib_authentication_rejected=True)
-        payload = self.ib_payload(device, text)
+        from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
+        owned_frame = re.search(r"__HTTP_IB_BEGIN_" + nonce + r'__\\n"; (.*?); task_rc=',
+                                text, flags=re.DOTALL)
+        self.test.assertIsNotNone(owned_frame, "one exact synthetic frame")
+        if owned_frame.group(1).startswith("sh -c "):
+            carrier = shlex.split(command[-1])
+            self.test.assertEqual(["sh", "-c"], carrier[:2])
+            nested = shlex.split(carrier[2].split("; exec ", 1)[1])
+            framed = shlex.split(nested[-1])
+            self.test.assertEqual(["sh", "-c"], framed[:2])
+            body = re.search(r"__HTTP_IB_BEGIN_" + nonce + r'__\\n"; (.*?); task_rc=',
+                             framed[2], flags=re.DOTALL)
+            self.test.assertIsNotNone(body)
+            backup = shlex.split(body.group(1))
+            self.test.assertEqual(["sh", "-c", EXPECTED_BACKUP_SCRIPT, "--"], backup[:-1])
+            self.test.assertRegex(backup[-1], r"^[0-9]{8}-[0-9]{6}$")
+            self.test.assertNotIn(device.hostname, self.backups, "never issue a second backup")
+            self.backups.append(device.hostname)
+            payload = f"path=/home/PUBLIC/current_{backup[-1]}.yaml\nbytes=137\n"
+        else:
+            inner = tuple(shlex.split(owned_frame.group(1)))
+            identity_reads = {("ip", "addr", "show", "eth0"), ("ip", "route")}
+            payload = self.ib_payload(device, text, identity_read=inner if inner in identity_reads else ())
         return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{payload}__HTTP_IB_END_{nonce}__=0\n", 0)
 
     def phase_session(self, command, responder, text, nonce, operation):

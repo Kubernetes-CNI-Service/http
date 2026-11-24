@@ -270,17 +270,53 @@ class SummaryOutputTests(unittest.TestCase):
         state = app.SessionResult(CONFIG, 0)
         rows = [{"hostname": t.ib.hostname, "interface": "eth0", "ip": t.ib.login_ip,
                  "status": "PASS", "detail": "synthetic direct success"}]
+        identity_calls = []
+        identities = []
+        real_identity = app._check_ib_identity
+
+        def check_identity(*positional, **keywords):
+            actual = real_identity(*positional, **keywords)
+            identities.append(actual)
+            return actual
+
+        def read_stage(*positional, **keywords):
+            self.assertEqual((t, task.neighbor, "cumulus", "", "admin", PASSWORD, 5),
+                             positional[:-1])
+            identity_calls.append(tuple(positional[-1]))
+            if positional[-1] == ["nv", "show", "system", "ztp"]:
+                self.assertEqual({"local": False, "strict": False, "policy": None,
+                                  "_ib_read_context": None}, keywords)
+                return app.SessionResult("service disabled\nstate disabled\nstatus success\n", 0)
+            self.assertEqual(["ip", "addr", "show", "eth0"], positional[-1])
+            self.assertEqual({"local": False, "strict": False, "policy": None}, keywords)
+            return app.SessionResult(
+                "2: eth0: <UP> mtu 1500\n"
+                "    link/ether 02:00:00:00:00:10\n"
+                "    inet 192.0.2.10/24 scope global eth0\n", 0)
+
         with patch.object(app, "log"), patch.object(app.time, "sleep"), \
+             patch.object(app, "interactive_run", side_effect=AssertionError("real transport forbidden")), \
+             patch.object(app, "_stage_ib_command", side_effect=read_stage), \
+             patch.object(app, "_check_ib_identity", side_effect=check_identity), \
              patch.object(app, "inspect_ib_device", return_value=(state, PASSWORD, True)), \
              patch.object(app, "run_initial_stage", return_value=(state.output, True)), \
-             patch.object(app, "parse_nvue_state", return_value=SimpleNamespace(hostname=t.ib.hostname, eth0_addresses=(), eth1_addresses=())), \
+             patch.object(app, "parse_nvue_state",
+                          return_value=app.DeviceState((), (), (), (), t.ib.hostname, state.output)), \
              patch.object(app, "base_stage_needed", return_value=False), \
              patch.object(app, "verify_state"), \
-             patch.object(app, "verify_ipv4_login", side_effect=app.SetupError("synthetic OOB IPv4 timeout")), \
+             patch.object(app, "verify_ipv4_login", side_effect=app.SetupError("synthetic OOB IPv4 timeout")) as readiness, \
              patch.object(app, "run_management_direct_checks", return_value=rows), \
              patch.object(app, "run_service_stage") as services, \
              patch.object(app, "run_key_stage") as keys:
             record = app.execute_ib_task(task, args, None, "admin", None, [], None, True)
+        self.assertEqual([("ip", "addr", "show", "eth0"), ("nv", "show", "system", "ztp")],
+                         identity_calls)
+        self.assertTrue(record["ztp"]["read"])
+        self.assertEqual("disabled", record["ztp"]["service"])
+        self.assertEqual(1, len(identities))
+        self.assertIs(identities[0]["ok"], True)
+        self.assertEqual("02:00:00:00:00:10", identities[0]["observed"]["mac"])
+        readiness.assert_called_once()
         self.assertEqual(record["outcome"], "FAILED")
         self.assertEqual(record["stage_status"]["day0"], "ALREADY_PRESENT")
         self.assertEqual(record["stage_status"]["ipv4_readiness"], "FAILED")
@@ -502,21 +538,43 @@ class SummaryOutputTests(unittest.TestCase):
     def test_mac_mismatch_is_skipped_before_ib_ssh(self):
         t = target()
         records, outcomes = {}, {}
+        links = "1: swp1: <UP> mtu 1500 state UP\n2: swp2: <UP> mtu 1500 state UP\n"
+        fdb = "02:00:00:00:00:10 dev swp2 master bridge dynamic\n"
+        vlans = "port vlan-id\nswp1 1 PVID Egress Untagged\nswp2 1 PVID Egress Untagged\n"
         with patch.object(app, "interface_status_line", return_value="swp1 up up"), \
              patch.object(app, "interface_oper_status", return_value="up"), \
-             patch.object(app, "fdb_port_for_interface", return_value="swp1"), \
-             patch.object(app, "neighbor_for_port", return_value=app.Neighbor("fe80::10", "vlan1000", "02:00:00:00:00:99")), \
-             patch.object(app, "run_on_ib") as ssh, patch.object(app, "log") as output:
+             patch.object(app, "interface_vrf", side_effect=AssertionError("Unexpected VRF probe")), \
+             patch.object(app, "run_on_ib", side_effect=AssertionError("Real device IO forbidden")) as ssh, \
+             patch.object(app, "run_on_ethernet", side_effect=AssertionError("Real device IO forbidden")), \
+             patch.object(app, "interactive_run", side_effect=AssertionError("Real device IO forbidden")), \
+             patch.object(subprocess, "run", side_effect=AssertionError("Real subprocess forbidden")), \
+             patch.object(app, "REPORT_HANDLE", None), patch.object(app, "log") as output:
             ready = app.prepare_ready_ib_tasks([t], SimpleNamespace(), {"example-oob-leaf01": ""}, set(),
-                {"example-oob-leaf01": "interfaces"}, {"example-oob-leaf01": ("links", "fdb", "neighbors")},
+                {"example-oob-leaf01": "interfaces"}, {"example-oob-leaf01": (links, fdb, vlans)},
                 {}, outcomes, records)
+            result = app.print_initial_setup_summary("fixture", SimpleNamespace(apply=False,
+                report=REPORT), [t], 1, {}, records, [], 0)
         self.assertEqual(ready, [])
         self.assertEqual(outcomes, {"example-ib001": "SKIPPED"})
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_MAC_MISMATCH")
-        self.assertEqual(records["example-ib001"]["mac_mismatch"],
-                         {"expected": "02:00:00:00:00:10", "observed": "02:00:00:00:00:99"})
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_CABLE_CHECK_FAILED")
+        self.assertEqual(records["example-ib001"]["cable_check"], {
+            "hostname": "example-ib001", "mac": "02:00:00:00:00:10",
+            "link_local": "fe80::ff:fe00:10", "expected": ("example-oob-leaf01", "swp1"),
+            "actual": (("example-oob-leaf01", "swp2"),), "verdict": "ELSEWHERE",
+            "extra_macs": (), "login_interface": "swp1", "after_ping": False,
+            "ping_ok": None, "ignored": False,
+        })
+        self.assertFalse(records["example-ib001"]["writes_attempted"])
+        for key in ("identity", "mac_mismatch", "backup"):
+            self.assertNotIn(key, records["example-ib001"])
         text = "\n".join(call.args[0] for call in output.call_args_list)
-        self.assertIn("expected=02:00:00:00:00:10 observed=02:00:00:00:00:99", text)
+        self.assertEqual("INCOMPLETE", result)
+        self.assertIn("Result: INCOMPLETE", text)
+        outcomes_text = text.split("03 IB SWITCHES OUTCOMES", 1)[1].split("04 CONFIGURATION STAGES", 1)[0]
+        self.assertIn("SKIPPED_CABLE_CHECK_FAILED: 1", outcomes_text)
+        self.assertIn("TOTAL: 1", outcomes_text)
+        self.assertIn('Cable: expected="example-oob-leaf01:swp1" actual=["example-oob-leaf01:swp2"] '
+                      'verdict=ELSEWHERE after_ping=no ping_ok=unknown ignored=no', outcomes_text)
         ssh.assert_not_called()
 
     # v15 ClassifiedSummaryTests.test_redaction_handles_quotes_before_json_serialization (test_desktop_initial_setup.py:2152)
@@ -603,14 +661,45 @@ class SummaryOutputTests(unittest.TestCase):
     def test_missing_inventory_mac_is_disclosed_without_faking_or_filling_it(self):
         t = target()
         t = replace(t, ib=replace(t.ib, eth0_mac=""))
-        records = {"example-ib001": dict(hostname="example-ib001", outcome="ALREADY_CONFIGURED")}
-        with patch.object(app, "log") as log:
-            app.print_initial_setup_summary("fixture", SimpleNamespace(apply=True, report=REPORT),
-                                            [t], 1, {}, records, [], 1)
-        text = "\n".join(c.args[0] for c in log.call_args_list)
-        self.assertIn("CSV eth0 MAC unavailable: 1", text)
-        self.assertIn("not checked against inventory MAC", text)
-        self.assertEqual(t.ib.eth0_mac, "")
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                records = {"example-ib001": {
+                    "hostname": "example-ib001", "outcome": "SKIPPED",
+                    "category": "SKIPPED_INPUT_INCOMPLETE", "writes_attempted": False,
+                    "reason": "eth0_mac=: MAC is missing or invalid", "metrics": {}, "stage_status": {},
+                    "input_issues": [{"hostname": "example-ib001", "field": "eth0_mac", "value": "",
+                                      "problem": "MAC is missing or invalid", "blocking": True}],
+                }}
+                with patch.object(app, "run_on_ib", side_effect=AssertionError("Real device IO forbidden")) as ssh, \
+                     patch.object(app, "run_on_ethernet", side_effect=AssertionError("Real device IO forbidden")), \
+                     patch.object(app, "interactive_run", side_effect=AssertionError("Real device IO forbidden")), \
+                     patch.object(subprocess, "run", side_effect=AssertionError("Real subprocess forbidden")), \
+                     patch.object(app, "REPORT_HANDLE", None), patch.object(app, "log") as log:
+                    result = app.print_initial_setup_summary("fixture", SimpleNamespace(apply=apply, report=REPORT),
+                                                            [t], 1, {}, records, [], 1)
+                text = "\n".join(c.args[0] for c in log.call_args_list)
+                self.assertEqual("INCOMPLETE", result)
+                self.assertIn("Result: INCOMPLETE", text)
+                outcomes_text = text.split("03 IB SWITCHES OUTCOMES", 1)[1].split("04 CONFIGURATION STAGES", 1)[0]
+                self.assertIn("SKIPPED_INPUT_INCOMPLETE: 1", outcomes_text)
+                self.assertIn("TOTAL: 1", outcomes_text)
+                self.assertNotIn("Completed:", outcomes_text)
+                self.assertNotIn("CHECKED_EXISTING_CONFIGURATION", outcomes_text)
+                self.assertNotIn("CHECKED_AND_CONFIGURED", outcomes_text)
+                self.assertIn('Input issue: field="eth0_mac" value="" problem="MAC is missing or invalid"', outcomes_text)
+                attention_text = text.split("06 ATTENTION REQUIRED", 1)[1].split("07 EVIDENCE & NEXT ACTIONS", 1)[0]
+                self.assertIn("[SKIPPED_INPUT_INCOMPLETE] 1 device(s)", attention_text)
+                self.assertIn("example-ib001", attention_text)
+                self.assertNotIn("    Identity:", text)
+                self.assertNotIn("    Backup:", text)
+                for key in ("identity", "cable_check", "backup"):
+                    self.assertNotIn(key, records["example-ib001"])
+                self.assertFalse(records["example-ib001"]["writes_attempted"])
+                self.assertNotIn("CSV eth0 MAC unavailable: 1", text)
+                self.assertNotIn("not checked against inventory MAC", text)
+                self.assertNotIn("Inventory: supply the real CSV eth0 MAC before MAC-required upgrade preflight", text)
+                self.assertEqual(t.ib.eth0_mac, "")
+                ssh.assert_not_called()
 
     # v15 ProgressAndSummaryDirectTests.test_synthetic_192_case_preserves_three_network_changes_and_fifteen_prerequisite_skips (test_initial_setup_log_review.py:240)
     def test_synthetic_192_case_preserves_three_network_changes_and_fifteen_prerequisite_skips(self):
@@ -657,6 +746,8 @@ class SummaryOutputTests(unittest.TestCase):
                 os.chdir(previous)
         self.assertEqual(stopped.exception.code, 0, err.getvalue())
         self.assertEqual(len((out.getvalue() + err.getvalue()).strip().splitlines()), 1)
+        self.assertEqual("http-v3.1.5\n", out.getvalue())
+        self.assertEqual("", err.getvalue())
         self.assertEqual(left, [])
 
     # ---- log-review gaps (table 7-1 :818): KeyReceiptDirectTests ------------------------------
@@ -708,6 +799,8 @@ class SummaryOutputTests(unittest.TestCase):
 
     # v15 AuthorizedKeyTaskWorkflowTests.test_real_task_and_coordinator_run_twice_then_report_unchanged_content_without_network_replay (test_initial_setup_log_review.py:279)
     def test_real_task_and_coordinator_run_twice_then_report_unchanged_content_without_network_replay(self):
+        from test_cases.native_cpld_physical_io import owned_test_root
+
         t = target()
         n = app.Neighbor("fe80::10", "vlan1000", t.ib.eth0_mac, "oob")
         task = app.PreparedIBTask(t, n, OOB_PASSWORD, False)
@@ -718,34 +811,126 @@ class SummaryOutputTests(unittest.TestCase):
         keys = [dict(name="key" + str(i) + ".pub", line=public(i), fingerprint=app._public_key_fingerprint(public(i)))
                 for i in (2, 3)]
         services = dict(dns=["192.0.2.53"], ntp=["192.0.2.123"], timezone="Etc/UTC")
-        with tempfile.TemporaryDirectory() as folder:
+        # These PUBLIC inputs do not come from the product's argv builder or
+        # formatter. The source constant below is only an exact effect gate.
+        public_lines = [public(2), public(3)]
+        public_bytes = ("\n".join(public_lines) + "\n").encode("utf-8")
+        public_payload = base64.b64encode(public_bytes).decode("ascii")
+        key_command = ["sh", "-c", app._KEY_INSTALL_SCRIPT, "--", public_payload]
+        addr_reply = ("2: eth0: <UP> mtu 1500 state UP\n"
+                      "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+                      "    inet 192.0.2.10/24 scope global eth0\n")
+        previous_config = app._TASK_IB_CONFIG
+        self.assertIsNone(app._JUMP_SESSIONS, "ordinary prepared-task carrier has no borrowed master")
+        self.assertIsNone(app._WORKER_CONNECTION, "one original task uses the real inline coordinator")
+        with tempfile.TemporaryDirectory(dir=owned_test_root()) as folder:
             home = Path(folder) / "remote"
             home.mkdir()
             args = SimpleNamespace(apply=True, yes=True, force=False, max_workers=16, task_timeout=20,
                                    eth_user="cumulus", ib_user="admin", connect_timeout=5,
                                    execution_mode="management", report=Path(folder) / "report.log")
-            calls = []
+            calls, shell_results, external_errors = [], [], []
+            safe_path = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+            outer_header = ["ssh", "-tt", "-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=10",
+                "-o", "ServerAliveCountMax=2", "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR",
+                "-o", "ControlMaster=no", "-o", "ControlPath=none", "cumulus@198.51.100.10"]
+            inner_header = ["ip", "vrf", "exec", "oob", "ssh", "-6", "-tt", "-o", "ConnectTimeout=5",
+                "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR", "-o", "ControlMaster=no",
+                "-o", "ControlPath=none", "-o", "NumberOfPasswordPrompts=1", "-B", "vlan1000", "admin@fe80::10"]
 
-            def remote(*values, **kwargs):
-                command = values[7]
+            def denied(*values, **kwargs):
+                error = RuntimeError("FIXTURE HOLD: outside the finite M3 PUBLIC IO boundary")
+                external_errors.append(error)
+                raise error
+
+            def remote(argv, responder, timeout, **kwargs):
+                self.assertIs(type(argv), list)
+                self.assertTrue(all(type(word) is str for word in argv))
+                self.assertEqual(outer_header, argv[:-1], "exact ordinary outer SSH carrier only")
+                self.assertEqual(60, timeout)
+                self.assertEqual({}, kwargs)
+                self.assertIs(type(responder), app.NestedResponder)
+                self.assertIsNone(responder._phase, "no fabricated private phase")
+                self.assertEqual(OOB_PASSWORD, responder.ethernet_password)
+                self.assertEqual(secret("ib"), responder.ib_default_password)
+                self.assertEqual("admin@fe80::10", responder.ib_destination)
+                self.assertIs(False, responder.allow_password_change)
+                self.assertIsNone(responder.ib_new_password)
+                carrier = shlex.split(argv[-1])
+                self.assertEqual(3, len(carrier))
+                self.assertEqual(["sh", "-c"], carrier[:2])
+                self.assertEqual(shlex.join(carrier), argv[-1])
+                self.assertTrue(carrier[2].startswith(safe_path))
+                inner_text = carrier[2][len(safe_path):]
+                inner = shlex.split(inner_text)
+                self.assertEqual(shlex.join(inner), inner_text)
+                self.assertEqual(inner_header, inner[:-1], "exact nested endpoint/options/interface")
+                framed = shlex.split(inner[-1])
+                self.assertEqual(3, len(framed))
+                self.assertEqual(["sh", "-c"], framed[:2])
+                self.assertEqual(shlex.join(framed), inner[-1])
+                markers = re.findall(r"__HTTP_IB_BEGIN_([0-9a-f]{32})__", framed[2])
+                self.assertEqual(1, len(markers))
+                marker = markers[0]
+                self.assertEqual([marker], re.findall(r"__HTTP_IB_END_([0-9a-f]{32})__", framed[2]))
+                prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                          + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                self.assertTrue(framed[2].startswith(prefix) and framed[2].endswith(suffix))
+                command_text = framed[2][len(prefix):-len(suffix)]
+                command = shlex.split(command_text)
+                self.assertEqual(shlex.join(command), command_text, "one canonical typed command")
                 calls.append(command)
-                app.record_metric("ib_ssh_attempts")
-                if command[:2] == ["sh", "-c"]:
-                    app.obtain_write_permit("public_key")
+                code = 0
+                if command == ["ip", "addr", "show", "eth0"]:
+                    body = addr_reply
+                elif command == ["nv", "show", "system", "ztp"]:
+                    body = "service disabled\nstate disabled\n"
+                elif command == ["nv", "config", "show", "-o", "commands"]:
+                    body = current
+                elif command == key_command:
+                    self.assertEqual(5, len(command))
+                    self.assertEqual(public_bytes, base64.b64decode(command[4], validate=True))
+                    # Observe permission already obtained by REAL run_on_ib.
+                    # The model never grants a permit or changes these facts.
+                    coordinator = app._ACTIVE_COORDINATOR
+                    self.assertIsNotNone(coordinator)
+                    self.assertIs(t, coordinator.current_target)
+                    self.assertIs(True, coordinator.authorized)
+                    self.assertIs(True, coordinator.writes_attempted)
+                    self.assertEqual(1, coordinator.metrics.get("public_key_install_attempts"))
                     result = install_keys(home, [public(2), public(3)])
-                    if result.returncode:
-                        raise app.SetupError("synthetic remote shell failed")
-                    return app.SessionResult(result.stdout, 0)
-                return app.SessionResult("service disabled\n" if command == ["nv", "show", "system", "ztp"] else "", 0)
+                    shell_results.append(result)
+                    body, code = result.stdout, result.returncode
+                else:
+                    # In particular: backup/deferred/rc/any other sh-c is
+                    # NEVER treated as the key program or executed locally.
+                    return denied()
+                return app.SessionResult("__HTTP_IB_BEGIN_" + marker + "__\n" + body
+                                         + "__HTTP_IB_END_" + marker + "__=" + str(code) + "\n", code)
+
+            def observed_remote(*values, **kwargs):
+                try:
+                    return remote(*values, **kwargs)
+                except BaseException as error:
+                    external_errors.append(error)
+                    raise
+
             with patch.object(app, "inspect_ib_device",
                               return_value=(app.SessionResult(current, 0), secret("ib"), True)), \
-                 patch.object(app, "run_on_ib", remote), patch.object(app, "verify_ipv4_login"), \
-                 patch.object(app.time, "sleep"), \
+                 patch.object(app, "interactive_run", new=observed_remote), \
+                 patch.object(app, "subprocess", SimpleNamespace(run=denied, Popen=denied,
+                     TimeoutExpired=subprocess.TimeoutExpired, SubprocessError=subprocess.SubprocessError)), \
+                 patch.object(app, "verify_ipv4_login"), \
                  patch.object(app, "run_management_direct_checks", return_value=[dict(
                      hostname=t.ib.hostname, interface="eth0", ip=t.ib.login_ip, status="PASS")]), \
                  contextlib.redirect_stdout(io.StringIO()):
                 first = app.run_prepared_tasks([task], args, None, "admin", services, keys, None)
+                if external_errors:
+                    raise external_errors[0]  # an adapter/HOLD is never a business result
                 second = app.run_prepared_tasks([task], args, None, "admin", services, keys, None)
+                if external_errors:
+                    raise external_errors[0]
             one = first["records"]["example-ib001"]
             two = second["records"]["example-ib001"]
             self.assertEqual(app.record_category(one), "CHECKED_EXISTING_KEYS_REFRESHED")
@@ -753,7 +938,23 @@ class SummaryOutputTests(unittest.TestCase):
             self.assertEqual(one["public_key_update"]["content_action"], "UPDATED")
             self.assertEqual(two["public_key_update"]["content_action"], "UNCHANGED")
             self.assertEqual(two["stage_status"]["services"], "ALREADY_PRESENT")
-            self.assertEqual(two["csv_fdb_mac_check"]["status"], "MATCH")
+            for record in (one, two):
+                self.assertIsNone(record["cable_check"], "no prepare/FDB means unmeasured, not MATCH")
+                self.assertNotIn("csv_fdb_mac_check", record)
+                self.assertIsNone(record["backup"], "key-only is not an NVUE write or a backup proof")
+                self.assertEqual(0, record["metrics"].get("nvue_write_commands", 0))
+                self.assertEqual(0, record["metrics"].get("config_backup_attempts", 0))
+                self.assertEqual(1, record["metrics"].get("public_key_install_attempts"))
+            self.assertEqual([0, 0], [result.returncode for result in shell_results])
+            self.assertEqual(["IBSW_PUBLIC_KEYS_UPDATED\n", "IBSW_PUBLIC_KEYS_UNCHANGED\n"],
+                             [result.stdout for result in shell_results])
+            self.assertEqual((1, 1), (first["workers"], second["workers"]))
+            self.assertEqual(Path(folder), Path(first["log_dir"]).parent)
+            self.assertEqual(Path(folder), Path(second["log_dir"]).parent)
+            self.assertIsNone(app._ACTIVE_COORDINATOR)
+            self.assertIsNone(app._TASK_DEADLINE)
+            self.assertIsNone(app._TASK_LOG_BUFFER)
+            self.assertIs(previous_config, app._TASK_IB_CONFIG)
             self.assertEqual((home / ".ssh/authorized_keys").read_text().splitlines(), [public(2), public(3)])
             self.assertFalse(any(c[:2] == ["nv", "set"] for c in calls))
             self.assertEqual(json.loads(Path(two["log"]).with_suffix(".json").read_text())["public_key_update"],
@@ -779,6 +980,10 @@ class PerRunReportNameTests(unittest.TestCase):
             "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
             "example-ib001,ib,192.0.2.10,24,192.0.2.1,02:00:00:00:00:10,,,\n"
             "example-oob-leaf01,eth_jump,198.51.100.10,,,,,,\n", encoding="utf-8")
+        (project / "02-devices_config.csv").write_text(
+            "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+            "example-ib001,ib,192.0.2.10,24,192.0.2.1,02:00:00:00:00:10,,,\n"
+            "example-oob-leaf01,eth,198.51.100.10,,,,,,\n", encoding="utf-8")
         (project / "p2p.dot").write_text('"example-ib001":"eth0" -- "example-oob-leaf01":"swp1"\n',
                                          encoding="utf-8")
         # Inputs and the cache and snapshots stay in the project, so the working directory's
@@ -875,3 +1080,343 @@ class PerRunReportNameTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FinalDeviceFactsTests(unittest.TestCase):
+    """WP5/r660:824–865, K4/K5 and the independently frozen9759d2a9 design.
+
+    Pure final-summary consumers only.  The original877-line module is an exact
+    byte prefix; Root selects this class, not the older process/shell test classes.
+    Every displayed expected line below is a PUBLIC literal fixed before source
+    implementation, not the formatter's output or a SUT-generated serialization.
+    """
+
+    def setUp(self):
+        self.stack = contextlib.ExitStack()
+        self.addCleanup(self.stack.close)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("pure final-facts test attempted external action")
+
+        # Replace only this loaded app's reference, not shared subprocess attrs.
+        self.stack.enter_context(patch.object(app, "subprocess", SimpleNamespace(
+            run=forbidden, Popen=forbidden,
+            TimeoutExpired=subprocess.TimeoutExpired,
+            SubprocessError=subprocess.SubprocessError)))
+        for name in ("interactive_run", "run_on_ib", "run_on_ethernet",
+                     "execute_ib_task", "run_prepared_tasks", "verify_password_hash",
+                     "obtain_write_permit", "_import_tools"):
+            self.stack.enter_context(patch.object(app, name, side_effect=forbidden))
+        for name in ("_WORKER_CONNECTION", "_TASK_LOG_BUFFER"):
+            self.stack.enter_context(patch.object(app, name, None))
+        self.stack.enter_context(patch.object(app, "_CONSOLE_VERBOSE", False))
+
+    def _record(self, hostname, **facts):
+        record = {
+            "hostname": hostname, "oob": None, "port": "",
+            "outcome": "ALREADY_CONFIGURED", "writes_attempted": False,
+            "failure_kind": None, "metrics": {"ib_ssh_attempts": 1},
+            "stage_status": {"authentication": "VERIFIED", "day0": "ALREADY_PRESENT",
+                             "direct_ssh": "VERIFIED"},
+        }
+        record.update(facts)
+        return record
+
+    def _pass(self, hostname):
+        return {"hostname": hostname, "interface": "eth0", "ip": "192.0.2.10",
+                "status": "PASS", "detail": "PUBLIC completed final access"}
+
+    def _render(self, records, rows=(), *, apply=False):
+        import copy
+
+        # All old structural defaults are supplied.  Immutability here protects
+        # facts/records, not a new ban on old missing-structural-field enrichment.
+        before, rows_before = copy.deepcopy(records), copy.deepcopy(rows)
+        targets = [app.Target(app.Device(name, "ib", "192.0.2.10", "192.0.2.10/24",
+                                        "192.0.2.1", "02:00:00:00:00:10", "", ""),
+                              None, "", "eth0") for name in records]
+        console, report = io.StringIO(), io.StringIO()
+        with patch.object(app, "REPORT_HANDLE", report), contextlib.redirect_stdout(console):
+            status = app.print_initial_setup_summary(
+                "PUBLIC-final-facts", SimpleNamespace(apply=apply,
+                    report=Path("/PUBLIC-display-only/final-facts.log")),
+                targets, len(targets), {}, records, list(rows), 1)
+        self.assertEqual(before, records, "final formatter mutated input records/facts")
+        self.assertEqual(rows_before, rows, "final formatter mutated direct-access facts")
+        return status, console.getvalue(), report.getvalue()
+
+    def _assert_fact_lines(self, console, report, total, expected):
+        # Exact entire post-TOTAL body: unknown extra lines are not filtered out.
+        for channel, text in (("console", console), ("report", report)):
+            with self.subTest(channel=channel):
+                anchor = "  TOTAL: " + str(total) + "\n"
+                self.assertEqual(1, text.count(anchor))
+                after = text.split(anchor, 1)[1]
+                self.assertIn("\n+-- 04 CONFIGURATION STAGES", after)
+                body = after.split("\n+-- 04 CONFIGURATION STAGES", 1)[0]
+                self.assertEqual(expected, body.strip("\n").splitlines())
+                headings = ("01 OVERVIEW", "02 OOB SNAPSHOTS", "03 IB SWITCHES OUTCOMES",
+                            "04 CONFIGURATION STAGES", "05 SSH ACCESS",
+                            "06 ATTENTION REQUIRED", "07 EVIDENCE & NEXT ACTIONS")
+                positions = [text.index(heading) for heading in headings]
+                self.assertEqual(sorted(positions), positions)
+                self.assertEqual(7, len(re.findall(r"(?m)^\+-- \d\d ", text)))
+                self.assertNotRegex(text, r"(?m)^\+-- 08 ")
+
+    def test_final_cable_facts_keep_physical_position_verdict_and_three_ping_states(self):
+        cases = (
+            ("ELSEWHERE", False, False, None,
+             "    Cable: expected=\"example-leaf01:swp7\" actual=[\"example-leaf02:swp9\"] verdict=ELSEWHERE after_ping=no ping_ok=unknown ignored=no"),
+            ("ELSEWHERE", True, False, None,
+             "    Cable: expected=\"example-leaf01:swp7\" actual=[\"example-leaf02:swp9\"] verdict=ELSEWHERE after_ping=no ping_ok=unknown ignored=yes"),
+            ("NOT_LEARNED", False, True, True,
+             "    Cable: expected=\"example-leaf01:swp7\" actual=[] verdict=NOT_LEARNED unlearned=yes after_ping=yes ping_ok=yes ignored=no"),
+            ("NOT_LEARNED", False, True, False,
+             "    Cable: expected=\"example-leaf01:swp7\" actual=[] verdict=NOT_LEARNED unlearned=yes after_ping=yes ping_ok=no ignored=no"),
+            ("NOT_LEARNED", False, True, None,
+             "    Cable: expected=\"example-leaf01:swp7\" actual=[] verdict=NOT_LEARNED unlearned=yes after_ping=yes ping_ok=unknown ignored=no"),
+        )
+        for apply in (False, True):
+            for verdict, ignored, after_ping, ping_ok, expected in cases:
+                with self.subTest(apply=apply, verdict=verdict, ignored=ignored, ping_ok=ping_ok):
+                    cable = {
+                        "hostname": "example-ib001", "mac": "02:00:00:00:00:10",
+                        "link_local": "fe80::ff:fe00:10",
+                        "expected": ["example-leaf01", "swp7"], "verdict": verdict,
+                        "actual": [["example-leaf02", "swp9"]] if verdict == "ELSEWHERE" else [],
+                        "extra_macs": [], "login_interface": "vlan1000",
+                        "after_ping": after_ping, "ping_ok": ping_ok, "ignored": ignored,
+                    }
+                    record = self._record("example-ib001", cable_check=cable,
+                        oob="example-spine01", port="swp49", jump={
+                            "hostname": "example-spine01", "login_ip": "198.51.100.10",
+                            "type": "eth_jump", "interface": "vlan1000", "vrf": "default",
+                            "access_vlan": "1000", "selection_reason": "PUBLIC-cascade"})
+                    if not ignored:
+                        record.update(outcome="SKIPPED", category="SKIPPED_CABLE_CHECK_FAILED",
+                                      stage_status={})
+                    status, console, report = self._render({"example-ib001": record},
+                        [self._pass("example-ib001")] if ignored else [], apply=apply)
+                    self.assertEqual("SUCCESS" if ignored else "INCOMPLETE", status)
+                    self._assert_fact_lines(console, report, 1,
+                        ["  Device facts: example-ib001", expected])
+                    self.assertEqual(verdict, record["cable_check"]["verdict"])
+                    for text in (console, report):
+                        self.assertNotIn('expected="example-spine01:swp49"', text)
+                        self.assertNotIn("verdict=MATCH", text)
+
+    def test_final_identity_facts_preserve_both_sides_and_do_not_invent_ipv4_verification(self):
+        mismatch = {
+            "ok": False, "via_ipv4": True,
+            "expected": {"mac": "02:00:00:00:00:10", "ipv4": "192.0.2.10/24",
+                         "gateway": "192.0.2.1"},
+            "observed": {"mac": "02:00:00:00:00:99", "ipv4": ["192.0.2.99/24"],
+                         "gateways": ["192.0.2.254"]},
+            "mismatches": [
+                {"field": "mac", "expected": "02:00:00:00:00:10", "observed": "02:00:00:00:00:99"},
+                {"field": "ipv4", "expected": "192.0.2.10/24", "observed": "192.0.2.99/24"},
+                {"field": "gateway", "expected": "192.0.2.1", "observed": "192.0.2.254"}],
+        }
+        link_local = {
+            "ok": True, "via_ipv4": False,
+            "expected": {"mac": "02:00:00:00:00:10", "ipv4": None, "gateway": None},
+            "observed": {"mac": "02:00:00:00:00:10", "ipv4": [], "gateways": []},
+            "mismatches": [],
+        }
+        cases = (
+            (mismatch, "INCOMPLETE", [
+                "    Identity: ok=no via_ipv4=yes mac_expected=\"02:00:00:00:00:10\" mac_observed=\"02:00:00:00:00:99\" ipv4_expected=\"192.0.2.10/24\" ipv4_observed=[\"192.0.2.99/24\"] gateway_expected=\"192.0.2.1\" gateways_observed=[\"192.0.2.254\"]"]),
+            (link_local, "SUCCESS", [
+                "    Identity: ok=yes via_ipv4=no mac_expected=\"02:00:00:00:00:10\" mac_observed=\"02:00:00:00:00:10\""]),
+            (None, "INCOMPLETE", []),
+            ({}, "INCOMPLETE", []),
+        )
+        for apply in (False, True):
+            for identity, wanted_status, lines in cases:
+                with self.subTest(apply=apply, identity=identity):
+                    record = self._record("example-ib001", identity=identity, backup=None)
+                    if wanted_status == "INCOMPLETE":
+                        record.update(outcome="FAILED", category="FAILED_IDENTITY_MISMATCH",
+                                      stage_status={})
+                    status, console, report = self._render({"example-ib001": record},
+                        [self._pass("example-ib001")] if wanted_status == "SUCCESS" else [], apply=apply)
+                    self.assertEqual(wanted_status, status)
+                    self._assert_fact_lines(console, report, 1,
+                        ["  Device facts: example-ib001", *lines])
+                    for text in (console, report):
+                        self.assertNotIn("    Backup:", text)
+                        if identity is not mismatch:
+                            self.assertNotIn("ipv4_expected=", text)
+                            self.assertNotIn("gateways_observed=", text)
+
+    def test_successful_direct_device_keeps_hint_route_and_actual_backup_in_final_panel(self):
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                healthy = self._record("example-ib002", jump=None, neighbor=None, cable_check=None,
+                    route={"hostname": "example-ib002", "path": "direct", "reason": "NO_MGMT_LINK",
+                           "jump": None, "port": None, "same_subnet": None},
+                    input_issues=[], eth1_hints=[{
+                        "hostname": "example-ib002", "field": "eth1_mac", "value": "",
+                        "problem": "only one management MAC was supplied", "blocking": False}],
+                    identity=None, backup={"path": "/home/admin/current_20261117-172746.yaml",
+                                           "bytes": 321} if apply else None,
+                    opaque_debug="PUBLIC-UNLISTED-RAW-MUST-NOT-PRINT")
+                if apply:
+                    healthy.update(outcome="CONFIGURED", writes_attempted=True,
+                                   metrics={"ib_ssh_attempts": 1, "nvue_write_commands": 9})
+                status, console, report = self._render({"example-ib002": healthy},
+                    [self._pass("example-ib002")], apply=apply)
+                self.assertEqual("SUCCESS", status,
+                                 "nonblocking eth1 hint cannot change final success")
+                expected = ["  Device facts: example-ib002",
+                    "    Route: path=\"direct\" reason=\"NO_MGMT_LINK\" same_subnet=null",
+                    "    eth1 hint: field=\"eth1_mac\" value=\"\" problem=\"only one management MAC was supplied\""]
+                if apply:
+                    expected.append("    Backup: path=\"/home/admin/current_20261117-172746.yaml\" bytes=321")
+                self._assert_fact_lines(console, report, 1, expected)
+                self.assertEqual([], app.initial_setup_attention(
+                    {"example-ib002": healthy}, [self._pass("example-ib002")]))
+                for text in (console, report):
+                    self.assertNotIn("PUBLIC-UNLISTED-RAW-MUST-NOT-PRINT", text)
+                    self.assertNotIn("None:", text)
+                    self.assertNotIn("vrf=", text)
+                    self.assertNotIn("    Cable:", text)
+                    self.assertNotIn("    Identity:", text)
+                blocked = self._record("example-ib001", outcome="SKIPPED",
+                    category="SKIPPED_INPUT_INCOMPLETE", stage_status={}, input_issues=[{
+                        "hostname": "example-ib001", "field": "eth0_gw", "value": "not-a-gateway",
+                        "problem": "gateway is not a valid IPv4 address", "blocking": True}])
+                status, console, report = self._render(
+                    {"example-ib002": healthy, "example-ib001": blocked},
+                    [self._pass("example-ib002")], apply=apply)
+                self.assertEqual("INCOMPLETE", status)
+                self._assert_fact_lines(console, report, 2, [
+                    "  Device facts: example-ib001",
+                    "    Input issue: field=\"eth0_gw\" value=\"not-a-gateway\" problem=\"gateway is not a valid IPv4 address\"",
+                    *expected])
+                self.assertIn("SKIPPED_INPUT_INCOMPLETE: 1", console)
+
+                # FF01: independently frozen before formatter implementation.
+                # Input has actual LF and one backslash; expected raw literals
+                # have JSON escapes on one physical ASCII line, not SUT/json.dumps.
+                escaped_value = 'PUBLIC-"q"\\path\n中文'
+                escaped_problem = '公开 "bad"\\note\nsecond'
+                escaped_records = {
+                    "example-ib001": self._record("example-ib001", outcome="SKIPPED",
+                        category="SKIPPED_INPUT_INCOMPLETE", stage_status={}, input_issues=[{
+                            "hostname": "example-ib001", "field": "eth0_gw", "value": escaped_value,
+                            "problem": escaped_problem, "blocking": True}]),
+                    "example-ib002": dict(healthy, eth1_hints=[{
+                        "hostname": "example-ib002", "field": "eth1_mac", "value": escaped_value,
+                        "problem": escaped_problem, "blocking": False}]),
+                }
+                escaped_expected = [
+                    "  Device facts: example-ib001",
+                    r'    Input issue: field="eth0_gw" value="PUBLIC-\"q\"\\path\n\u4e2d\u6587" problem="\u516c\u5f00 \"bad\"\\note\nsecond"',
+                    "  Device facts: example-ib002",
+                    "    Route: path=\"direct\" reason=\"NO_MGMT_LINK\" same_subnet=null",
+                    r'    eth1 hint: field="eth1_mac" value="PUBLIC-\"q\"\\path\n\u4e2d\u6587" problem="\u516c\u5f00 \"bad\"\\note\nsecond"',
+                ]
+                if apply:
+                    escaped_expected.append("    Backup: path=\"/home/admin/current_20261117-172746.yaml\" bytes=321")
+                status, console, report = self._render(escaped_records,
+                    [self._pass("example-ib002")], apply=apply)
+                self.assertEqual("INCOMPLETE", status)
+                self._assert_fact_lines(console, report, 2, escaped_expected)
+
+    def test_final_facts_keep_legacy_missing_metadata_inputs_immutable_and_seven_panels(self):
+        records = {
+            "example-ib003": self._record("example-ib003"),
+            "example-ib002": self._record("example-ib002", outcome="FAILED",
+                failure_kind="DIRECT_LOGIN_NETWORK", category="CHECKED_AND_CONFIGURED"),
+            "example-ib001": self._record("example-ib001", outcome="FAILED",
+                failure_kind="DIRECT_SSH_NETWORK", category="CHECKED_AND_CONFIGURED"),
+        }
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                status, console, report = self._render(records,
+                    [self._pass("example-ib003")], apply=apply)
+                self.assertEqual("INCOMPLETE", status)
+                self._assert_fact_lines(console, report, 3, [
+                    "  Device facts: example-ib001", "  Device facts: example-ib002",
+                    "  Device facts: example-ib003"])
+                self.assertEqual({"FAILED_DIRECT_SSH_NETWORK": 1,
+                                  "FAILED_DIRECT_LOGIN_NETWORK": 1,
+                                  "CHECKED_EXISTING_CONFIGURATION": 1},
+                                 app.initial_setup_facts(records,
+                                     [self._pass("example-ib003")])["categories"])
+                for text in (console, report):
+                    self.assertIn("FAILED_DIRECT_SSH_NETWORK: 1", text)
+                    self.assertIn("FAILED_DIRECT_LOGIN_NETWORK: 1", text)
+                    self.assertNotIn("CHECKED_AND_CONFIGURED: 2", text)
+                    self.assertNotIn("    Identity:", text)
+                    self.assertNotIn("    Backup:", text)
+                    self.assertNotIn("    Route:", text)
+
+    def test_csv_eui64_source_is_separate_from_legacy_nd_fdb_and_null_direct(self):
+        records = {
+            "example-ib001": self._record("example-ib001", neighbor={
+                "ipv6": "fe80::10", "interface": "vlan1000", "vrf": "default",
+                "mac": "02:00:00:00:00:10", "address_source": "ND"}),
+            "example-ib002": self._record("example-ib002", neighbor={
+                "ipv6": "fe80::20", "interface": "vlan1000", "vrf": "default",
+                "mac": "02:00:00:00:00:20", "address_source": "FDB_EUI64_CANDIDATE"}),
+            "example-ib003": self._record("example-ib003", neighbor={
+                "ipv6": "fe80::ff:fe00:30", "interface": "vlan1000", "vrf": "default",
+                "mac": "02:00:00:00:00:30", "address_source": "CSV_EUI64"}),
+            "example-ib004": self._record("example-ib004", outcome="NOT_ATTEMPTED",
+                stage_status={}, neighbor={"ipv6": "fe80::ff:fe00:40", "interface": "vlan1000",
+                    "vrf": "default", "mac": "02:00:00:00:00:40", "address_source": "CSV_EUI64"}),
+            "example-ib005": self._record("example-ib005", jump=None, neighbor=None,
+                route={"hostname": "example-ib005", "path": "direct", "reason": "NO_MGMT_LINK",
+                       "jump": None, "port": None, "same_subnet": None}),
+        }
+        rows = [self._pass(name) for name in (
+            "example-ib001", "example-ib002", "example-ib003", "example-ib005")]
+        facts = app.initial_setup_facts(records, rows)
+        self.assertEqual({"ND": 1, "FDB_EUI64_CANDIDATE": 1, "CSV_EUI64": 2},
+                         facts["ipv6_address_sources"])
+        self.assertEqual({"candidates": 1, "authenticated": 1, "not_verified": 0},
+                         facts["ipv6_fallback"], "legacy FDB statistic is not renamed CSV")
+        self.assertIn("ipv6_csv_eui64", facts, "missing distinct current CSV source statistic")
+        self.assertEqual({"candidates": 2, "authenticated": 1, "not_verified": 1},
+                         facts["ipv6_csv_eui64"])
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                status, console, report = self._render(records, rows, apply=apply)
+                self.assertEqual("INCOMPLETE", status, "unattempted candidate remains incomplete")
+                self._assert_fact_lines(console, report, 5, [
+                    "  Device facts: example-ib001", "  Device facts: example-ib002",
+                    "  Device facts: example-ib003", "  Device facts: example-ib004",
+                    "  Device facts: example-ib005",
+                    "    Route: path=\"direct\" reason=\"NO_MGMT_LINK\" same_subnet=null"])
+                for text in (console, report):
+                    self.assertIn("CSV-derived IPv6 candidates: 2; authenticated=1; not-verified=1", text)
+                    self.assertIn("FDB-derived IPv6 candidates: 1; authenticated=1; not-verified=0", text)
+                    self.assertNotIn("FDB-derived IPv6 candidates: 3", text)
+
+    def test_replace_display_defaults_do_not_modify_caller_records(self):
+        import copy
+
+        selected_target = target()
+        name = selected_target.ib.hostname
+        omitted = "example-ib002"
+        targets = [selected_target, replace(selected_target,
+                   ib=replace(selected_target.ib, hostname=omitted))]
+        record = self._record(name, needs_change=False)
+        records = {name: record}
+        selection = {name: {"file": "PUBLIC-example.yaml"}}
+        before = copy.deepcopy((records, selection))
+        args = SimpleNamespace(apply=False, config_mode="replace", _replace_selected=selection,
+                               report=Path("/PUBLIC-display-only/replace.log"))
+        with patch.object(app, "log"), \
+             patch.object(app, "initial_setup_facts", wraps=app.initial_setup_facts) as facts:
+            app.print_initial_setup_summary("PUBLIC-replace", args, targets, 2, {},
+                                            records, [], 1)
+        self.assertEqual(before, (records, selection), "formatter changed caller data")
+        self.assertIs(record, records[name])
+        projected = facts.call_args.args[0]
+        self.assertEqual({"file": "PUBLIC-example.yaml"}, projected[name]["replace"])
+        self.assertEqual("replace", projected[name]["config_mode"])
+        self.assertIs(projected[name]["needs_change"], True)
+        self.assertEqual("NOT_ATTEMPTED", projected[omitted]["outcome"])

@@ -125,8 +125,18 @@ class JumpVlanLoginTests(unittest.TestCase):
     # v15 EthJumpVlanLoginTests.test_multiple_candidates_are_rejected_instead_of_choosing_first
     # (test_desktop_initial_setup.py:347); guide T13 (:2299) keeps this refusal at read.
     def test_multiple_candidates_are_rejected_instead_of_choosing_first(self):
-        with self.assertRaisesRegex(app.SetupError, "multiple.*VLAN.*login"):
-            self.inventory(vlan2="2000", svi2="203.0.113.10")
+        # v315 r617 O2 supersedes the historical T13 read-time refusal above;
+        # actual candidate retry/identity behavior is verified by WP2.
+        try:
+            _, ethernet = self.inventory(vlan2="2000", svi2="203.0.113.10")
+        except app.SetupError as error:
+            self.fail("O2 must retain the ordered login candidates: " + str(error))
+        jump = ethernet[JUMP]
+        self.assertTrue(hasattr(jump, "jump_candidates"))
+        self.assertEqual((("198.51.100.10", "JUMP_VLAN1000"),
+                          ("203.0.113.10", "JUMP_VLAN2000")),
+                         tuple((item.address, item.entry) for item in jump.jump_candidates))
+        self.assertEqual("198.51.100.10", jump.login_ip)
 
     # v15 EthJumpVlanLoginTests.test_invalid_svi_vlan_mask_and_nonhost_addresses_are_rejected
     # (test_desktop_initial_setup.py:351)
@@ -137,8 +147,17 @@ class JumpVlanLoginTests(unittest.TestCase):
             {"svi1": "198.51.100.10/99"}, {"mask1": "invalid"},
             {"svi1": "0.0.0.0"}, {"svi1": MULTICAST},
         ):
-            with self.subTest(fields=fields), self.assertRaises(app.SetupError):
-                self.inventory(**fields)
+            with self.subTest(fields=fields):
+                try:
+                    _, ethernet = self.inventory(**fields)
+                except app.SetupError as error:
+                    self.fail("O10 rejects this candidate, not the whole inventory: " + str(error))
+                jump = ethernet[JUMP]
+                self.assertEqual("", jump.login_ip)
+                self.assertTrue(hasattr(jump, "jump_candidates"))
+                self.assertEqual((), jump.jump_candidates)
+                self.assertTrue(hasattr(jump, "input_issues"))
+                self.assertTrue(jump.input_issues)
 
     # v15 EthJumpVlanLoginTests.test_vrr_and_evpn_addresses_are_not_svi_login_fallbacks
     # (test_desktop_initial_setup.py:361), rewritten per guide T13 (:2299): "VRR and EVPN
@@ -155,10 +174,21 @@ class JumpVlanLoginTests(unittest.TestCase):
     # v15 EthJumpVlanLoginTests.test_duplicate_jump_endpoint_and_ib_address_are_rejected
     # (test_desktop_initial_setup.py:365)
     def test_duplicate_jump_endpoint_and_ib_address_are_rejected(self):
-        with self.assertRaisesRegex(app.SetupError, "duplicate.*login address"):
-            self.inventory(extra_jump="198.51.100.10")
-        with self.assertRaisesRegex(app.SetupError, "duplicate.*login address"):
-            self.inventory(svi1="192.0.2.10")
+        # O22: shared jump address is checked by actual login hostname later;
+        # O9: an IB address overlapping a jump address blocks that IB only.
+        try:
+            _, ethernet = self.inventory(extra_jump="198.51.100.10")
+        except app.SetupError as error:
+            self.fail("O22 must not abort for two jump declarations: " + str(error))
+        self.assertEqual({JUMP, OTHER_JUMP}, set(ethernet))
+        self.assertEqual("198.51.100.10", ethernet[JUMP].login_ip)
+        self.assertEqual("198.51.100.10", ethernet[OTHER_JUMP].login_ip)
+        try:
+            ib, _ = self.inventory(svi1="192.0.2.10")
+        except app.SetupError as error:
+            self.fail("O9 must retain the blocked IB: " + str(error))
+        self.assertTrue(hasattr(ib[IB], "input_issues"))
+        self.assertTrue(any(issue.blocking and JUMP in issue.problem for issue in ib[IB].input_issues))
 
     # v15 EthJumpVlanLoginTests.test_vlan_login_builds_readonly_jump_transport_and_checks_hostname
     # (test_desktop_initial_setup.py:371)

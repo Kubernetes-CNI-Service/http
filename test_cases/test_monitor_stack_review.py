@@ -7486,9 +7486,9 @@ if [ "$1 $2" = "show platform" ] && [ "$#" -eq 2 ]; then
 elif [ "$1 $2 $3" = "show platform inventory" ] && [ "$#" -eq 3 ]; then
   cat "$MONITOR_REAL_INVENTORY_FIXTURE"
 elif [ "$1 $2" = "show interface" ] && [ "$#" -eq 2 ]; then
-  printf '%s\n' 'nvl1 up'
+  printf '%s\n' 'acp1 up 400G 256 nvl Active LinkUp'
 elif [ "$4 $5" = "link phy-detail" ]; then
-  printf '%s\n' 'effective-ber 1e-12' 'effective-error 0'
+  printf '%s\n' 'effective-ber 1e-12' 'effective-errors 0'
 elif [ "$4 $5" = "link counters" ]; then
   printf '%s\n' 'link-downed 2' 'qp1-drops 3'
 else
@@ -7527,7 +7527,7 @@ fi
                         },
                     )
                 else:
-                    self.assertIn("TestNV,nvl1,1e-12,0,2,3,up", text)
+                    self.assertIn("TestNV,acp1,1e-12,0,2,3,up", text)
 
     def test_deidentified_captured_inventory_corpus_parses_nonzero(self):
         payload = DEIDENTIFIED_INVENTORY_CORPUS_JSON.encode("utf-8")
@@ -8165,8 +8165,18 @@ class BringupSafetyTests(unittest.TestCase):
                 "EXAMPLE-OOB01,eth,192.0.2.10,,,,,,\n",
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(module.SetupError, "duplicate IB address"):
-                module.load_devices(path)
+            # v315 r617 D1b-O9: valid address collisions are per-device even
+            # when both MACs are missing. Keep this original PUBLIC CSV.
+            try:
+                devices, _ = module.load_devices(path)
+            except module.SetupError as error:
+                self.fail("D1b-O9 must retain both conflicting IB rows: " + str(error))
+            self.assertEqual({"example-ib01", "example-ib02"}, set(devices))
+            for name, other in (("example-ib01", "EXAMPLE-IB02"),
+                                ("example-ib02", "EXAMPLE-IB01")):
+                self.assertTrue(hasattr(devices[name], "input_issues"))
+                self.assertTrue(any(issue.blocking and other in issue.problem
+                                    for issue in devices[name].input_issues))
 
     def test_xdr_upgrade_parses_both_supported_nvos_image_names(self):
         from test_cases.ibsw225_fixture_support.legacy_shell_workflow import (

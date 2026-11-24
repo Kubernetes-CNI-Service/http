@@ -1433,5 +1433,115 @@ class Version314DocumentationTests(unittest.TestCase):
             self.assertIn(expected, line)
 
 
+class Version315D7DocumentationTests(unittest.TestCase):
+    """Operator-facing D7 contract from the approved v3.1.5 guidance."""
+
+    def test_initial_setup_replace_contract_in_readme_manual_and_template(self):
+        readme = (ROOT / "infiniband/bringup/xdr-initial-setup/README.md").read_text(encoding="utf-8")
+        _, _, usage = readme.partition("## 使用方法")
+        self.assertTrue(usage)
+        parser = _ManualParser()
+        parser.feed((ROOT / "user-manual.html").read_text(encoding="utf-8"))
+        headings = [node for node in parser.root.walk()
+                    if node.tag == "h3" and node.attrs.get("id") == "v2-initial-setup"]
+        self.assertEqual(1, len(headings))
+        manual = headings[0].parent
+        self.assertIn("callout", manual.attrs.get("class", "").split())
+        readme_body = readme.partition("## 安全规则")[0].replace(chr(96), "")
+        documentation = (
+            ("README", readme_body, re.split(r"\n\s*\n", readme_body)),
+            ("manual", manual.text(), [node.text() for node in manual.children if node.tag == "p"]),
+        )
+        for name, body, paragraphs in documentation:
+            for phrase in (
+                "YAML_MISSING_OR_INVALID", "不回退到 patch", "verdict", "file", "sha256", "reason",
+                "writes_attempted", "verified_complete", "FAILED_DETACHED", "FAILED_DETACH_FAILED",
+                "不自动重放", "仅 patch", "不写设备配置",
+            ):
+                with self.subTest(document=name, phrase=phrase):
+                    self.assertIn(phrase, body)
+            for contract, expected in (
+                ("mode selection", ("默认", "--config-mode patch", "--config-mode replace", "管理服务器")),
+                ("per-target preview", ("--plan", "只读", "逐台", "整份替换（会清掉 yaml 以外的配置）")),
+                ("read-only replace result", ("只读", "replace", "WOULD_REPLACE", "CHECK_ONLY",
+                                              "INCOMPLETE", "退出码 2", "不写设备配置")),
+                ("release provenance", ("--project-dir", "<脚本目录>/latest_yaml", "99-output-ib_nvl/latest",
+                                        ".published-complete", "release-manifest.json", "current-release.json")),
+            ):
+                with self.subTest(document=name, contract=contract):
+                    self.assertTrue(any(all(part in paragraph for part in expected)
+                                        for paragraph in paragraphs), expected)
+            with self.subTest(document=name, contract="device stage order"):
+                self.assertRegex(body, r"核对身份\s*→\s*备份\s*→\s*关闭并核对 ZTP\s*→\s*整份替换"
+                                       r"\s*→\s*应用并保存[^→]*核对完成回执[^→]*→\s*补回缺项\s*→\s*再核对 ZTP"
+                                       r"\s*→\s*公钥\s*→\s*IPv4 就绪")
+        template = (ROOT / "DAY0-Prepare/template/README.txt").read_text(encoding="utf-8")
+        alias = ("infiniband/bringup/xdr-initial-setup/latest_yaml"
+                 " -----> ztp/config/nvos/latest_yaml")
+        rows = [line.strip() for line in template.splitlines()]
+        self.assertEqual(1, rows.count(alias))
+        nvos_links = template.split(alias, 1)[1].split("99-output-dhcp/", 1)[0]
+        self.assertIn("由 setup 创建", nvos_links)
+        self.assertIn("由 ZTP 发布器维护", nvos_links)
+
+
+class Version315OperatorDocumentationRecoveryTests(unittest.TestCase):
+    """r757 WP-1, WP-3, WP-6/7 and C4 operator facts; only authored sections count."""
+
+    def initial_docs(self):
+        from html import unescape
+
+        readme = (ROOT / "infiniband/bringup/xdr-initial-setup/README.md").read_text(encoding="utf-8")
+        parser = _ManualParser()
+        source = (ROOT / "user-manual.html").read_text(encoding="utf-8")
+        parser.feed(source)
+        (heading,) = [node for node in parser.root.walk()
+                      if node.tag == "h3" and node.attrs.get("id") == "v2-initial-setup"]
+        self.assertIn("callout", heading.parent.attrs.get("class", "").split())
+        (_, body), = re.findall(r'(<h3 id="v2-initial-setup"[^>]*>)(.*?)(?=<h3 id=)', source, re.S)
+        ordered = " ".join(unescape(re.sub(r"<[^>]+>", " ", body)).split())
+        return readme.replace(chr(96), ""), ordered, parser.root
+
+    def test_ib_input_rejects_bad_required_fields_but_not_absent_optional_gateway(self):
+        readme, _, _ = self.initial_docs()
+        for expected in (
+            "eth0_ip、第一组 netmask 和 eth0_gw 是每台 IB 必填",
+            "eth1 可选", "未填写网关时只配置地址", "无效的 eth1 项只记非阻断提示",
+            "不是唯一或合法的全局主机名时拒绝", "只有类型以 jump 结尾才是跳板候选",
+            "没有邻居条目不预先阻断",
+        ):
+            with self.subTest(contract=expected):
+                self.assertIn(expected, readme)
+
+    def test_route_and_leaf_cache_contract_is_visible_in_both_documents(self):
+        readme, manual, _ = self.initial_docs()
+        for name, text in (("README", readme), ("manual", manual)):
+            for expected in ("按 EUI-64", "只有符合重试条件的网络失败才改试 CSV IPv4",
+                             "版本 6", "同目录", "hostname_ranges.py", "device_identity.py", "login_path.py",
+                             "没有 P2P 管理连线本身不算失败"):
+                with self.subTest(document=name, contract=expected):
+                    self.assertIn(expected, text)
+
+    def test_default_patch_selection_and_readonly_result_are_documented_in_both(self):
+        readme, manual, _ = self.initial_docs()
+        for name, text in (("README", readme), ("manual", manual)):
+            for expected in ("--force 与默认相同", "真实冲突在写入前拒绝该台",
+                             "--devices", "records", "selection.unmapped",
+                             "有公钥时只读核对一次", "无公钥不读取",
+                             "不回传 authorized_keys", "不写设备配置"):
+                with self.subTest(document=name, contract=expected):
+                    self.assertIn(expected, text)
+
+    def test_manual_monitor_status_preserves_raw_health_and_inventory_boundary(self):
+        _, _, root = self.initial_docs()
+        status = [node.text() for node in root.walk() if node.tag == "li"
+                  and "Switch Status" in node.text() and "Effective-Error" in node.text()]
+        self.assertEqual(1, len(status))
+        for expected in ("QP1 Receive / Transmit", "NOT OK", "标签不改变原始健康",
+                         "NVLink 仍受当前清单过滤", "Actual FW"):
+            with self.subTest(contract=expected):
+                self.assertIn(expected, status[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -178,13 +178,20 @@ class _World:
                                if jump_passwords is None else jump_passwords)
         self.calls_path = root / "calls.tsv"
         self.calls_path.write_text("", encoding="utf-8")
-        with (root / "ib.csv").open("w", newline="", encoding="utf-8") as stream:
-            writer = csv.writer(stream)
-            writer.writerow(["hostname", "type", "eth0_ip", "netmask", "eth0_gw", "eth0_mac"])
-            for device in devices:
-                writer.writerow([device.hostname, "ib", device.address, "24", "192.0.2.1", device.mac])
-            for device in devices:
-                writer.writerow([device.jump, "eth_jump", device.jump_ip, "", "", ""])
+        inventory_header = ["hostname", "type", "eth0_ip", "netmask", "eth0_gw", "eth0_mac"]
+        inventory_rows = [
+            [device.hostname, "ib", device.address, "24", "192.0.2.1", device.mac]
+            for device in devices
+        ] + [
+            [device.jump, "eth_jump", device.jump_ip, "", "", ""]
+            for device in devices
+        ]
+        # MAIN checks both on-disk inventories; the PUBLIC fixture supplies both.
+        for name in ("ib.csv", "02-devices_config.csv"):
+            with (root / name).open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(inventory_header)
+                writer.writerows(inventory_rows)
         (root / "p2p.dot").write_text("".join(
             f'"{device.hostname}":"eth0" -- "{device.jump}":"swp1"\n' for device in devices), encoding="utf-8")
         # WP-8 table 8-1 (guide :923): --project-dir reads the project's own neutral defaults here.
@@ -246,6 +253,8 @@ class _World:
                     "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n")
         if command == ["bridge", "fdb", "show"]:
             return f"{device.mac} dev swp1 vlan 1000 master br_default\n"
+        if command == ["bridge", "vlan", "show"]:
+            return "port              vlan-id\nswp1              1000 PVID Egress Untagged\n"
         if command == ["ip", "neighbor"]:
             return f"{self.app.mac_to_link_local(device.mac)} dev vlan1000 lladdr {device.mac} REACHABLE\n"
         if command == ["ip", "-j", "address", "show"]:
@@ -295,7 +304,9 @@ class _World:
                 session.feed("\nPUBLIC interface not ready yet\n")
             return session.result(code)
         marker = frame.group(1)
-        inner = re.search(r"__HTTP_IB_BEGIN_" + marker + r'__\\n"; (.*?); task_rc=', text)
+        inner = re.search(r"__HTTP_IB_BEGIN_" + marker + r'__\\n"; (.*?); task_rc=', text,
+                          flags=re.DOTALL)
+        self.test.assertIsNotNone(inner, "one owned mocked command frame")
         reply = session.feed(f"\nadmin@{peer}'s password: ")
         if reply != device.password:
             self.note(device, session_kind + "-rejected", "")
@@ -314,8 +325,28 @@ class _World:
                     return session.result(code)
                 payload = ""
             else:
-                self.note(device, session_kind, inner_command)
-                if inner_command == "nv show system ztp":
+                if not inner_command.startswith("sh -c "):
+                    # Observe readiness separately from stage commands, using the actual mock endpoint.
+                    is_jump_ipv4_read = (outer is not None and peer == device.address
+                                         and inner_command in {"ip addr show eth0", "ip route"})
+                    self.note(device, "ipv4_read" if is_jump_ipv4_read else session_kind, inner_command)
+                if inner_command.startswith("sh -c "):
+                    from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
+
+                    carrier = shlex.split(command[-1])
+                    self.test.assertEqual(["sh", "-c"], carrier[:2])
+                    nested = shlex.split(carrier[2].split("; exec ", 1)[1])
+                    framed = shlex.split(nested[-1])
+                    self.test.assertEqual(["sh", "-c"], framed[:2])
+                    exact_body = re.search(r"__HTTP_IB_BEGIN_" + marker + r'__\\n"; (.*?); task_rc=',
+                                           framed[2], flags=re.DOTALL)
+                    self.test.assertIsNotNone(exact_body)
+                    backup = shlex.split(exact_body.group(1))
+                    self.test.assertEqual(["sh", "-c", EXPECTED_BACKUP_SCRIPT, "--"], backup[:-1])
+                    self.test.assertRegex(backup[-1], r"^[0-9]{8}-[0-9]{6}$")
+                    self.note(device, session_kind, "configuration backup")
+                    payload = f"path=/home/PUBLIC/current_{backup[-1]}.yaml\nbytes=137\n"
+                elif inner_command == "nv show system ztp":
                     payload = device.ztp_text()
                 elif inner_command == "nv config diff -o commands":
                     if device.on_pending is not None:
@@ -323,6 +354,29 @@ class _World:
                     payload = ""
                 elif inner_command == "nv config show -o commands":
                     payload = device.readback()
+                elif inner_command == "ip addr show eth0":
+                    if outer is not None and peer == device.address:
+                        # A full IPv4 attempt still has one observation point:
+                        # its first exact, framed address read. Route is separate.
+                        self.note(device, "ipv4", "strict")
+                        code = device.ipv4_codes.pop(0) if device.ipv4_codes else 0
+                        if code:
+                            session.feed("\nPUBLIC interface not ready yet\n")
+                            return session.result(code)
+                    payload = (
+                        "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                        f"    link/ether {device.mac} brd ff:ff:ff:ff:ff:ff\n"
+                    )
+                    for line in device.lines:
+                        if line.startswith("nv set interface eth0 ipv4 address "):
+                            payload += f"    inet {line.split()[-1]} scope global eth0\n"
+                elif inner_command == "ip route":
+                    payload = "".join(
+                        f"default via {line.split()[-1]} dev eth0\n"
+                        for line in device.lines
+                        if line.startswith(("nv set interface eth0 ipv4 gateway ",
+                                            "nv set interface eth0-1 ipv4 gateway "))
+                    )
                 elif inner_command.startswith("nv set "):
                     device.apply_set(inner_command)
                     payload = ""
@@ -491,11 +545,11 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- b-3 ---------------------------------------------------------------------------------------
     def test_strict_partial_or_conflicting_network_is_refused_before_any_write(self) -> None:
-        # Owner Q-035 (a); CURRENT-CONTRACT.md:54-55 ("真冲突或不明 pending 不盲目覆盖"; "--force 只补缺失
-        # Network 字段，不绕过身份、密码、冲突或 pending"): partial or CSV-conflicting Network fields stop
-        # this device before any write (locates v15 base_stage_needed :2706-2711).
+        # Keep this test ID; D67-O1/O3 now separates fillable omissions from a true conflict.
+        # The latter still stops this device before any write, not the other eligible device.
         target = secret("target")
-        cases = (("conflict", [*network_lines(1, hostname="example-other.example.test"), *SERVICES, *INITIAL_SET]),
+        conflicting_name = "example-other.example.test"
+        cases = (("conflict", [*network_lines(1, hostname=conflicting_name), *SERVICES, *INITIAL_SET]),
                  ("partial", ["nv set system hostname " + host(1), *INITIAL_SET]))
         for label, lines in cases:
             with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="strict-partial-") as folder:
@@ -503,11 +557,41 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
                            _Device(2, password=target, lines=complete_lines(2))]
                 world, code, err = self.apply(folder, devices, initial=target, target=target)
                 record = world.record(1)
-                self.assertIn("Network fields are partial or conflict with CSV", record.get("reason", ""))
-                self.assertEqual([], world.writes(host(1)), "no Initial, Network, Services or key write")
-                self.assertEqual("FAILED", record["outcome"])
+                details = [detail for _, detail in world.calls(host(1))]
                 self.assertIn(world.record(2)["outcome"], ("CONFIGURED", "ALREADY_CONFIGURED"))
-                self.assertEqual(2, code, err)
+                if label == "conflict":
+                    self.assertEqual("Network conflict; manual resolution required: hostname: "
+                                     "expected CSV value, found conflicting applied value", record["reason"])
+                    self.assertEqual("BLOCKED_NETWORK_CONFLICT", record["category"])
+                    self.assertEqual([{"field": "hostname", "expected": host(1), "actual": conflicting_name}],
+                                     record["conflicts"])
+                    self.assertIn(f"CONFLICT hostname: expected={host(1)}, actual={conflicting_name}", world.report())
+                    self.assertIs(record["ztp"]["read"], True)
+                    self.assertEqual(1, details.count("nv show system ztp"))
+                    self.assertEqual([], world.writes(host(1)), "no Initial, Network, Services or key write")
+                    self.assertNotIn("configuration backup", details)
+                    self.assertIsNone(record["backup"])
+                    self.assertIs(record["writes_attempted"], False)
+                    self.assertEqual("NOT_REACHED", record["stage_status"]["services"])
+                    self.assertEqual("NOT_REACHED", record["stage_status"]["public_keys"])
+                    self.assertEqual("FAILED", record["outcome"])
+                    self.assertEqual(2, code, err)
+                else:
+                    network = ["nv set interface eth0 ipv4 address 192.0.2.12/24",
+                               "nv set interface eth0 ipv4 gateway 192.0.2.1",
+                               "nv set interface eth0-1 link state up",
+                               "nv set interface eth0-1 type eth",
+                               "nv config apply -y", "nv config save"]
+                    self.assertEqual([*network, *SERVICES, "nv config apply -y", "nv config save"],
+                                     world.writes(host(1)), "only missing Network and Services are written")
+                    self.assertEqual([], record["conflicts"])
+                    self.assertEqual(1, details.count("configuration backup"))
+                    self.assertLess(details.index("configuration backup"), details.index(network[0]))
+                    self.assertIsNotNone(record["backup"])
+                    self.assertIs(record["writes_attempted"], True)
+                    self.assertEqual("VERIFIED", record["stage_status"]["day0"])
+                    self.assertEqual("CONFIGURED", record["outcome"])
+                    self.assertEqual(0, code, err)
 
     def test_strict_complete_addresses_with_unready_ports_fill_only_the_port_setters(self) -> None:
         # Owner Q-035 (a); CURRENT-CONTRACT.md:53 ("保留原条件决定哪些阶段需要写入"): addresses that match
@@ -597,8 +681,9 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- b-6 / P5 ----------------------------------------------------------------------------------
     def test_strict_password_reads_and_change_follow_the_one_v15_sequence(self) -> None:
-        # Map 2.3 _authenticate_ib_read :129 (P5: "只留一个落点，指一套实现"; "v15 留口令来源顺序（初始→
-        # 项目目标→问当前口令，I14、WP-5）、改密流程和 IBPasswordChangeUncertain"), map D32d :284 ("认证、
+        # R667 / I039 replaces the old initial-first source order with qualified project →
+        # distinct initial → once-current. Map 2.3 _authenticate_ib_read :129 still owns one
+        # implementation, the password-change process and IBPasswordChangeUncertain; map D32d :284 ("认证、
         # 改密到项目目标" taken into the v15 skeleton) and CURRENT-CONTRACT.md:50 ("兼容已强制改密，改密写
         # 后用新连接验证").
         target, initial = secret("target"), secret("initial")
@@ -606,7 +691,8 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             devices = [_Device(1, password=initial, expired=True, lines=unconfigured_lines())]
             world, code, err = self.apply(folder, devices, initial=initial, target=target)
             phases = [kind for kind, _detail in world.calls(host(1)) if kind.startswith("phase:")]
-            self.assertEqual(["phase:auth-probe-readonly", "phase:password-change", "phase:post-change-read"],
+            self.assertEqual(["phase:auth-probe-readonly", "phase:auth-probe-readonly",
+                              "phase:password-change", "phase:post-change-read"],
                              phases)
             self.assertIn("IB new-password authentication and NVUE readback verified.", world.report())
             self.assertEqual("CONFIGURED", world.record(1)["outcome"])
@@ -622,12 +708,13 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
                           "the fresh readback after the change must parse as NVUE configuration")
             self.assertEqual([], world.writes(host(1)))
             self.assertEqual(2, code, err)
-        with self.subTest(case="initial-rejected-target-fallback"), \
+        with self.subTest(case="project-first-no-rotation"), \
                 tempfile.TemporaryDirectory(prefix="strict-fallback-") as folder:
             devices = [_Device(1, password=target, lines=complete_lines(1))]
             world, code, err = self.apply(folder, devices, initial=initial, target=target)
-            self.assertIn("Initial IB credential rejected; trying the project IB password (no rotation).",
-                          world.report())
+            self.assertEqual([("phase:auth-probe-readonly", "accepted")],
+                             [(kind, detail) for kind, detail in world.calls(host(1)) if kind.startswith("phase:")])
+            self.assertEqual([], world.writes(host(1)))
             self.assertEqual(0, code, err)
         # One implementation: the third credential source (T18) is asked from one place only.
         # Its own subTest, so it is reported even when a run above fails.
@@ -681,26 +768,36 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- check-only --------------------------------------------------------------------------------
     def test_strict_check_only_reports_v15_stage_results_without_a_pending_read(self) -> None:
-        # P3c map D32d :284 ("合并：v15 的阶段骨架和失败隔离"; the DEV strict branch's check-only
-        # pending report is not part of that skeleton); CURRENT-CONTRACT.md:59 ("check-only 不写设备
-        # 配置，仍只读 SSH 并生成本地报告"): the read-only strict run plans Network like v15 and stops the
-        # device there (locates v15 :4208-4216); it does not add the DEV pending-diff report.
+        # P3c map D32d :284 / CURRENT-CONTRACT.md:59 still forbid a check-only pending read or
+        # write. D67 now records the missing Services plan even when Network also needs work.
         target = secret("target")
         with tempfile.TemporaryDirectory(prefix="strict-check-") as folder:
             devices = [_Device(1, password=target, lines=unconfigured_lines()),
                        _Device(2, password=target, lines=complete_lines(2))]
             world = self.world(Path(folder), devices)
-            code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target), target=target)
+            # I-039: a global-backed read-only run qualifies the project target before opening any session.
+            code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target, target=target),
+                                      target=target)
             self.assertFalse([call for call in world.calls() if call == ("run", "nv config diff -o commands")],
                              "check-only reads no pending diff")
             record = world.record(1)
             self.assertEqual("CHECK_ONLY", record["outcome"])
             self.assertEqual("NEEDS_CONFIGURATION", record["stage_status"]["day0"])
-            self.assertEqual("NOT_REACHED", record["stage_status"]["services"])
+            self.assertEqual("PLANNED_NOT_APPLIED", record["stage_status"]["services"])
+            self.assertEqual([{"item": "dns", "value": "192.0.2.53"},
+                              {"item": "ntp", "value": "192.0.2.123"},
+                              {"item": "timezone", "value": "Etc/UTC"}],
+                             [item for item in record["planned_changes"]
+                              if item["item"] in {"dns", "ntp", "timezone"}])
+            self.assertIs(record["needs_change"], True)
             self.assertIn("WOULD APPLY: nv set interface eth0 ipv4 address 192.0.2.12/24", world.report())
             self.assertEqual("ALREADY_CONFIGURED", world.record(2)["outcome"])
             self.assertEqual("CHECKED", world.record(2)["stage_status"]["initial"])
             self.assertEqual([], world.writes(host(1)) + world.writes(host(2)))
+            for index in (1, 2):
+                self.assertNotIn("configuration backup", [detail for _, detail in world.calls(host(index))])
+                self.assertIsNone(world.record(index)["backup"])
+                self.assertIs(world.record(index)["writes_attempted"], False)
             self.assertEqual(2, code, err)
 
     def test_check_only_with_only_initial_missing_needs_configuration(self) -> None:
@@ -732,7 +829,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
         for label, lines, ztp in cases:
             with self.subTest(case=label), tempfile.TemporaryDirectory(prefix="check-initial-") as folder:
                 world = self.world(Path(folder), [_Device(1, password=target, lines=lines, ztp=ztp)])
-                code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target),
+                code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target, target=target),
                                           target=target)
                 record = world.record(1)
                 self.assertEqual("CHECK_ONLY", record["outcome"])
@@ -922,7 +1019,8 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
                                       mock.patch.object(app.subprocess, "run", side_effect=keygen),
                                       mock.patch.object(app.shutil, "which", side_effect=which)))
             self.assertEqual(0, code, err)
-            served = [detail for kind, detail in world.calls(host(1)) if kind == "run"]
+            observed = world.calls(host(1))
+            served = [detail for kind, detail in observed if kind == "run"]
             commands = carried(helper)
             for stage, command in (("Initial", "nv show system ztp"), ("Initial", INITIAL_SET[0]),
                                    ("Network", "nv set interface eth0 ipv4 address 192.0.2.12/24"),
@@ -932,12 +1030,24 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             # T15: the pre-write pending reads are plain reads, never through the helper.
             self.assertIn(pending, served, "T15 reads the pending diff before the writes")
             self.assertNotIn(pending, commands, "the T15 pending read does not use the helper")
+            # O13 is a distinct one-time action; the transport fixture verifies its exact frame.
+            backup = "configuration backup"
+            self.assertEqual(1, served.count(backup))
+            self.assertLess(served.index(backup), served.index(INITIAL_SET[0]))
+            self.assertNotIn(backup, commands)
+            # D1b-O5: verify_ipv4_login owns these fresh reads on the newly configured IPv4 endpoint.
+            address, route = ("ipv4_read", "ip addr show eth0"), ("ipv4_read", "ip route")
+            self.assertEqual([address, route], [call for call in observed if call[0] == "ipv4_read"])
+            network = ("run", "nv set interface eth0 ipv4 address 192.0.2.12/24")
+            self.assertLess(observed.index(network), observed.index(address))
+            self.assertLess(observed.index(route), observed.index(("run", SERVICES[0])))
             # Every other stage read and write the device served came through the helper, in order.
-            self.assertEqual([detail for detail in served if detail != pending], commands)
+            self.assertEqual([detail for detail in served if detail not in {pending, backup}], commands)
         with self.subTest(case="check-only"), tempfile.TemporaryDirectory(prefix="strict-helper-check-") as folder:
             world = self.world(Path(folder), [_Device(1, password=target, lines=lines)])
             helper = mock.Mock(wraps=app._run_authorized_ib_command)
-            code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target), target=target,
+            code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target, target=target),
+                                      target=target,
                                       extra=(mock.patch.object(app, "_run_authorized_ib_command", helper),))
             # 06 WP6-a8 (WP-6 review A wa-9): a check-only run that finds configuration to do is
             # INCOMPLETE, exit 2 (table 6-1 row 11, guide :754).
@@ -1059,8 +1169,8 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
         # implementation: v15 counts each IB SSH session once, before it starts and whatever its
         # result (参考/initial-setup-v15/initial-setup-20261019-v15_oob-spine.py:2494-2495:
         # record_metric("ib_ssh_attempts"), then interactive_run); each credential the IB
-        # authentication readback tries is one such session (v15 :494-496 the initial password,
-        # :505-507 the project target); P3c map :120 (run_on_ib keeps v15's record_metric) and :219
+        # authentication readback tries is one such session. I039 / R667 changes only their
+        # source order to project-first, not the metric; P3c map :120 (run_on_ib keeps v15's record_metric) and :219
         # (record_metric: take v15's counting), guide :419 (the run_on_ib merge keeps v15's counter),
         # all at tag guide-v3.1.3-approved-r302.  The strict read is a DEV phase session (map :129),
         # so its own branch counts it.  Only the phase session, the project authority and log are
@@ -1071,8 +1181,8 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
         exhausted, transport = app._IB_CREDENTIALS_EXHAUSTED, "PUBLIC synthetic phase transport failure"
         names = set()
         for case, outcomes, password, expected, ending in (
-                ("accepted", ["accept"], initial, [metric, phase], initial),
-                ("rejected-then-target-accepted", ["reject", "accept"], initial, [metric, phase] * 2, target),
+                ("accepted", ["accept"], initial, [metric, phase], target),
+                ("project-rejected-initial-accepted", ["reject", "accept"], initial, [metric, phase] * 2, initial),
                 ("initial-equals-target-rejected", ["reject"], target, [metric, phase], exhausted),
                 ("transport-failure", ["transport"], initial, [metric, phase], transport)):
             with self.subTest(case=case):
@@ -1091,7 +1201,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
         # FX3 control group (WP-7 review B C1, C2): green before and after FX3.  Same sources as the
         # test above (v15 :2494-2495: one count per IB SSH session, before it starts).
         # C1: the non-strict authentication read is one v15 password-only run_on_ib session per
-        #     credential (v15 :494-496, :505-507); run_on_ib stays real, interactive_run answers.
+        #     credential (I039 / R667 project → distinct initial); run_on_ib stays real, interactive_run answers.
         # C2: the strict T18 read, the password change and the fresh read after it are run_on_ib
         #     phase sessions (v15 :515-517, :530-533, :538-540; map :120), each counted once.
         app = self.app
@@ -1099,7 +1209,7 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
         metric, run = ("metric", "ib_ssh_attempts"), ("run", "ib")
         for case, outcomes, expected in (
                 ("C1-accepted", ["accept"], [metric, run]),
-                ("C1-rejected-then-target-accepted", ["reject", "accept"], [metric, run] * 2),
+                ("C1-project-rejected-initial-accepted", ["reject", "accept"], [metric, run] * 2),
                 ("C1-both-rejected", ["reject", "reject"], [metric, run] * 2),
                 ("C1-transport-failure", ["transport"], [metric, run])):
             with self.subTest(case=case):

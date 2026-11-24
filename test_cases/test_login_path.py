@@ -40,6 +40,287 @@ def parser_module(test):
     return login_path
 
 
+class LoginPathRouteTests(unittest.TestCase):
+    """v315 r617 WP1 pure facts; literal expectations from guide 4.1/WP1.
+
+    No old editor test setup is inherited. New calls must be pure; in particular
+    missing planned interfaces give assertion RED, never import/API ERROR.
+    """
+
+    def setUp(self):
+        self.api = parser_module(self)
+        from contextlib import ExitStack
+        self.effects = ExitStack()
+        self.addCleanup(self.effects.close)
+        for owner, name in ((subprocess, "Popen"), (os, "system"), (os, "execve")):
+            self.effects.enter_context(mock.patch.object(
+                owner, name, side_effect=AssertionError("pure route called external effect")))
+        self.effects.enter_context(mock.patch("socket.socket", side_effect=AssertionError(
+            "pure route called network")))
+
+    def need(self, *names):
+        for name in names:
+            self.assertTrue(callable(getattr(self.api, name, None)),
+                            "r617 4.1 requires pure interface " + name)
+        return self.api
+
+    def eth0(self, **changes):
+        self.need("check_eth0_inputs")
+        values = dict(mac="02:00:00:00:00:10", address="192.0.2.10",
+                      netmask="255.255.255.0", gateway="192.0.2.1")
+        values.update(changes)
+        return self.api.check_eth0_inputs("example-ib01", **values)
+
+    def test_jump_type_is_suffix_jump_only(self):
+        api = self.need("is_jump_type")
+        for value in ("eth_jump", " IB_JUMP ", "customjump"):
+            with self.subTest(value=value):
+                self.assertIs(True, api.is_jump_type(value))
+        for value in ("eth", "eth_spx", "spx", "ethernet", "jump_extra", ""):
+            with self.subTest(value=value):
+                self.assertIs(False, api.is_jump_type(value))
+
+    def test_eth0_inputs_each_missing_or_wrong_field_blocks(self):
+        api = self.need("check_eth0_inputs")
+        import ipaddress
+        plan, issues = self.eth0(mac="0200.0000.0010")
+        self.assertEqual((), issues)
+        self.assertEqual("02:00:00:00:00:10", plan.mac)
+        self.assertEqual(ipaddress.IPv4Interface("192.0.2.10/24"), plan.address)
+        self.assertEqual("192.0.2.1", plan.gateway)
+        for changes, field in (({"mac": ""}, "eth0_mac"), ({"mac": "bad"}, "eth0_mac"),
+                               ({"address": ""}, "eth0_ip"), ({"address": "no-ip"}, "eth0_ip"),
+                               ({"netmask": ""}, "netmask"), ({"netmask": "x"}, "netmask"),
+                               ({"gateway": ""}, "eth0_gw"),
+                               ({"gateway": "198.51.100.1"}, "eth0_gw"),
+                               ({"gateway": "192.0.2.0"}, "eth0_gw"),
+                               ({"gateway": "192.0.2.255"}, "eth0_gw"),
+                               ({"address": "192.0.2.0"}, "eth0_ip")):
+            with self.subTest(changes=changes):
+                result, found = self.eth0(**changes)
+                self.assertIsNone(result)
+                self.assertTrue(any(i.field == field and i.blocking for i in found))
+                self.assertTrue(all(i.hostname == "example-ib01" for i in found))
+
+    def test_eth1_inputs_only_hint_and_configure_valid_items(self):
+        api = self.need("check_eth1_inputs")
+        def check(**kw):
+            values = dict(eth0_mac="02:00:00:00:00:10", mac="02:00:00:00:00:11",
+                          address="198.51.100.10", netmask="24", gateway="198.51.100.1")
+            values.update(kw)
+            return api.check_eth1_inputs("example-ib01", **values)
+        good, hints = check()
+        self.assertEqual("198.51.100.10/24", str(good.address))
+        self.assertEqual("198.51.100.1", good.gateway)
+        self.assertEqual((), hints)
+        partial, hints = check(gateway="")
+        self.assertEqual("198.51.100.10/24", str(partial.address))
+        self.assertEqual("", partial.gateway)
+        self.assertTrue(hints)
+        for kw in ({"address": ""}, {"gateway": "192.0.2.1"}, {"mac": "02:00:00:00:00:19"},
+                   {"mac": ""}, {"eth0_mac": ""}, {"mac": "wrong"}):
+            with self.subTest(changes=kw):
+                plan, hints = check(**kw)
+                self.assertTrue(hints)
+                self.assertTrue(all(not i.blocking for i in hints))
+                if "gateway" in kw:
+                    self.assertEqual("", plan.gateway)
+        empty, hints = check(mac="", address="", gateway="")
+        self.assertIsNone(empty.address)
+        self.assertEqual("", empty.gateway)
+        spelled, hints = check(mac="0200-0000.0011")
+        self.assertEqual((), hints)
+
+    def test_jump_login_candidates_order_and_dedup(self):
+        api = self.need("jump_login_candidates")
+        result, issues = api.jump_login_candidates("example-jump01", eth0_ip="192.0.2.1",
+            vlan_groups=(("20", "198.51.100.2", "24"),
+                         ("30", "203.0.113.3", "255.255.255.0"),
+                         ("40", "192.0.2.1", ""), ("4095", "203.0.113.4", "24"),
+                         ("50", "not-an-ip", "24")))
+        self.assertEqual((("192.0.2.1", "JUMP_ETH0"), ("198.51.100.2", "JUMP_VLAN20"),
+                          ("203.0.113.3", "JUMP_VLAN30")),
+                         tuple((v.address, v.entry) for v in result))
+        self.assertEqual(2, len(issues))
+        self.assertTrue(all(not i.blocking for i in issues))
+        for invalid in ("127.0.0.1", "0.0.0.0", "224.0.0.1", "255.255.255.255"):
+            with self.subTest(invalid=invalid):
+                result, issues = api.jump_login_candidates("example-jump01", eth0_ip=invalid,
+                                                          vlan_groups=())
+                self.assertEqual((), result)
+                self.assertTrue(issues)
+
+    def test_direct_access_selector_forms(self):
+        api = self.need("select_direct_access")
+        from tools.hostname_ranges import SelectorError
+        hosts = ("example-ib01.example.test", "example-ib02", "example-ib03", "example-ib09")
+        for text, expected in (("example-ib01", {hosts[0]}), ("example-ib0*", set(hosts)),
+                               ("example-ib[01-03]", set(hosts[:3])),
+                               ("example-ib02,example-ib09", {hosts[1], hosts[3]}),
+                               ("all", set(hosts))):
+            with self.subTest(text=text):
+                self.assertEqual(frozenset(expected), api.select_direct_access(text, hosts))
+        for text in ("missing", "all,example-ib02", "example-ib[1-09]"):
+            with self.subTest(text=text):
+                with self.assertRaises(SelectorError) as error:
+                    api.select_direct_access(text, hosts)
+                self.assertIn("--direct-access", str(error.exception))
+                self.assertIn(text.split(",")[0], str(error.exception))
+
+    def test_classify_routes(self):
+        api = self.need("classify", "Attachment")
+        from types import SimpleNamespace
+        devices = [SimpleNamespace(hostname=n) for n in ("ib-a", "ib-b", "ib-c", "ib-d")]
+        attachments = {"ib-a": api.Attachment("jump-a", "eth_jump", "swp1"),
+                       "ib-b": api.Attachment("leaf-b", "eth", "swp2"),
+                       "ib-c": None, "ib-d": api.Attachment("jump-d", "ib_jump", "swp4")}
+        rows = api.classify(devices, attachments, direct=frozenset({"ib-d"}),
+                            same_subnet={"ib-b": "en7"})
+        self.assertEqual([("ib-a", "jump", "JUMP_LINK", "jump-a", "swp1", None),
+                          ("ib-b", "direct", "PEER_NOT_JUMP", None, None, "en7"),
+                          ("ib-c", "direct", "NO_MGMT_LINK", None, None, None),
+                          ("ib-d", "direct", "DIRECT_ACCESS", None, None, None)],
+                         [(r.hostname, r.path, r.reason, r.jump, r.port, r.same_subnet) for r in rows])
+        self.assertEqual("jump-a", attachments["ib-a"].peer)
+
+    def test_same_subnet_needs_ipv4_in_plan_and_ipv6(self):
+        api = self.need("parse_local_interfaces", "same_subnet_interface")
+        import ipaddress
+        text = '[{"ifname":"en7","addr_info":[{"family":"inet","local":"192.0.2.99","prefixlen":24},{"family":"inet6","local":"fe80::1","prefixlen":64}]},{"ifname":"en8","addr_info":[{"family":"inet","local":"198.51.100.99","prefixlen":24}]}]'
+        local = api.parse_local_interfaces(text)
+        self.assertEqual("en7", api.same_subnet_interface(ipaddress.IPv4Interface("192.0.2.10/24"), local))
+        self.assertIsNone(api.same_subnet_interface(ipaddress.IPv4Interface("198.51.100.10/24"), local))
+        self.assertIsNone(api.same_subnet_interface(ipaddress.IPv4Interface("203.0.113.10/24"), local))
+        self.assertEqual((), api.parse_local_interfaces("[]"))
+
+    def test_link_local_eui64_vectors(self):
+        api = self.need("link_local_from_mac")
+        self.assertEqual("fe80::ff:fe00:10", api.link_local_from_mac("02:00:00:00:00:10"))
+        self.assertEqual("fe80::ff:fe00:1", api.link_local_from_mac("0200.0000.0001"))
+        for value in ("00:00:00:00:00:00", "01:00:00:00:00:01", "ff:ff:ff:ff:ff:ff", "bad"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                api.link_local_from_mac(value)
+
+    def test_credential_order(self):
+        api = self.need("credential_order")
+        self.assertEqual(("key", "project", "initial", "ask"),
+                         api.credential_order("direct", key_available=True))
+        self.assertEqual(("project", "initial", "ask"),
+                         api.credential_order("direct", key_available=False))
+        self.assertEqual(("project", "initial", "ask"),
+                         api.credential_order("jump", key_available=True))
+
+    def test_login_interface_from_port_vlan(self):
+        api = self.need("login_interface")
+        links = ("2: bridge: <BROADCAST,UP> mtu 1500\n"
+                 "3: swp7: <BROADCAST,UP> mtu 1500 master bridge\n"
+                 "4: vlan20@bridge: <BROADCAST,UP> mtu 1500\n"
+                 "    vlan protocol 802.1Q id 20 <REORDER_HDR>\n"
+                 "5: vlan20-v0@vlan20: <BROADCAST,UP> mtu 1500\n"
+                 "    macvlan mode private\n"
+                 "6: swp8: <BROADCAST,UP> mtu 1500\n")
+        vlans = "port              vlan-id\nswp7              20 PVID Egress Untagged\n"
+        self.assertEqual("vlan20", api.login_interface(links, vlans, "swp7"))
+        self.assertEqual("swp8", api.login_interface(links, vlans, "swp8"))
+        for bad_links, bad_vlans in ((links.replace("id 20", "id 21"), vlans),
+                                     (links, vlans + "                  30\n"),
+                                     (links + "7: another@bridge: <UP> mtu 1500\n    vlan id 20\n", vlans)):
+            with self.subTest(links=bad_links, vlans=bad_vlans), self.assertRaises(ValueError):
+                api.login_interface(bad_links, bad_vlans, "swp7")
+
+    def test_cable_check_two_results_and_not_learned(self):
+        api = self.need("check_cable", "JumpTables")
+        mac = "02:00:00:00:00:10"
+        links = ("2: bridge: <UP> mtu 1500\n3: swp7: <UP> mtu 1500 master bridge\n"
+                 "4: vlan20@bridge: <UP> mtu 1500\n    vlan protocol 802.1Q id 20\n"
+                 "5: swp8: <UP> mtu 1500 master bridge\n")
+        vlans = "port vlan-id\nswp7 20 PVID Egress Untagged\nswp8 20 PVID Egress Untagged\n"
+        def table(host, fdb, linktext=links):
+            return api.JumpTables(host, linktext, fdb, vlans)
+        cases = (([table("jump-a", mac + " dev swp7 vlan 20 master bridge\n"
+                         "02:00:00:00:00:19 dev swp7 vlan 20 master bridge\n")],
+                  "MATCH", (("jump-a", "swp7"),), ("02:00:00:00:00:19",)),
+                 ([table("jump-a", mac + " dev swp8 vlan 20 master bridge\n")],
+                  "ELSEWHERE", (("jump-a", "swp8"),), ()),
+                 ([table("jump-a", ""), table("jump-b", mac + " dev swp8 vlan 20 master bridge\n")],
+                  "ELSEWHERE", (("jump-b", "swp8"),), ()),
+                 ([table("jump-a", "")], "NOT_LEARNED", (), ()))
+        for tables, verdict, actual, extra in cases:
+            with self.subTest(verdict=verdict, actual=actual):
+                check = api.check_cable("example-ib01", mac, ("jump-a", "swp7"), tables,
+                                        cascade_ports=frozenset())
+                self.assertEqual((verdict, actual, extra, "fe80::ff:fe00:10", "vlan20"),
+                    (check.verdict, check.actual, check.extra_macs, check.link_local, check.login_interface))
+                self.assertIs(False, check.after_ping)
+                self.assertIsNone(check.ping_ok)
+        cascaded = [table("jump-a", mac + " dev swp8 vlan 20 master bridge\n"),
+                    table("jump-b", mac + " dev swp7 vlan 20 master bridge\n")]
+        check = api.check_cable("example-ib01", mac, ("jump-a", "swp7"), cascaded,
+                                cascade_ports=frozenset({("jump-a", "swp8")}))
+        self.assertEqual((("jump-b", "swp7"),), check.actual)
+        bonded_links = links.replace("swp7: <UP> mtu 1500 master bridge",
+                                      "swp7: <UP> mtu 1500 master bond1") + "6: bond1: <UP> mtu 1500 master bridge\n"
+        check = api.check_cable("example-ib01", mac, ("jump-a", "swp7"),
+            [table("jump-a", mac + " dev bond1 vlan 20 master bridge\n", bonded_links)],
+            cascade_ports=frozenset(), after_ping=True, ping_ok=False)
+        self.assertEqual("MATCH", check.verdict)
+        self.assertEqual((("jump-a", "bond1"),), check.actual)
+        self.assertIs(True, check.after_ping)
+        self.assertIs(False, check.ping_ok)
+
+    def test_ping_argv_and_plan(self):
+        api = self.need("ping_argv", "ping_plan", "CableCheck")
+        self.assertEqual(["ip", "vrf", "exec", "default", "ping", "-6", "-c", "2", "-W", "1",
+                          "fe80::ff:fe00:10%vlan20"],
+                         api.ping_argv("default", "fe80::ff:fe00:10", "vlan20"))
+        def check(host, jump, verdict):
+            return api.CableCheck(host, "02:00:00:00:00:10", "fe80::ff:fe00:10",
+                (jump, "swp7"), verdict, (), (), "vlan20", False, None)
+        checks = [check("ib-a", "jump-a", "NOT_LEARNED"), check("ib-b", "jump-b", "NOT_LEARNED"),
+                  check("ib-c", "jump-a", "MATCH"), check("ib-d", "jump-a", "ELSEWHERE")]
+        grouped = api.ping_plan(checks)
+        self.assertEqual({"jump-a", "jump-b"}, set(grouped))
+        self.assertEqual(["ib-a"], [item.hostname for item in grouped["jump-a"]])
+        self.assertEqual(["ib-b"], [item.hostname for item in grouped["jump-b"]])
+
+    def test_identity_checks_by_path(self):
+        api = self.need("IdentityFacts", "check_identity")
+        import ipaddress
+        def observed(mac="02:00:00:00:00:10", addresses=("192.0.2.10/24",), gateways=("192.0.2.1",)):
+            return api.IdentityFacts(mac, tuple(ipaddress.IPv4Interface(v) for v in addresses), gateways)
+        def check(facts, via_ipv4=True):
+            return api.check_identity("02:00:00:00:00:10", facts, via_ipv4=via_ipv4,
+                                      expected_ipv4="192.0.2.10/24", expected_gateway="192.0.2.1")
+        for facts in (observed(), observed(gateways=())):
+            self.assertIs(True, check(facts).ok)
+        for facts, field in ((observed(mac="02:00:00:00:00:11"), "mac"),
+                             (observed(addresses=("192.0.2.10/25",)), "ipv4"),
+                             (observed(addresses=("192.0.2.11/24",)), "ipv4"),
+                             (observed(gateways=("192.0.2.2",)), "gateway")):
+            with self.subTest(field=field):
+                result = check(facts)
+                self.assertIs(False, result.ok)
+                self.assertIn(field, {row[0] for row in result.mismatches})
+        self.assertIs(True, check(observed(addresses=(), gateways=("198.51.100.1",)), False).ok)
+        self.assertIs(False, check(observed(mac="", addresses=(), gateways=()), False).ok)
+
+    def test_identity_readback_parsers(self):
+        api = self.need("parse_ip_addr", "parse_default_routes", "neighbor_mac")
+        addr = ("2: eth0: <BROADCAST,UP> mtu 1500\n    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+                "    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\n"
+                "3: eth1: <UP> mtu 1500\n    link/ether 02:00:00:00:00:11 brd ff:ff:ff:ff:ff:ff\n"
+                "    inet 198.51.100.10/24 scope global eth1\n")
+        facts = api.parse_ip_addr(addr)
+        self.assertEqual("02:00:00:00:00:10", facts.mac)
+        self.assertEqual(("192.0.2.10/24",), tuple(map(str, facts.ipv4)))
+        self.assertEqual(("192.0.2.1",), api.parse_default_routes(
+            "default via 192.0.2.1 dev eth0\n192.0.2.0/24 dev eth0 scope link\n"))
+        self.assertEqual((), api.parse_default_routes("192.0.2.0/24 dev eth0 scope link\n"))
+        self.assertEqual("02:00:00:00:00:10", api.neighbor_mac(
+            "192.0.2.10 dev en7 lladdr 02:00:00:00:00:10 REACHABLE\n", "192.0.2.10"))
+        self.assertIsNone(api.neighbor_mac("192.0.2.10 dev en7 FAILED\n", "192.0.2.10"))
+
+
 class LoginPathHostKeyTests(unittest.TestCase):
     def test_parse_openssh_warning_with_crlf_and_multiple_offending_lines(self):
         # r504 :717-719: preserve original address and every Offending line.
@@ -333,7 +614,7 @@ class LocalHostKeyRefreshTests(unittest.TestCase):
                     calls.append((node.func.attr, owners))
         self.assertEqual([("run", ["fingerprints"]), ("run", ["remove"])], calls)
         imports = [alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names]
-        allowed = {"__future__", "dataclasses", "ipaddress", "pathlib", "re", "shlex", "stat", "subprocess", "typing",
+        allowed = {"__future__", "dataclasses", "ipaddress", "json", "pathlib", "re", "shlex", "stat", "subprocess", "typing",
                    "tools.device_identity", "tools.hostname_ranges"}
         sources = [node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
         self.assertTrue(set(imports + sources).issubset(allowed))

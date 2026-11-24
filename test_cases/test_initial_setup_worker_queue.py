@@ -396,23 +396,33 @@ class WorkerQueueTests(unittest.TestCase):
 
     # -- v15 BatchDeviceIsolationTests (the real main(); every device/SSH boundary is fake) --------
     def run_batch(self, failure_stage, failure_type=None):
+        import re
+
+        from test_cases.test_initial_setup_identity_and_backup import EXPECTED_BACKUP_SCRIPT
+
         failure_type = failure_type or app.SetupError
         names = [f"example-ib{number:03d}" for number in (1, 2, 3)]
+        macs = {name: f"02:00:00:00:00:{number + 15:02x}" for number, name in enumerate(names, 1)}
+        peers = {f"admin@fe80::ff:fe00:{number + 15:x}": name for number, name in enumerate(names, 1)}
+        prefixes = {name: f"192.0.2.{number + 9}/24" for number, name in enumerate(names, 1)}
+        ports = {name: f"swp{number}" for number, name in enumerate(names, 1)}
         inspected, base_calls, key_calls, messages = [], [], [], []
+        identity_reads, backups = set(), {}
+        initial_ztp_reads = set()
+        initial_ztp_reply = "service disabled\nstatus aborted\n"
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             global_path = root / "01-global.yaml"
             global_path.write_text(global_text())
             # A real CSV/P2P: the strict cache/profile admission needs the real target cache.
             rows = ["hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac"]
-            rows += [f"{name},ib,192.0.2.{number + 9},24,192.0.2.1,02:00:00:00:00:{number + 15:02x}"
-                     for number, name in enumerate(names, 1)]
+            rows += [f"{name},ib,{prefixes[name].split('/')[0]},24,192.0.2.1,{macs[name]}" for name in names]
             rows.append(f"{JUMP},eth_jump,198.51.100.10,,,")
             csv_path = root / "ib.csv"
             csv_path.write_text("\n".join(rows) + "\n")
+            (root / "02-devices_config.csv").write_bytes(csv_path.read_bytes())  # real M4 authority
             p2p_path = root / "p2p.dot"
-            p2p_path.write_text("".join(f'"{name}":"eth0" -- "{JUMP}":"swp{number}"\n'
-                                        for number, name in enumerate(names, 1)))
+            p2p_path.write_text("".join(f'"{name}":"eth0" -- "{JUMP}":"{ports[name]}"\n' for name in names))
             # O6 (guide :259): the neutral service defaults are one local infra-neutral.conf, under
             # --project-dir the project's infiniband/bringup/xdr-initial-setup/ one (WP-8 table 8-1, :923).
             neutral = root / "infiniband/bringup/xdr-initial-setup/infra-neutral.conf"
@@ -438,6 +448,32 @@ class WorkerQueueTests(unittest.TestCase):
             stack.enter_context(patch.object(app.ProjectPasswordPolicy, "matches",
                                              side_effect=lambda value: value == PASSWORD))
 
+            # Raw switch responses, not route/parser substitutions: each CSV MAC has its own
+            # learned physical port and all three ports use the same active Leaf VLAN/SVI.
+            leaf_replies = {
+                ("hostname",): JUMP + "\n",
+                ("nv", "show", "interface"): "".join(f"{port} up up\n" for port in ports.values()),
+                ("ip", "-d", "link", "show"): (
+                    "1: br_default: <UP> mtu 9216 state UP\n"
+                    "5: vlan1000@br_default: <UP> mtu 9216 master oob state UP\n"
+                    "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n"
+                    + "".join(f"{n}: {port}: <UP> mtu 9216 master br_default state UP\n"
+                              for n, port in enumerate(ports.values(), 2))),
+                ("bridge", "fdb", "show"): "".join(f"{macs[name]} dev {ports[name]} vlan 1000 master br_default\n"
+                                                     for name in names),
+                ("bridge", "vlan", "show"): "port vlan-id\n" + "".join(f"{port} 1000 PVID Egress Untagged\n"
+                                                                       for port in ports.values()),
+                ("ip", "-j", "address", "show"): json.dumps([{"ifname": "vlan1000", "flags": ["UP"],
+                    "operstate": "UP", "addr_info": [{"family": "inet", "local": "192.0.2.1", "prefixlen": 24},
+                                                     {"family": "inet6", "local": "fe80::1", "prefixlen": 64}]}]),
+                ("ifquery", "vlan1000"): "iface vlan1000\n    vrf oob\n",
+            }
+
+            def ethernet(device, user, password, command, timeout, *, local=False):
+                self.assertEqual((device.hostname, device.login_ip, user, local), (JUMP, "198.51.100.10", "cumulus", False))
+                self.assertIn(tuple(command), leaf_replies, "unexpected PUBLIC Leaf operation")
+                return leaf_replies[tuple(command)]
+
             def fail_at(stage, device):
                 if device.ib.hostname == "example-ib002" and failure_stage == stage:
                     raise failure_type("synthetic device-local failure")
@@ -450,26 +486,83 @@ class WorkerQueueTests(unittest.TestCase):
                 return app.SessionResult(CONFIG, 0), PASSWORD, True
 
             def initialize(device, *args, **kwargs):
+                self.assertIn(device.ib.hostname, initial_ztp_reads)
+                self.assertEqual(initial_ztp_reply, kwargs["initial_ztp_output"],
+                                 "Initial consumes the same first D67-O9 ZTP read")
                 fail_at("initial", device)
                 # The v15 run_initial_stage returns (readback text, authorized).
                 return CONFIG, True
 
-            def run_command(device, *args, **kwargs):
-                command = args[6]
-                text = shlex.join(command)
-                if text.startswith(WRITE_PREFIXES):
-                    # Only Network writes count as base calls; the pending-diff and readback reads
-                    # that the merged stage adds (T15 :2301, _verify_management_network_state) do not.
-                    base_calls.append(device.ib.hostname)
-                    fail_at("base", device)
-                    return app.SessionResult("", 0)
-                if command == ["nv", "config", "diff", "-o", "commands"]:
-                    return app.SessionResult("", 0)
-                if command == ["nv", "config", "show", "-o", "commands"]:
-                    return app.SessionResult("".join(shlex.join(item) + "\n" for item in
-                                                     app.desired_commands(device.ib)
-                                                     if item[:2] == ["nv", "set"]), 0)
-                raise AssertionError("unexpected IB command " + text)
+            def transport(argv, responder, timeout, **kwargs):
+                # Preserve real run_on_ib: it owns both the backup preflight and each write permit.
+                self.assertEqual(argv[0], "ssh")
+                self.assertEqual(argv[-2], "cumulus@198.51.100.10")
+                outer = shlex.split(argv[-1])
+                safe_path = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+                self.assertEqual(outer[:2], ["sh", "-c"])
+                self.assertEqual(len(outer), 3)
+                self.assertTrue(outer[2].startswith(safe_path))
+                inner = shlex.split(outer[2][len(safe_path):])
+                self.assertEqual(inner[:7], ["ip", "vrf", "exec", "oob", "ssh", "-6", "-tt"])
+                self.assertEqual(inner[-4:-2], ["-B", "vlan1000"])
+                self.assertIn(inner[-2], peers, "only one of the three PUBLIC device endpoints")
+                name = peers[inner[-2]]
+                self.assertEqual(inspected[-1:], [name], "device operations belong to the current inline task")
+                self.assertIs(type(responder), app.NestedResponder)
+                self.assertEqual(responder.ib_destination, inner[-2])
+                self.assertIsNone(responder._phase)
+
+                frame = shlex.split(inner[-1])
+                self.assertEqual(frame[:2], ["sh", "-c"])
+                self.assertEqual(len(frame), 3)
+                match = re.match(r'^printf "\\n__HTTP_IB_BEGIN_([0-9a-f]{32})__\\n"; ', frame[2])
+                self.assertIsNotNone(match)
+                nonce = match.group(1)
+                suffix = f'; task_rc=$?; printf "\\n__HTTP_IB_END_{nonce}__=%s\\n" "$task_rc"; exit "$task_rc"'
+                self.assertTrue(frame[2].endswith(suffix))
+                text = frame[2][match.end():-len(suffix)]
+                command = tuple(shlex.split(text))
+                self.assertEqual(text, shlex.join(command))
+                setters = (("nv", "set", "interface", "eth0", "ipv4", "address", prefixes[name]),
+                           ("nv", "set", "interface", "eth0", "ipv4", "gateway", "192.0.2.1"),
+                           ("nv", "set", "interface", "eth0-1", "link", "state", "up"),
+                           ("nv", "set", "interface", "eth0-1", "type", "eth"),
+                           ("nv", "set", "system", "hostname", name))
+                if command == ("ip", "addr", "show", "eth0"):
+                    identity_reads.add(name)
+                    body = f"2: eth0: <UP> mtu 1500 state UP\n    link/ether {macs[name]}\n"
+                elif command == ("nv", "show", "system", "ztp"):
+                    self.assertIn(name, identity_reads, "the first ZTP read follows O5")
+                    self.assertNotIn(name, initial_ztp_reads, "the first ZTP read is not repeated")
+                    initial_ztp_reads.add(name)
+                    body = initial_ztp_reply
+                elif command[:2] == ("sh", "-c"):
+                    self.assertEqual(len(command), 5)
+                    self.assertEqual(command[:4], ("sh", "-c", EXPECTED_BACKUP_SCRIPT, "--"))
+                    stamp = command[4]
+                    self.assertRegex(stamp, r"^[0-9]{8}-[0-9]{6}$")
+                    self.assertEqual(inner[-8:-4], ["-o", "PubkeyAuthentication=no", "-o",
+                        "PreferredAuthentications=password,keyboard-interactive"])
+                    self.assertIn(name, identity_reads, "O5 must establish MAC before backup")
+                    self.assertIn(name, initial_ztp_reads, "the first ZTP read precedes backup")
+                    self.assertNotIn(name, backups, "backup must not replay")
+                    backups[name] = stamp
+                    body = f"path=/home/admin/current_{stamp}.yaml\nbytes=47\n"
+                elif text.startswith(WRITE_PREFIXES):
+                    self.assertIn(command, (*setters, ("nv", "config", "apply", "-y"), ("nv", "config", "save")))
+                    self.assertIn(name, backups, "backup must precede the first Network write")
+                    base_calls.append(name)
+                    if name == "example-ib002" and failure_stage == "base":
+                        raise failure_type("synthetic device-local failure")
+                    body = ""
+                elif command == ("nv", "config", "diff", "-o", "commands"):
+                    body = ""
+                elif command == ("nv", "config", "show", "-o", "commands"):
+                    self.assertIn(name, base_calls)
+                    body = "".join(shlex.join(item) + "\n" for item in setters)
+                else:
+                    raise AssertionError("unexpected PUBLIC IB operation")
+                return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{body}__HTTP_IB_END_{nonce}__=0\n", 0)
 
             def services(device, *args, **kwargs):
                 fail_at("services", device)
@@ -485,19 +578,11 @@ class WorkerQueueTests(unittest.TestCase):
                 "resolve_initial_ib_password": lambda *a, **k: "admin",
                 "local_ethernet_keys": lambda *a, **k: set(),
                 "prompt_ethernet_passwords": lambda *a, **k: {JUMP: OOB},
-                "collect_ethernet_interfaces": lambda *a, **k: (JUMP, "interfaces"),
-                "collect_ethernet_network_tables": lambda *a, **k: ("links", "fdb", "neighbors"),
-                "save_ethernet_snapshot": lambda *a, **k: root / "snapshot.json",
-                "interface_status_line": lambda *a, **k: "swp1 up up",
-                "interface_oper_status": lambda *a, **k: "up",
-                "fdb_port_for_interface": lambda links, port: port,
-                "neighbor_for_port": lambda *a, **k: app.Neighbor("fe80::10", "vlan1000", "02:00:00:00:00:10"),
-                "verify_fdb_eth0_mac": lambda *a, **k: None,
-                "interface_vrf": lambda *a, **k: "oob",
+                "run_on_ethernet": ethernet,
                 "inspect_ib_device": inspect,
                 "run_initial_stage": initialize,
                 "base_stage_needed": lambda *a, **k: True,
-                "run_on_ib": run_command,
+                "interactive_run": transport,
                 "verify_state": lambda *a, **k: None,
                 "verify_ipv4_login": lambda device, *a, **k: fail_at("readiness", device),
                 "run_service_stage": services,
@@ -518,6 +603,11 @@ class WorkerQueueTests(unittest.TestCase):
                 # Fixture check, not a v15 expectation: the management run with the project global
                 # sent its Network writes through the merged strict helper.
                 self.assertGreater(strict.call_count, 0)
+            self.assertEqual(set(backups), set(base_calls))
+            if failure_stage == "global":
+                self.assertEqual({"example-ib001"}, initial_ztp_reads)
+                self.assertEqual({"example-ib001"}, set(backups),
+                                 "a changed global stops the next device before any backup")
         return result, inspected, base_calls, key_calls, "\n".join(messages)
 
     # v15 BatchDeviceIsolationTests.test_middle_device_failure_does_not_stop_other_devices

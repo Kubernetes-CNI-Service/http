@@ -155,7 +155,7 @@ class ManagementNetworkPureContractDraftTests(unittest.TestCase):
         cases = (
             ("single", [
                 ["nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"],
-                ["nv", "set", "interface", "eth0-1", "ipv4", "gateway", "203.0.113.1"],
+                ["nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"],
                 ["nv", "set", "interface", "eth0-1", "link", "state", "up"],
                 ["nv", "set", "interface", "eth0-1", "type", "eth"],
                 ["nv", "set", "system", "hostname", "EXAMPLE-IB01"],
@@ -203,7 +203,7 @@ class ManagementNetworkPureContractDraftTests(unittest.TestCase):
         ready = LINK_RANGE + TYPE_RANGE + HOST
         cases = (
             ("single-fresh-gateways", "single", ADDRESS0 + ready, [
-                ["nv", "set", "interface", "eth0-1", "ipv4", "gateway", "203.0.113.1"],
+                ["nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"],
             ]),
             ("single-preserve-unrequired-eth1-gateway", "single",
              ADDRESS0 + GATEWAY1_DIFF + ready, [

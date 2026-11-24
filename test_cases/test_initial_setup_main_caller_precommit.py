@@ -28,6 +28,7 @@ ZTP = ["nv", "set", "system", "ztp", "config-save", "enabled"]
 ADDRESS = ["nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"]
 APPLY = ["nv", "config", "apply", "-y"]
 SAVE = ["nv", "config", "save"]
+ZTP_SHOW = ["nv", "show", "system", "ztp"]
 SERVICE = [
  ["nv","set","system","dns","server","203.0.113.53"],
  ["nv","set","system","ntp","server","ntp.ubuntu.com"],
@@ -49,6 +50,41 @@ PUBLIC_SERVICES = (
  "nv set system ntp server ntp.ubuntu.com\n"
  "nv set system ntp server time.ib.example.test\n"
  "nv set system date-time timezone Asia/Taipei\n")
+
+# Closed PUBLIC fixture input; the default stays single-device.
+METADATA_DEFAULT_IDENTITY_FACTS = {
+    "EXAMPLE-IB01": {
+        "target": ("EXAMPLE-IB01", "203.0.113.2", "203.0.113.2/24",
+                   "203.0.113.1", "02:00:00:00:00:17"),
+        "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:17", "vlan1", "default"),
+    },
+}
+
+
+def _metadata_identity_fact(fixture, hostname):
+    """Qualify only the two independent PUBLIC contracts, never any target."""
+    facts = fixture.get("metadata_identity_facts")
+    allowed = {
+        **METADATA_DEFAULT_IDENTITY_FACTS,
+        "EXAMPLE-IB02": {
+            "target": ("EXAMPLE-IB02", "203.0.113.3", "203.0.113.3/24",
+                       "203.0.113.1", "02:00:00:00:00:18"),
+            "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:18", "vlan1", "default"),
+        },
+    }
+    if (type(hostname) is not str or type(facts) is not dict or not facts
+            or any(type(key) is not str or key not in allowed for key in facts)
+            or hostname not in facts):
+        raise RuntimeError("FIXTURE HOLD: explicit PUBLIC metadata identity facts are unqualified")
+    for key, value in facts.items():
+        if (type(value) is not dict or set(value) != {"target", "point"}
+                or any(type(value[field]) is not tuple or len(value[field]) != 5
+                       or any(type(part) is not str or not part for part in value[field])
+                       for field in ("target", "point"))
+                or value != allowed[key]):
+            raise RuntimeError("FIXTURE HOLD: explicit PUBLIC metadata identity facts are unqualified")
+    return facts[hostname]
+
 
 # Append an independently specified remote-host behavior layer to the inherited
 # actual SSH executable. It is not a product hook and never opens a network.
@@ -100,6 +136,13 @@ def show_state(S):
         lines.append("nv set interface eth0-1 ipv4 gateway 203.0.113.254")
     return "\n".join(lines) + "\n"
 def business(command, S):
+    # Preserve one entry per readiness attempt while separately witnessing its
+    # actual route read. Neither LL O5 metadata nor backup consumes caller-show
+    # or pending-diff probes; delegate their independent facts to the base peer.
+    if command in (["ip", "addr", "show", "eth0"], ["ip", "route"]):
+        return _base_business(command, S)
+    if backup_stamp(command) is not None:
+        return _base_business(command, S)
     if command == ["nv", "config", "show", "-o", "commands"]:
         if S.get("initial_transaction_done"):
             S["post_initial_reads"] = S.get("post_initial_reads", 0) + 1
@@ -160,6 +203,50 @@ def peer_program():
         '        record("non-auth-refusal",reason=C["scenario"],operation=operation);emit("\\n"+errors[C["scenario"]])\n', 1)
 
 
+class MetadataIdentityFactContractTests(unittest.TestCase):
+    """Pure fixture DATA only; no native setup, source loading or helper run."""
+
+    def test_default_single_and_explicit_two_public_identities_are_closed(self):
+        first = {
+            "target": ("EXAMPLE-IB01", "203.0.113.2", "203.0.113.2/24",
+                       "203.0.113.1", "02:00:00:00:00:17"),
+            "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:17", "vlan1", "default"),
+        }
+        second = {
+            "target": ("EXAMPLE-IB02", "203.0.113.3", "203.0.113.3/24",
+                       "203.0.113.1", "02:00:00:00:00:18"),
+            "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:18", "vlan1", "default"),
+        }
+        self.assertEqual({"EXAMPLE-IB01": first}, METADATA_DEFAULT_IDENTITY_FACTS)
+        self.assertEqual(first, _metadata_identity_fact(
+            {"metadata_identity_facts": {"EXAMPLE-IB01": dict(first)}}, "EXAMPLE-IB01"))
+        explicit = {"EXAMPLE-IB01": dict(first), "EXAMPLE-IB02": dict(second)}
+        self.assertEqual(first, _metadata_identity_fact({"metadata_identity_facts": explicit}, "EXAMPLE-IB01"))
+        self.assertEqual(second, _metadata_identity_fact({"metadata_identity_facts": explicit}, "EXAMPLE-IB02"))
+        bad_mac = dict(second, target=(*second["target"][:4], "02:00:00:00:00:19"))
+        bad_point = dict(second, point=("EXAMPLE-JUMP01", "192.0.2.10", "fe80::18", "vlan1", "default"))
+        bad_shapes = {
+            "missing-map": {},
+            "none-map": {"metadata_identity_facts": None},
+            "empty-map": {"metadata_identity_facts": {}},
+            "unknown-key": {"metadata_identity_facts": {"EXAMPLE-IB03": second}},
+            "default-cannot-admit-second": {"metadata_identity_facts": {"EXAMPLE-IB01": first}},
+            "missing-field": {"metadata_identity_facts": {"EXAMPLE-IB02": {"target": second["target"]}}},
+            "extra-field": {"metadata_identity_facts": {"EXAMPLE-IB02": dict(second, extra="PUBLIC")}},
+            "wrong-row-type": {"metadata_identity_facts": {"EXAMPLE-IB02": tuple(second.values())}},
+            "wrong-target-type": {"metadata_identity_facts": {"EXAMPLE-IB02": dict(second, target=list(second["target"]))}},
+            "wrong-point-length": {"metadata_identity_facts": {"EXAMPLE-IB02": dict(second, point=second["point"][:-1])}},
+            "wrong-MAC": {"metadata_identity_facts": {"EXAMPLE-IB02": bad_mac}},
+            "wrong-point": {"metadata_identity_facts": {"EXAMPLE-IB02": bad_point}},
+        }
+        for label, fixture in bad_shapes.items():
+            with self.subTest(label=label), self.assertRaisesRegex(
+                    RuntimeError, "^FIXTURE HOLD: explicit PUBLIC metadata identity facts are unqualified$"):
+                _metadata_identity_fact(fixture, "EXAMPLE-IB02")
+        # This proves bad expected-map qualification only. It does not claim
+        # a real peer wrong-MAC/O5 negative, which needs its own actual workflow.
+
+
 class MainCallerPrecommitDraftTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -217,7 +304,10 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
         f["config"].chmod(0o600)
         f["caller"] = dict(consent=[], stage=[], classifier=[], returned_diff=[], diff_entry=[], timeline=[],
                            selector=[], network_constructor=[], helper=[], helper_reads=[], calls=[], native=[], fetch=[], gate=[],
+                           helper_all=[], helper_metadata=[], metadata_gate=[],
                            slots=[], reaps=[], fixture_reaps=[], product_depth=0)
+        f["metadata_identity_facts"] = {name: dict(value)
+                                        for name, value in METADATA_DEFAULT_IDENTITY_FACTS.items()}
         return f
 
     # Unbound original safe boundary/fixture helpers only. No imported TestCase
@@ -298,11 +388,47 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             witness["calls"].append(tuple(command) if command[:2] != ["sh","-c"] else ("KEY-SHELL",))
             return result
         def helper(*args, **kw):
-            command = inspect.signature(real_helper).bind(*args, **kw).arguments["ib_command"]
+            bound = inspect.signature(real_helper).bind(*args, **kw).arguments
+            command = bound["ib_command"]
+            metadata = command in (["ip", "addr", "show", "eth0"], ["ip", "route"])
+            label = tuple(command) if command[:2] != ["sh","-c"] else ("KEY-SHELL",)
+            row = dict(command=label, metadata=metadata, returned=False,
+                       native_before=len(witness["native"]), fetch_before=len(witness["fetch"]))
+            witness["helper_all"].append(row)
+            if metadata:
+                target, neighbor = bound["target"], bound["neighbor"]
+                row.update(target=(target.ib.hostname, target.ib.login_ip, target.ib.eth0_prefix,
+                                   target.ib.eth0_gateway, target.ib.eth0_mac),
+                           point=(target.ethernet.hostname, target.ethernet.login_ip,
+                                  neighbor.ipv6, neighbor.interface, neighbor.vrf),
+                           current_initial=hmac.compare_digest(bound["current_password"], base.PUBLIC_INITIAL),
+                           current_target=hmac.compare_digest(bound["current_password"], self.kat["PASSWORD"]),
+                           current_oob=hmac.compare_digest(bound["current_password"], base.PUBLIC_OOB),
+                           outer_oob=hmac.compare_digest(bound["ethernet_password"], base.PUBLIC_OOB))
+                self.assertIs(type(target), app.Target)
+                self.assertIs(type(neighbor), app.Neighbor)
+                expected = _metadata_identity_fact(f, target.ib.hostname)
+                self.assertEqual(expected["target"],
+                                 (target.ib.hostname, target.ib.login_ip, target.ib.eth0_prefix,
+                                  target.ib.eth0_gateway, target.ib.eth0_mac))
+                self.assertEqual(expected["point"],
+                                 (target.ethernet.hostname, target.ethernet.login_ip,
+                                  neighbor.ipv6, neighbor.interface, neighbor.vrf))
+                self.assertEqual(("cumulus", "admin", 2),
+                                 (bound["eth_user"], bound["ib_user"], bound["timeout"]))
+                self.assertIs(False, bound.get("local", False))
             before = len(witness["native"])
-            result = real_helper(*args, **kw)
-            witness["helper"].append(tuple(command) if command[:2] != ["sh","-c"] else ("KEY-SHELL",))
-            witness["gate"].append(len(witness["native"]) > before)
+            try:
+                result = real_helper(*args, **kw)
+            finally:
+                row.update(native_after=len(witness["native"]), fetch_after=len(witness["fetch"]))
+            row["returned"] = True
+            if metadata:
+                witness["helper_metadata"].append(label)
+                witness["metadata_gate"].append(len(witness["native"]) > before)
+            else:
+                witness["helper"].append(label)
+                witness["gate"].append(len(witness["native"]) > before)
             if command == READ:
                 witness["helper_reads"].append(dict(
                     initial_pair=all(row in result.output.splitlines() for row in PUBLIC_INITIAL_ROWS.splitlines()),
@@ -392,11 +518,13 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             self.fixed_hold()
         cache = json.loads(f["cache"].read_text())
         # Table 6-1 row 6 (guide :749): v15 CURRENT-CONTRACT.md:20 "cache version 5".
-        self.assertEqual(5, cache["version"])
+        # v315 r617 WP1 :558 explicitly advances this existing P1 fixture to6.
+        self.assertEqual(6, cache["version"])
         self.assertTrue(self.kat["PASSWORD"] not in f["cache"].read_text(),
                         "P1 cache exposed target; value suppressed")
         f["caller"] = dict(consent=[], stage=[], classifier=[], returned_diff=[], diff_entry=[], timeline=[],
                            selector=[], network_constructor=[], helper=[], helper_reads=[], calls=[], native=[], fetch=[], gate=[],
+                           helper_all=[], helper_metadata=[], metadata_gate=[],
                            slots=[], reaps=[], fixture_reaps=[], product_depth=0)
 
     def run_case(self, folder, **scene):
@@ -407,6 +535,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             # device of an --apply scene already uses the target (fixture, not an expectation).
             scene.setdefault("credential", "target")
         f = self.fixture(folder, **scene)
+        if scene["case"] in ("readonly-initial", "readonly-target"):
+            self.model_readonly_key_peer(f, scene["case"])
         self.p1(f)
         before = len(self.events(f))
         result = self.invoke(f, *([] if check else ["--apply"]))
@@ -418,11 +548,44 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                              base.PUBLIC_INITIAL, base.PUBLIC_OOB)),
                         "MAIN diagnostic privacy failed; values suppressed")
         self.assertEqual([], f["boundary_errors"], "external boundary prerequisite failure")
+        witness = f["caller"]
+        entries = witness["helper_all"]
+        self.assertEqual(witness["helper"], [row["command"] for row in entries
+                                            if not row["metadata"] and row["returned"]])
+        self.assertEqual(witness["helper_metadata"], [row["command"] for row in entries
+                                                     if row["metadata"] and row["returned"]])
+        self.assertEqual(len(entries), len(witness["helper"]) + len(witness["helper_metadata"])
+                         + sum(row["returned"] is False for row in entries))
+        self.assertEqual(len(entries), sum(row["metadata"] is True for row in entries)
+                         + sum(row["metadata"] is False for row in entries))
+        expected_metadata = ([] if scene["case"] in
+            ("initial-apply", "readonly-expiry", "readonly-network") else [("ip", "addr", "show", "eth0")])
+        self.assertEqual(expected_metadata, witness["helper_metadata"],
+                         "one actual LL O5 read, not an auth retry or IPv4 readiness attempt")
+        self.assertEqual([0] if expected_metadata else [],
+                         [i for i, row in enumerate(entries) if row["metadata"]],
+                         "O5 metadata must precede the original business helper sequence")
+        selected_role = "current_initial" if scene["case"] == "readonly-initial" else "current_target"
+        self.assertTrue(all(row[selected_role] and not row["current_oob"] and row["outer_oob"]
+                            for row in entries if row["metadata"]),
+                        "LL identity reads must preserve selected IB and OOB roles")
+        self.assertEqual(len(expected_metadata), len(witness["metadata_gate"]))
+        self.assertTrue(all(witness["metadata_gate"]), "metadata still needs its real project qualification")
+        wire = [event["kind"] for event in fresh
+                if event["kind"] in ("ipv4-read", "ipv4-route-read")]
+        self.assertEqual(["ipv4-read", "ipv4-route-read"] if "ipv4-read" in wire else [], wire,
+                         "one readiness attempt has a distinct ordered addr/route pair")
         return f, result, fresh
+
+    def model_readonly_key_peer(self, f, case):
+        from test_cases.test_initial_setup_main_profile_custody import MainProfileCustodyWorkflowTests
+
+        # Reuse the existing closed, independent PUBLIC fixture only in the admitted runs.
+        MainProfileCustodyWorkflowTests._model_readonly_key_peer(self, f, cases=(case,))
 
     def writes(self, events):
         return [event for event in events if event["kind"] in
-                ("mutation", "apply-y", "save", "key-shell", "ipv4-read", "pam-target")]
+                ("mutation", "apply-y", "save", "key-shell", "ipv4-read", "pam-target", "config-backup")]
 
     def diffs(self, events):
         return [event for event in events if event["kind"] == "caller-diff"]
@@ -562,7 +725,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                     self.assertTrue("conflict" in result["stdout"],
                                     "the refusal must name the Network conflict")
                     self.assertEqual([], self.writes(events))
-                    self.assertEqual([], w["helper"])
+                    self.assertEqual([tuple(ZTP_SHOW)], w["helper"])
+                    self.assertEqual([True], w["gate"], "the pre-conflict ZTP read needs real qualification")
                     # Owner Q-035 (a) item 4: the target is fetched and natively verified at
                     # authentication, before the refusal.
                     self.assertTrue(bool(w["fetch"]) and bool(w["native"])
@@ -628,43 +792,78 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                 w = f["caller"]
                 self.assertEqual([], self.writes(events))
                 self.assertEqual([], w["consent"])
-                self.assertEqual([], w["helper"], "read-only report must not acquire authorized-write helper")
-                inner = [e for e in events if e["kind"] == "inner-answer"]
-                total = (3 if scene["case"] == "readonly-target" else
-                         2 if scene["case"] == "readonly-initial" else 1)
+                positive = scene["case"] in ("readonly-initial", "readonly-target")
+                self.assertEqual([("KEY-SHELL",)] if positive else [], w["helper"])
+                self.assertEqual([34] if positive else [],
+                                 [e["rc"] for e in events if e["kind"] == "readonly-key-check"])
+                all_inner = [e for e in events if e["kind"] == "inner-answer"]
+                metadata = [e for e in all_inner if e["command"] in
+                            (["ip", "addr", "show", "eth0"], ["ip", "route"])]
+                inner = [e for e in all_inner if e["command"] not in
+                         (["ip", "addr", "show", "eth0"], ["ip", "route"])]
+                total = (3 if scene["case"] == "readonly-initial" else 2) + int(positive)
                 self.assertEqual(total, len(inner))
+                auth = [e for e in inner if e["operation"] == "auth-probe-readonly"]
+                expected_auth_roles = ([(True, False, False)]
+                                       if scene["case"] == "readonly-target" else
+                                       [(True, False, False), (False, True, False)])
+                self.assertEqual(expected_auth_roles,
+                                 [(e["target"], e["initial"], e["oob"]) for e in auth])
+                self.assertTrue(all(e["phase"] is True for e in auth),
+                                "PROJECT-first authentication must retain actual phase binding")
+                self.assertEqual([("ip", "addr", "show", "eth0")]
+                                 if scene["case"] in ("readonly-initial", "readonly-target") else [],
+                                 [tuple(e["command"]) for e in metadata])
+                self.assertEqual(total + len(metadata), len(all_inner))
                 if scene["case"] in ("readonly-initial","readonly-target"):
                     # Table 6-1 row 11 (guide :754; v15 CURRENT-CONTRACT.md:67): a check-only run that
                     # finds work left (here the public keys to install) ends INCOMPLETE, exit 2.
                     self.assertTrue(result["error"] is None and result["rc"] == 2,
                                     "check-only with remaining work must end INCOMPLETE (2)")
                     # P3c map D32d :284 (E8, 04 Q-039; 06 D1a-B; v15 CURRENT-CONTRACT.md:59): the
-                    # v15 check-only reads no pending diff; its one ordinary read after selection
-                    # is the ZTP state (Q-035 item 1), counted apart from auth-probe sessions, and it
-                    # uses the selected credential.
+                    # Check-only reads no pending diff. After auth/O5 it reads ZTP and key presence
+                    # once each (WP-6/7), with the already selected credential.
                     self.assertEqual(0, len(self.diffs(events)))
                     auth = [e for e in inner if e["operation"] == "auth-probe-readonly"]
-                    self.assertEqual(2 if scene["case"] == "readonly-target" else 1, len(auth))
+                    self.assertEqual(1 if scene["case"] == "readonly-target" else 2, len(auth))
                     self.assertEqual([], w["returned_diff"])
                     self.assertEqual([], w["diff_entry"])
                     self.assertEqual(["selector-return"], w["timeline"])
                     expected_role = "target" if scene["case"] == "readonly-target" else "initial"
+                    self.assertTrue(all(e["operation"] is None and e["phase"] is False
+                                        and e[expected_role] and not e["oob"] for e in metadata),
+                                    "O5 LL read must use the actual selected current, never PAM/OOB")
+                    self.assertLess(all_inner.index(auth[-1]), all_inner.index(metadata[0]))
                     self.assertTrue(len(w["selector"]) == 1 and not w["selector"][0]["required"]
                                     and w["selector"][0][expected_role],
                                     "one actual nonrequired selector result must establish selected CURRENT")
                     reads = [e for e in inner if e["operation"] is None]
-                    self.assertTrue(len(reads) == 1 and reads[0]["command"] == ["nv", "show", "system", "ztp"]
-                                    and reads[0]["phase"] is False and reads[0][expected_role],
-                                    "the ZTP read must use actual selected current, not a desired role")
-                    self.assertTrue(w["selector"][0]["native"] == len(w["native"])
-                                    and w["selector"][0]["fetch"] == len(w["fetch"]),
-                                    "the selected return to the report cannot acquire additional authority")
-                    if scene["case"] == "readonly-initial":
-                        self.assertEqual([], w["fetch"])
-                        self.assertEqual([], w["native"])
-                    else:
-                        self.assertTrue(bool(w["fetch"]) and bool(w["native"]))
-                        self.assertTrue(all(row["IB"] and row["target"] for row in w["native"]))
+                    self.assertEqual([ZTP_SHOW, ["KEY-SHELL"]], [e["command"] for e in reads])
+                    self.assertTrue(all(not e["phase"] and e[expected_role] and not e["oob"] for e in reads),
+                                    "both ordinary reads must use actual selected current, not a desired role")
+                    self.assertLess(all_inner.index(metadata[0]), all_inner.index(reads[0]),
+                                    "LL identity must precede both ordinary reads")
+                    metadata_rows = [row for row in w["helper_all"] if row["metadata"]]
+                    native_positions = {i for row in metadata_rows
+                                        for i in range(row["native_before"], row["native_after"])}
+                    fetch_positions = {i for row in metadata_rows
+                                       for i in range(row["fetch_before"], row["fetch_after"])}
+                    business_native = [row for i, row in enumerate(w["native"]) if i not in native_positions]
+                    business_fetch = [row for i, row in enumerate(w["fetch"]) if i not in fetch_positions]
+                    self.assertEqual(len(w["native"]), len(business_native) + len(native_positions))
+                    self.assertEqual(len(w["fetch"]), len(business_fetch) + len(fetch_positions))
+                    key_rows = [row for row in w["helper_all"] if row["command"] == ("KEY-SHELL",)]
+                    self.assertEqual(1, len(key_rows))
+                    key = key_rows[0]
+                    self.assertTrue(key["returned"] and not key["metadata"])
+                    self.assertEqual((3, 3, 4, 4),
+                                     (key["native_before"], key["fetch_before"],
+                                      key["native_after"], key["fetch_after"]))
+                    self.assertEqual([True], w["gate"])
+                    self.assertEqual((2, 2), (w["selector"][0]["native"], w["selector"][0]["fetch"]))
+                    self.assertEqual((3, 3), (len(business_native), len(business_fetch)))
+                    self.assertTrue(bool(business_fetch) and bool(business_native))
+                    self.assertTrue(all(row["IB"] and row["target"] for row in w["native"]))
                 else:
                     if scene["case"] == "readonly-expiry":
                         self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["required"],
@@ -682,13 +881,14 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                         self.assertTrue(any(e["kind"] == "non-auth-refusal" and e["reason"] == "network"
                                             and e["operation"] == "auth-probe-readonly" for e in events),
                                         "actual peer network refusal must be reached after authenticated phase")
-                        self.assertTrue(len(inner) == 1 and inner[0]["phase"] is True
-                                        and inner[0]["operation"] == "auth-probe-readonly"
-                                        and inner[0]["initial"] is True and inner[0]["oob"] is False,
+                        self.assertTrue(len(inner) == 2 and inner[-1]["phase"] is True
+                                        and inner[-1]["operation"] == "auth-probe-readonly"
+                                        and inner[-1]["initial"] is True and inner[-1]["oob"] is False,
                                         "network case must use actual phase-bound INITIAL, not earlier wrong-role rejection")
                     self.assertEqual([], self.diffs(events))
-                    self.assertEqual([], w["fetch"])
-                    self.assertEqual([], w["native"])
+                    self.assertEqual(2, len(w["fetch"]))
+                    self.assertEqual(2, len(w["native"]))
+                    self.assertTrue(all(row["IB"] and row["target"] for row in w["native"]))
                 self.assertFalse(f["credentials"].exists() or f["marker"].exists()
                                  or f["terminal"].exists(),
                                  "check-only may not persist credentials/watch/terminal state")
@@ -705,6 +905,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
         for case in cases:
             with self.subTest(admission=case), tempfile.TemporaryDirectory(prefix="caller-admission-") as folder:
                 f = self.fixture(folder, case="readonly-initial")
+                if case == "MATCH":
+                    self.model_readonly_key_peer(f, "readonly-initial")
                 self.p1(f)
                 app = f["app"]
                 alias = f["tool"] / "01-global.yaml"
@@ -880,10 +1082,40 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
 
                 # Entry witnesses count attempted calls before delegate success.
                 # An early unrelated error cannot masquerade as zero activity.
+                metadata_active = []
                 def observer(label, real):
                     @wraps(real)
                     def call(*args, **kwargs):
-                        observed["entries"].append(label)
+                        if label == "authorized":
+                            bound = inspect.signature(real).bind(*args, **kwargs).arguments
+                            if bound["ib_command"] == ["ip", "addr", "show", "eth0"]:
+                                target, point = bound["target"], bound["neighbor"]
+                                self.assertEqual(("EXAMPLE-IB01", "203.0.113.2", "02:00:00:00:00:17",
+                                                  "EXAMPLE-JUMP01", "fe80::ff:fe00:17", "vlan1", "default"),
+                                                 (target.ib.hostname, target.ib.login_ip, target.ib.eth0_mac,
+                                                  target.ethernet.hostname, point.ipv6,
+                                                  point.interface, point.vrf))
+                                self.assertEqual([], metadata_active)
+                                observed["entries"].append("metadata-authorized")
+                                metadata_active.append("metadata-")
+                                try:
+                                    return real(*args, **kwargs)
+                                finally:
+                                    metadata_active.pop()
+                            if case == "MATCH" and bound["ib_command"][:2] == ["sh", "-c"]:
+                                self.assertFalse(metadata_active, "readonly check must be its own helper call")
+                                observed["entries"].append("readonly-authorized")
+                                metadata_active.append("readonly-")
+                                try:
+                                    actual = real(*args, **kwargs)
+                                finally:
+                                    metadata_active.pop()
+                                self.assertIs(type(actual), app.SessionResult)
+                                self.assertEqual(("", 34), (actual.output, actual.exit_code))
+                                return actual
+                        actual_label = (metadata_active[-1] + label if metadata_active
+                                        and label in ("native", "target-fetch", "IB") else label)
+                        observed["entries"].append(actual_label)
                         return real(*args, **kwargs)
                     return call
 
@@ -945,8 +1177,37 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                                     and f["caller"]["selector"][0]["initial"]
                                     and not f["caller"]["selector"][0]["required"])
                     self.assertEqual([], f["caller"]["returned_diff"])
-                    self.assertFalse(any(label in ("native", "target-fetch", "confirm",
-                                                   "authorized", "IPv4") for label in observed["entries"]))
+                    self.assertFalse(any(label in ("confirm", "authorized", "IPv4")
+                                         for label in observed["entries"]))
+                    self.assertEqual(2, observed["entries"].count("native"))
+                    self.assertEqual(2, observed["entries"].count("target-fetch"))
+                    self.assertEqual(["TARGET", "TARGET", "OOB"], result["prompts"])
+                    self.assertLess(observed["entries"].index("native"),
+                                    observed["entries"].index("selector"))
+                    self.assertLess(observed["entries"].index("target-fetch"),
+                                    observed["entries"].index("selector"))
+                    self.assertEqual([], metadata_active)
+                    metadata_rows = [row for row in f["caller"]["helper_all"] if row["metadata"]]
+                    self.assertEqual([("ip", "addr", "show", "eth0")],
+                                     [row["command"] for row in metadata_rows])
+                    self.assertTrue(all(row["returned"] and row["current_initial"]
+                                        and not row["current_oob"] and row["outer_oob"] for row in metadata_rows))
+                    self.assertEqual(1, observed["entries"].count("metadata-authorized"))
+                    self.assertEqual(1, observed["entries"].count("metadata-IB"))
+                    native_count = sum(row["native_after"] - row["native_before"] for row in metadata_rows)
+                    fetch_count = sum(row["fetch_after"] - row["fetch_before"] for row in metadata_rows)
+                    self.assertEqual(native_count, observed["entries"].count("metadata-native"))
+                    self.assertEqual(fetch_count, observed["entries"].count("metadata-target-fetch"))
+                    self.assertEqual(2 + native_count + fetch_count,
+                                     sum(label.startswith("metadata-") for label in observed["entries"]),
+                                     "only this one observed LL O5 call owns the added authority scope")
+                    self.assertEqual(["readonly-authorized", "readonly-target-fetch",
+                                      "readonly-native", "readonly-IB"],
+                                     [label for label in observed["entries"] if label.startswith("readonly-")])
+                    self.assertLess(observed["entries"].index("metadata-authorized"),
+                                    observed["entries"].index("readonly-authorized"))
+                    self.assertEqual([34], [event["rc"] for event in events
+                                            if event["kind"] == "readonly-key-check"])
                 else:
                     self.assert_hold(result)
                     self.assertEqual([], observed["entries"],

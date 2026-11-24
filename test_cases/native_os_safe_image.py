@@ -2645,10 +2645,32 @@ _PROJECT_POINTER_EXTRACTION_REGIONS = (
 )
 
 
+_INITIAL_SETUP_LATEST_YAML_PC_POSTIMAGE = 'e3225c8152b38855d59f4e15033ff3f16395565030b6075cab13221ceacf32a7'
+_INITIAL_SETUP_LATEST_YAML_PC_ROW = (
+    b'    SetupLinkSpec("infiniband/bringup/xdr-initial-setup/latest_yaml", "ztp/config/nvos/latest_yaml", "dir",\n'
+    b'                  "optional", writer="setup", base="repository"),\n'
+)
+
+
+def _restore_initial_setup_latest_yaml_layer(payload):
+    """Validate only the exact D7 alias DATA layer; never execute old bytes."""
+    if type(payload) is not bytes or _sha(payload) != _INITIAL_SETUP_LATEST_YAML_PC_POSTIMAGE:
+        raise AssertionError('whole reviewed initial-setup alias source required')
+    offset, row = 55588, _INITIAL_SETUP_LATEST_YAML_PC_ROW
+    if payload.count(row) != 1 or payload[offset:offset + len(row)] != row:
+        raise AssertionError('unique exact initial-setup alias span required')
+    original = payload[:offset] + payload[offset + len(row):]
+    if _sha(original) != _PROJECT_POINTER_PC_POSTIMAGE:
+        raise AssertionError('whole previous project extraction source required')
+    return original
+
+
 def _restore_project_pointer_layer(payload):
     before = PRODUCTION_PINS['tools/project_contract.py']
     if type(payload) is not bytes:
         raise AssertionError('whole project pointer source bytes required')
+    if _sha(payload) == _INITIAL_SETUP_LATEST_YAML_PC_POSTIMAGE:
+        payload = _restore_initial_setup_latest_yaml_layer(payload)
     if _sha(payload) == before:
         return payload
     if _sha(payload) != _PROJECT_POINTER_PC_POSTIMAGE:

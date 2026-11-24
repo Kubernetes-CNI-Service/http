@@ -23,6 +23,7 @@ import unittest
 from unittest import mock
 
 from test_cases import test_initial_setup_management_stage_roles as roles
+from test_cases.test_initial_setup_bringup_results import EXPECTED_READONLY_KEY_SCRIPT
 
 APP = roles.APP
 PUBLIC_INITIAL = "PUBLIC-INITIAL-Only-17!"
@@ -170,7 +171,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
         return roles.PresentGlobalManagementStageRoleDraftTests._eg_global_snapshot(self, path)
 
     def invoke(self, kind, f, current, policy, *, apply=True, authorized=True,
-               service_body=BASE, keys=None, user="admin", ib_password=None):
+               service_body=BASE, keys=None, user="admin", ib_password=None, details=None):
         context = dict(_ib_current_password=current, _password_policy=policy)
         if ib_password is not None:
             # WP-6 fixture (class 4, 06 D1a-I): a caller outside the management-server
@@ -185,7 +186,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             return APP.run_key_stage(
                 f["target"], f["neighbor"], "cumulus", PUBLIC_OOB, user, 2,
                 f["keys"] if keys is None else keys, local=False, apply=apply,
-                authorized=authorized, management_private_key=f["private"], **context)
+                authorized=authorized, management_private_key=f["private"], details=details, **context)
         if kind == "ipv4":
             return APP.verify_ipv4_login(
                 f["target"], "default", "cumulus", PUBLIC_OOB, user, 2,
@@ -195,10 +196,16 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
     @contextmanager
     def boundaries(self, f, kind, selected, *, receipt=UPDATED, legacy=False,
                    block=False, fault=None, change_transport=False, change_helper=None,
-                   consent="no"):
+                   consent="no", readonly_rc=None):
         real_verify = APP.verify_password_hash
         real_helper = APP._run_authorized_ib_command
         real_password = APP.ProjectPasswordPolicy.password
+        real_clock = APP.time
+        class ConsumerClock:
+            def sleep(self, _seconds):
+                return None
+            def __getattr__(self, name):
+                return getattr(real_clock, name)
         observation = dict(native=[], fetch=[], calls=[], roles=[], helper=[], success=[],
                            helper_errors=[], active=[], gate=[], possession=[], prompts=[],
                            consent=[], errors=[], fault=[], mutation=[])
@@ -206,6 +213,11 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             if type(command) is not list:
                 raise AssertionError("PUBLIC transport argv is not a list")
             vector = tuple(command)
+            if readonly_rc is not None:
+                payload = base64.b64encode((f["line"] + "\n").encode("ascii")).decode("ascii")
+                if kind != "key" or vector != ("sh", "-c", EXPECTED_READONLY_KEY_SCRIPT, "--", payload):
+                    raise AssertionError("PUBLIC readonly key boundary accepts only its exact read")
+                return "KEY_READONLY"
             if vector in SERVICE_ORDER:
                 return vector
             if (len(command) == 5 and command[:2] == ["sh", "-c"]
@@ -279,6 +291,8 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                 raise fault
             if change_transport:
                 mutate()
+            if item == "KEY_READONLY":
+                return APP.SessionResult("", readonly_rc)
             return APP.SessionResult(receipt if item == "KEY" else
                                      (SERVICE_BODY if item == READ else "PUBLIC-ACK\n"), 0)
         def interactive(command, responder, timeout):
@@ -292,34 +306,40 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                         or not carrier[2].startswith(SAFE_PATH) or timeout != 45):
                     raise ValueError("PUBLIC IPv4 outer carrier")
                 nested = shlex.split(carrier[2][len(SAFE_PATH):])
-                marker = None
+                framed = shlex.split(nested[-1]) if nested else []
+                found = re.findall(r"__HTTP_IB_BEGIN_([a-f0-9]{32})__", framed[2]) if len(framed) == 3 else []
+                marker = found[0] if len(found) == 1 else None
                 if legacy:
-                    # WP-6 (class 3, table 6-1 row 9, guide :752): outside the management-server
-                    # context the probe is v15's own -- ssh -tt, password-only authentication and a
-                    # framed `true` (v15 verify_ipv4_login :2945-2953, _framed_script :432-440)
-                    # -- not the DEV probe.
-                    framed = shlex.split(nested[-1]) if nested else []
-                    found = re.findall(r"__HTTP_IB_BEGIN_([A-Za-z0-9_]+)__", framed[2]) if len(framed) == 3 else []
-                    marker = found[0] if len(found) == 1 else None
+                    # Fresh identity changes the payload, not this legacy password-only prefix.
                     expected = ["ip", "vrf", "exec", "default", "ssh", "-tt",
                                 "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
                                 "-o", "LogLevel=ERROR", "-o", "ControlMaster=no", "-o", "ControlPath=none",
                                 "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
                                 "-o", "PreferredAuthentications=password,keyboard-interactive",
                                 "admin@203.0.113.2"]
-                    if (marker is None or framed[:2] != ["sh", "-c"] or nested[:-1] != expected
-                            or framed[2] != ('printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; true; '
-                                             'task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
-                                             + '__=%s\\n" "$task_rc"; exit "$task_rc"')):
-                        raise ValueError("PUBLIC IPv4 inner carrier")
                 else:
                     expected = ["ip", "vrf", "exec", "default", "ssh",
                                 "-o", "ConnectTimeout=2", "-o", "StrictHostKeyChecking=accept-new",
                                 "-o", "LogLevel=ERROR",
                                 "-o", "ControlMaster=no", "-o", "ControlPath=none",
-                                "admin@203.0.113.2", "true"]
-                    if nested != expected:
-                        raise ValueError("PUBLIC IPv4 inner carrier")
+                                "admin@203.0.113.2"]
+                if marker is None or framed[:2] != ["sh", "-c"] or nested[:-1] != expected:
+                    raise ValueError("PUBLIC IPv4 inner carrier")
+                prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+                suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                          + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+                replies = {
+                    "ip addr show eth0": ("IPV4_ADDR", "2: eth0: <UP> mtu 1500 state UP\n"
+                        "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n"
+                        "    inet 203.0.113.2/24 scope global eth0\n"),
+                    "ip route": ("IPV4_ROUTE", "default via 203.0.113.1 dev eth0\n"),
+                }
+                if not (framed[2].startswith(prefix) and framed[2].endswith(suffix)):
+                    raise ValueError("PUBLIC IPv4 complete frame")
+                body = framed[2][len(prefix):-len(suffix)]
+                if body not in replies:
+                    raise ValueError("PUBLIC IPv4 read outside its closed pair")
+                item, output = replies[body]
                 if responder.allow_password_change is not False:
                     raise ValueError("PUBLIC IPv4 inner carrier")
                 if legacy:
@@ -330,7 +350,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     inner = responder("admin@203.0.113.2's password: ")
                     role_ok = (type(outer) is str and hmac.compare_digest(outer, PUBLIC_OOB)
                                and type(inner) is str and hmac.compare_digest(inner, selected))
-                observation["calls"].append("IPV4")
+                observation["calls"].append(item)
                 observation["roles"].append(role_ok)
                 observation["gate"].append(not legacy and bool(observation["native"]))
                 if fault is not None:
@@ -338,10 +358,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     raise fault
                 if change_transport:
                     mutate()
-                if marker is not None:
-                    # WP-6 fixture (class 4, row 9): the modeled device answers the framed probe.
-                    return APP.SessionResult(f"\n__HTTP_IB_BEGIN_{marker}__\n__HTTP_IB_END_{marker}__=0\n", 0)
-                return APP.SessionResult("", 0)
+                return APP.SessionResult(f"\n__HTTP_IB_BEGIN_{marker}__\n{output}__HTTP_IB_END_{marker}__=0\n", 0)
             except (ValueError, IndexError, TypeError):
                 observation["errors"].append("ipv4-carrier")
                 raise AssertionError("PUBLIC IPv4 adapter rejected the carrier") from None
@@ -362,9 +379,9 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(APP, "verify_management_key_possession", side_effect=possession))
             stack.enter_context(mock.patch.object(APP.getpass, "getpass", side_effect=getpass))
             stack.enter_context(mock.patch("builtins.input", side_effect=terminal))
-            # WP-6 fixture (class 4, table 6-1 row 9, guide :752): the IPv4 readiness
-            # probe waits 10 s before each attempt; the wait itself is not under test.
-            stack.enter_context(mock.patch.object(APP.time, "sleep", return_value=None))
+            # The readiness wait is modeled, but the native verifier's parent
+            # subprocess must retain the original standard-library clock.
+            stack.enter_context(mock.patch.object(APP, "time", new=ConsumerClock()))
             yield observation
 
     def common(self, outcome, observation):
@@ -398,7 +415,8 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     outcome = self.capture(lambda: self.invoke(kind, f, selected, f["policy"]))
                 self.common(outcome, observation)
                 self.reached_native(observation)
-                expected = SERVICE_ORDER if kind == "service" else ["KEY" if kind == "key" else "IPV4"]
+                expected = (SERVICE_ORDER if kind == "service" else ["KEY"] if kind == "key"
+                            else ["IPV4_ADDR", "IPV4_ROUTE"])
                 self.assertEqual(expected, observation["calls"])
                 self.assertEqual([] if kind == "ipv4" else expected, observation["helper"])
                 self.assertEqual([] if kind == "ipv4" else expected, observation["success"])
@@ -427,7 +445,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             ("service", "check-only", False, True, BASE, None, (True, False), 0),
             ("service", "refused", True, False, BASE, None, (False, True), 1),
             ("key", "empty", True, True, BASE, [], True, 0),
-            ("key", "check-only", False, True, BASE, None, True, 0),
+            ("key", "check-only-empty", False, True, BASE, [], True, 0),
             ("key", "refused", True, False, BASE, None, False, 1),
         )
         for kind, label, apply, authorized, body, keys, expected, consent_count in cases:
@@ -446,6 +464,34 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     self.assertEqual([], observation[name], "no-write path acquired target or dispatched")
                 self.assertEqual(consent_count, len(observation["consent"]))
                 self.assertTrue(before == self.snapshot(f["path"]), "no-write path changed authority")
+
+        # WP-7/D67-O8: with keys, check-only reads presence without authorizing a write.
+        for code in (0, 34):
+            with self.subTest(kind="key", case="check-only-with-key", code=code), \
+                    tempfile.TemporaryDirectory(prefix="t1-readkey-") as folder:
+                f = self.fixture(folder, block_birth=True)
+                before = self.snapshot(f["path"])
+                details = {}
+                with self.boundaries(f, "key", PUBLIC_INITIAL, readonly_rc=code) as observation:
+                    outcome = self.capture(lambda: self.invoke(
+                        "key", f, PUBLIC_INITIAL, f["policy"], apply=False,
+                        authorized=False, details=details))
+                self.common(outcome, observation)
+                self.assertTrue(outcome["normal"] and outcome["error"] is None,
+                                "readonly public-key check did not complete normally")
+                self.assertIs(outcome["value"], False, "readonly presence must not grant write authorization")
+                self.assertEqual({"present": code == 0}, details)
+                self.reached_native(observation)
+                # A cold password lookup validates once; the real command gate validates again.
+                self.assertEqual(2, len(observation["native"]))
+                self.assertEqual(["actual-policy-password"], observation["fetch"])
+                for name in ("helper", "calls", "success"):
+                    self.assertEqual(["KEY_READONLY"], observation[name])
+                self.assertEqual([True], observation["roles"])
+                self.assertEqual([True], observation["gate"])
+                for name in ("possession", "consent", "helper_errors", "mutation"):
+                    self.assertEqual([], observation[name])
+                self.assertTrue(before == self.snapshot(f["path"]), "readonly check changed authority")
 
     def test_mixed_or_invalid_context_cannot_use_the_legacy_fallback(self):
         cases = [(kind, mode) for kind in ("service", "key", "ipv4")
@@ -480,7 +526,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
             ("service", "after-dns", DNS, False, [DNS]),
             ("service", "after-save", SAVE, False, [DNS, NTP, TZ, APPLY, SAVE]),
             ("key", "installer-return", None, True, ["KEY"]),
-            ("ipv4", "interactive-return", None, True, ["IPV4"]),
+            ("ipv4", "interactive-return", None, True, ["IPV4_ADDR"]),
         )
         for kind, label, helper_cut, transport_cut, expected in cases:
             with self.subTest(kind=kind, case=label), tempfile.TemporaryDirectory(prefix="t1-change-") as folder:
@@ -532,7 +578,7 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                     outcome = self.capture(lambda: self.invoke(kind, f, PUBLIC_INITIAL, f["policy"]))
                 self.common(outcome, observation)
                 self.reached_native(observation)
-                self.assertEqual(["IPV4" if kind == "ipv4" else "KEY" if kind == "key" else DNS],
+                self.assertEqual(["IPV4_ADDR" if kind == "ipv4" else "KEY" if kind == "key" else DNS],
                                  observation["calls"], "fault must follow the first real dispatch")
                 self.assertEqual(["actual-ipv4-boundary" if kind == "ipv4" else "actual-ordinary-boundary"],
                                  observation["fault"])
@@ -585,7 +631,8 @@ class ExplicitConsumerContextDraftTests(unittest.TestCase):
                 self.common(outcome, observation)
                 self.assertTrue(outcome["normal"] and outcome["error"] is None,
                                 "actual legacy delegation changed")
-                expected = SERVICE_ORDER if kind == "service" else ["KEY" if kind == "key" else "IPV4"]
+                expected = (SERVICE_ORDER if kind == "service" else ["KEY"] if kind == "key"
+                            else ["IPV4_ADDR", "IPV4_ROUTE"])
                 self.assertEqual(expected, observation["calls"])
                 self.assertEqual([], observation["helper"], "legacy branch unexpectedly used new helper")
                 self.assertEqual([], observation["native"])

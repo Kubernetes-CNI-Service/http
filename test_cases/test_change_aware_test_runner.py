@@ -1190,6 +1190,8 @@ class ImpactManifestTests(unittest.TestCase):
                 "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
                 # 2026-11-08 (v3.1.1 WP-12, R-016 AP-c, dfe69a3): the template's default ib.csv link.
                 "DAY0-Prepare/template/ib.csv",
+                # v3.1.5 WP-9 P050: the exact shared initial-setup test helper.
+                "test_cases/initial_setup_jump_fixture.py",
             ],
             manifest["tracked_support"],
         )
@@ -1899,6 +1901,146 @@ class ImpactManifestTests(unittest.TestCase):
     def test_manifest_entries_naming_a_former_borrower_also_name_its_definer(self):
         manifest = RUNNER.load_and_validate_manifest(ROOT, MANIFEST_PATH)
         self.assertEqual([], former_reexport_manifest_gaps(manifest))
+
+
+class InitialSetupJumpSupportContractsTests(unittest.TestCase):
+    """P050: preserve fourteen historical consumers and the two approved workflows."""
+
+    SUPPORT = "test_cases/initial_setup_jump_fixture.py"
+    CONSUMERS = (
+        "test_cases.test_ibsw225_managed_outer_guard_workflow",
+        "test_cases.test_initial_setup_bringup_results_workflow",
+        "test_cases.test_initial_setup_credentials_fd_workflow",
+        "test_cases.test_initial_setup_host_key_refresh_workflow",
+        "test_cases.test_initial_setup_jump_sessions",
+        "test_cases.test_initial_setup_offline_main",
+        "test_cases.test_initial_setup_oob_spine_main",
+        "test_cases.test_initial_setup_operator_reexec",
+        # This consumer copies/imports the helper in its cold child source;
+        # it is not a fourteenth parent-module AST ImportFrom.
+        "test_cases.test_initial_setup_operator_reexec_workflow",
+        "test_cases.test_initial_setup_project_names_workflow",
+        "test_cases.test_initial_setup_replace_workflow",
+        "test_cases.test_initial_setup_strict_stage_skeleton",
+        "test_cases.test_initial_setup_summary_output",
+        "test_cases.test_initial_setup_target_credentials_workflow",
+        "test_cases.test_initial_setup_worker_queue",
+        "test_cases.test_req10b_services_keys_workflow",
+    )
+    BEFORE = b"# PUBLIC-WP9-JUMP-A\n"
+    AFTER = b"# PUBLIC-WP9-JUMP-B\n"
+    LOCK = "requirements-container-top-level.lock"
+    LOCK_BYTES = b"# PUBLIC-WP9 lock only\n"
+
+    def snapshot_fixture(self, root):
+        """Only own inert bytes; no helper or consumer is imported/executed."""
+        (root / "test_cases").mkdir()
+        (root / self.SUPPORT).write_bytes(self.BEFORE)
+        (root / self.LOCK).write_bytes(self.LOCK_BYTES)
+        for test_id in self.CONSUMERS:
+            (root / (test_id.replace(".", "/") + ".py")).write_bytes(
+                b"# PUBLIC-WP9 inert consumer\n",
+            )
+        manifest = {
+            "schema_version": 1,
+            "scripts": {}, "baseline_tests": [], "test_rules": [], "workflows": [],
+            "test_suites": [{"id": "public-wp9", "description": "PUBLIC toy only",
+                             "tests": list(self.CONSUMERS)}],
+            "tracked_support": [self.SUPPORT, self.LOCK],
+            "path_rules": [{"paths": [self.SUPPORT], "tests": list(self.CONSUMERS)},
+                           {"paths": [self.LOCK], "tests": list(self.CONSUMERS)}],
+        }
+        path = root / "test_cases/script_test_manifest.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path, manifest
+
+    def test_helper_registration_is_exact_and_keeps_all_fourteen_consumers(self):
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(1, manifest["tracked_support"].count(self.SUPPORT))
+        self.assertNotIn(self.SUPPORT, manifest["scripts"])
+        matching = [rule for rule in manifest["path_rules"]
+                    if RUNNER.path_matches(self.SUPPORT, rule["paths"])]
+        self.assertEqual(
+            [{"paths": [self.SUPPORT], "tests": list(self.CONSUMERS)}], matching,
+            "one literal path, no glob/full-suite fallback or omitted cold child",
+        )
+        self.assertEqual(
+            hashlib.sha256((ROOT / self.SUPPORT).read_bytes()).hexdigest(),
+            RUNNER.sha256_support_path(ROOT, self.SUPPORT),
+        )
+
+    def test_helper_change_selects_baseline_and_exact_fourteen_including_cold_child(self):
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        selected = RUNNER.select_tests(
+            ROOT, manifest, [self.SUPPORT], RUNNER.PendingChanges(),
+        )
+        self.assertFalse(selected.full_suite, "unknown-path safe full is not support mapping")
+        self.assertEqual({self.SUPPORT}, selected.changed_paths)
+        self.assertEqual(set(manifest["baseline_tests"]) | set(self.CONSUMERS), selected.tests)
+        self.assertIn("test_cases.test_initial_setup_operator_reexec_workflow", selected.tests)
+
+    def test_same_size_helper_byte_change_invalidates_only_its_snapshot_and_proof(self):
+        with tempfile.TemporaryDirectory(prefix="wp9-jump-support-") as directory:
+            root = Path(directory)
+            manifest_path, manifest = self.snapshot_fixture(root)
+            lock_digest = hashlib.sha256(self.LOCK_BYTES).hexdigest()
+            before = RUNNER.make_snapshot(root, manifest_path, manifest)
+            self.assertEqual(
+                {self.SUPPORT: hashlib.sha256(self.BEFORE).hexdigest(), self.LOCK: lock_digest},
+                before.support,
+            )
+            self.assertEqual({}, before.scripts)
+            # PUBLIC metadata is independent of the machine and the real lock.
+            # Only is_current's environment observation is modeled below.
+            environment = {
+                "python_executable": "/PUBLIC/wp9/python3", "python_implementation": "PUBLIC",
+                "python_version": [3, 9, 0], "python_cache_tag": "PUBLIC-wp9",
+                "platform": "PUBLIC", "machine": "PUBLIC",
+                "container_toplevel_versions": ["PUBLIC-WP9==1"],
+                "container_toplevel_lock_sha256": lock_digest,
+            }
+            proof = RUNNER.full_suite_attestation(before, environment=environment)
+            self.assertEqual(environment, proof["environment"])
+            approved = RUNNER.snapshot_as_json(before)
+            self.assertFalse(RUNNER.detect_pending(before, approved).any())
+            with mock.patch.object(RUNNER, "full_suite_environment", return_value=environment) as observed:
+                self.assertTrue(RUNNER.full_suite_attestation_is_current(before, proof))
+                self.assertEqual(len(self.BEFORE), len(self.AFTER))
+                self.assertEqual(1, sum(a != b for a, b in zip(self.BEFORE, self.AFTER)))
+                (root / self.SUPPORT).write_bytes(self.AFTER)
+                after = RUNNER.make_snapshot(root, manifest_path, manifest)
+                self.assertEqual(
+                    {self.SUPPORT: hashlib.sha256(self.AFTER).hexdigest(), self.LOCK: lock_digest},
+                    after.support,
+                )
+                self.assertEqual(before.manifest_sha256, after.manifest_sha256)
+                self.assertEqual(before.scripts, after.scripts)
+                self.assertEqual(before.tests, after.tests)
+                self.assertNotEqual(before.support[self.SUPPORT], after.support[self.SUPPORT])
+                self.assertEqual(
+                    RUNNER.PendingChanges(support={self.SUPPORT}),
+                    RUNNER.detect_pending(after, approved),
+                )
+                self.assertFalse(RUNNER.full_suite_attestation_is_current(after, proof))
+                current = RUNNER.full_suite_attestation(after, environment=environment)
+                self.assertNotEqual(proof["snapshot_sha256"], current["snapshot_sha256"])
+                self.assertTrue(RUNNER.full_suite_attestation_is_current(after, current))
+            self.assertEqual(
+                [mock.call(expected_lock_sha256=lock_digest)] * 3, observed.call_args_list,
+                "before true/old proof false/new proof true share the identical PUBLIC environment",
+            )
+
+    def test_missing_required_helper_fails_closed_in_real_snapshot(self):
+        with tempfile.TemporaryDirectory(prefix="wp9-jump-missing-") as directory:
+            root = Path(directory)
+            manifest_path, manifest = self.snapshot_fixture(root)
+            self.assertIn(self.SUPPORT, RUNNER.make_snapshot(root, manifest_path, manifest).support)
+            (root / self.SUPPORT).unlink()  # Only this newly created inert toy file.
+            with self.assertRaisesRegex(
+                RUNNER.ImpactError,
+                r"^missing tracked support file: test_cases/initial_setup_jump_fixture\.py$",
+            ):
+                RUNNER.make_snapshot(root, manifest_path, manifest)
 
 
 class ApprovalLedgerTests(unittest.TestCase):
@@ -2793,6 +2935,40 @@ FROZEN_QUIET_CASES = (
     "test_cases.test_bootstrap_config_fetch_workflow.RenderedBootstrapFetchWorkflowTests.test_both_rendered_entrypoints_retry_transient_fetch_then_apply_dedicated",
     "test_cases.test_ibsw225_three_component_workflow::"
     "test_cases.test_ibsw225_three_component_workflow.ThreeComponentWorkflowTests.test_nine_devices_five_real_workers_overlap_after_native_canary",
+    # v3.1.5 R611/A.6: only the WP3 methods with actual owned PTY peer startup and reap.
+    # The remaining methods in these fixture-free modules stay in their ordinary lane.
+    "test_cases.test_initial_setup_direct_observers::"
+    "test_cases.test_initial_setup_direct_observers.DirectBoundaryObserverTests.test_phase_builder_entry_has_no_outer_endpoint",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_split_hostkey_warning_requires_both_active_reads",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_network_close_failure_is_unknown_without_address_retry",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_foreign_or_partial_hostkey_warning_never_authorizes_refresh",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_network_with_one_conflicting_fact_never_retries_or_sends_input",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_named_network_failure_falls_back_after_clean_reap",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_hostkey_warning_preserves_attempt_and_readonly_never_removes",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_authentication_and_post_change_read_each_use_one_endpoint",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_rejects_only_completed_endpoint_attributable_denial",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_bare255_wrong_markers_endpoint_and_missing_exit_are_unknown",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_foreign_or_bare_outer_prompt_never_receives_input",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_phase_incomplete_current_write_is_unknown_not_authentication_rejection",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_readonly_expiry_cancels_before_pam_writes",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_password_change_retains_same_project_pam_and_current_input",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_pam_fixed_eight_second_reserve_refuses_before_pam_input",
+    "test_cases.test_initial_setup_direct_transport_workflow::"
+    "test_cases.test_initial_setup_direct_transport_workflow.DirectTransportWorkflowTests.test_real_pam_rechecks_changed_project_before_any_pam_input",
     "test_cases.test_manual_applied_config::"
     "test_cases.test_manual_applied_config.MonitorLiveConfigTransportTests.test_actual_private_shell_monitor_and_manual_observe_same_raw_live_bytes",
     "test_cases.test_public_publication_workflow::"

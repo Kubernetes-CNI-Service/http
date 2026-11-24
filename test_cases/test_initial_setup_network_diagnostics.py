@@ -51,7 +51,7 @@ BAD_READ_ROWS = (
 )
 NETWORK_SETTERS = (
     ("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"),
-    ("nv", "set", "interface", "eth0-1", "ipv4", "gateway", "203.0.113.1"),
+    ("nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"),
     ("nv", "set", "interface", "eth0-1", "link", "state", "up"),
     ("nv", "set", "interface", "eth0-1", "type", "eth"),
     ("nv", "set", "system", "hostname", "EXAMPLE-IB01"),
@@ -217,15 +217,15 @@ class NetworkDiagnosticDirectTests(unittest.TestCase):
                                   else row for row in COMPLETE_ROWS))
             state = self.app.parse_nvue_state(supplied)
             needed, error = self.pure(self.app.force_day0_needed, self.device(), state)
-            self.assertTrue(error is None and needed is True
-                            and state.eth0_addresses == ("203.0.113.200/24",),
-                            "old force fillmissing may not delete or conflict on an extra address")
+            self.assertIsNone(needed)
+            self.assertIs(type(error), self.app.SetupError)
+            self.assertRegex(str(error),
+                             r"^Network conflict; manual resolution required: eth0 address: expected ")
+            self.assertEqual(("203.0.113.200/24",), state.eth0_addresses)
             result, error = self.pure(
                 self.app._management_network_commands, self.device(), supplied)
-            self.assertTrue(error is None and result ==
-                            [["nv", "set", "interface", "eth0", "ipv4", "address",
-                              "203.0.113.2/24"]],
-                            "fillmissing must add only requested address, never remove the old one")
+            self.safe_error(error, "management Network eth0 address conflict; device state is UNKNOWN")
+            self.assertIsNone(result, "a conflicting address cannot produce setters")
 
     def test_actual_readback_verifier_reports_fixed_failure_without_raw_details(self):
         for complete in (True, False):
@@ -473,10 +473,11 @@ class NetworkDiagnosticWorkflowTests(unittest.TestCase):
                                         for command in observed["commands"]),
                                 "preflight conflict may not issue setters/apply/save")
                 # Owner Q-035 (a) item 4: the target is fetched and natively verified at
-                # authentication; still no helper (write authority) and no consent.
+                # authentication. D67-O9 adds exactly one read-only ZTP helper
+                # before conflict; it grants no write authority or consent.
                 self.assertTrue(bool(f["caller"]["fetch"]) and bool(f["caller"]["native"])
                                 and all(row["IB"] and row["target"] for row in f["caller"]["native"])
-                                and not f["caller"]["helper"] and
+                                and f["caller"]["helper"] == [("nv", "show", "system", "ztp")] and
                                 "consent-granted" not in f["caller"]["timeline"],
                                 "preflight conflict acquired write/consent authority")
                 self.assertEqual([], observed["following"],

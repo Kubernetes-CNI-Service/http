@@ -15,6 +15,8 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -92,6 +94,7 @@ class JumpSessionTests(unittest.TestCase):
         self.addCleanup(restore_cwd)
         os.chdir(owned_root)
         self.app = transport.load_module('wp1_jump_sessions', transport.INITIAL_SETUP)
+        self.app.time = SimpleNamespace(**vars(self.app.time))
         self.jump = self.app.Device('EXAMPLE-JUMP01', 'eth_jump', '192.0.2.10',
                                    '192.0.2.10', '', '', '', '')
         self.config = self.root / 'config.json'
@@ -202,9 +205,71 @@ class JumpSessionTests(unittest.TestCase):
         self.assertIn('ControlMaster=no', argv[-1])
         self.assertIn('ControlPath=none', argv[-1])
 
+    def test_readiness_sleep_mock_preserves_external_stdlib_clock_identity(self):
+        # RV164: a test-local readiness observer must not intercept stdlib
+        # subprocess polling. The independent import is the external witness.
+        import time as external_time
+        original_sleep = external_time.sleep
+        original_monotonic = external_time.monotonic
+        application_time = self.app.time
+        original_app_sleep = application_time.sleep
+        try:
+            with mock.patch.object(application_time, 'sleep') as local_sleep:
+                self.assertIs(original_sleep, external_time.sleep,
+                              'fixture sleep mock must not replace external stdlib sleep')
+                self.assertIs(original_monotonic, external_time.monotonic)
+                self.assertIsNot(external_time, application_time)
+                self.assertIs(original_monotonic, application_time.monotonic)
+                self.app.time.sleep(15)
+                local_sleep.assert_called_once_with(15)
+                external_time.sleep(0)
+                self.assertIs(original_monotonic, external_time.monotonic)
+                local_sleep.assert_called_once_with(15)
+        finally:
+            self.assertIs(original_sleep, external_time.sleep)
+            self.assertIs(original_monotonic, external_time.monotonic)
+            self.assertIs(original_app_sleep, application_time.sleep)
+
+    def strict_fresh_command(self, argv):
+        carrier = shlex.split(argv[-1])
+        safe = 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec '
+        self.assertEqual(['sh', '-c'], carrier[:2])
+        self.assertEqual(3, len(carrier))
+        self.assertTrue(carrier[2].startswith(safe))
+        inner = shlex.split(carrier[2][len(safe):])
+        self.assertEqual(['ip', 'vrf', 'exec', 'default', 'ssh',
+                          '-o', 'ConnectTimeout=2', '-o', 'StrictHostKeyChecking=accept-new',
+                          '-o', 'LogLevel=ERROR', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+                          'admin@203.0.113.2'], inner[:-1])
+        frame = shlex.split(inner[-1])
+        self.assertEqual(['sh', '-c'], frame[:2])
+        self.assertEqual(3, len(frame))
+        markers = re.findall(r'__HTTP_IB_BEGIN_([a-f0-9]{32})__', frame[2])
+        self.assertEqual(1, len(markers))
+        marker = markers[0]
+        prefix = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+        suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+                  + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+        self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix))
+        body = frame[2][len(prefix):-len(suffix)]
+        self.assertIn(body, ('ip addr show eth0', 'ip route'))
+        return body, marker
+
+    def strict_fresh_answer(self, argv, *_args, **_kwargs):
+        command, marker = self.strict_fresh_command(argv)
+        replies = {
+            'ip addr show eth0': ('2: eth0: <UP> mtu 1500 state UP\n'
+                '    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n'
+                '    inet 203.0.113.2/24 scope global eth0\n'),
+            # This fixture has no configured gateway: do not invent a default route.
+            'ip route': '203.0.113.0/24 dev eth0 scope link\n',
+        }
+        return self.app.SessionResult('__HTTP_IB_BEGIN_' + marker + '__\n'
+            + replies[command] + '__HTTP_IB_END_' + marker + '__=0\n', 0)
+
     def test_strict_ipv4_probe_keeps_inner_unmultiplexed_with_real_project_policy(self):
         self.establish()
-        ib = self.app.Device('EXAMPLE-IB01', 'ib', '203.0.113.2', '203.0.113.2/24', '', '', '', '')
+        ib = self.app.Device('EXAMPLE-IB01', 'ib', '203.0.113.2', '203.0.113.2/24', '', '02:00:00:00:00:17', '', '')
         target = self.app.Target(ib, self.jump, 'swp7', 'eth0')
         global_path = self.root / '01-global.yaml'
         public_hash = '$' + '6$PUBLICsalt$' + 'A' * 86
@@ -218,24 +283,26 @@ class JumpSessionTests(unittest.TestCase):
                 mock.patch.object(self.app, '_JUMP_SESSIONS', self.sessions), \
                 mock.patch.object(self.app.time, 'sleep'), \
                 mock.patch.object(self.app, 'outer_ssh_command', wraps=self.app.outer_ssh_command) as outer, \
-                mock.patch.object(self.app, 'interactive_run', return_value=self.app.SessionResult('', 0)) as execute:
+                mock.patch.object(self.app, 'interactive_run', side_effect=self.strict_fresh_answer) as execute:
             policy = self.app.ProjectPasswordPolicy(global_path, 'admin', target_password=password, interactive=False)
             self.app.verify_ipv4_login(target, 'default', 'cumulus', '', 'admin', 2,
                                       _ib_current_password='PUBLIC-Current-72!', _password_policy=policy)
-        outer.assert_called_once()
-        inner = outer.call_args.args[2]
-        self.assertIsInstance(inner, list)
-        self.assertIn('ControlMaster=no', inner, 'guide :436 applies to strict IPv4 inner SSH too')
-        self.assertIn('ControlPath=none', inner)
-        self.assertEqual('admin@203.0.113.2', inner[-2])
-        self.assertEqual('true', inner[-1])
-        self.assertEqual(self.sessions.jump_control_path(self.jump), outer.call_args.kwargs['control_path'])
-        execute.assert_called_once()
+        self.assertEqual(2, outer.call_count)
+        for call in outer.call_args_list:
+            inner = call.args[2]
+            self.assertIsInstance(inner, list)
+            self.assertIn('ControlMaster=no', inner, 'guide :436 applies to strict IPv4 inner SSH too')
+            self.assertIn('ControlPath=none', inner)
+            self.assertEqual('admin@203.0.113.2', inner[-2])
+            self.assertEqual(self.sessions.jump_control_path(self.jump), call.kwargs['control_path'])
+        self.assertEqual(2, execute.call_count)
+        self.assertEqual(['ip addr show eth0', 'ip route'],
+                         [self.strict_fresh_command(call.args[0])[0] for call in execute.call_args_list])
 
     def test_strict_ipv4_rechecks_master_after_every_wait_and_rebuilds_before_retry(self):
         self.establish()
         path = Path(self.sessions.jump_control_path(self.jump))
-        ib = self.app.Device('EXAMPLE-IB01', 'ib', '203.0.113.2', '203.0.113.2/24', '', '', '', '')
+        ib = self.app.Device('EXAMPLE-IB01', 'ib', '203.0.113.2', '203.0.113.2/24', '', '02:00:00:00:00:17', '', '')
         target = self.app.Target(ib, self.jump, 'swp7', 'eth0')
         global_path = self.root / '01-global.yaml'
         public_hash = '$' + '6$PUBLICsalt$' + 'A' * 86
@@ -271,7 +338,7 @@ class JumpSessionTests(unittest.TestCase):
             events.append(('probe', len(probes)))
             if len(probes) < 3:
                 return self.app.SessionResult('ssh: connect to host 203.0.113.2 port 22: Connection refused', 255)
-            return self.app.SessionResult('', 0)
+            return self.strict_fresh_answer(command)
 
         with mock.patch.object(self.app, 'verify_password_hash',
                                side_effect=lambda value, setting: value == password and setting == public_hash), \
@@ -285,9 +352,11 @@ class JumpSessionTests(unittest.TestCase):
             self.app.verify_ipv4_login(target, 'default', 'cumulus', '', 'admin', 2,
                                       _ib_current_password='PUBLIC-Current-72!', _password_policy=policy)
         self.assertEqual([15, 10, 10], waits, 'r506 WP-3 changes only the IPv4 readiness schedule')
-        self.assertEqual(3, len(probes))
-        self.assertEqual([('check', True)] * 3, preceding,
-                         'each strict PTY dispatch needs a live check after its own sleep')
+        self.assertEqual(4, len(probes))
+        self.assertEqual(['ip addr show eth0'] * 3 + ['ip route'],
+                         [self.strict_fresh_command(command)[0] for command in probes])
+        self.assertEqual([('check', True)] * 4, preceding,
+                         'each strict PTY read needs a live check; a pair shares one attempt wait')
         self.assertEqual(1, sum(call.args[0] == 'jump-master' for call in request.call_args_list))
         self.assertEqual(2, sum('-M' in command for command in self.calls()))
         self.assertTrue(all('ControlPath=' + str(path) in command for command in probes))
@@ -471,13 +540,25 @@ class JumpSessionTests(unittest.TestCase):
         from test_cases.initial_setup_jump_fixture import legacy_jump_sessions_factory
         factory = legacy_jump_sessions_factory(self.app)
         sessions = factory(local_keys=set(), timeout=7)
+        responder = mock.Mock(side_effect=AssertionError('legacy adapter must not call a responder'))
         with mock.patch.object(self.app, 'probe_ethernet_key', return_value='password') as probe, \
                 mock.patch.object(self.app, 'interactive_run', side_effect=AssertionError('fixture SSH')), \
-                mock.patch.object(self.app.tempfile, 'mkdtemp', side_effect=AssertionError('fixture directory')):
+                mock.patch.object(self.app.tempfile, 'mkdtemp', side_effect=AssertionError('fixture directory')), \
+                mock.patch.object(self.app.subprocess, 'run', side_effect=AssertionError('fixture child')):
             self.assertEqual('password', sessions.probe_jump_key(self.jump, 'cumulus'))
-            self.assertEqual('192.0.2.10', sessions.open_jump_master(self.jump, 'cumulus', None))
+            probe.assert_called_once_with(self.jump, 'cumulus', 7)
+            probe.reset_mock()
+            with self.assertRaises(self.app.SshFailure) as refused:
+                sessions.open_jump_master(self.jump, 'cumulus', None)
+            self.assertEqual(
+                (self.app.SshFailureKind.JUMP_AUTHENTICATION, 'outer', '192.0.2.10', self.jump.hostname),
+                (refused.exception.kind, refused.exception.hop, refused.exception.address, refused.exception.jump))
+            self.assertEqual({'address': '192.0.2.10'},
+                             sessions.records[self.app.normalize_name(self.jump.hostname)])
+            self.assertEqual('192.0.2.10', sessions.open_jump_master(self.jump, 'cumulus', responder))
             self.assertIsNone(sessions.jump_control_path(self.jump))
             sessions.close_jump_masters()
+        responder.assert_not_called()
         probe.assert_called_once_with(self.jump, 'cumulus', 7)
 
     def test_master_uses_selected_address_on_rebuild(self):
@@ -1511,11 +1592,34 @@ class JumpFixtureOwnedRootTests(unittest.TestCase):
 
     def test_third_normal_main_uses_two_roots_and_closes_before_cwd_restore(self):
         prior = Path.cwd()
+        link_local_macs = {
+            'example-ib01.example.test': '02:00:00:00:00:10',
+            'example-ib02.example.test': '02:00:00:00:00:12',
+        }
         for root in self.roots():
             with self.subTest(root=root.name):
                 state = {}
                 with self.observed_third_world(root, state) as workflow:
-                    code, summary, text, waits, opened = workflow.run_world(blocked_until=180)
+                    public_world = sys.modules[type(workflow).__module__].PublicWorld
+                    original_payload = public_world.ib_payload
+                    identity_reads = []
+
+                    def with_link_local_identity(world, device, text):
+                        # O5 adds one framed link-local read after auth. All other
+                        # requests still pass through the original closed model.
+                        framed_commands = re.findall(
+                            r'__HTTP_IB_BEGIN_[0-9a-f]{32}__\\n"; (.*?); task_rc=\$\?;',
+                            text, flags=re.DOTALL)
+                        if framed_commands != ['ip addr show eth0']:
+                            return original_payload(world, device, text)
+                        self.assertIn(device.hostname, link_local_macs)
+                        identity_reads.append(device.hostname)
+                        return ('2: eth0: <UP> mtu 1500 state UP\n'
+                                f'    link/ether {link_local_macs[device.hostname]} brd ff:ff:ff:ff:ff:ff\n')
+
+                    with mock.patch.object(public_world, 'ib_payload', new=with_link_local_identity):
+                        code, summary, text, waits, opened = workflow.run_world(blocked_until=180)
+                    self.assertEqual(set(link_local_macs), set(identity_reads))
                     self.assertEqual(0, code)
                     self.assertEqual([240], waits)
                     self.assertEqual(2, opened.count('198.51.100.10'))

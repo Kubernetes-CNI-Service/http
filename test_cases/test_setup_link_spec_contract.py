@@ -145,6 +145,8 @@ NEW_ROWS = {
     # O2 default: setup builds initial-setup's two inputs beside it.
     "infiniband/bringup/xdr-initial-setup/ib.csv": ("repository", "infiniband/ib.csv", "required"),
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx": ("repository", "infiniband/p2p.xlsx", "required"),
+    # D67-O10 B: setup-owned alias, never a third publisher pointer.
+    "infiniband/bringup/xdr-initial-setup/latest_yaml": ("repository", "ztp/config/nvos/latest_yaml", "optional"),
 }
 # 需求文档 R-013 第 3 条 (owner 2026-11-03 「现在一起确认 R-013」; v3.1.1 WP-8): setup no longer makes it.
 REMOVED_ROWS = {"monitor/99-output-ufm"}
@@ -157,6 +159,7 @@ NEW_ALIAS_TEXTS = {
     "nvlink/monitor/01-global.yaml": "../01-global.yaml",
     "infiniband/bringup/xdr-initial-setup/ib.csv": "../../ib.csv",
     "infiniband/bringup/xdr-initial-setup/p2p.xlsx": "../../p2p.xlsx",
+    "infiniband/bringup/xdr-initial-setup/latest_yaml": "../../../ztp/config/nvos/latest_yaml",
 }
 # R-016 §3.4.
 REQUIRED_INPUTS = {"01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv", "ib.csv", "p2p.xlsx"}
@@ -205,9 +208,17 @@ class LinkSpecificationTableTest(unittest.TestCase):
                 self.assertIn(row.writer, {"setup", "publisher"})
                 self.assertIn(row.base, {"project", "repository"})
                 self.assertIsInstance(row.note, str)
-                # R-016 §3.4: only latest_yaml belongs to the publisher, in both columns.
-                self.assertEqual(path.endswith("/latest_yaml"), row.role == "publisher")
+                if path == "infiniband/bringup/xdr-initial-setup/latest_yaml":
+                    self.assertEqual(("dir", "optional", "setup", "repository", "ztp/config/nvos/latest_yaml"),
+                                     (row.kind, row.role, row.writer, row.base, row.target))
+                    self.assertIsNone(row.view)
+                    self.assertIs(row.published, False)
+                else:
+                    # Original two publisher rows retain the R-016 contract.
+                    self.assertEqual(path.endswith("/latest_yaml"), row.role == "publisher")
                 self.assertEqual(row.role == "publisher", row.writer == "publisher")
+        self.assertEqual({"ztp/config/cumulus/latest_yaml", "ztp/config/nvos/latest_yaml"},
+                         {path for path, row in rows.items() if row.role == "publisher"})
 
     def test_table_holds_appendix_a_and_the_new_rows(self):
         rows = self.table()
@@ -221,8 +232,8 @@ class LinkSpecificationTableTest(unittest.TestCase):
         for path, (base, target, _role) in NEW_ROWS.items():
             expected[path] = (base, target)
         # 74 − monitor/99-output-ufm (WP-8, R-013) + 6 structure + 3 networks' 02 + 3 alias tables + 4 status
-        # + 99-output-bringup + 2 (O2) = 92; G14-1 removes the three tools/ rows later.
-        self.assertEqual(92, len(expected))
+        # + 99-output-bringup + 2 (O2) = old92; D67-O10 B adds only one setup alias =93.
+        self.assertEqual(93, len(expected))
         self.assertEqual(set(expected), set(rows))
         for path, (base, target) in expected.items():
             with self.subTest(path=path):
@@ -246,6 +257,13 @@ class LinkSpecificationTableTest(unittest.TestCase):
         for path, row in rows.items():
             with self.subTest(path=path):
                 target = project_target(row)
+                if path == "infiniband/bringup/xdr-initial-setup/latest_yaml":
+                    self.assertIsNone(target)
+                    self.assertEqual(("dir", "optional", "setup", "repository", "ztp/config/nvos/latest_yaml"),
+                                     (row.kind, row.role, row.writer, row.base, row.target))
+                    self.assertIsNone(row.view)
+                    self.assertIs(row.published, False)
+                    continue
                 if path.endswith("/latest_yaml"):
                     self.assertIsNone(target)
                     self.assertEqual(("dir", "publisher"), (row.kind, row.role))

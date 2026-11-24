@@ -849,6 +849,82 @@ def _scan_loopback_until_deadline(
     raise TimeoutError(f"loopback sshd scan deadline expired: attempts={attempts!r}")
 
 
+def _signal_owned_stock_sshd_group(daemon):
+    # The fixture creates this session through its own start_new_session Popen.
+    # Do not poll here: a sole owner retaining an unreaped child also retains
+    # its identity. A previous daemon_alive() poll may already have retired it.
+    if daemon.returncode is not None:
+        return
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError("the stock loopback daemon requires original child reaping")
+    try:
+        os.killpg(daemon.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _close_local_stock_sshd(daemon, daemon_log_stream):
+    """Stop only the original fixture-owned session, then settle its actual Popen."""
+    try:
+        _signal_owned_stock_sshd_group(daemon)
+        try:
+            daemon.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            _signal_owned_stock_sshd_group(daemon)
+            daemon.wait(timeout=2)
+    finally:
+        daemon_log_stream.close()
+
+
+class StockSshdCustodyContractTests(unittest.TestCase):
+    def test_a_reaped_daemon_does_not_authorize_any_group_signal(self):
+        daemon = mock.Mock(spec=subprocess.Popen, pid=424242, returncode=1)
+        log_stream = mock.Mock()
+        with mock.patch.object(os, "killpg") as kill_group:
+            _close_local_stock_sshd(daemon, log_stream)
+        kill_group.assert_not_called()
+        daemon.wait.assert_called_once_with(timeout=2)
+        daemon.poll.assert_not_called()
+        log_stream.close.assert_called_once_with()
+
+    def test_an_owned_daemon_uses_both_bounded_tries_before_reaping(self):
+        daemon = mock.Mock(spec=subprocess.Popen, pid=424242, returncode=None)
+        log_stream = mock.Mock()
+        events = mock.Mock()
+        events.attach_mock(daemon.wait, "wait")
+        events.attach_mock(log_stream.close, "close")
+        daemon.wait.side_effect = [subprocess.TimeoutExpired("synthetic daemon", 2), -9]
+        with mock.patch.object(os, "killpg") as kill_group:
+            events.attach_mock(kill_group, "signal")
+            _close_local_stock_sshd(daemon, log_stream)
+        self.assertEqual(
+            [mock.call.signal(daemon.pid, signal.SIGKILL), mock.call.wait(timeout=2),
+             mock.call.signal(daemon.pid, signal.SIGKILL), mock.call.wait(timeout=2),
+             mock.call.close()],
+            events.mock_calls,
+        )
+        daemon.poll.assert_not_called()
+
+    def test_reaped_before_the_retry_does_not_authorize_another_group_signal(self):
+        daemon = mock.Mock(spec=subprocess.Popen, pid=424242, returncode=None)
+        log_stream = mock.Mock()
+
+        def wait_for_original_handle(*, timeout):
+            self.assertEqual(2, timeout)
+            if daemon.returncode is None:
+                daemon.returncode = -9
+                raise subprocess.TimeoutExpired("synthetic daemon", timeout)
+            return daemon.returncode
+
+        daemon.wait.side_effect = wait_for_original_handle
+        with mock.patch.object(os, "killpg") as kill_group:
+            _close_local_stock_sshd(daemon, log_stream)
+        kill_group.assert_called_once_with(daemon.pid, signal.SIGKILL)
+        self.assertEqual([mock.call(timeout=2), mock.call(timeout=2)], daemon.wait.call_args_list)
+        daemon.poll.assert_not_called()
+        log_stream.close.assert_called_once_with()
+
+
 def load_module(name: str, relative: str):
     path = ROOT / relative
     spec = importlib.util.spec_from_file_location(name, path)
@@ -4099,6 +4175,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             daemon_log_stream = None
             daemon = None
             if active_loopback is None:
+                self.assertEqual(signal.SIG_DFL, signal.getsignal(signal.SIGCHLD))
                 daemon_log_stream = daemon_log.open("w", encoding="utf-8")
                 try:
                     daemon = subprocess.Popen(
@@ -4456,20 +4533,7 @@ class BackupAuthenticationContractTests(unittest.TestCase):
                 raise
             finally:
                 if daemon is not None:
-                    try:
-                        os.killpg(daemon.pid, 9)
-                    except ProcessLookupError:
-                        pass
-                    try:
-                        daemon.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        try:
-                            os.killpg(daemon.pid, 9)
-                        except ProcessLookupError:
-                            pass
-                        daemon.wait(timeout=2)
-                    finally:
-                        daemon_log_stream.close()
+                    _close_local_stock_sshd(daemon, daemon_log_stream)
                     self.assertIsNotNone(daemon.poll())
                     self.assertTrue(daemon_log_stream.closed)
                 else:

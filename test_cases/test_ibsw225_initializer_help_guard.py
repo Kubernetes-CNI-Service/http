@@ -126,7 +126,8 @@ class InitializerHelpGuardTests(unittest.TestCase):
         self.assertEqual(stopped.exception.code, 0)
         printed = (out.getvalue() + err.getvalue()).strip()
         self.assertRegex(printed, r"\Ahttp-v3\.1\.[0-9]+\Z")
-        self.assertEqual("http-v3.1.4", printed)
+        # Approved v3.1.5 guide A.11: the runtime marker is part of this snapshot.
+        self.assertEqual("http-v3.1.5", printed)
         self.assertNotIn("desktop", printed.casefold())
         self.assertIsNone(initial.REPORT_HANDLE)
         guard.assert_not_called()

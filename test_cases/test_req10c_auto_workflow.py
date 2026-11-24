@@ -519,21 +519,21 @@ class Req10CAutoUnsetupWorkflowTests(unittest.TestCase):
             global_file.write_text("system:\n  timezone: UTC\n", encoding="ascii")
             csv = base / "ib.csv"
             p2p = base / "p2p.dot"
-            csv.write_text("fixture CSV\n", encoding="ascii")
-            p2p.write_text("fixture P2P\n", encoding="ascii")
+            csv.write_text(
+                "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
+                "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:02,,,\n"
+                "EXAMPLE-LEAF01,eth,192.0.2.10,24,192.0.2.1,,,,\n", encoding="ascii")
+            p2p.write_text('"EXAMPLE-IB01":"eth0" -- "EXAMPLE-LEAF01":"swp7";\n', encoding="ascii")
+            qualification = base / "qualification"
+            qualification.mkdir()
+            (qualification / "02-devices_config.csv").write_bytes(csv.read_bytes())
+            compared = self.initial._compare_inventory(csv, qualification)
             cache = base / "targets.json"
-            ib = self.initial.Device(
-                "EXAMPLE-IB01", "ib", "203.0.113.2", "203.0.113.2/24",
-                "203.0.113.1", "", "", "",
-            )
-            eth = self.initial.Device(
-                "EXAMPLE-LEAF01", "eth", "192.0.2.10", "192.0.2.10/24",
-                "192.0.2.1", "", "", "",
-            )
+            ib, ethernet = self.initial.load_devices(csv)
+            targets = self.initial.build_targets(self.initial.parse_p2p(p2p), ib, ethernet)
             self.initial.save_target_cache(
-                cache, csv, p2p, 1,
-                [self.initial.Target(ib, eth, "swp7", "eth0")],
-                global_file=global_file, services=None, public_keys=[],
+                cache, csv, p2p, 1, targets,
+                global_file=global_file, services=None, public_keys=[], inventory_check=compared,
             )
             newer = cache.stat().st_mtime + 30
             os.utime(csv, (newer, newer))

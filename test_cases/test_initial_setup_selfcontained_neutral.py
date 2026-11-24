@@ -5,6 +5,7 @@ C2 is a development-side real reader, not a production bundle dependency.
 """
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -87,6 +88,9 @@ class _NeutralFixture:
             (tool / "infra-neutral.conf").write_bytes(local)
         (day0 / "ib.csv").write_text(PUBLIC_CSV, encoding="ascii")
         (day0 / "p2p.dot").write_text(PUBLIC_P2P, encoding="ascii")
+        qualification = root / "management-inputs"
+        qualification.mkdir()
+        (qualification / "02-devices_config.csv").write_text(PUBLIC_CSV, encoding="ascii")
         if global_present:
             (day0 / "01-global.yaml").write_text(public_global(explicit), encoding="ascii")
         for name in ("ib.csv", "p2p.dot", "01-global.yaml"):
@@ -122,6 +126,7 @@ class _NeutralFixture:
             return result
         app._service_profile = qualified_profile
         return dict(root=root, tool=tool, day0=day0, cwd=cwd, poison=poison,
+                    qualification=qualification,
                     profile_records=profile_records,
                     source=source, source_bytes=source_bytes, app=app)
 
@@ -138,6 +143,33 @@ class _NeutralFixture:
         return {p.name: p.read_bytes() for p in f["day0"].iterdir()}
 
 class SelfContainedNeutralAuthorityTests(_NeutralFixture, unittest.TestCase):
+    def test_plain_nested_management_without_inventory_authority_refuses_before_output(self):
+        with tempfile.TemporaryDirectory(prefix="neutral-plain-management-") as directory:
+            f = self.fixture(directory)
+            before = self.before(f)
+            app = f["app"]
+            argv = [str(f["source"]), "--generate-json", "--execution-mode", "management",
+                "--ib-csv", str(f["day0"] / "ib.csv"), "--p2p", str(f["day0"] / "p2p.dot"),
+                "--target-cache", str(f["root"] / "out/targets.json"),
+                "--report", str(f["root"] / "out/report.log")]
+            with ExitStack() as scope:
+                scope.enter_context(mock.patch.dict(sys.modules))
+                for name in list(sys.modules):
+                    if name == "tools" or name.startswith("tools."):
+                        del sys.modules[name]
+                scope.enter_context(mock.patch.object(sys, "path", [str(f["tool"]), *sys.path]))
+                scope.enter_context(mock.patch.object(sys, "argv", argv))
+                profile = scope.enter_context(mock.patch.object(app, "_service_profile"))
+                sessions = scope.enter_context(mock.patch.object(app, "_new_jump_sessions"))
+                scope.enter_context(mock.patch.object(app.subprocess, "Popen", side_effect=AssertionError("no child")))
+                scope.enter_context(mock.patch.object(app, "interactive_run", side_effect=AssertionError("no transport")))
+                with self.assertRaisesRegex(app.SetupError, "repository inventory master is unavailable.*use --project-dir"):
+                    app.main()
+                profile.assert_not_called()
+                sessions.assert_not_called()
+            self.assertFalse((f["root"] / "out").exists())
+            self.assert_inputs_unchanged(f, before)
+
     def test_local_authority_and_fallback_ignore_valid_ancestor_poison(self):
         with tempfile.TemporaryDirectory(prefix="neutral-direct-local-") as directory:
             f = self.fixture(directory)
@@ -198,8 +230,58 @@ class SelfContainedNeutralWorkflowTests(_NeutralFixture, unittest.TestCase):
              mock.patch.object(sys, "path", list(sys.path)):
             cls.c2 = load_script("neutral_bundle_actual_c2", C2)
 
+    def test_qualified_caller_binds_real_master_without_changing_nested_authority(self):
+        with tempfile.TemporaryDirectory(prefix="neutral-qualified-caller-") as directory:
+            f = self.fixture(directory, local=BUNDLE_NEUTRAL)
+            before = self.before(f)
+            try:
+                code = self.p1(f, False)
+            except (f["app"].SetupError, AssertionError) as error:
+                self.fail("qualified PUBLIC caller must preserve the real nested P1/profile: " + str(error))
+            self.assertEqual(0, code)
+            payload = json.loads((f["root"] / "out/targets.json").read_text())
+            self.assertEqual({"status": "checked_by_caller"}, payload["inventory_check"])
+            self.assertEqual(EXPECTED_FALLBACK, payload["services"])
+            self.assert_inputs_unchanged(f, before)
+
+    def test_mismatched_caller_master_stops_before_nested_main(self):
+        with tempfile.TemporaryDirectory(prefix="neutral-caller-mismatch-") as directory:
+            f = self.fixture(directory, local=BUNDLE_NEUTRAL)
+            master = f["qualification"] / "02-devices_config.csv"
+            master.write_text(PUBLIC_CSV.replace("203.0.113.2,", "203.0.113.99,"), encoding="ascii")
+            with mock.patch.object(f["app"], "main", wraps=f["app"].main) as main:
+                with self.assertRaisesRegex(f["app"].SetupError,
+                                            r"\APUBLIC caller inventory mismatch before nested main\Z"):
+                    self.p1(f, False)
+            main.assert_not_called()
+            self.assertFalse((f["root"] / "out").exists())
+            self.assertEqual(ANCESTOR_POISON, f["poison"].read_bytes())
+
     def p1(self, f, explicit):
         app = f["app"]
+        # A real management-side caller qualifies these exact PUBLIC inputs.
+        # This scope is gone before the original three-file Leaf is entered;
+        # the production bundle never borrows the caller's M4 module.
+        inventory_source = ROOT / "tools/inventory_subset.py"
+        identity_source = ROOT / "tools/device_identity.py"
+        bound_sources = [(path, path.read_bytes()) for path in (inventory_source, identity_source)]
+        with mock.patch.object(sys, "path", [str(ROOT), *sys.path]), mock.patch.dict(sys.modules):
+            for name in list(sys.modules):
+                if name == "tools" or name.startswith("tools."):
+                    del sys.modules[name]
+            package = importlib.import_module("tools")
+            self.assertIn(str(ROOT / "tools"), list(package.__path__))
+            with mock.patch.object(package, "__path__", [str(ROOT / "tools")]):
+                inventory = importlib.import_module("tools.inventory_subset")
+                identity = importlib.import_module("tools.device_identity")
+                self.assertEqual(inventory_source, Path(inventory.__file__).resolve())
+                self.assertEqual(identity_source, Path(identity.__file__).resolve())
+                differences = inventory.compare(f["day0"] / "ib.csv",
+                    f["qualification"] / "02-devices_config.csv")
+            for path, expected in bound_sources:
+                self.assertEqual(expected, path.read_bytes(), "caller input library changed during qualification")
+        if differences:
+            raise app.SetupError("PUBLIC caller inventory mismatch before nested main")
         effects = []
         profile_entries = []
         actual_profile = app._service_profile
@@ -210,7 +292,7 @@ class SelfContainedNeutralWorkflowTests(_NeutralFixture, unittest.TestCase):
         def forbidden(*args, **kwargs):
             effects.append(True)
             raise AssertionError("PUBLIC generate-json must not reach a process/transport/native boundary")
-        argv = [str(f["source"]), "--generate-json", "--execution-mode", "management",
+        argv = [str(f["source"]), "--generate-json", "--execution-mode", "management", "--inventory-checked",
                 "--ib-csv", str(f["tool"] / "ib.csv"), "--p2p", str(f["tool"] / "p2p.dot"),
                 "--target-cache", str(f["root"] / "out/targets.json"),
                 "--report", str(f["root"] / "out/report.log"),

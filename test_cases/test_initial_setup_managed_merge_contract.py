@@ -74,6 +74,13 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
         root = root.resolve()
         ib_csv = ib_csv.resolve()
         ib_csv.write_text(MANAGED_CSV, encoding="utf-8")
+        master_csv = (
+            "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw,config_method\n"
+            "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:01,,,,initial-setup\n"
+            "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,,\n"
+        )
+        (root / "02-devices_config.csv").write_text(master_csv, encoding="utf-8")
+        (root / "infiniband/02-devices_config.csv").write_text(master_csv, encoding="utf-8")
         private = root / ".ssh/id_ed25519"
         private.parent.mkdir(mode=0o700)
         private.write_text("fixture identity; never a real key")
@@ -81,15 +88,26 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
         return helper, root, tool.resolve(), global_path, ib_csv, p2p.resolve(), cache.parent.resolve() / cache.name
 
     def device_io(self, stack, calls, *, observe=None, initial="fixture"):
-        neighbor = self.initial.Neighbor("fe80::1", "swp7", "02:00:00:00:00:01")
+        import base64
+
+        key_payload = base64.b64encode((req10b.public_key(17, "laptop")
+                                       + req10b.public_key(18, "management")).encode("ascii")).decode("ascii")
+        links = (
+            "7: swp7: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+            "8: swp8: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+        )
+        fdb = (
+            "02:00:00:00:00:01 dev swp7 master bridge dynamic\n"
+            "02:00:00:00:00:02 dev swp8 master bridge dynamic\n"
+        )
+        vlans = "port vlan-id\nswp7 1 PVID Egress Untagged\nswp8 1 PVID Egress Untagged\n"
         stack.enter_context(mock.patch.dict(os.environ, {"NVOS_INITIAL_PASSWORD": initial}))
         for name, value in (("local_ethernet_keys", set()),
                             ("prompt_ethernet_passwords", {"example-jump01": "fixture"}),
                             ("collect_ethernet_interfaces", ("EXAMPLE-JUMP01", "table")),
-                            ("collect_ethernet_network_tables", ("links", "fdb", "neighbors")),
+                            ("collect_ethernet_network_tables", (links, fdb, vlans)),
                             ("save_ethernet_snapshot", Path("/nonexistent/snapshot")),
                             ("interface_status_line", "swp7 up"), ("interface_oper_status", "up"),
-                            ("fdb_port_for_interface", "swp7"), ("neighbor_for_port", neighbor),
                             ("interface_vrf", "default"),
                             # v15 checks IPv4 on every --apply (owner Q-035 (a)); that SSH check
                             # is a transport outside the PUBLIC model.
@@ -99,12 +117,17 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
         def device(*args, **kwargs):
             command = tuple(args[7])
             calls.append((command, kwargs.get("_phase_operation")))
-            if (len(command) == 5 and command[:2] == ("sh", "-c")
-                    and command[2] == self.initial._KEY_INSTALL_SCRIPT and command[3] == "--"):
+            if command == ("sh", "-c", self.initial._KEY_INSTALL_SCRIPT, "--", key_payload):
                 return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
+            if command == ("ip", "addr", "show", "eth0"):
+                return self.initial.SessionResult(
+                    "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
+                    "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
             if command == req10b.STRICT_DIFF:
                 return self.initial.SessionResult("", 0)
-            return self.initial.SessionResult(CONFIGURED_STATE, 0)
+            if command == req10b.STRICT_READ:
+                return self.initial.SessionResult(CONFIGURED_STATE, 0)
+            raise AssertionError(f"unexpected managed device command: {command!r}")
 
         stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device))
         stack.enter_context(mock.patch.object(self.initial, "verify_management_key_possession"))
@@ -224,6 +247,11 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                     cycle = self.authority.ManagedInitialMethodCycle(root, self.initial)
                     calls, stderr = [], io.StringIO()
                     with ExitStack() as stack:
+                        from tools import ib_bringup_runtime_guard as runtime_guard
+
+                        guard_path = root / "private-runtime.lock"
+                        self.assertFalse(os.path.lexists(guard_path))
+                        stack.enter_context(mock.patch.object(runtime_guard, "_RUNTIME_GUARD_PATH", guard_path))
                         self.device_io(stack, calls)
                         stack.enter_context(redirect_stderr(stderr))
                         if entry == "main":
@@ -237,6 +265,20 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                             self.assertEqual(2, result)
                             self.assertIn("managed initial-setup rejected: AuthorityError", stderr.getvalue())
                         cycle.close()
+                        if entry == "managed-cli":
+                            self.assertTrue(guard_path.is_file())
+                            guard_info = guard_path.stat()
+                            self.assertEqual(root, guard_path.parent)
+                            self.assertEqual(os.getuid(), guard_info.st_uid)
+                            self.assertEqual(1, guard_info.st_nlink)
+                            with runtime_guard._runtime_instance_guard() as descriptor:
+                                held = os.fstat(descriptor)
+                                self.assertEqual((guard_info.st_dev, guard_info.st_ino),
+                                                 (held.st_dev, held.st_ino))
+                            self.assertEqual((guard_info.st_dev, guard_info.st_ino),
+                                             (guard_path.stat().st_dev, guard_path.stat().st_ino))
+                        else:
+                            self.assertFalse(os.path.lexists(guard_path))
                     for output in (cache.parent / "report.log", cache, cache.with_name(cache.name + ".sha256"),
                                    cache.parent / "snapshots", root / "99-output-ztp"):
                         self.assertFalse(os.path.lexists(output), f"{output.name} must not exist")

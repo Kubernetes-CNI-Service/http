@@ -227,6 +227,21 @@ NVLink 分别有固定表头；修改字段时必须同步 monitor 的行规范�
 归档名都以 UTC 生成，CSV 中 AIR 行即使排在共用地址的 Production 行之前，也会在完整扫描后
 继承同网段 SVI，不再依赖人工行顺序。
 
+三个平台的 CSV 列名仍是 `Effective-Error`，解析设备输出中的复数 `effective-errors`。
+IB 的 QP1 Receive、Transmit 保持分列且顺序不变；SPX 的 IPv4/IPv6 Summary 不算 LLDP，
+没有邻居时 Peer 两列留空，PFC 仍取 QoS Port Statistics 的 Pause Frames。
+IB 和 NVLink 的采集入口是上述 Ethernet 脚本的发布别名。NVLink 的端口名使用 `acp`、
+Type 为 `nvl`，已有 ASIC 信息由 `nv show ib device` 采集，不增加卡片栏目。
+NVLink Link 表关注 Effective-Error、Link-Downed、QP1-Drops，沿用原快照选择和保留策略。
+
+普通 ETH/IB/NVL 设备的卡片与列表只有解析后的 `ok` 显示 `OK`，其余均显示
+`NOT OK`；这是显示标签，不改变采集原值、配色、未采集状态或告警口径。UFM 不适用
+此标签规则。PSU 仅在同设备本行 Model、Serial 都是 N/A 且另一 PSU 有至少一个真实
+身份字段时判 absent；全 N/A 仍按原 State，风扇或硬件元数据不能证明 PSU 存在。
+IB `swNpN` 和 NVLink `acpN` 接口只有 State up 且 Active 才计 Up，其余有效接口计入
+“Down接口”。总数完整，名称最多显示 20 个并提示剩余数。固件列表保留 Actual FW 整列；
+只有 BIOS 的 Not Specified 显示 NA。不为显示旧 NVLink 归档绕过当前清单。
+
 当前 `cron.sh` 为兼容频繁 rebuild 的 AIR 仿真，SSH/SCP 仍使用
 `StrictHostKeyChecking=no` 与临时 known-hosts。后续 hostname/MAC 校验只能防止普通地址串线；
 因为值来自同一个未认证 SSH 会话，它不是密码学主机认证，不能抵御主动中间人。Production 应

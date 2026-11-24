@@ -46,11 +46,25 @@ DEV_OUTCOME_WORDS = ("CHECKED_ONLY", "SKIPPED_NO_WORK", "BLOCKED_PREREQUISITE",
 READ = ["nv", "config", "show", "-o", "commands"]
 NETWORK_SETTERS = (
     ("nv", "set", "interface", "eth0", "ipv4", "address", "203.0.113.2/24"),
-    ("nv", "set", "interface", "eth0-1", "ipv4", "gateway", "203.0.113.1"),
+    ("nv", "set", "interface", "eth0", "ipv4", "gateway", "203.0.113.1"),
     ("nv", "set", "interface", "eth0-1", "link", "state", "up"),
     ("nv", "set", "interface", "eth0-1", "type", "eth"),
     ("nv", "set", "system", "hostname", "EXAMPLE-IB01"),
 )
+# Independent PUBLIC input for the caller's explicitly leased narrow fact seam.
+# Default caller facts stay one-device; only this S3 scene supplies the second.
+SUMMARY_IDENTITY_FACTS = {
+    "EXAMPLE-IB01": {
+        "target": ("EXAMPLE-IB01", "203.0.113.2", "203.0.113.2/24",
+                   "203.0.113.1", "02:00:00:00:00:17"),
+        "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:17", "vlan1", "default"),
+    },
+    "EXAMPLE-IB02": {
+        "target": ("EXAMPLE-IB02", "203.0.113.3", "203.0.113.3/24",
+                   "203.0.113.1", "02:00:00:00:00:18"),
+        "point": ("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:18", "vlan1", "default"),
+    },
+}
 # Table 6-1 row 2 (guide :745) with v15 CURRENT-CONTRACT.md:21 ("每设备 `oob/port` 保留物理
 # Leaf/端口"): the (IB hostname, OOB Leaf, Leaf port) of every device record in the run's
 # summary.json.  It replaces the DEV 7-column per-target rows and their rendered text.
@@ -84,28 +98,363 @@ SUMMARY_PEER_TRANSFORMS = (
 SUMMARY_PEER_IPV4_PREVIOUS = '    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR"]\n'
 SUMMARY_PEER_IPV4_CURRENT = '    allowed4 = ["-o","ConnectTimeout=2","-o","StrictHostKeyChecking=accept-new","-o","LogLevel=ERROR",\n                "-o","ControlMaster=no","-o","ControlPath=none"]\n'
 
-def _summary_two_target_peer(caller):
-    # Fixture qualification only: exact original generated peer, no SUT oracle.
-    original = caller.peer_program()
-    if type(original) is not str or original.count(SUMMARY_PEER_IPV4_CURRENT) != 1:
+# R667 O8 changes only the peer's independent single-port setter, not its
+# legacy readback or the historical e79 source. Freeze the exact reviewed
+# current peer; reverse this one fixture delta only for the old-pin comparison.
+SUMMARY_PEER_O8_CURRENT_SHA256 = "f6fc1c57978ccdc4b9442a8ce9e2b72c0044af52699424312b14eb4340b90c48"
+SUMMARY_PEER_O8_PREVIOUS = ' ["nv","set","interface","eth0-1","ipv4","gateway","203.0.113.1"],\n'
+SUMMARY_PEER_O8_CURRENT = ' ["nv","set","interface","eth0","ipv4","gateway","203.0.113.1"],\n'
+
+# Exact fixture DATA layers only; original pins/pairs/eleven transforms above stay byte-exact.
+# Historical inverse data qualifies current input and is NEVER the runtime peer.
+SUMMARY_PEER_CURRENT_SHA256 = '4eee2234f523f7c1abcd246707315cb0303956f6b42181e5f533e053eb5f1950'
+
+SUMMARY_PEER_LAYERS = (('B1 independent metadata/backup',
+  'f6fc1c57978ccdc4b9442a8ce9e2b72c0044af52699424312b14eb4340b90c48',
+  'facc140b687fd9fa15115b5804b8360a0a7b977279cc6b2593823ac87d89411b',
+  (('B1 span 1',
+    ' ["nv","set","system","ntp","server","time.ib.example.test"],\n'
+    ' ["nv","set","system","date-time","timezone","Asia/Taipei"],\n'
+    ']\n'
+    'def public_command(command):\n'
+    '    # Only independent PUBLIC closed vectors can enter a durable event. Never\n'
+    "    # serialize a rejected candidate's raw argv, even before business admission.\n",
+    ' ["nv","set","system","ntp","server","time.ib.example.test"],\n'
+    ' ["nv","set","system","date-time","timezone","Asia/Taipei"],\n'
+    ']\n'
+    '# Complete independent WP4 proposal literal, frozen before its producer.\n'
+    '# This MODEL never executes it or returns configuration contents.\n'
+    'EXPECTED_BACKUP_SCRIPT = (\n'
+    "    'set -eu\\n'\n"
+    "    'umask 077\\n'\n"
+    '    "fail() { printf \'%s\\\\n\' \'IB configuration backup failed\' >&2; exit 1; }\\n"\n'
+    '    \'[ "$#" -eq 1 ] || fail\\n\'\n'
+    "    'stamp=$1\\n'\n"
+    '    \'case "$stamp" in\\n\'\n'
+    "    '    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\\n'\n"
+    "    '    *) fail ;;\\n'\n"
+    "    'esac\\n'\n"
+    '    \'case "${HOME-}" in /*) ;; *) fail ;; esac\\n\'\n'
+    '    \'backup="$HOME/current_${stamp}.yaml"\\n\'\n'
+    '    \'[ ! -e "$backup" ] && [ ! -L "$backup" ] || fail\\n\'\n'
+    "    'tmp=\\n'\n"
+    '    \'trap \\\'if [ -n "$tmp" ]; then rm -f -- "$tmp"; fi\\\' EXIT\\n\'\n'
+    '    "trap \'exit 1\' HUP INT TERM\\n"\n'
+    '    \'tmp=$(mktemp "${backup}.tmp.XXXXXX" 2>/dev/null) || fail\\n\'\n'
+    '    \'chmod 600 "$tmp" || fail\\n\'\n'
+    '    \'nv config show > "$tmp" 2>/dev/null || fail\\n\'\n'
+    '    \'[ -s "$tmp" ] || fail\\n\'\n'
+    '    \'bytes=$(wc -c < "$tmp" | tr -d \\\'[:space:]\\\') || fail\\n\'\n'
+    '    \'case "$bytes" in \\\'\\\'|*[!0-9]*) fail ;; esac\\n\'\n'
+    '    \'[ "$bytes" -gt 0 ] || fail\\n\'\n'
+    '    \'ln -T -- "$tmp" "$backup" 2>/dev/null || fail\\n\'\n'
+    '    \'rm -f -- "$tmp" || fail\\n\'\n'
+    "    'tmp=\\n'\n"
+    '    \'printf \\\'path=%s\\\\nbytes=%s\\\\n\\\' "$backup" "$bytes"\\n\'\n'
+    ')\n'
+    'def backup_stamp(command):\n'
+    '    if (len(command) == 5 and command[:2] == ["sh", "-c"]\n'
+    '            and command[2] == EXPECTED_BACKUP_SCRIPT and command[3] == "--"\n'
+    '            and re.fullmatch(r"[0-9]{8}-[0-9]{6}", command[4])):\n'
+    '        return command[4]\n'
+    '    return None\n'
+    'def public_command(command):\n'
+    '    # Only independent PUBLIC closed vectors can enter a durable event. Never\n'
+    "    # serialize a rejected candidate's raw argv, even before business admission.\n"),
+   ('B1 span 2',
+    '        ["nv","config","diff","-o","commands"],\n'
+    '        ["nv","show","system","ztp"], ["nv","config","apply","-y"],\n'
+    '        ["nv","config","save"], ["true"],\n'
+    '    ]\n'
+    '    if command in known:\n'
+    '        return command\n'
+    '    if command[:2] == ["sh","-c"]:\n'
+    '        return ["KEY-SHELL"]\n'
+    '    return ["UNKNOWN-COMMAND"]\n',
+    '        ["nv","config","diff","-o","commands"],\n'
+    '        ["nv","show","system","ztp"], ["nv","config","apply","-y"],\n'
+    '        ["nv","config","save"], ["true"],\n'
+    '        ["ip","addr","show","eth0"], ["ip","route"],\n'
+    '    ]\n'
+    '    if command in known:\n'
+    '        return command\n'
+    '    if backup_stamp(command) is not None:\n'
+    '        return ["CONFIG-BACKUP"]\n'
+    '    if command[:2] == ["sh","-c"]:\n'
+    '        return ["KEY-SHELL"]\n'
+    '    return ["UNKNOWN-COMMAND"]\n'),
+   ('B1 span 3',
+    '        ]\n'
+    '    return "\\n".join(lines) + "\\n"\n'
+    'def business(command, S):\n'
+    '    if command == ["nv","config","show","-o","commands"]:\n'
+    '        return show_state(S), 0\n'
+    '    if command == ["nv","config","diff","-o","commands"]:\n',
+    '        ]\n'
+    '    return "\\n".join(lines) + "\\n"\n'
+    'def business(command, S):\n'
+    '    # Persist an independent pre-existing-vs-new Network distinction. A new\n'
+    '    # apply must save before readiness; already-configured KEY-only may probe.\n'
+    '    S.setdefault("peer_network_saved", S["network"])\n'
+    '    if command == ["ip", "addr", "show", "eth0"]:\n'
+    '        body = ("2: eth0: <UP> mtu 1500 state UP\\n"\n'
+    '                "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\\n")\n'
+    '        if S["network"]:\n'
+    '            body += "    inet 203.0.113.2/24 scope global eth0\\n"\n'
+    '        if S["peer_ipv4"]:\n'
+    '            if not (S["initial"] and S["network"] and S["peer_network_saved"] and not '
+    'S["pending"]):\n'
+    '                raise ValueError("IPv4 readiness before configured saved Network")\n'
+    '            S["peer_ipv4_addr"] = True\n'
+    '            record("ipv4-read")\n'
+    '        else:\n'
+    '            S["peer_identity_read"] = True\n'
+    '            record("identity-addr-read")\n'
+    '        return body, 0\n'
+    '    if command == ["ip", "route"]:\n'
+    '        if not (S["peer_ipv4"] and S.pop("peer_ipv4_addr", False)):\n'
+    '            raise ValueError("IPv4 route without this attempt\'s fresh address")\n'
+    '        record("ipv4-route-read")\n'
+    '        return "default via 203.0.113.1 dev eth0\\n", 0\n'
+    '    stamp = backup_stamp(command)\n'
+    '    if stamp is not None:\n'
+    '        if not S.get("peer_identity_read") or stamp in S.get("peer_backup_stamps", []):\n'
+    '            raise ValueError("backup without fresh LL identity or reusing a prior backup")\n'
+    '        S.setdefault("peer_backup_stamps", []).append(stamp)\n'
+    '        record("config-backup", fresh_identity=True)\n'
+    '        return "path=" + str(root / "remote-home" / ("current_" + stamp + ".yaml")) + '
+    '"\\nbytes=23\\n", 0\n'
+    '    if command == ["nv","config","show","-o","commands"]:\n'
+    '        return show_state(S), 0\n'
+    '    if command == ["nv","config","diff","-o","commands"]:\n'),
+   ('B1 span 4',
+    '        record("apply-y")\n'
+    '        return "", 0\n'
+    '    if command == ["nv","config","save"]:\n'
+    '        record("save")\n'
+    '        return "",0\n'
+    '    if command[:2] == ["sh","-c"]:\n'
+    '        return key_program(command)\n'
+    '    if command == ["true"]:\n'
+    '        record("ipv4-read")\n'
+    '        return "",0\n'
+    '    record("rejected-business", reason="outside literal NVOS contract")\n'
+    '    return "PUBLIC command outside fixture contract\\n",2\n',
+    '        record("apply-y")\n'
+    '        return "", 0\n'
+    '    if command == ["nv","config","save"]:\n'
+    '        if S["network"]:\n'
+    '            S["peer_network_saved"] = True\n'
+    '        record("save")\n'
+    '        return "",0\n'
+    '    if command[:2] == ["sh","-c"]:\n'
+    '        return key_program(command)\n'
+    '    if command == ["true"]:\n'
+    '        # Other original authentication uses remain legal, never fresh identity.\n'
+    '        return "",0\n'
+    '    record("rejected-business", reason="outside literal NVOS contract")\n'
+    '    return "PUBLIC command outside fixture contract\\n",2\n'),
+   ('B1 span 5',
+    '        lines.append("nv set interface eth0-1 ipv4 gateway 203.0.113.254")\n'
+    '    return "\\n".join(lines) + "\\n"\n'
+    'def business(command, S):\n'
+    '    if command == ["nv", "config", "show", "-o", "commands"]:\n'
+    '        if S.get("initial_transaction_done"):\n'
+    '            S["post_initial_reads"] = S.get("post_initial_reads", 0) + 1\n',
+    '        lines.append("nv set interface eth0-1 ipv4 gateway 203.0.113.254")\n'
+    '    return "\\n".join(lines) + "\\n"\n'
+    'def business(command, S):\n'
+    '    # Preserve one entry per readiness attempt while separately witnessing its\n'
+    '    # actual route read. Neither LL O5 metadata nor backup consumes caller-show\n'
+    '    # or pending-diff probes; delegate their independent facts to the base peer.\n'
+    '    if command in (["ip", "addr", "show", "eth0"], ["ip", "route"]):\n'
+    '        return _base_business(command, S)\n'
+    '    if backup_stamp(command) is not None:\n'
+    '        return _base_business(command, S)\n'
+    '    if command == ["nv", "config", "show", "-o", "commands"]:\n'
+    '        if S.get("initial_transaction_done"):\n'
+    '            S["post_initial_reads"] = S.get("post_initial_reads", 0) + 1\n'),
+   ('B1 span 6',
+    '                with open(C["global_path"],"a") as file:\n'
+    '                    file.write("# PUBLIC changed after authenticated read, before next '
+    'mutation\\n")\n'
+    '                S["global_changed"]=True;record("global-changed-after-read")\n'
+    '        body, rc = business(command,S)\n'
+    '        state_path.write_text(json.dumps(S))\n'
+    '        response(body,rc,frame)\n',
+    '                with open(C["global_path"],"a") as file:\n'
+    '                    file.write("# PUBLIC changed after authenticated read, before next '
+    'mutation\\n")\n'
+    '                S["global_changed"]=True;record("global-changed-after-read")\n'
+    '        if command in (["ip", "addr", "show", "eth0"], ["ip", "route"]) or backup_stamp(command) '
+    'is not None:\n'
+    '            if frame is None:\n'
+    '                raise ValueError("metadata and backup require their complete command frame")\n'
+    '        S["peer_ipv4"] = destination == "admin@203.0.113.2"\n'
+    '        if command != ["ip", "route"]:\n'
+    '            S.pop("peer_ipv4_addr", None)\n'
+    '        if (S["peer_ipv4"] and phase_nonce is not None\n'
+    '                and command in (["ip", "addr", "show", "eth0"], ["ip", "route"])):\n'
+    '            raise ValueError("IPv4 readiness unexpectedly used a phase operation")\n'
+    '        body, rc = business(command,S)\n'
+    '        state_path.write_text(json.dumps(S))\n'
+    '        response(body,rc,frame)\n'))),
+ ('VLAN outer snapshot',
+  'facc140b687fd9fa15115b5804b8360a0a7b977279cc6b2593823ac87d89411b',
+  '6fbe91438356b479c912d604b00412fd8ddc2ad913c53a8f0de5f479cdfa891c',
+  (('VLAN command',
+    '                   ["bridge","fdb","show"],["ip","neighbor"],["ifquery","vlan1"],\n',
+    '                   '
+    '["bridge","fdb","show"],["bridge","vlan","show"],["ip","neighbor"],["ifquery","vlan1"],\n'),
+   ('VLAN1 snapshot',
+    '          ("ip","neighbor"): "fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\n",\n',
+    '          ("bridge","vlan","show"): "port              vlan-id\\nswp7              1 PVID Egress '
+    'Untagged\\n",\n'
+    '          ("ip","neighbor"): "fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\n",\n'))),
+ ('physical master br_default',
+  '6fbe91438356b479c912d604b00412fd8ddc2ad913c53a8f0de5f479cdfa891c',
+  '7003471fe27eca645e0e944a48ed56bbca1dfd4a641f9d459c539bbb38825532',
+  (('swp7 master',
+    '          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 state UP\\n    link/ether '
+    '02:00:00:00:00:07\\n8: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan protocol 802.1Q id '
+    '1\\n",\n',
+    '          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 master br_default state '
+    'UP\\n    link/ether 02:00:00:00:00:07\\n8: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan '
+    'protocol 802.1Q id 1\\n",\n'),)),
+ ('CSV MAC-derived EUI64',
+  '7003471fe27eca645e0e944a48ed56bbca1dfd4a641f9d459c539bbb38825532',
+  '4eee2234f523f7c1abcd246707315cb0303956f6b42181e5f533e053eb5f1950',
+  (('CSV EUI line 440',
+    '          ("ip","neighbor"): "fe80::17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\n",\n',
+    '          ("ip","neighbor"): "fe80::ff:fe00:17 dev vlan1 lladdr 02:00:00:00:00:17 '
+    'REACHABLE\\n",\n'),
+   ('CSV EUI line 450',
+    '    if destination not in ("admin@fe80::17", "admin@203.0.113.2"):\n',
+    '    if destination not in ("admin@fe80::ff:fe00:17", "admin@203.0.113.2"):\n'),
+   ('CSV EUI line 521',
+    '            emit("\\nssh: connect to host fe80::17 port 22: Network is unreachable\\n")\n',
+    '            emit("\\nssh: connect to host fe80::ff:fe00:17 port 22: Network is unreachable\\n")\n'),
+   ('CSV EUI line 526',
+    '          "network":"ssh: connect to host fe80::17 port 22: Network is unreachable\\n",\n',
+    '          "network":"ssh: connect to host fe80::ff:fe00:17 port 22: Network is '
+    'unreachable\\n",\n'))))
+
+SUMMARY_PEER_MODERN_TRANSFORMS = (('OOB two link ports and one vlan',
+  '          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 master br_default state '
+  'UP\\n    link/ether 02:00:00:00:00:07\\n8: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan '
+  'protocol 802.1Q id 1\\n",\n',
+  '          ("ip","-d","link","show"): "7: swp7: <BROADCAST,UP> mtu 1500 master br_default state '
+  'UP\\n    link/ether 02:00:00:00:00:07\\n8: swp8: <BROADCAST,UP> mtu 1500 master br_default state '
+  'UP\\n    link/ether 02:00:00:00:00:08\\n9: vlan1@br_default: <UP> mtu 1500 state UP\\n    vlan '
+  'protocol 802.1Q id 1\\n",\n'),
+ ('OOB two ND literals',
+  '          ("ip","neighbor"): "fe80::ff:fe00:17 dev vlan1 lladdr 02:00:00:00:00:17 REACHABLE\\n",\n',
+  '          ("ip","neighbor"): "fe80::ff:fe00:17 dev vlan1 lladdr 02:00:00:00:00:17 '
+  'REACHABLE\\nfe80::ff:fe00:18 dev vlan1 lladdr 02:00:00:00:00:18 REACHABLE\\n",\n'),
+ ('closed four endpoints to independent literal state basenames',
+  '    if destination not in ("admin@fe80::ff:fe00:17", "admin@203.0.113.2"):\n'
+  '        raise ValueError("inner endpoint")\n',
+  '    if destination in ("admin@fe80::ff:fe00:17", "admin@203.0.113.2"):\n'
+  '        summary_target, summary_state = "IB01", "summary-device-01.json"\n'
+  '    elif destination in ("admin@fe80::ff:fe00:18", "admin@203.0.113.3"):\n'
+  '        summary_target, summary_state = "IB02", "summary-device-02.json"\n'
+  '    else:\n'
+  '        raise ValueError("inner endpoint")\n'
+  '    selected_state_path = root / summary_state\n'
+  '    record("summary-target-entry", target=summary_target)\n'))
+
+SUMMARY_PEER_FRESH_TRANSFORMS = (('two independent VLAN ports',
+  '          ("bridge","vlan","show"): "port              vlan-id\\nswp7              1 PVID Egress '
+  'Untagged\\n",\n',
+  '          ("bridge","vlan","show"): "port              vlan-id\\nswp7              1 PVID Egress '
+  'Untagged\\nswp8              1 PVID Egress Untagged\\n",\n'),
+ ('both actual IPv4 endpoints',
+  '        S["peer_ipv4"] = destination == "admin@203.0.113.2"\n',
+  '        S["peer_ipv4"] = destination in ("admin@203.0.113.2", "admin@203.0.113.3")\n'),
+ ('both summary IPv4 endpoints',
+  '        S["summary_ipv4"] = destination == "admin@203.0.113.2"\n',
+  '        S["summary_ipv4"] = destination in ("admin@203.0.113.2", "admin@203.0.113.3")\n'),
+ ('saved first-target first identity read fault',
+  '            and command == ["true"] and S.get("summary_network_saved") is True):\n',
+  '            and command == ["ip", "addr", "show", "eth0"] and S.get("summary_network_saved") is '
+  'True):\n'),
+ ('IB02 independent facts and separate witnesses',
+  '    body, rc = _summary_base_business(command, S)\n',
+  '    body, rc = _summary_base_business(command, S)\n'
+  '    if rc == 0 and command == ["ip", "addr", "show", "eth0"] and S["summary_target"] == "IB02":\n'
+  '        body = ("2: eth0: <UP> mtu 1500 state UP\\n"\n'
+  '                "    link/ether 02:00:00:00:00:18 brd ff:ff:ff:ff:ff:ff\\n")\n'
+  '        if S["network"]:\n'
+  '            body += "    inet 203.0.113.3/24 scope global eth0\\n"\n'
+  '    if rc == 0 and command in (["ip", "addr", "show", "eth0"], ["ip", "route"]):\n'
+  '        record("summary-metadata-read", target=S["summary_target"],\n'
+  '               ipv4=S["peer_ipv4"], read="addr" if command[1] == "addr" else "route")\n'
+  '    if rc == 0 and backup_stamp(command) is not None:\n'
+  '        record("summary-config-backup", target=S["summary_target"])\n'))
+
+SUMMARY_PEER_TWO_TARGET_SHA256 = '9784e3caeaf214d708fd80fa909dbd68b0e5dd434463d017f2218bc16c706ae5'
+
+def _summary_layer(program, spans, *, reverse=False):
+    if type(program) is not str or type(spans) is not tuple:
         raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
-    previous = original.replace(SUMMARY_PEER_IPV4_CURRENT, SUMMARY_PEER_IPV4_PREVIOUS, 1)
-    if hashlib.sha256(previous.encode("utf-8")).hexdigest() != SUMMARY_PEER_BASE_SHA256:
-        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
-    program = original
-    for label, old, new in SUMMARY_PEER_TRANSFORMS:
-        if program.count(old) != 1:
-            raise RuntimeError("NOT_READY: unique PUBLIC summary peer anchor absent")
-        program = program.replace(old, new, 1)
-    restored = program
-    for label, old, new in reversed(SUMMARY_PEER_TRANSFORMS):
-        if restored.count(new) != 1:
-            raise RuntimeError("NOT_READY: unique PUBLIC summary peer inverse absent")
-        restored = restored.replace(new, old, 1)
-    if restored != original:
-        raise RuntimeError("NOT_READY: PUBLIC summary peer whole inverse differs")
+    for label, old, new in (reversed(spans) if reverse else spans):
+        source, target = (new, old) if reverse else (old, new)
+        if (type(label) is not str or type(source) is not str or type(target) is not str
+                or not source or not target or program.count(source) != 1):
+            raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+        previous = program
+        program = program.replace(source, target, 1)
+        if program.count(target) != 1 or program.replace(target, source, 1) != previous:
+            raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
     return program
 
+
+def _summary_current_history(original):
+    if (type(original) is not str
+            or hashlib.sha256(original.encode("utf-8")).hexdigest() != SUMMARY_PEER_CURRENT_SHA256):
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    value = original
+    for label, before, after, spans in reversed(SUMMARY_PEER_LAYERS):
+        if hashlib.sha256(value.encode("utf-8")).hexdigest() != after:
+            raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+        previous = _summary_layer(value, spans, reverse=True)
+        if (hashlib.sha256(previous.encode("utf-8")).hexdigest() != before
+                or _summary_layer(previous, spans) != value):
+            raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+        value = previous
+    if (hashlib.sha256(value.encode("utf-8")).hexdigest() != SUMMARY_PEER_O8_CURRENT_SHA256
+            or value.count(SUMMARY_PEER_O8_CURRENT) != 1
+            or value.count(SUMMARY_PEER_IPV4_CURRENT) != 1):
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    historical = value.replace(SUMMARY_PEER_O8_CURRENT, SUMMARY_PEER_O8_PREVIOUS, 1)
+    historical = historical.replace(SUMMARY_PEER_IPV4_CURRENT, SUMMARY_PEER_IPV4_PREVIOUS, 1)
+    if (hashlib.sha256(historical.encode("utf-8")).hexdigest() != SUMMARY_PEER_BASE_SHA256
+            or historical.count(SUMMARY_PEER_O8_PREVIOUS) != 1
+            or historical.count(SUMMARY_PEER_IPV4_PREVIOUS) != 1):
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    replayed = historical.replace(SUMMARY_PEER_O8_PREVIOUS, SUMMARY_PEER_O8_CURRENT, 1)
+    replayed = replayed.replace(SUMMARY_PEER_IPV4_PREVIOUS, SUMMARY_PEER_IPV4_CURRENT, 1)
+    if replayed != value:
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    return value, historical
+
+
+def _summary_two_target_peer(caller):
+    original = caller.peer_program()
+    _summary_current_history(original)  # qualification DATA only, not runtime input
+    modern = {label: (old, new) for label, old, new in SUMMARY_PEER_MODERN_TRANSFORMS}
+    if len(modern) != 3:
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    transforms = tuple((label, *modern[label]) if label in modern else (label, old, new)
+                       for label, old, new in SUMMARY_PEER_TRANSFORMS)
+    program = _summary_layer(original, transforms)
+    program = _summary_layer(program, SUMMARY_PEER_FRESH_TRANSFORMS)
+    restored = _summary_layer(program, SUMMARY_PEER_FRESH_TRANSFORMS, reverse=True)
+    restored = _summary_layer(restored, transforms, reverse=True)
+    if (restored != original
+            or hashlib.sha256(program.encode("utf-8")).hexdigest() != SUMMARY_PEER_TWO_TARGET_SHA256):
+        raise RuntimeError("NOT_READY: original PUBLIC summary peer changed")
+    return program
 
 def _device_rows(value):
     """(hostname, oob, port) of every per-device record anywhere in a summary.json document."""
@@ -608,6 +957,26 @@ class SummaryPeerCurrentBindingTests(unittest.TestCase):
         self.assertIn('summary-device-02.json', transformed)
         self.assertIn('admin@203.0.113.3', transformed)
         self.assertEqual("e79cb3fa63569505380fb367f82d04c7fcc5de6667d0cee9703eb82391009948", SUMMARY_PEER_BASE_SHA256)
+        historical, original = _summary_current_history(current)
+        self.assertEqual("f6fc1c57978ccdc4b9442a8ce9e2b72c0044af52699424312b14eb4340b90c48",
+                         hashlib.sha256(historical.encode()).hexdigest())
+        self.assertEqual(SUMMARY_PEER_BASE_SHA256, hashlib.sha256(original.encode()).hexdigest())
+        self.assertEqual("4eee2234f523f7c1abcd246707315cb0303956f6b42181e5f533e053eb5f1950",
+                         hashlib.sha256(current.encode()).hexdigest())
+        self.assertEqual(SUMMARY_PEER_TWO_TARGET_SHA256, hashlib.sha256(transformed.encode()).hexdigest())
+        self.assertIn('admin@fe80::ff:fe00:17', transformed)
+        self.assertIn('admin@fe80::ff:fe00:18', transformed)
+        self.assertNotIn('admin@fe80::18', transformed)
+        # Every exact layer individually restores its full preceding input.
+        value = historical
+        for label, before, after, spans in SUMMARY_PEER_LAYERS:
+            with self.subTest(layer=label):
+                self.assertEqual(before, hashlib.sha256(value.encode()).hexdigest())
+                changed = _summary_layer(value, spans)
+                self.assertEqual(after, hashlib.sha256(changed.encode()).hexdigest())
+                self.assertEqual(value, _summary_layer(changed, spans, reverse=True))
+                value = changed
+        self.assertEqual(current, value)
 
     def test_old_missing_duplicate_and_external_peer_drift_are_refused(self):
         from test_cases import test_initial_setup_main_caller_precommit as caller
@@ -626,9 +995,22 @@ class SummaryPeerCurrentBindingTests(unittest.TestCase):
             "different-definition": current.replace("def direct_check(args):", "def direct_check_drift(args):", 1),
             "wrong-type": current.encode(),
         }
+        historical, _original = _summary_current_history(current)
+        cases["whole-historical-f6fc-peer"] = historical
         for label, payload in cases.items():
             with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, "^NOT_READY: original PUBLIC summary peer changed$"):
                 _summary_two_target_peer(self.source_caller(payload))
+        for index, (label, before, after, spans) in enumerate(SUMMARY_PEER_LAYERS):
+            for fault in ("missing-span", "duplicate-span", "wrong-inverse"):
+                changed = (spans[1:] if fault == "missing-span" else spans + spans[:1]
+                           if fault == "duplicate-span" else
+                           ((spans[0][0], spans[0][1] + "# PUBLIC drift\n", spans[0][2]), *spans[1:]))
+                layers = (*SUMMARY_PEER_LAYERS[:index], (label, before, after, changed),
+                          *SUMMARY_PEER_LAYERS[index + 1:])
+                with self.subTest(layer=label, fault=fault), mock.patch.dict(
+                        globals(), {"SUMMARY_PEER_LAYERS": layers}), self.assertRaisesRegex(
+                            RuntimeError, "^NOT_READY: original PUBLIC summary peer changed$"):
+                    _summary_current_history(current)
 
 
 class TargetOutcomeSummaryDirectTests(unittest.TestCase):
@@ -854,17 +1236,23 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
         summary = json.loads(fresh[0].read_text(encoding="utf-8"))
         self.assertIn("spine_jump_routes", summary)
         self.assertEqual(sorted(TARGET_ROWS[scene]), sorted(set(_device_rows(summary))))
+        return summary
 
     def test_S0_one_real_OOB_failure_blocks_three_unattempted_IB_targets(self):
         with self.root() as folder:
             f = self.fixture(folder, case="summary-oob-failed", scenario="outer-denied",
                              network=True, services=True, credential="initial")
-            f["csv"].write_text(
+            inventory = (
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:17,,,\n"
                 "EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:18,,,\n"
                 "EXAMPLE-IB03,ib,203.0.113.4,24,203.0.113.1,02:00:00:00:00:19,,,\n"
-                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n", encoding="ascii")
+                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n")
+            master = f["root"] / "infiniband/02-devices_config.csv"
+            f["csv"].write_text(inventory, encoding="ascii")
+            master.write_text(inventory, encoding="ascii")
+            self.assertEqual(inventory.encode("ascii"), f["csv"].read_bytes())
+            self.assertEqual(inventory.encode("ascii"), master.read_bytes())
             f["p2p"].write_text(
                 '"EXAMPLE-IB01":"eth0" -- "EXAMPLE-JUMP01":"7";\n'
                 '"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n'
@@ -888,8 +1276,17 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertFalse(any(e["kind"] in ("inner-answer", "nested-dispatch", "mutation",
                                                "apply-y", "save", "key-shell", "ipv4-read",
                                                "pam-target") for e in fresh))
-            self.assertTrue(not f["caller"]["selector"] and not f["caller"]["native"]
-                            and not f["caller"]["fetch"] and not f["caller"]["helper"])
+            # r660:773/I039: qualify PROJECT once before the first OOB refusal.
+            # This is parent prefetch, not a granted IB session or metadata scope.
+            w = f["caller"]
+            self.assertEqual(["actual-policy-fetch"], w["fetch"])
+            self.assertEqual([{"target": True, "IB": True, "matched": True}], w["native"])
+            self.assertEqual(["TARGET", "TARGET", "OOB"], result["prompts"])
+            for name in ("selector", "helper", "helper_all", "helper_metadata", "metadata_gate"):
+                self.assertEqual([], w[name], "OOB refusal cannot enter an IB/helper scope")
+            self.assertFalse(any(e["kind"] in ("identity-addr-read", "ipv4-route-read",
+                                               "config-backup", "pam-start", "pam-readonly-refusal")
+                                 for e in fresh))
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
             # T12 keeps the counter format. v3.1.4 WP-2 K4/:520-521:
@@ -941,15 +1338,45 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
                             and not w["selector"][0]["required"])
             self.assertEqual([], w["returned_diff"])
-            self.assertEqual([], w["fetch"])
-            self.assertEqual([], w["native"])
+            # r660:773/I039 plus O5: parent prefetch + PROJECT authentication
+            # qualification + the single real LL identity helper qualification.
+            self.assertEqual(["actual-policy-fetch"] * 3, w["fetch"])
+            self.assertEqual([{"target": True, "IB": True, "matched": True}] * 3, w["native"])
             self.assertEqual([], w["helper"])
+            self.assertEqual([("ip", "addr", "show", "eth0")], w["helper_metadata"])
+            self.assertEqual([True], w["metadata_gate"])
+            self.assertEqual(1, len(w["helper_all"]))
+            [metadata] = w["helper_all"]
+            self.assertTrue(metadata["metadata"] is True and metadata["returned"] is True)
+            self.assertEqual(("ip", "addr", "show", "eth0"), metadata["command"])
+            self.assertEqual(("EXAMPLE-IB01", "203.0.113.2", "203.0.113.2/24",
+                              "203.0.113.1", "02:00:00:00:00:17"), metadata["target"])
+            self.assertEqual(("EXAMPLE-JUMP01", "192.0.2.10", "fe80::ff:fe00:17", "vlan1", "default"),
+                             metadata["point"])
+            self.assertTrue(metadata["current_initial"] and not metadata["current_target"]
+                            and not metadata["current_oob"] and metadata["outer_oob"])
+            self.assertEqual((2, 2, 3, 3), (metadata["native_before"], metadata["fetch_before"],
+                                          metadata["native_after"], metadata["fetch_after"]),
+                             "parent/auth qualification must not be relabeled as metadata")
+            self.assertEqual(1, sum(e["kind"] == "identity-addr-read" for e in fresh))
+            self.assertFalse(any(e["kind"] in ("config-backup", "ipv4-route-read", "pam-start",
+                                               "pam-readonly-refusal") for e in fresh))
             self.assertFalse(any(e["kind"] in ("mutation", "apply-y", "save", "key-shell",
                                                "ipv4-read", "pam-target") for e in fresh))
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
-            self.require_report(f, result, "S1",
-                "Summary: targets=1 configured=0 skipped=0 failed=0 day0-skipped=0 services-skipped=0", summaries)
+            # Q-039 / WP-6: the Network plan does not hide the already satisfied Services stage.
+            report = self.require_report(f, result, "S1",
+                "Summary: targets=1 configured=0 skipped=0 failed=0 day0-skipped=0 services-skipped=1", summaries)
+            self.assertEqual("INCOMPLETE", report["result"])
+            [row] = report["records"].values()
+            self.assertEqual("EXAMPLE-IB01", row["hostname"])
+            self.assertEqual("CHECK_ONLY", row["outcome"])
+            self.assertEqual("NEEDS_CONFIGURATION", row["stage_status"]["day0"])
+            self.assertEqual("ALREADY_PRESENT", row["stage_status"]["services"])
+            self.assertEqual("NO_KEYS_PROVIDED", row["stage_status"]["public_keys"])
+            self.assertIs(row["needs_change"], True)
+            self.assertIs(row["writes_attempted"], False)
 
     def test_S2_real_completed_checks_with_no_work_are_not_unattempted(self):
         with self.root() as folder:
@@ -973,6 +1400,12 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             # Owner Q-035 (a) item 1 (guide :438): ZTP state is read before Initial, on a
             # management task through the authorized helper (P3c map D32d :284).
             self.assertEqual([("nv", "show", "system", "ztp")], w["helper"])
+            self.assertEqual([("ip", "addr", "show", "eth0")], w["helper_metadata"])
+            self.assertEqual([True], w["metadata_gate"])
+            self.assertEqual([SUMMARY_IDENTITY_FACTS["EXAMPLE-IB01"]["target"]],
+                             [row["target"] for row in w["helper_all"] if row["metadata"]])
+            self.assertEqual([SUMMARY_IDENTITY_FACTS["EXAMPLE-IB01"]["point"]],
+                             [row["point"] for row in w["helper_all"] if row["metadata"]])
             self.assertTrue(bool(w["gate"]) and all(w["gate"]))
             # Owner Q-035 (a) item 4: the target is fetched and verified against the global hash.
             self.assertTrue(bool(w["fetch"]))
@@ -982,6 +1415,10 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                                                "pam-target") for e in fresh))
             # Owner Q-035 (a) item 3 (guide :438): every --apply verifies IPv4 login once.
             self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in fresh))
+            self.assertEqual(["identity-addr-read", "ipv4-read", "ipv4-route-read"],
+                             [e["kind"] for e in fresh if e["kind"] in
+                              ("identity-addr-read", "ipv4-read", "ipv4-route-read")])
+            self.assertFalse(any(e["kind"] == "config-backup" for e in fresh))
             self.require_product_custody(f, result)
             self.require_preserved(f, before)
             self.require_report(f, result, "S2",
@@ -996,14 +1433,21 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             # (fixture precondition, not an expectation).
             f = self.fixture(folder, case="summary-two-target-stop",
                              network=False, services=True, credential="target")
-            f["csv"].write_text(
+            inventory = (
                 "hostname,type,eth0_ip,netmask,eth0_gw,eth0_mac,eth1_ip,netmask,eth1_gw\n"
                 "EXAMPLE-IB01,ib,203.0.113.2,24,203.0.113.1,02:00:00:00:00:17,,,\n"
                 "EXAMPLE-IB02,ib,203.0.113.3,24,203.0.113.1,02:00:00:00:00:18,,,\n"
-                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n", encoding="ascii")
+                "EXAMPLE-JUMP01,eth_jump,192.0.2.10,,,,,,\n")
+            master = f["root"] / "infiniband/02-devices_config.csv"
+            f["csv"].write_text(inventory, encoding="ascii")
+            master.write_text(inventory, encoding="ascii")
+            self.assertEqual(inventory.encode("ascii"), f["csv"].read_bytes())
+            self.assertEqual(inventory.encode("ascii"), master.read_bytes())
             f["p2p"].write_text(
                 '"EXAMPLE-IB01":"eth0" -- "EXAMPLE-JUMP01":"7";\n'
                 '"EXAMPLE-IB02":"eth0" -- "EXAMPLE-JUMP01":"8";\n', encoding="ascii")
+            f["metadata_identity_facts"] = {name: dict(facts)
+                                            for name, facts in SUMMARY_IDENTITY_FACTS.items()}
             first = json.loads(f["state"].read_text(encoding="ascii"))
             first.update(summary_target="IB01", network=False,
                          summary_network_applied=False, summary_network_saved=False)
@@ -1035,6 +1479,7 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             original_ipv4 = app.verify_ipv4_login
             evaluation, selector_entries, prefix, statuses, verified, ipv4_errors = (
                 [], [], [], [], [], [])
+            helper_entries = []
             required_rows = (
                 "nv set interface eth0 ipv4 address 203.0.113.2/24",
                 "nv set interface eth0-1 ipv4 gateway 203.0.113.1",
@@ -1062,8 +1507,10 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
                 return original_select(*args, **kwargs)
             @wraps(original_helper)
             def helper(*args, **kwargs):
-                command = inspect.signature(original_helper).bind(*args, **kwargs).arguments["ib_command"]
+                bound = inspect.signature(original_helper).bind(*args, **kwargs).arguments
+                command = bound["ib_command"]
                 value = original_helper(*args, **kwargs)
+                helper_entries.append((bound["target"].ib.hostname, tuple(command)))
                 if command in (["nv", "config", "apply", "-y"],
                                ["nv", "config", "save"], READ):
                     tag = ("apply-return" if command == ["nv", "config", "apply", "-y"]
@@ -1118,6 +1565,24 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertEqual([ztp, *NETWORK_SETTERS, ("nv", "config", "apply", "-y"),
                               ("nv", "config", "save"), tuple(READ), ztp], w["helper"])
             self.assertTrue(len(w["gate"]) == 10 and all(w["gate"]))
+            # O5 is separate metadata, not a changed business/native gate count.
+            metadata = [row for row in w["helper_all"] if row["metadata"]]
+            self.assertEqual([("ip", "addr", "show", "eth0")] * 2, w["helper_metadata"])
+            self.assertEqual([True, True], w["metadata_gate"])
+            self.assertEqual([SUMMARY_IDENTITY_FACTS[name]["target"]
+                              for name in ("EXAMPLE-IB01", "EXAMPLE-IB02")],
+                             [row["target"] for row in metadata])
+            self.assertEqual([SUMMARY_IDENTITY_FACTS[name]["point"]
+                              for name in ("EXAMPLE-IB01", "EXAMPLE-IB02")],
+                             [row["point"] for row in metadata])
+            self.assertEqual(12, len(w["helper_all"]))
+            self.assertTrue(all(row["returned"] for row in w["helper_all"]))
+            self.assertTrue(all(row["current_target"] and not row["current_initial"]
+                                and not row["current_oob"] and row["outer_oob"] for row in metadata))
+            for name in ("EXAMPLE-IB01", "EXAMPLE-IB02"):
+                own = [command for target, command in helper_entries if target == name]
+                self.assertTrue(len(own) >= 2 and own[0] == ("ip", "addr", "show", "eth0")
+                                and own[1] == ztp, "actual O5 precedes this device's first business helper")
             # Owner Q-035 (a) item 4 (guide :438): each --apply login is the project target.
             self.assertTrue(len(w["selector"]) == 2
                             and all(row["target"] and not row["required"] for row in w["selector"]))
@@ -1129,6 +1594,19 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             # Approved WP-3 (guide :30/:631; I-037 :148): IPv4 readiness has 9 attempts.
             self.assertTrue(len(applied) == len(saved) == 1 and len(faults) == 9
                             and applied[0] < saved[0] < faults[0])
+            self.assertTrue(all(fresh[index].get("target") == "IB01" for index in faults))
+            self.assertEqual([("IB01", False, "addr"), ("IB02", False, "addr"),
+                              ("IB02", True, "addr"), ("IB02", True, "route")],
+                             [(e["target"], e["ipv4"], e["read"]) for e in fresh
+                              if e["kind"] == "summary-metadata-read"])
+            backups = [i for i, e in enumerate(fresh) if e["kind"] == "summary-config-backup"]
+            self.assertEqual(["IB01"], [fresh[i]["target"] for i in backups])
+            first_write = next(i for i, e in enumerate(fresh) if e["kind"] == "mutation")
+            first_identity = next(i for i, e in enumerate(fresh)
+                                  if e["kind"] == "summary-metadata-read" and e["target"] == "IB01")
+            self.assertTrue(first_identity < backups[0] < first_write)
+            self.assertEqual(1, sum(e["kind"] == "config-backup" for e in fresh))
+            self.assertEqual(1, sum(e["kind"] == "ipv4-route-read" for e in fresh))
             reads = [i for i, e in enumerate(fresh) if e["kind"] == "caller-show"
                      and saved[0] < i < faults[0]]
             self.assertEqual(1, len(reads))

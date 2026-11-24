@@ -5,6 +5,7 @@ Private operation/selector ABI below is proposed source contract, not a test hoo
 Current missing interfaces are prerequisite HOLD, never behavior RED.
 """
 from __future__ import annotations
+from contextlib import contextmanager
 import errno
 import hashlib
 import inspect
@@ -158,6 +159,7 @@ def run():
         emit("\npasswd: all authentication tokens updated successfully\n");emit(end(0));event("finish",declared=0);return 0
     good=case in ("success","post-change-success","duplicate-command-frame","payload-status-mismatch","hostname-notice-value","unexpected-password-notice")
     if case=="candidate-select":good=got==C["target"]
+    if case=="initial-select":good=got==C["initial"]
     if case=="both-reject":good=False
     if case=="network":emit("\nssh: connect to host fe80::17 port 22: Network is unreachable\n"+denied)
     elif case=="hostkey":emit("\nWARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"+denied)
@@ -237,12 +239,20 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         return []if not p.exists()else[json.loads(x)for x in snapshot(p)[1].decode().splitlines()]
 
     def drive(self,f,operation="auth-probe-readonly",*,policy=None,password=None,allow=False,
-              selector=False,write_fault=None,uncertain=False,timeout=False,input_error=None,ib_user="admin",ib_command=None,read_notice=False,read_errno=None):
+              selector=False,write_fault=None,uncertain=False,timeout=False,input_error=None,ib_user="admin",ib_command=None,read_notice=False,read_errno=None,
+              expected_candidates=None):
         # Transparent observations of real kernel calls; no fake CP/result/error.
+        # R667 / RV31-192: an independent per-invocation vector, never a value
+        # copied from the selector's argv/return, owns each actual session's FD
+        # fault. Raw phase calls keep their original initial/target/OOB roles.
+        if selector and (type(expected_candidates)is not tuple or not expected_candidates
+                         or any(type(value)is not str or not value for value in expected_candidates)):
+            raise RuntimeError("FIXTURE HOLD: selector needs an independent candidate vector")
         real_fork=APP.pty.fork;real_exec=os.execve;real_read=os.read;real_write=os.write
         real_close=os.close;real_fstat=os.fstat;real_wait=os.waitpid
         real_kill=os.kill;real_killpg=os.killpg;real_clock=time.monotonic
         active=set();slots=[];order=[];boundary_errors=[];actual_reaps=[];fixture_drains=[]
+        expected_current={}
         fault_used=False;short_pending=None;in_transport=False;last_master=None
         eagain_count=0
         input_progress={}
@@ -255,9 +265,12 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
             order.append(dict(kind=kind,index=len(order),**facts))
         def fork():
             nonlocal last_master
+            if selector and len(slots)>=len(expected_candidates):
+                raise RuntimeError("FIXTURE HOLD: outside the independently declared candidate chain")
             pair=real_fork()
             if pair[0]>0:
                 slots.append((pair[0],pair[1],nine(real_fstat(pair[1]))))
+                if selector:expected_current[pair[1]]=expected_candidates[len(slots)-1]
                 active.add(pair[1]);last_master=pair[1];log("fork")
             return pair
         def execute(name,argv):
@@ -389,7 +402,8 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         def written(fd,raw,n):
             if fd not in active:return
             progress=input_progress.get(fd,b"")+raw[:n]
-            known=(("current",f["initial"].encode()+b"\n"),("target",self.kat["PASSWORD"].encode()+b"\n"),("oob",OOB.encode()+b"\n"))
+            current=expected_current[fd]if selector else f["initial"]
+            known=(("current",current.encode()+b"\n"),("target",self.kat["PASSWORD"].encode()+b"\n"),("oob",OOB.encode()+b"\n"))
             complete=next((role for role,value in known if progress==value),None)
             if complete is not None:
                 log("write",role=complete,full=True,written=len(progress));input_progress[fd]=b""
@@ -400,7 +414,8 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         def write(fd,data):
             nonlocal fault_used,short_pending,eagain_count
             raw=bytes(data)
-            is_current=raw==f["initial"].encode()+b"\n"
+            current=expected_current[fd]if selector and fd in active else f["initial"]
+            is_current=raw==current.encode()+b"\n"
             if fd in active and is_current and write_fault in ("eagain-once","eagain-deadline"):
                 if write_fault=="eagain-deadline"or eagain_count==0:
                     eagain_count+=1
@@ -519,6 +534,30 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         self.assertEqual(count,len(out["reaps"]),"actual SUT must reap its exact children")
         self.assertEqual(count,sum(x["kind"]=="master-close-attempt"for x in out["order"]))
         self.assertEqual([],out["fixture_drains"],"fixture custody cannot stand in for product reap")
+
+    @contextmanager
+    def selector_authority(self,f):
+        """Observe the genuine project verifier; never prefetch for the SUT."""
+        native=APP.verify_password_hash
+        checks=[]
+        before=sum(e["kind"]=="request"for e in self.peer_events(f))
+        def genuine(password,setting):
+            checks.append(dict(requests=sum(e["kind"]=="request"for e in self.peer_events(f)),
+                               target=password==self.kat["PASSWORD"],IB=setting==self.kat["YESCRYPT"]))
+            return native(password,setting)
+        with mock.patch.object(APP,"verify_password_hash",new=genuine),\
+             mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("supplied project authority cannot prompt"))as prompt:
+            policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
+            yield policy,checks,before,prompt
+
+    def assert_selector_authority(self,checks,before,*,no_late_fetch=True):
+        self.assertTrue(bool(checks),"selector must genuinely verify the project before its first device session")
+        self.assertTrue(checks[0]["target"]and checks[0]["IB"]and checks[0]["requests"]==before,
+                        "first project qualification must precede this invocation's peer request")
+        if no_late_fetch:
+            self.assertTrue(all(row["requests"]==before for row in checks),
+                            "uncertain transport cannot authorize a later project fetch or verification")
+
     def test_admin_rejection_requires_actual_complete_input_then_diagnostic_and_reap(self):
         with tempfile.TemporaryDirectory(prefix="ib-phase-admin-")as folder:
             f=self.fixture(folder,"reject")
@@ -548,15 +587,14 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         for case in cases:
             with self.subTest(case=case),tempfile.TemporaryDirectory(prefix="ib-phase-negative-")as folder:
                 f=self.fixture(folder,case)
-                with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("non-auth HOLD cannot request a target"))as backend,\
-                     mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("non-auth HOLD cannot prompt"))as prompt:
-                    policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                    out=self.drive(f,timeout=case=="timeout",selector=True,policy=policy)
+                with self.selector_authority(f)as(policy,checks,before,prompt):
+                    out=self.drive(f,timeout=case=="timeout",selector=True,policy=policy,
+                                   expected_candidates=(self.kat["PASSWORD"],f["initial"]))
                 if case=="diagnostic-before-full-write":
                     witnesses=[e for e in out["order"]if e["kind"]=="read"and e["prompt"]and e["denied"]]
                     if not witnesses:
                         raise RuntimeError("FIXTURE HOLD: required coalesced actual read witness absent; not a product result")
-                self.assertEqual(0,backend.call_count)
+                self.assert_selector_authority(checks,before)
                 self.assertEqual(0,prompt.call_count)
                 self.assertTrue(out["result"]is None,"unexpected result; raw output suppressed")
                 self.assertTrue(isinstance(out["error"],APP.SetupError),"expected safe domain HOLD; raw error suppressed")
@@ -576,11 +614,10 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         for fault in ("short-zero","eio"):
             with self.subTest(fault=fault),tempfile.TemporaryDirectory(prefix="ib-phase-input-")as folder:
                 f=self.fixture(folder,"reject")
-                with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("input uncertainty cannot request a target"))as backend,\
-                     mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("input uncertainty cannot prompt"))as prompt:
-                    policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                    out=self.drive(f,write_fault=fault,selector=True,policy=policy)
-                self.assertEqual(0,backend.call_count)
+                with self.selector_authority(f)as(policy,checks,before,prompt):
+                    out=self.drive(f,write_fault=fault,selector=True,policy=policy,
+                                   expected_candidates=(self.kat["PASSWORD"],f["initial"]))
+                self.assert_selector_authority(checks,before)
                 self.assertEqual(0,prompt.call_count)
                 self.assertTrue(out["result"]is None,"unexpected result; raw output suppressed")
                 self.assertTrue(isinstance(out["error"],(APP.SetupError,OSError)),"expected bounded input failure; raw error suppressed")
@@ -591,11 +628,10 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                                 "actual credential input fault must be reached")
         with tempfile.TemporaryDirectory(prefix="ib-phase-uncertain-")as folder:
             f=self.fixture(folder,"uncertain")
-            with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("unconfirmed reap cannot request a target"))as backend,\
-                 mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("unconfirmed reap cannot prompt"))as prompt:
-                policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                out=self.drive(f,uncertain=True,selector=True,policy=policy)
-            self.assertEqual(0,backend.call_count)
+            with self.selector_authority(f)as(policy,checks,before,prompt):
+                out=self.drive(f,uncertain=True,selector=True,policy=policy,
+                               expected_candidates=(self.kat["PASSWORD"],f["initial"]))
+            self.assert_selector_authority(checks,before)
             self.assertEqual(0,prompt.call_count)
             self.assertTrue(out["result"]is None,"unexpected result; raw output suppressed")
             self.assertTrue(isinstance(out["error"],APP.SetupError),"expected safe domain HOLD; raw error suppressed")
@@ -608,18 +644,18 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
     def test_lazy_candidates_and_explicit_pam_require_real_project_guards_and_fresh_post_read(self):
         with tempfile.TemporaryDirectory(prefix="ib-phase-lazy-")as folder:
             f=self.fixture(folder,"success")
-            with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("pure initial read must not verify a target"))as backend,\
-                 mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("pure initial read must not prompt"))as prompt:
-                policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",interactive=True)
-                out=self.drive(f,selector=True,policy=policy)
+            with self.selector_authority(f)as(policy,checks,before,prompt):
+                out=self.drive(f,selector=True,policy=policy,
+                               expected_candidates=(self.kat["PASSWORD"],f["initial"]))
             self.assertTrue(out["error"]is None,"unexpected failure; raw error suppressed")
             self.assertTrue(PAYLOAD==out["result"].read_result.output,"independent command payload mismatch; raw output suppressed")
-            self.assertTrue(out["result"].current_password==f["initial"],"initial source selected by real read")
-            self.assertEqual(0,backend.call_count)
+            self.assertTrue(out["result"].current_password==self.kat["PASSWORD"],"project source selected by the real first read")
+            self.assert_selector_authority(checks,before)
             self.assertEqual(0,prompt.call_count)
             self.assert_custody(out)
             self.assertEqual(1,sum(e["kind"]=="request"for e in out["peer"]))
-        for case,equal,wanted in (("candidate-select",False,2),("both-reject",False,2),("both-reject",True,1)):
+        for case,equal,wanted in (("candidate-select",False,1),("initial-select",False,2),
+                                  ("both-reject",False,2),("both-reject",True,1)):
             with self.subTest(case=case,equal=equal),tempfile.TemporaryDirectory(prefix="ib-phase-select-")as folder:
                 f=self.fixture(folder,case,initial=self.kat["PASSWORD"]if equal else"admin")
                 native=APP.verify_password_hash;observed=[]
@@ -629,18 +665,20 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                 with mock.patch.object(APP,"verify_password_hash",new=genuine),\
                      mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("formal auto may not prompt"))as prompt:
                     policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                    out=self.drive(f,selector=True,policy=policy)
+                    candidates=(self.kat["PASSWORD"],)if equal else(self.kat["PASSWORD"],f["initial"])
+                    out=self.drive(f,selector=True,policy=policy,expected_candidates=candidates)
                 self.assert_custody(out,count=wanted)
                 self.assertEqual(wanted,sum(e["kind"]=="request"for e in out["peer"]))
-                self.assertTrue(bool(observed),"only a needed second known value is actually verified")
-                self.assertEqual(1,observed[0],"target cannot be prompted/verified before the first actual probe")
+                self.assertTrue(bool(observed),"project first requires a genuine target qualification")
+                self.assertEqual(0,observed[0],"project must be verified before the first actual probe")
                 self.assertEqual(0,prompt.call_count)
-                if case=="candidate-select":
+                if case in("candidate-select","initial-select"):
                     self.assertTrue(out["error"]is None,"unexpected failure; raw error suppressed")
-                    self.assertTrue(out["result"].current_password==self.kat["PASSWORD"])
+                    expected=self.kat["PASSWORD"]if case=="candidate-select"else f["initial"]
+                    self.assertTrue(out["result"].current_password==expected,"independent accepted credential role mismatch")
                     self.assertTrue(PAYLOAD==out["result"].read_result.output,"independent command payload mismatch; raw output suppressed")
                     requests=[e for e in out["peer"]if e["kind"]=="request"]
-                    self.assertEqual(2,len({e["nonce"]for e in requests}))
+                    self.assertEqual(wanted,len({e["nonce"]for e in requests}))
                 else:
                     self.assertTrue(isinstance(out["error"],APP.SetupError),"expected safe domain HOLD; raw error suppressed")
                     self.assertTrue(out["result"]is None,"unexpected result; raw output suppressed")
@@ -734,15 +772,16 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                         born_error=exc
                     self.assertTrue(born_error is None,
                                     "policy birth failed before actual phase; private exception suppressed")
-                    out=self.drive(f,selector=True,policy=policy)
-                self.assert_custody(out)
-                self.assertEqual([255],out["reaps"],"first real rejected session must finish before target verification")
-                self.assertEqual(before+1,sum(e["kind"]=="request"for e in out["peer"]),"backend failure cannot birth second session")
+                    out=self.drive(f,selector=True,policy=policy,
+                                   expected_candidates=(self.kat["PASSWORD"],f["initial"]))
+                self.assert_custody(out,count=0)
+                self.assertEqual([],out["reaps"],"project qualification failure must precede any session")
+                self.assertEqual(before,sum(e["kind"]=="request"for e in out["peer"]),"backend failure cannot birth any session")
                 self.assertEqual(0,prompt.call_count)
                 self.assertEqual(1,len(reached)-first_call,"one exact needed native-verifier seam call")
                 actual=reached[-1]
-                self.assertTrue(actual["target"]and actual["IB"]and actual["requests"]==before+1,
-                                "actual target/hash verification must follow the first real peer request")
+                self.assertTrue(actual["target"]and actual["IB"]and actual["requests"]==before,
+                                "actual project qualification must precede the first real peer request")
                 if expected=="domain":
                     error=out["error"]
                     self.assertTrue(type(error)is APP.SetupError and error is not seed,
@@ -766,13 +805,12 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
             context=RuntimeError(self.kat["YESCRYPT"])
             seed.__cause__=cause
             seed.__context__=context
-            with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("failed input cannot request target"))as backend,\
-                 mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("failed input cannot prompt"))as prompt:
-                policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                out=self.drive(f,selector=True,policy=policy,write_fault="eio",input_error=seed)
+            with self.selector_authority(f)as(policy,checks,before,prompt):
+                out=self.drive(f,selector=True,policy=policy,write_fault="eio",input_error=seed,
+                               expected_candidates=(self.kat["PASSWORD"],f["initial"]))
             self.assert_custody(out)
             self.assertEqual(1,sum(e["kind"]=="request"for e in out["peer"]))
-            self.assertEqual(0,backend.call_count)
+            self.assert_selector_authority(checks,before)
             self.assertEqual(0,prompt.call_count)
             prompts=[e["index"]for e in out["order"]if e["kind"]=="read"and e["prompt"]]
             faults=[e["index"]for e in out["order"]if e["kind"]=="input-eio"]
@@ -818,10 +856,9 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
     def test_owned_nonblocking_input_stops_at_original_deadline_without_fallback(self):
         with tempfile.TemporaryDirectory(prefix="ib-phase-eagain-deadline-")as folder:
             f=self.fixture(folder,"reject")
-            with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("incomplete input cannot fetch target"))as backend,\
-                 mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("incomplete input cannot prompt"))as prompt:
-                policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                out=self.drive(f,selector=True,policy=policy,write_fault="eagain-deadline",timeout=True)
+            with self.selector_authority(f)as(policy,checks,before,prompt):
+                out=self.drive(f,selector=True,policy=policy,write_fault="eagain-deadline",timeout=True,
+                               expected_candidates=(self.kat["PASSWORD"],f["initial"]))
             attempts=[e for e in out["order"]if e["kind"]=="input-eagain"]
             self.assertGreaterEqual(len(attempts),2,"fault must reach the actual owned credential FD repeatedly")
             self.assertTrue(all(e["nonblocking"]is True for e in attempts))
@@ -833,7 +870,7 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                             "fixed safe deadline error only; raw error values suppressed")
             self.assertTrue(out["error"].__cause__ is None and out["error"].__context__ is None)
             self.assertEqual(1,sum(e["kind"]=="request"for e in out["peer"]))
-            self.assertEqual(0,backend.call_count)
+            self.assert_selector_authority(checks,before)
             self.assertEqual(0,prompt.call_count)
             self.assertEqual(1,len(out["reaps"]),"real SUT custody must finish before return")
             self.assert_custody(out)
@@ -1046,10 +1083,9 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         for case,declared in (("success",0),("reject",255)):
             with self.subTest(point=point,case=case),tempfile.TemporaryDirectory(prefix="ib-phase-read-errno-")as folder:
                 f,model=self._read_errno_fixture(folder,case,point,"fatal",declared)
-                with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("read uncertainty cannot request target"))as backend,\
-                     mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("read uncertainty cannot prompt"))as prompt:
-                    policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",target_password=self.kat["PASSWORD"],interactive=False)
-                    out=self.drive(f,selector=True,policy=policy,read_errno=model)
+                with self.selector_authority(f)as(policy,checks,before,prompt):
+                    out=self.drive(f,selector=True,policy=policy,read_errno=model,
+                                   expected_candidates=(self.kat["PASSWORD"],f["initial"]))
                 facts=model["facts"]
                 self.assertEqual([],facts["errors"],"read observer prerequisite failure is not product proof")
                 self.assertEqual(1,facts["injections"],"actual owned read-errno boundary must be reached once")
@@ -1066,7 +1102,7 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                 self.assert_custody(out)
                 self.assertEqual(1,out["forks"],"read uncertainty cannot birth a fallback session")
                 self.assertEqual(1,sum(e["kind"]=="request"for e in out["peer"]))
-                self.assertEqual(0,backend.call_count)
+                self.assert_selector_authority(checks,before)
                 self.assertEqual(0,prompt.call_count)
                 self.assertTrue(out["result"]is None,"read failure cannot yield successful configuration")
                 error=out["error"]
@@ -1097,10 +1133,9 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
         for kind,point in (("eagain","main"),("real-eio","drain")):
             with self.subTest(kind=kind),tempfile.TemporaryDirectory(prefix="ib-phase-read-benign-")as folder:
                 f,model=self._read_errno_fixture(folder,"success",point,kind,0)
-                with mock.patch.object(APP,"verify_password_hash",side_effect=AssertionError("successful initial read needs no target"))as backend,\
-                     mock.patch.object(APP.getpass,"getpass",side_effect=AssertionError("successful initial read cannot prompt"))as prompt:
-                    policy=APP.ProjectPasswordPolicy(f["global_path"],"admin",interactive=True)
-                    out=self.drive(f,selector=True,policy=policy,read_errno=model)
+                with self.selector_authority(f)as(policy,checks,before,prompt):
+                    out=self.drive(f,selector=True,policy=policy,read_errno=model,
+                                   expected_candidates=(self.kat["PASSWORD"],f["initial"]))
                 facts=model["facts"]
                 self.assertEqual([],facts["errors"],"unmodeled observer error is fixture HOLD")
                 if kind=="eagain":
@@ -1136,11 +1171,11 @@ class IndependentIBPhaseProtocolDraftTests(unittest.TestCase):
                 self.assertTrue(out["error"]is None,"benign read completion cannot fail; raw error suppressed")
                 self.assertTrue(PAYLOAD==out["result"].read_result.output,
                                 "qualified positive payload must match independent literal")
-                self.assertTrue(out["result"].current_password==f["initial"])
+                self.assertTrue(out["result"].current_password==self.kat["PASSWORD"],"qualified project-first read must retain its accepted credential")
                 self.assert_custody(out)
                 self.assertEqual([0],out["reaps"],"EOF/EIO alone cannot supply an invented exit status")
                 self.assertEqual(1,sum(e["kind"]=="request"for e in out["peer"]))
-                self.assertEqual(0,backend.call_count)
+                self.assert_selector_authority(checks,before)
                 self.assertEqual(0,prompt.call_count)
 
 

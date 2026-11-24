@@ -81,6 +81,8 @@ infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs
 infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade-logs/**
 infiniband/bringup/xdr-initial-setup/ib.csv
 infiniband/bringup/xdr-initial-setup/ib.csv/**
+infiniband/bringup/xdr-initial-setup/latest_yaml
+infiniband/bringup/xdr-initial-setup/latest_yaml/**
 infiniband/bringup/xdr-initial-setup/p2p.xlsx
 infiniband/bringup/xdr-initial-setup/p2p.xlsx/**
 infiniband/bringup/xdr-initial-setup/xdr-initial-setup-logs

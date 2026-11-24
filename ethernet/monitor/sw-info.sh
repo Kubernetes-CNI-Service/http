@@ -94,8 +94,7 @@ IB_CMDS=(
 
 # NV-only commands (NVOS / MNV*)
 NV_CMDS=(
-    "nv show nvlink device"
-    "nv show nvlink port"
+    "nv show ib device"
 )
 
 # ── Build final command list ──────────────────────────────────────────────────

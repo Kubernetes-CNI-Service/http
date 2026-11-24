@@ -1350,6 +1350,51 @@ def _call_argument(
     )
 
 
+def _source_bound_dataclass_replace_calls(tree: ast.AST) -> set[ast.Call]:
+    """Only a directly imported, unshadowed record copy has no write destination."""
+    if not any(
+        isinstance(node, ast.ImportFrom) and node.level == 0 and node.module == "dataclasses"
+        and any(alias.name == "replace" and alias.asname is None for alias in node.names)
+        for node in getattr(tree, "body", ())
+    ):
+        return set()
+    if _subtree_binding_counts(tree).get("replace") != 1:
+        return set()
+    nodes = list(ast.walk(tree))
+    module_table_reads = {
+        node.value for node in nodes
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
+    }
+    if any(
+        (isinstance(node, ast.ImportFrom) and any(alias.name == "*" for alias in node.names))
+        or (isinstance(node, ast.Import) and any(
+            alias.name.split(".")[0] == "builtins" for alias in node.names))
+        or (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "builtins")
+        or (isinstance(node, ast.Name) and node.id in (
+            _CLOSURE_DYNAMIC_SCOPE_NAMES | {"setattr", "delattr", "__import__", "__builtins__"}))
+        or (isinstance(node, ast.Attribute) and (
+            node.attr in {"f_globals", "f_locals", "__globals__", "setattr", "delattr",
+                          "__setattr__", "__delattr__"}
+            or (node.attr == "modules" and node not in module_table_reads)
+            or (node.attr == "replace" and isinstance(node.ctx, (ast.Store, ast.Del)))))
+        or (isinstance(node, (ast.Attribute, ast.Subscript)) and isinstance(node.ctx, (ast.Store, ast.Del))
+            and any(isinstance(part, ast.Attribute) and part.attr == "modules" for part in ast.walk(node.value)))
+        or (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _CLOSURE_MODULES_MUTATORS
+            and any(isinstance(part, ast.Attribute) and part.attr == "modules"
+                    for part in ast.walk(node.func.value)))
+        for node in nodes
+    ):
+        return set()
+    return {
+        node for node in nodes
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "replace" and len(node.args) == 1
+        and not isinstance(node.args[0], ast.Starred)
+        and node.keywords and all(keyword.arg is not None for keyword in node.keywords)
+    }
+
+
 def generic_mutation_parameter_summaries(
     tree: ast.AST, source_path: str | None = None,
 ) -> dict[str, set[int]]:
@@ -1366,6 +1411,7 @@ def generic_mutation_parameter_summaries(
         _source_bound_native_rename_calls(tree, source_path)
         if source_path is not None else {}
     )
+    data_copies = _source_bound_dataclass_replace_calls(tree)
     summaries: dict[str, set[int]] = {}
     symbolic_by_function: dict[str, dict[str, set[int]]] = {}
     calls_by_function: dict[str, list[ast.Call]] = {}
@@ -1421,6 +1467,8 @@ def generic_mutation_parameter_summaries(
         static_integers = _function_static_integers(function)
         direct = set()
         for call in calls:
+            if call in data_copies:
+                continue
             if (
                 isinstance(call.func, ast.Name)
                 and len(getattr(aliases, "_mutation_possibilities", {}).get(call.func.id, ())) > 1
@@ -2704,6 +2752,7 @@ def literal_governed_mutation_sinks(
     """Find sinks from their destination spelling, independent of quiesce calls."""
     result = _source_bound_unsetup_pointer_sinks(tree)
     module_aliases = _mutation_aliases(tree)
+    data_copies = _source_bound_dataclass_replace_calls(tree)
     native_calls = (
         _source_bound_native_rename_calls(tree, source_path)
         if source_path is not None else {}
@@ -2780,6 +2829,8 @@ def literal_governed_mutation_sinks(
             node for node in _walk_local_scope(function)
             if isinstance(node, ast.Call)
         ):
+            if call in data_copies:
+                continue
             if (
                 isinstance(call.func, ast.Name)
                 and len(getattr(aliases, "_mutation_possibilities", {}).get(call.func.id, ())) > 1
@@ -7081,6 +7132,46 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
                     {"publish"},
                     literal_governed_mutation_sinks(ast.parse(source)),
                 )
+
+    def test_only_source_bound_dataclass_copy_is_not_a_mutation_destination(self) -> None:
+        """Memory-only dataclass copy is not publication; unknown replace still fails closed."""
+        binding = "from dataclasses import replace\n"
+        path = "Path('/srv/http/DAY0-Prepare/customer/01-global.yaml')"
+        base = (
+            "def copy(operand):\n"
+            "    return replace(operand, neighbor=None)\n"
+            "def main():\n"
+            f"    return copy({path})\n"
+        )
+        exact = ast.parse(binding + base)
+        self.assertEqual(set(), generic_mutation_parameter_summaries(exact)["copy"])
+        self.assertEqual(set(), literal_governed_mutation_sinks(exact))
+
+        for name, source in (
+            ("unknown", base),
+            ("relative", "from .dataclasses import replace\n" + base),
+            ("wildcard", binding + "from hooks import *\n" + base),
+            ("rebound", binding + "replace = other_replace\n" + base),
+            ("shadowed", binding + base.replace(
+                "    return replace", "    replace = other_replace\n    return replace")),
+            ("dynamic-namespace", binding + "globals()['replace'] = other_replace\n" + base),
+            ("qualified-reflection",
+             "import builtins as b\nimport dataclasses as d\n"
+             "b.setattr(d, 'replace', other_replace)\n" + binding + base),
+            ("module-table-store", "import sys\nsys.modules['dataclasses'] = other_module\n" + binding + base),
+            ("module-table-alias", "import sys\nregistry = sys.modules\n"
+             "registry.update(other_modules)\n" + binding + base),
+            ("module-table-descendant", "import sys\n"
+             "sys.modules['dataclasses'].__dict__.update(changes)\n" + binding + base),
+            ("real-os", "import os\n" + base.replace(
+                "replace(operand, neighbor=None)", "os.replace('temporary', operand)")),
+            ("real-path", base.replace(
+                "replace(operand, neighbor=None)", "Path('temporary').replace(operand)")),
+        ):
+            with self.subTest(name=name):
+                tree = ast.parse(source)
+                self.assertEqual({0}, generic_mutation_parameter_summaries(tree)["copy"])
+                self.assertIn("main", literal_governed_mutation_sinks(tree))
 
     def test_literal_reflected_os_replace_is_not_an_undiscovered_writer(self) -> None:
         """An exact getattr of os.replace still writes a governed authority."""

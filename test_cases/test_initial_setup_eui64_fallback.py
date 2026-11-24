@@ -26,6 +26,12 @@ MACs of the 0 -> 1 vectors are RFC 7042 documentation values, also built at run 
 review A wa7-9, http dev option (a); guide :765: this restores the 0 -> 1 coverage the fixture
 rewrite had dropped).  No SSH or device I/O happens: interface_vrf and interactive_run are replaced
 (interactive_run fails the test if called).
+
+v315 r629 WP2 / R652: the historical ND/FDB source and early-DOWN expectations
+below are superseded only where explicitly marked. Physical VLAN authority is
+bridge vlan show, the emitted source is CSV_EUI64, and old ambiguity/no-login
+protections remain. The independent RFC vectors and unrelated executor checks
+are not changed.
 """
 from __future__ import annotations
 
@@ -104,7 +110,11 @@ class Eui64FallbackTests(unittest.TestCase):
              "41: ib-oob@br_default: <UP> mtu 9216 master oob state UP\n"
              "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n")
 
-    def prepare(self, *, fdb=None, links=None, nd="", csv_mac=MAC, oper="up"):
+    VLANS = "port vlan-id\nswp6 1000 PVID Egress Untagged\n"
+
+    def prepare(self, *, fdb=None, links=None, nd="", vlans=None, csv_mac=MAC, oper="up"):
+        # nd remains a historical adversarial input only; network tuple slot 3
+        # is now physical VLAN text, so it cannot grant an address/identity.
         original = target()
         device = app.Target(replace(original.ib, eth0_mac=csv_mac), original.ethernet, "swp6", "eth0")
         records, outcomes, messages = {}, {}, []
@@ -116,7 +126,8 @@ class Eui64FallbackTests(unittest.TestCase):
                 [device], args, {"example-oob-leaf01": ""}, set(),
                 {"example-oob-leaf01": f"swp6 up {oper}\n"},
                 {"example-oob-leaf01": (self.LINKS if links is None else links,
-                                        self.FDB if fdb is None else fdb, nd)}, {}, outcomes, records)
+                                        self.FDB if fdb is None else fdb,
+                                        self.VLANS if vlans is None else vlans)}, {}, outcomes, records)
         return ready, records, "\n".join(messages), vrf.call_count
 
     # v15 FdbEui64FallbackTests.test_modified_eui64_known_vectors_and_ul_bit (test_desktop_initial_setup.py:1371)
@@ -147,68 +158,79 @@ class Eui64FallbackTests(unittest.TestCase):
     # v15 FdbEui64FallbackTests.test_user_evidence_becomes_candidate_using_actual_svi_and_vrf (test_desktop_initial_setup.py:1385)
     def test_user_evidence_becomes_candidate_using_actual_svi_and_vrf(self):
         ready, records, output, queries = self.prepare()
-        self.assertEqual(records, {})
+        self.assertEqual("MATCH", records["example-ib001"]["cable_check"]["verdict"])
         self.assertEqual(len(ready), 1)
         neighbor = ready[0].neighbor
         self.assertEqual((neighbor.ipv6, neighbor.interface, neighbor.mac, neighbor.vrf),
                          (self.IPV6, "ib-oob", self.MAC, "oob"))
-        self.assertEqual(neighbor.address_source, "FDB_EUI64_CANDIDATE")
+        self.assertEqual(neighbor.address_source, "CSV_EUI64")
         self.assertEqual(queries, 1)
-        self.assertIn("ND missing", output)
-        self.assertIn("candidate", output)
+        self.assertNotIn("ND missing", output)
+        self.assertEqual(self.MAC, records["example-ib001"]["cable_check"]["mac"])
 
     # v15 FdbEui64FallbackTests.test_nd_address_keeps_priority_even_when_not_eui64 (test_desktop_initial_setup.py:1397)
     def test_nd_address_keeps_priority_even_when_not_eui64(self):
         ready, _, _, _ = self.prepare(nd=f"fe80::1234 dev ib-oob lladdr {self.MAC} STALE\n")
-        self.assertEqual(ready[0].neighbor.ipv6, "fe80::1234")
-        self.assertEqual(ready[0].neighbor.address_source, "ND")
+        self.assertEqual(ready[0].neighbor.ipv6, self.IPV6)
+        self.assertEqual(ready[0].neighbor.address_source, "CSV_EUI64")
 
     # v15 FdbEui64FallbackTests.test_multiple_nd_matches_do_not_fall_back (test_desktop_initial_setup.py:1402)
     def test_multiple_nd_matches_do_not_fall_back(self):
         nd = (f"fe80::1234 dev ib-oob lladdr {self.MAC} STALE\n"
               f"fe80::5678 dev ib-oob lladdr {self.MAC} REACHABLE\n")
         ready, records, _, _ = self.prepare(nd=nd)
-        self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual([self.IPV6], [task.neighbor.ipv6 for task in ready])
+        self.assertEqual("CSV_EUI64", ready[0].neighbor.address_source)
 
     # v15 FdbEui64FallbackTests.test_additional_dynamic_mac_cannot_be_filtered_away_by_csv_match (test_desktop_initial_setup.py:1408)
     def test_additional_dynamic_mac_cannot_be_filtered_away_by_csv_match(self):
         ready, records, _, _ = self.prepare(
             fdb=self.FDB + self.OTHER_MAC + " dev swp6 vlan 1000 master br_default\n")
-        self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual([self.IPV6], [task.neighbor.ipv6 for task in ready])
+        self.assertEqual((self.OTHER_MAC,), records["example-ib001"]["cable_check"]["extra_macs"])
 
     # v15 FdbEui64FallbackTests.test_multiple_fdb_vlan_contexts_are_not_guessed (test_desktop_initial_setup.py:1413)
     def test_multiple_fdb_vlan_contexts_are_not_guessed(self):
-        ready, records, _, _ = self.prepare(fdb=self.FDB + f"{self.MAC} dev swp6 vlan 1001 master br_default\n")
+        # O1/O11: ambiguity is in the physical port's VLAN observation, not ND/FDB.
+        ready, records, _, _ = self.prepare(
+            fdb=self.FDB + f"{self.MAC} dev swp6 vlan 1001 master br_default\n",
+            vlans=self.VLANS + "swp6 1001\n")
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_DEPENDENCY_UNVERIFIED")
 
     # v15 FdbEui64FallbackTests.test_csv_mac_required_for_derived_candidate (test_desktop_initial_setup.py:1418)
     def test_csv_mac_required_for_derived_candidate(self):
-        ready, records, _, _ = self.prepare(csv_mac="")
-        self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        # O11/R652: use the real CSV/M4/input producer, not an invalid manually
+        # constructed Device reaching a final readiness adapter without issues.
+        from test_cases.test_initial_setup_cable_check import _World, IB1, IB2, MAC1
+        with _World(self) as world:
+            for source in (world.csv, world.master):
+                source.write_text(source.read_text().replace(MAC1, "", 1))
+            world.invoke()
+            self.assertEqual([], [task for task in world.prepared if task.target.ib.hostname == IB1])
+            self.assertEqual("SKIPPED_INPUT_INCOMPLETE", world.records[IB1]["category"])
+            self.assertEqual((IB2,), tuple(task.target.ib.hostname for task in world.prepared))
 
     # v15 FdbEui64FallbackTests.test_wrong_csv_mac_remains_mac_mismatch_not_a_login_attempt (test_desktop_initial_setup.py:1423)
     def test_wrong_csv_mac_remains_mac_mismatch_not_a_login_attempt(self):
         ready, records, _, queries = self.prepare(csv_mac=self.OTHER_MAC)
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_MAC_MISMATCH")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_CABLE_CHECK_FAILED")
         self.assertEqual(queries, 0)
 
     # v15 FdbEui64FallbackTests.test_no_dynamic_mac_never_invents_candidate_from_csv_alone (test_desktop_initial_setup.py:1429)
     def test_no_dynamic_mac_never_invents_candidate_from_csv_alone(self):
         ready, records, _, _ = self.prepare(fdb=self.BRIDGE_MAC + " dev swp6 master br_default permanent\n")
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_CABLE_CHECK_FAILED")
 
     # v15 FdbEui64FallbackTests.test_link_down_remains_skip_without_vrf_query (test_desktop_initial_setup.py:1434)
     def test_link_down_remains_skip_without_vrf_query(self):
         ready, records, _, queries = self.prepare(oper="down")
-        self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_LINK_DOWN")
-        self.assertEqual(queries, 0)
+        # O4: DOWN is not an early refusal; this fixture already has a MATCH.
+        self.assertEqual([self.IPV6], [task.neighbor.ipv6 for task in ready])
+        self.assertEqual("MATCH", records["example-ib001"]["cable_check"]["verdict"])
+        self.assertEqual(queries, 1)
 
     # v15 FdbEui64FallbackTests.test_same_vlan_on_other_bridge_does_not_create_ambiguity (test_desktop_initial_setup.py:1440)
     def test_same_vlan_on_other_bridge_does_not_create_ambiguity(self):
@@ -224,13 +246,13 @@ class Eui64FallbackTests(unittest.TestCase):
                               "    vlan protocol 802.1Q id 1000 <REORDER_HDR>\n")
         ready, records, _, _ = self.prepare(links=links)
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_DEPENDENCY_UNVERIFIED")
 
     # v15 FdbEui64FallbackTests.test_missing_svi_is_not_replaced_with_assumed_vlan_name (test_desktop_initial_setup.py:1454)
     def test_missing_svi_is_not_replaced_with_assumed_vlan_name(self):
         ready, records, _, _ = self.prepare(links=self.LINKS.split("41:")[0])
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_DEPENDENCY_UNVERIFIED")
 
     # v15 FdbEui64FallbackTests.test_unbridged_port_uses_physical_interface_not_invented_svi (test_desktop_initial_setup.py:1459)
     def test_unbridged_port_uses_physical_interface_not_invented_svi(self):
@@ -247,20 +269,31 @@ class Eui64FallbackTests(unittest.TestCase):
     # candidate (no guessed PVID or bridge L3 interface) and no VRF query.  v15
     # derived_neighbor_for_port :2315-2321 (refusal at :2320).
     def test_r011_i22_bridged_fdb_entry_without_vlan_gets_no_guessed_pvid(self):
-        ready, records, _, queries = self.prepare(fdb=self.MAC + " dev swp6 master br_default\n")
+        ready, records, _, queries = self.prepare(
+            fdb=self.MAC + " dev swp6 master br_default\n", vlans="")
         self.assertEqual(ready, [])
-        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_NEIGHBOR_UNRESOLVED")
+        self.assertEqual(records["example-ib001"]["category"], "SKIPPED_DEPENDENCY_UNVERIFIED")
         self.assertEqual(queries, 0)
 
-    # I22 (tracker :3875-3876): one [FALLBACK] line marks the address as a derived candidate and
-    # names the MAC, the IPv6 candidate, the actual egress interface and the VRF, without claiming
-    # success.  v15 prepare_ready_ib_tasks :4708-4711.
+    # I22 history: ND/FALLBACK wording retired by r629 O11 / R652. The real
+    # prepared CSV path still records address/egress/VRF/source before login;
+    # MAC remains an independently checked preparation/cable fact, not log text.
     def test_r011_i22_fallback_line_names_mac_candidate_egress_and_vrf(self):
-        _, _, output, _ = self.prepare()
-        lines = [line for line in output.splitlines() if line.startswith("[FALLBACK]")]
-        self.assertEqual(len(lines), 1, output)
-        for part in ("example-ib001", "ND missing", self.MAC, "candidate " + self.IPV6,
-                     "dev ib-oob", "vrf oob", "still required"):
+        ready, records, _, _ = self.prepare()
+        self.assertEqual(self.MAC, ready[0].neighbor.mac)
+        self.assertEqual(self.MAC, records["example-ib001"]["cable_check"]["mac"])
+        args = SimpleNamespace(eth_user="cumulus", ib_user="admin", connect_timeout=5, apply=False,
+                               force=False, execution_mode="management")
+        messages = []
+        with patch.object(app, "inspect_ib_device",
+                          side_effect=app.SetupError("synthetic stop after the path line")), \
+                patch.object(app, "interactive_run", side_effect=AssertionError("no IB SSH")), \
+                patch.object(app, "log", lambda message="": messages.append(message)):
+            record = app.execute_ib_task(ready[0], args, None, "admin", None, [], None)
+        self.assertEqual(record["outcome"], "FAILED")
+        lines = [line for line in messages if "IB IPv6 path:" in line]
+        self.assertEqual(len(lines), 1, messages)
+        for part in (self.IPV6, "dev ib-oob", "vrf oob", "source=CSV_EUI64"):
             with self.subTest(part=part):
                 self.assertIn(part, lines[0])
 
@@ -269,7 +302,8 @@ class Eui64FallbackTests(unittest.TestCase):
     def test_r011_i22_device_log_marks_nd_or_fdb_candidate_source(self):
         args = SimpleNamespace(eth_user="cumulus", ib_user="admin", connect_timeout=5, apply=False,
                                force=False, execution_mode="management")
-        for address, source in (("fe80::1234", "ND"), (self.IPV6, "FDB_EUI64_CANDIDATE")):
+        for address, source in (("fe80::1234", "ND"), (self.IPV6, "FDB_EUI64_CANDIDATE"),
+                                (self.IPV6, "CSV_EUI64")):
             task = app.PreparedIBTask(target(), app.Neighbor(address, "ib-oob", self.MAC, "oob", source),
                                       "", False)
             messages = []

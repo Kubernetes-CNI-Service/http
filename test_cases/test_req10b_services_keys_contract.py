@@ -32,11 +32,13 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.initial = load_script("req10b_services_keys_direct", SCRIPT)
 
-    def test_target_cache_version_is_five(self) -> None:
+    def test_target_cache_version_is_six(self) -> None:
         # v3.1.3 table 6-1 row 6 (guide :749, O4 default "采用 5；测试改名并断言 5"); v15
         # CURRENT-CONTRACT.md:20 "cache version 5 只保存有输入校验的静态目标" (Device gains
         # login_interface).  Formerly test_target_cache_version_is_four asserting 4.
-        self.assertEqual(5, self.initial.TARGET_CACHE_VERSION)
+        # v3.1.5 r617 WP1 :558: existing five -> six; route/input/inventory facts.
+        # The paragraph above retains the historical source of version five.
+        self.assertEqual(6, self.initial.TARGET_CACHE_VERSION)
 
     def test_f02_cache_snapshot_missing_member_never_falls_back_to_filesystem(self):
         """A finite immutable input map is closed, not a best-effort read cache."""
@@ -427,7 +429,7 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
         cases = (
             ("no_eth0_yet", (), (), (), (), "nvos", True),
             ("extra_eth0_target_missing", ("198.51.100.2/24",), (),
-             ("203.0.113.1",), (), "EXAMPLE-IB01", True),
+             ("203.0.113.1",), (), "EXAMPLE-IB01", "eth0 address"),
             ("target_and_extra_eth0", ("198.51.100.2/24", "203.0.113.2/24"), (),
              ("203.0.113.1",), (), "EXAMPLE-IB01", False),
             ("target_and_extra_gateway", ("203.0.113.2/24",), (),
@@ -447,6 +449,13 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
                 state = self.initial.DeviceState(
                     eth0, eth1, gateway0, gateway1, hostname, "PUBLIC supplied readback",
                 )
+                if expected == "eth0 address":
+                    # D67-O1 changes only this nonempty, target-absent address case.
+                    with self.assertRaisesRegex(self.initial.SetupError,
+                            r"^Network conflict; manual resolution required: eth0 address: expected "):
+                        self.initial.force_day0_needed(device, state)
+                    self.assertEqual(("198.51.100.2/24",), state.eth0_addresses)
+                    continue
                 self.assertIs(expected, self.initial.force_day0_needed(device, state))
 
         dual = self.initial.Device(
@@ -454,7 +463,7 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
             "203.0.113.1", "", "192.0.2.2/24", "192.0.2.1",
         )
         dual_cases = (
-            ("requested_eth1_target_missing", ("198.51.100.22/24",), True),
+            ("requested_eth1_target_missing", ("198.51.100.22/24",), "eth1 address"),
             ("requested_eth1_membership", ("198.51.100.22/24", "192.0.2.2/24"), False),
         )
         for name, actual_eth1, expected in dual_cases:
@@ -463,6 +472,12 @@ class Req10BServicesKeysContractTests(unittest.TestCase):
                     ("203.0.113.2/24",), actual_eth1, ("203.0.113.1",),
                     ("192.0.2.1",), "EXAMPLE-IB01", "PUBLIC supplied readback",
                 )
+                if expected == "eth1 address":
+                    with self.assertRaisesRegex(self.initial.SetupError,
+                            r"^Network conflict; manual resolution required: eth1 address: expected "):
+                        self.initial.force_day0_needed(dual, state)
+                    self.assertEqual(("198.51.100.22/24",), state.eth1_addresses)
+                    continue
                 self.assertIs(expected, self.initial.force_day0_needed(dual, state))
 
     def test_force_fill_missing_keeps_actual_hostname_and_gateway_conflicts(self) -> None:

@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -195,6 +196,22 @@ class CacheAdmissionOutputDirectTests(unittest.TestCase):
         if out is not OMITTED:
             kwargs["_admission_out"] = out
         with ExitStack() as stack:
+            # P1 already isolates its copied runtime. The direct loader now also
+            # imports route helpers, so bind it to the same fixture-owned tools.
+            stack.enter_context(mock.patch.object(sys, "path", list(sys.path)))
+            saved_tools = {name: module for name, module in sys.modules.items()
+                           if name == "tools" or name.startswith("tools.")}
+
+            def restore_tools():
+                for name in list(sys.modules):
+                    if name == "tools" or name.startswith("tools."):
+                        del sys.modules[name]
+                sys.modules.update(saved_tools)
+
+            stack.callback(restore_tools)
+            for name in saved_tools:
+                del sys.modules[name]
+            stack.enter_context(mock.patch.object(app, "_TOOLS_ROOT", None))
             stack.enter_context(mock.patch.object(app.subprocess, "run", new=run))
             stack.enter_context(mock.patch.object(app, "verify_password_hash", new=crypto))
             if forbid_copy:

@@ -1,15 +1,21 @@
 """Workflow: the real cron.sh runs the real ufm-info.sh on each server_ufm and archives the snapshots
 (infiniband/monitor/UFM-MONITOR.md). SSH/SCP reach per-IP sandboxes; the UFM commands are fakes."""
 
+from array import array
 import json
 import os
 import re
+import select
+import shlex
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -30,9 +36,217 @@ TIMING = {"RETRIEVE_FIRST_WAIT=60": "RETRIEVE_FIRST_WAIT=1", "RETRIEVE_POLL=5 ":
           "UFM_IBDIAG_FIRST_WAIT=300": "UFM_IBDIAG_FIRST_WAIT=1", "UFM_IBDIAG_POLL=30": "UFM_IBDIAG_POLL=1",
           "UFM_IBDIAG_WAIT=1020": "UFM_IBDIAG_WAIT=60"}
 
+_CUSTODY_FD = "FAKE_UFM_CUSTODY_FD"
+_REMOTE_CLEANUP_SECONDS = 10
+_CRON_SECONDS = 240
+_FD_SIZE = array("i").itemsize
+
+
+def _send_fds(channel, tag, fds):
+    if channel.sendmsg([tag], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", fds))]) != 1:
+        raise RuntimeError("incomplete fixture descriptor transfer")
+
+
+def _receive_fds(channel, count):
+    tag, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(count * _FD_SIZE))
+    received = []
+    try:
+        for level, kind, data in ancillary:
+            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS or len(data) % _FD_SIZE:
+                raise RuntimeError("invalid fixture descriptor transfer")
+            values = array("i")
+            values.frombytes(data)
+            received.extend(values)
+        if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(received) != count:
+            raise RuntimeError("truncated or incomplete fixture descriptor transfer")
+        for fd in received:
+            os.set_inheritable(fd, False)
+        return tag, received
+    except BaseException:
+        for fd in received:
+            os.close(fd)
+        raise
+
+
+def _receive_exact(channel, size):
+    data = bytearray()
+    while len(data) < size:
+        chunk = channel.recv(size - len(data))
+        if not chunk:
+            raise EOFError("fixture custody channel closed")
+        data.extend(chunk)
+    return bytes(data)
+
+
+_REMOTE_SESSION_ANCHOR = r"""
+import os, signal, socket, struct, subprocess, sys
+status_fd, release_fd, writer_fd, stdin_fd, stdout_fd, stderr_fd = map(int, sys.argv[1:7])
+# Install a caught handler, not SIG_IGN: exec resets this handler in the real Bash.
+signal.signal(signal.SIGTERM, lambda signum, frame: None)
+with socket.socket(fileno=status_fd) as reply:
+    try:
+        env = dict(os.environ, FAKE_UFM_WRITER_FD=str(writer_fd))
+        remote = subprocess.Popen(["bash", "-c", sys.argv[7]], env=env,
+                                  stdin=stdin_fd, stdout=stdout_fd, stderr=stderr_fd,
+                                  pass_fds=(writer_fd,))
+    finally:
+        for fd in (stdin_fd, stdout_fd, stderr_fd, writer_fd):
+            os.close(fd)
+    try:
+        reply.sendall(struct.pack("!i", remote.wait()))
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+try:
+    # The original Popen remains the private group leader after Bash has
+    # returned. Only the test parent can release it, after writer EOF.
+    if os.read(release_fd, 1):
+        raise RuntimeError("unexpected UFM custody release byte")
+finally:
+    os.close(release_fd)
+"""
+
+
+def _signal_retained_group(process, signum):
+    """PID is meaningful only in the custody of this unreaped Popen."""
+    if process.returncode is not None:
+        raise ProcessLookupError("the original fixture session has already been reaped")
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise RuntimeError("the fixture requires original child reaping")
+    os.killpg(process.pid, signum)
+
+
+class _OwnedRemoteSession:
+    def __init__(self, process, writer_reader, release_writer):
+        self.process = process
+        self.writer_reader = writer_reader
+        self.release_writer = release_writer
+
+    def writer_stopped(self):
+        if not select.select([self.writer_reader], [], [], 0)[0]:
+            return False
+        if os.read(self.writer_reader, 1):
+            raise RuntimeError("the synthetic UFM writer guard is not a data channel")
+        return True
+
+    def reap(self, deadline):
+        if self.release_writer is not None:
+            os.close(self.release_writer)
+            self.release_writer = None
+        self.process.wait(timeout=max(0, deadline - time.monotonic()))
+        os.close(self.writer_reader)
+
+
+class _RemoteSessionCustodian:
+    """Private FD-only launch channel for the already-local fake SSH.
+
+    Each invocation hands back the original status and standard streams. Only
+    this test process launches and owns the actual session leaders. It never
+    resolves process IDs by path or a filesystem record.
+    """
+
+    def __init__(self, root, owned):
+        self.root, self.owned = root, owned
+        self.server, self.client = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        self.deadline = time.monotonic() + _CRON_SECONDS
+        self.cleanup_deadline = None
+        self.closing = threading.Event()
+        self.error = None
+        self.thread = threading.Thread(target=self._serve, name="ufm-fixture-custody", daemon=True)
+
+    def _serve(self):
+        try:
+            while True:
+                tag, fds = _receive_fds(self.server, 1)
+                with socket.socket(fileno=fds[0]) as request:
+                    if tag == b"X":
+                        return
+                    if tag != b"R":
+                        raise RuntimeError("invalid synthetic UFM custody request")
+                    if self.closing.is_set():
+                        continue
+                    remaining = self.deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("UFM custody request exceeded the original cron deadline")
+                    request.settimeout(remaining)
+                    self._launch(request)
+        except BaseException as exc:
+            self.error = exc
+
+    def _launch(self, request):
+        tag, stream_fds = _receive_fds(request, 3)
+        release_reader = release_writer = writer_reader = writer = None
+        try:
+            if tag != b"S":
+                raise RuntimeError("missing synthetic UFM standard streams")
+            size, = struct.unpack("!I", _receive_exact(request, 4))
+            if not 0 < size <= os.sysconf("SC_ARG_MAX"):
+                raise RuntimeError("invalid synthetic UFM request size")
+            payload = json.loads(_receive_exact(request, size))
+            command, cwd, env = payload["command"], Path(payload["cwd"]), payload["env"]
+            if (cwd.resolve() != cwd or cwd.parent.parent != self.root / "hosts" or cwd.name != "root"
+                    or env.get("HOME") != str(cwd) or env.get("TMPDIR") != str(cwd.parent / "tmp")):
+                raise RuntimeError("fake SSH attempted to leave its private UFM home")
+            env.pop(_CUSTODY_FD, None)
+            if self.closing.is_set():
+                raise RuntimeError("UFM fixture admissions already closed")
+            release_reader, release_writer = os.pipe()
+            writer_reader, writer = os.pipe()
+            control = (request.fileno(), release_reader, writer, *stream_fds)
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-S", "-B", "-c", _REMOTE_SESSION_ANCHOR,
+                 *(str(fd) for fd in control), command],
+                cwd=cwd, env=env, start_new_session=True, pass_fds=control,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self.owned.append(_OwnedRemoteSession(process, writer_reader, release_writer))
+            writer_reader = release_writer = None
+            # Diagnostic only: no shutdown or probe reads this file.
+            with (self.root / "remote-sessions").open("a", encoding="ascii") as record:
+                record.write(f"{process.pid}\n")
+        finally:
+            for fd in (*stream_fds, release_reader, release_writer, writer_reader, writer):
+                if fd is not None:
+                    os.close(fd)
+
+    def __enter__(self):
+        try:
+            if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+                raise RuntimeError("the test harness must keep its original owned children")
+            self.thread.start()
+        except BaseException:
+            self.server.close()
+            self.client.close()
+            raise
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.closing.set()
+        try:
+            # The cron has already returned; only the actual parent sends the
+            # sentinel on its private endpoint. Ancillary remains exactly one fd.
+            _send_fds(self.client, b"X", [self.client.fileno()])
+            self.thread.join(timeout=max(0, self.deadline - time.monotonic()))
+            if self.thread.is_alive():
+                # An expired cron leaves no read deadline. Share this wait with
+                # the original 10-second TERM phase, never add a third phase.
+                self.cleanup_deadline = time.monotonic() + _REMOTE_CLEANUP_SECONDS
+                self.thread.join(timeout=max(0, self.cleanup_deadline - time.monotonic()))
+            if self.thread.is_alive() and exc is None:
+                raise RuntimeError("UFM custody admissions have not closed")
+            if self.error is not None and exc is None:
+                raise self.error
+        except OSError:
+            if exc is None:
+                raise
+        finally:
+            self.server.close()
+            self.client.close()
+
 # ssh/scp stand-ins: user@IP is the sandbox <root>/hosts/<IP>; "/root/" maps into it.
 FAKE_REMOTE = r'''#!{python}
-import glob, json, os, shutil, subprocess, sys
+from array import array
+import glob, json, os, shutil, socket, struct, subprocess, sys
+REQUIRE_CUSTODY = False
 state = json.load(open(os.environ["FAKE_UFM_STATE"]))
 tool = os.path.basename(sys.argv[0])
 args, words = sys.argv[1:], []
@@ -92,15 +306,29 @@ if tool == "ssh":
     after = state.get("failover", {}).get("after")
     trigger = after and after in command and vip_address in state.get("failover", {}).get("vip", {})
     command = command.replace("/root", home(ip) + "/root").replace("/sys/class/net", home(ip) + "/sys/class/net")
-    sessions = os.environ.get("FAKE_UFM_SESSIONS")
-    if sessions:
-        # Like on a real UFM, the remote command (and what it leaves running with nohup) is not in the
-        # caller's process group; its session is recorded so the test can stop it before removing the sandbox.
-        remote = subprocess.Popen(["bash", "-c", command], env=env, cwd=home(ip) + "/root", start_new_session=True)
-        with open(sessions, "a") as record:
-            record.write(f"{remote.pid}\n")
-        rc = remote.wait()
+    custody = os.environ.get("FAKE_UFM_CUSTODY_FD")
+    if custody is not None:
+        # The fixture's parent owns the session even after this stub returns.
+        # The preopened channel is a capability; no filesystem ID grants it.
+        recv, reply = socket.socketpair()
+        with recv, socket.socket(fileno=os.dup(int(custody))) as intake:
+            with reply:
+                if intake.sendmsg([b"R"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [reply.fileno()]))]) != 1:
+                    raise RuntimeError("incomplete UFM custody request")
+            if recv.sendmsg([b"S"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [0, 1, 2]))]) != 1:
+                raise RuntimeError("incomplete UFM stream transfer")
+            payload = json.dumps({"command": command, "cwd": home(ip) + "/root", "env": env}).encode("utf-8")
+            recv.sendall(struct.pack("!I", len(payload)) + payload)
+            status = bytearray()
+            while len(status) < 4:
+                part = recv.recv(4 - len(status))
+                if not part:
+                    raise RuntimeError("UFM custody reply missing")
+                status.extend(part)
+            rc, = struct.unpack("!i", status)
     else:
+        if REQUIRE_CUSTODY:
+            raise RuntimeError("the staged SSH fixture requires its original custody channel")
         rc = subprocess.call(["bash", "-c", command], env=env, cwd=home(ip) + "/root")
     if trigger:
         open(FAILOVER, "w").close()
@@ -127,8 +355,14 @@ else:
 
 class UfmCronCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name).resolve()
+        # Keep the sandbox if unprovable writers survive; no automatic
+        # TemporaryDirectory finalizer may delete it after a teardown refusal.
+        self.root = Path(tempfile.mkdtemp(prefix="ufm-cron-fixture-")).resolve()
+        root_info = self.root.lstat()
+        self._root_identity = root_info.st_dev, root_info.st_ino, root_info.st_uid
+        self._owned_remote_sessions = []
+        self._unsettled_admissions = False
+        self._admissions_cleanup_deadline = None
         # the published tree: the shared collector and its infiniband entry point. cron.sh pins PATH, so
         # the staged copy puts the fake ssh/scp/flock in front of it; the pinned line must exist exactly once.
         self.bin = self.mkdir("bin")
@@ -207,14 +441,21 @@ class UfmCronCase(unittest.TestCase):
         (monitor / "01-global.yaml").symlink_to(self.project / "01-global.yaml")
         # fakes: ssh/scp, flock (absent on macOS), and the UFM's own commands
         self.ufm_bin = self.mkdir("ufm-bin")
+        self.assertEqual(1, FAKE_REMOTE.count("REQUIRE_CUSTODY = False"))
+        staged_remote = FAKE_REMOTE.replace("REQUIRE_CUSTODY = False", "REQUIRE_CUSTODY = True")
         for tool in ("ssh", "scp"):
-            self.write_exec(self.bin / tool, FAKE_REMOTE.replace("{python}", sys.executable))
+            self.write_exec(self.bin / tool, staged_remote.replace("{python}", sys.executable))
         self.write_exec(self.bin / "flock", "#!/bin/sh\nexit 0\n")
         fakes = dict(FAKES, hostname='echo "$FAKE_HOSTNAME"',
                      ip='echo "eno8303          UP             $FAKE_MAC <BROADCAST,MULTICAST,UP>"')
         for name, body in fakes.items():
             self.write_exec(self.ufm_bin / name, f"#!/bin/sh\n{body}\n")
-        self.write_exec(self.ufm_bin / "docker", FAKE_DOCKER.replace("{python}", sys.executable))
+        native_docker = FAKE_DOCKER.replace("{python}", sys.executable)
+        old = 'sys.exit(subprocess.call(["sh", "-c", script]))'
+        self.assertEqual(1, native_docker.count(old))
+        native_docker = native_docker.replace(old, 'fd = os.environ.get("FAKE_UFM_WRITER_FD")\n'
+            '    sys.exit(subprocess.call(["sh", "-c", script], pass_fds=(() if fd is None else (int(fd),))))')
+        self.write_exec(self.ufm_bin / "docker", native_docker)
         self.sysfs = self.mkdir("sys-infiniband")
         (self.sysfs / "mlx5_0").mkdir()
         self.state = {"ufms": {ip: {"hostname": name, "mac": mac} for name, (ip, mac) in UFMS.items()},
@@ -222,7 +463,10 @@ class UfmCronCase(unittest.TestCase):
 
     def tearDown(self):
         self.stop_remote_sessions()
-        self.tmp.cleanup()
+        info = self.root.lstat()
+        self.assertEqual(self._root_identity, (info.st_dev, info.st_ino, info.st_uid))
+        self.assertEqual(self.root, self.root.resolve())
+        shutil.rmtree(self.root)
 
     @staticmethod
     def _darwin_group_has_only_owned_zombies(group):
@@ -252,25 +496,66 @@ class UfmCronCase(unittest.TestCase):
         """cron.sh starts the collectors on a UFM with nohup and need not wait for them: on a VIP holder that is
         then rejected, ufm-ibdiagnet.sh and `ufm-info.sh --ha` are never fetched and may still run when cron.sh
         returns; ufm-ibdiagnet.sh was seen writing into the sandbox while it was being removed ("Directory not
-        empty"). Stop every recorded remote session (SIGTERM, then SIGKILL after 10 s) before the sandbox goes;
-        this runs only after the test's own checks."""
-        record = self.root / "remote-sessions"
-        groups = {int(pid) for pid in record.read_text().split()} if record.exists() else set()
+        empty"). Stop the sessions held by this test (SIGTERM, then SIGKILL after
+        10 s) before removing its sandbox; assertions run before this cleanup."""
+        owned = getattr(self, "_owned_remote_sessions", [])
+        sessions = owned[:]
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            for session in sessions:
+                try:
+                    _signal_retained_group(session.process, signum)
+                except ProcessLookupError:
+                    pass  # Still require the original writer pipe and Popen below.
+                except PermissionError:
+                    if not session.writer_stopped():
+                        raise
+            deadline = time.monotonic() + _REMOTE_CLEANUP_SECONDS
+            if signum == signal.SIGTERM and getattr(self, "_admissions_cleanup_deadline", None) is not None:
+                deadline = min(deadline, self._admissions_cleanup_deadline)
+            while sessions:
+                for session in sessions[:]:
+                    if session.writer_stopped():
+                        try:
+                            session.reap(deadline)
+                        except subprocess.TimeoutExpired:
+                            # Keep the original handle and reader; the old
+                            # second phase still owns the unreaped group.
+                            continue
+                        sessions.remove(session)
+                        owned.remove(session)
+                remaining = deadline - time.monotonic()
+                if not sessions or remaining <= 0:
+                    break
+                time.sleep(min(0.05, remaining))
+            if not sessions:
+                if getattr(self, "_unsettled_admissions", False):
+                    self.fail("UFM custody admissions still open; preserving fixture sandbox")
+                return
+        self.fail("original remote sessions still have a writer after SIGKILL")
+
+    def _stop_modelled_owned_groups(self, owned):
+        """Original permission/refusal matrix with pre-registered model handles.
+
+        The native fixture uses the original writer FD instead of reconstructing
+        identity with ps. The legacy compatibility model still requires a
+        custodian and tests the original exact evidence and refusal assertions.
+        """
+        groups = set(owned)
         for signum in (signal.SIGTERM, signal.SIGKILL):
             for group in sorted(groups):
                 try:
-                    os.killpg(group, signum)
+                    _signal_retained_group(owned[group], signum)
                 except ProcessLookupError:
                     groups.discard(group)
                 except PermissionError:
                     if not self._darwin_group_has_only_owned_zombies(group):
                         raise
                     groups.discard(group)
-            deadline = time.monotonic() + 10
+            deadline = time.monotonic() + _REMOTE_CLEANUP_SECONDS
             while groups and time.monotonic() < deadline:
                 for group in sorted(groups):
                     try:
-                        os.killpg(group, 0)
+                        _signal_retained_group(owned[group], 0)
                     except ProcessLookupError:
                         groups.discard(group)
                     except PermissionError:
@@ -293,18 +578,37 @@ class UfmCronCase(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         path.chmod(0o755)
 
-    def run_cron(self, *args, pass_fds=(), **extra_env):
+    def _fixture_environment(self, **extra_env):
         state_path = self.root / "state.json"
         state_path.write_text(json.dumps(self.state), encoding="utf-8")
         self.calls = self.root / "calls.jsonl"
         # COPYFILE_DISABLE: macOS tar would otherwise add "._" metadata members (GNU tar never does).
-        env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", LC_ALL="C", COPYFILE_DISABLE="1",
+        return dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}", LC_ALL="C", COPYFILE_DISABLE="1",
                    FAKE_UFM_STATE=str(state_path), FAKE_UFM_CALLS=str(self.calls),
                    FAKE_UFM_HOSTS=str(self.mkdir("hosts")), FAKE_UFM_BIN=str(self.ufm_bin),
-                   FAKE_UFM_SYSFS=str(self.sysfs), FAKE_UFM_SESSIONS=str(self.root / "remote-sessions"),
+                   FAKE_UFM_SYSFS=str(self.sysfs),
                    **extra_env)
-        return subprocess.run(["bash", str(self.root / "infiniband/monitor/cron.sh"), *args], cwd=self.root, env=env,
-                              capture_output=True, text=True, timeout=240, pass_fds=pass_fds)
+
+    def _run_with_custody(self, command, *, pass_fds=(), input_text=None, **extra_env):
+        if self._unsettled_admissions:
+            raise RuntimeError("refusing new UFM requests while earlier custody is unsettled")
+        env = self._fixture_environment(**extra_env)
+        custodian = _RemoteSessionCustodian(self.root, self._owned_remote_sessions)
+        try:
+            with custodian:
+                descriptor = custodian.client.fileno()
+                env[_CUSTODY_FD] = str(descriptor)
+                return subprocess.run(command, cwd=self.root, env=env, input=input_text,
+                                      capture_output=True, text=True, timeout=_CRON_SECONDS,
+                                      pass_fds=(*pass_fds, descriptor))
+        finally:
+            self._unsettled_admissions |= custodian.thread.is_alive()
+            if custodian.cleanup_deadline is not None:
+                self._admissions_cleanup_deadline = custodian.cleanup_deadline
+
+    def run_cron(self, *args, pass_fds=(), **extra_env):
+        return self._run_with_custody(["bash", str(self.root / "infiniband/monitor/cron.sh"), *args],
+                                     pass_fds=pass_fds, **extra_env)
 
     def archives(self):
         return sorted(self.output.glob("*.tar.gz"))
@@ -886,6 +1190,92 @@ class UfmSharedReportCleanupTest(UfmCronCase):
         self.assertIn(f"newest of its kind kept loose: {newest.name}", result.stdout)
 
 
+class UfmCronCleanupCustodyContractTests(unittest.TestCase):
+    def test_unsettled_admissions_do_not_skip_cleanup_of_already_held_children(self):
+        from unittest import mock
+
+        subject = UfmCronCase()
+        subject._unsettled_admissions = True
+        subject._admissions_cleanup_deadline = time.monotonic()
+        owned = mock.Mock()
+        owned.process = mock.Mock(spec=subprocess.Popen, pid=424242, returncode=None)
+        owned.writer_stopped.return_value = True
+        subject._owned_remote_sessions = [owned]
+        with mock.patch.object(os, "killpg") as signal_group:
+            with self.assertRaisesRegex(AssertionError, "preserving fixture sandbox"):
+                subject.stop_remote_sessions()
+        signal_group.assert_called_once_with(owned.process.pid, signal.SIGTERM)
+        owned.reap.assert_called_once()
+        self.assertEqual([], subject._owned_remote_sessions)
+
+    def test_audit_group_number_without_a_custodian_is_never_signalled_or_probed(self):
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory(prefix="ufm-unowned-cleanup-") as folder:
+            subject = UfmCronCase()
+            subject.root = Path(folder)
+            record = subject.root / "remote-sessions"
+            audit_only = "424242\n"
+            record.write_text(audit_only, encoding="ascii")
+            with mock.patch.object(os, "killpg", side_effect=ProcessLookupError) as group, \
+                    mock.patch.object(subprocess, "run") as lookup:
+                subject.stop_remote_sessions()
+            group.assert_not_called()
+            lookup.assert_not_called()
+            self.assertEqual(audit_only, record.read_text(encoding="ascii"))
+
+
+class UfmCronNativeSessionCustodyTests(UfmCronCase):
+    def test_fake_ssh_keeps_exact_streams_status_and_owned_detached_writer(self):
+        from unittest import mock
+
+        command = (
+            'IFS= read -r line || exit 98; printf "stdout:%s\\n" "$line"; '
+            'printf "fixture stderr\\n" >&2; '
+        )
+        writer = (
+            'test -n "${FAKE_UFM_WRITER_FD:-}" || exit 98; '
+            'printf "owned writer ready\\n" > custody-ready.part && mv custody-ready.part custody-ready || exit 98; '
+            'while :; do sleep 0.05; done'
+        )
+        inside = f"nohup /bin/sh -c {shlex.quote(writer)} </dev/null >/dev/null 2>&1 &"
+        command += f"docker exec ufm sh -c {shlex.quote(inside)} || exit 98; exit 37"
+        addr = UFMS["ufm01.example.test"][0]
+        result = self._run_with_custody([str(self.bin / "ssh"), f"root@{addr}", command],
+                                        input_text="original stdin\n")
+        self.assertEqual(37, result.returncode, (result.stdout, result.stderr))
+        self.assertEqual("stdout:original stdin\n", result.stdout)
+        self.assertEqual("fixture stderr\n", result.stderr)
+        self.assertEqual(1, len(self._owned_remote_sessions))
+        observed = self._owned_remote_sessions[0]
+        ready = self.root / "hosts" / addr / "root" / "custody-ready"
+        deadline = time.monotonic() + _REMOTE_CLEANUP_SECONDS
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual("owned writer ready\n", ready.read_text(encoding="ascii"))
+        self.assertFalse(observed.writer_stopped(), "detached writer must still own the guard after fake SSH returns")
+
+        record = self.root / "remote-sessions"
+        audit_only = record.read_text(encoding="ascii") + "424242\n"
+        record.write_text(audit_only, encoding="ascii")
+        native_signal = os.killpg
+        actual = []
+
+        def original_signal(group, signum):
+            self.assertEqual(observed.process.pid, group)
+            self.assertIsNone(observed.process.returncode)
+            actual.append(signum)
+            return native_signal(group, signum)
+
+        with mock.patch.object(os, "killpg", side_effect=original_signal):
+            self.stop_remote_sessions()
+        self.assertEqual([signal.SIGTERM], actual)
+        self.assertIsNotNone(observed.process.returncode)
+        self.assertEqual([], self._owned_remote_sessions)
+        self.assertEqual(audit_only, record.read_text(encoding="ascii"))
+        self.assertTrue(self.root.is_dir(), "group cleanup must precede removing the sandbox")
+
+
 class UfmCronZombieCleanupControllerTests(unittest.TestCase):
     """Model only cleanup signals and exact-group metadata; never launch a UFM fixture."""
 
@@ -927,7 +1317,8 @@ class UfmCronZombieCleanupControllerTests(unittest.TestCase):
                     mock.patch.object(subprocess, "run", side_effect=query_group), \
                     mock.patch.object(sys, "platform", platform_name):
                 try:
-                    subject.stop_remote_sessions()
+                    owner = mock.Mock(spec=subprocess.Popen, pid=self.GROUP, returncode=None)
+                    subject._stop_modelled_owned_groups({self.GROUP: owner})
                 except PermissionError as error:
                     observed = error
             self.assertEqual(original_record, record.read_text(encoding="ascii"))

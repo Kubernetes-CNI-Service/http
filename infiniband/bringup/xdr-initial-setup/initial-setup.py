@@ -46,6 +46,7 @@ import fcntl
 import getpass
 import hashlib
 import hmac
+import io
 import ipaddress
 import json
 import multiprocessing
@@ -69,7 +70,7 @@ import time
 import weakref
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from collections import deque
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -83,7 +84,7 @@ NA_VALUES = {"", "na", "n/a", "none", "null", "tbd", "-"}
 IB_PORT_ALIASES = {"eth0", "mgmt", "management", "bmc"}
 DEFAULT_HOSTNAMES = {"", "nvos"}
 TRANSIT_DEVICE_TYPES = frozenset({"eth", "eth_spx", "spx", "ethernet", "eth_jump"})
-TARGET_CACHE_VERSION = 5
+TARGET_CACHE_VERSION = 6
 _SELF_SOURCE_PATH = Path(__file__).resolve()
 MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b")
 DOT_LINK_RE = re.compile(
@@ -93,7 +94,7 @@ DOT_LINK_RE = re.compile(
 REPORT_HANDLE = None
 # Fixed in the file: an OOB Leaf copy has no git to derive it from.  Every version that
 # changes this script sets it to that version before its release tag (guide WP-2, A.11).
-_REPOSITORY_REVISION = "http-v3.1.4"
+_REPOSITORY_REVISION = "http-v3.1.5"
 
 # Fixed host-local identity, independent of user HOME/TMPDIR, cwd, project,
 # selected devices and renamed/copied entries. Upgrade uses the same path.
@@ -286,6 +287,7 @@ _ACTIVE_COORDINATOR = None
 _JUMP_SESSIONS = None
 _TASK_LOG_BUFFER = None
 _TASK_DEADLINE = None
+_TASK_IB_CONFIG = None
 # Conservative authorized_keys grammar; preserve existing records byte-for-byte.
 # Actual program strings remain single-line for the unchanged typed argv gate.
 _KEY_AWK_LEXER = (
@@ -343,6 +345,100 @@ _KEY_VERIFY_AWK = _KEY_AWK_LEXER + (
     "{ stop_invalid(); } "
     "END { if(invalid || !requests) exit 34; for(k in wanted) if(!(k in found)) exit 34; } "
 )
+# WP4 closed device programs: exact independent bytes, never arbitrary shell.
+_CONFIG_BACKUP_SCRIPT = (
+    "set -eu\n"
+    "umask 077\n"
+    "fail() { printf '%s\\n' 'IB configuration backup failed' >&2; exit 1; }\n"
+    "[ \"$#\" -eq 1 ] || fail\n"
+    "stamp=$1\n"
+    "case \"$stamp\" in\n"
+    "    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n"
+    "    *) fail ;;\n"
+    "esac\n"
+    "case \"${HOME-}\" in /*) ;; *) fail ;; esac\n"
+    "backup=\"$HOME/current_${stamp}.yaml\"\n"
+    "[ ! -e \"$backup\" ] && [ ! -L \"$backup\" ] || fail\n"
+    "tmp=\n"
+    "trap 'if [ -n \"$tmp\" ]; then rm -f -- \"$tmp\"; fi' EXIT\n"
+    "trap 'exit 1' HUP INT TERM\n"
+    "tmp=$(mktemp \"${backup}.tmp.XXXXXX\" 2>/dev/null) || fail\n"
+    "chmod 600 \"$tmp\" || fail\n"
+    "nv config show > \"$tmp\" 2>/dev/null || fail\n"
+    "[ -s \"$tmp\" ] || fail\n"
+    "bytes=$(wc -c < \"$tmp\" | tr -d '[:space:]') || fail\n"
+    "case \"$bytes\" in ''|*[!0-9]*) fail ;; esac\n"
+    "[ \"$bytes\" -gt 0 ] || fail\n"
+    "ln -T -- \"$tmp\" \"$backup\" 2>/dev/null || fail\n"
+    "rm -f -- \"$tmp\" || fail\n"
+    "tmp=\n"
+    "printf 'path=%s\\nbytes=%s\\n' \"$backup\" \"$bytes\"\n"
+)
+
+_DEFERRED_APPLY_SCRIPT = (
+    "set -eu\n"
+    "umask 077\n"
+    "fail() { printf '%s\\n' 'IB deferred configuration launch failed' >&2; exit 1; }\n"
+    "[ \"$#\" -eq 1 ] || fail\n"
+    "stamp=$1\n"
+    "case \"$stamp\" in\n"
+    "    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n"
+    "    *) fail ;;\n"
+    "esac\n"
+    "case \"${HOME-}\" in /*) ;; *) fail ;; esac\n"
+    "rc_file=\"$HOME/.initial-setup-${stamp}.rc\"\n"
+    "[ ! -e \"$rc_file\" ] && [ ! -L \"$rc_file\" ] || fail\n"
+    "(set -C; : > \"$rc_file\") 2>/dev/null || fail\n"
+    "chmod 600 \"$rc_file\" || fail\n"
+    "setsid nohup sh -c '\n"
+    "set -u\n"
+    "umask 077\n"
+    "rc_file=$1\n"
+    "sleep 3 || exit 1\n"
+    "nv config apply -y && nv config save\n"
+    "status=$?\n"
+    "tmp=\n"
+    "trap '\\''if [ -n \"$tmp\" ]; then rm -f -- \"$tmp\"; fi'\\'' EXIT\n"
+    "trap '\\''exit 1'\\'' HUP INT TERM\n"
+    "tmp=$(mktemp \"${rc_file}.tmp.XXXXXX\" 2>/dev/null) || exit 1\n"
+    "printf \"%s\\n\" \"$status\" > \"$tmp\" || exit 1\n"
+    "chmod 600 \"$tmp\" || exit 1\n"
+    "mv -fT -- \"$tmp\" \"$rc_file\" || exit 1\n"
+    "tmp=\n"
+    "exit \"$status\"\n"
+    "' -- \"$rc_file\" > /dev/null 2>&1 < /dev/null &\n"
+    "exit 0\n"
+)
+
+_DEFERRED_APPLY_RC_SCRIPT = (
+    "set -eu\n"
+    "fail() { printf '%s\\n' 'IB deferred configuration result is unverified' >&2; exit 1; }\n"
+    "[ \"$#\" -eq 1 ] || fail\n"
+    "stamp=$1\n"
+    "case \"$stamp\" in\n"
+    "    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;\n"
+    "    *) fail ;;\n"
+    "esac\n"
+    "case \"${HOME-}\" in /*) ;; *) fail ;; esac\n"
+    "rc_file=\"$HOME/.initial-setup-${stamp}.rc\"\n"
+    "[ ! -L \"$rc_file\" ] || fail\n"
+    "if [ ! -e \"$rc_file\" ]; then printf 'rc=\\n'; exit 0; fi\n"
+    "[ -f \"$rc_file\" ] || fail\n"
+    "if [ ! -s \"$rc_file\" ]; then printf 'rc=\\n'; exit 0; fi\n"
+    "IFS= read -r status < \"$rc_file\" || fail\n"
+    "case \"$status\" in\n"
+    "    0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) ;;\n"
+    "    *) fail ;;\n"
+    "esac\n"
+    "bytes=$(wc -c < \"$rc_file\" | tr -d '[:space:]') || fail\n"
+    "case \"$bytes\" in ''|*[!0-9]*) fail ;; esac\n"
+    "[ \"$bytes\" -eq \"$((${#status} + 1))\" ] || fail\n"
+    "printf 'rc=%s\\n' \"$status\"\n"
+)
+
+_CONFIG_REPLACE_SCRIPT = "set -eu\numask 077\nfail() { printf '%s\\n' 'IB configuration replace failed' >&2; exit 1; }\n[ \"$#\" -eq 2 ] || fail\npayload=$1\nexpected=$2\n[ \"${#expected}\" -eq 64 ] || fail\ncase \"$expected\" in ''|*[!0-9a-f]*) fail ;; esac\ncase \"${HOME-}\" in /*) ;; *) fail ;; esac\nconfig=\"$HOME/initial-setup-replace.yaml\"\n[ ! -L \"$config\" ] || fail\nif [ -e \"$config\" ] && [ ! -f \"$config\" ]; then fail; fi\ntmp=\ntrap 'if [ -n \"$tmp\" ]; then rm -f -- \"$tmp\"; fi' EXIT\ntrap 'exit 1' HUP INT TERM\ntmp=$(mktemp \"${config}.tmp.XXXXXX\" 2>/dev/null) || fail\nchmod 600 \"$tmp\" || fail\nprintf '%s' \"$payload\" | base64 -d > \"$tmp\" 2>/dev/null || fail\n[ -s \"$tmp\" ] || fail\nactual=$(sha256sum \"$tmp\" 2>/dev/null) || fail\n[ \"${actual%% *}\" = \"$expected\" ] || fail\nmv -fT -- \"$tmp\" \"$config\" || fail\ntmp=\nif nv config replace \"$config\" > /dev/null 2>&1; then\n    :\nelse\n    rc=$?\n    case \"$rc\" in\n        [1-9]|[1-9][0-9]|1[01][0-9]|12[0-5])\n            printf 'rc=%s\\nfailed_operation=replace\\n' \"$rc\"\n            exit 1 ;;\n        *) fail ;;\n    esac\nfi\nprintf 'path=%s\\nsha256=%s\\n' \"$config\" \"$expected\"\n"
+
+
 _KEY_INSTALL_SCRIPT = (
     "set -eu; LC_ALL=C; export LC_ALL; "
     "command -v tr >/dev/null 2>&1 || exit 34; "
@@ -388,6 +484,21 @@ _KEY_INSTALL_SCRIPT = (
     "printf 'IBSW_PUBLIC_KEYS_UPDATED\\n'"
 )
 
+_KEY_READONLY_SCRIPT = (
+    "set -eu\n"
+    "LC_ALL=C\n"
+    "export LC_ALL\n"
+    "[ \"$#\" -eq 1 ] || exit 34\n"
+    "[ -n \"${HOME:-}\" ] || exit 34\n"
+    "auth=\"$HOME/.ssh/authorized_keys\"\n"
+    "[ -f \"$auth\" ] || exit 34\n"
+    "required=$(printf %s \"$1\" | base64 -d 2>/dev/null) || exit 34\n"
+    "[ -n \"$required\" ] || exit 34\n"
+    "printf '%s\\n' \"$required\" | awk '"
+    + _KEY_VERIFY_AWK +
+    "' /dev/stdin \"$auth\" >/dev/null 2>&1 || exit 34\n"
+)
+
 
 class SetupError(RuntimeError):
     pass
@@ -402,6 +513,7 @@ class SshFailureKind(enum.Enum):
     IDENTITY_MISMATCH = "OOB_IDENTITY_CONFLICT"
     LOCAL_COMMAND = "LOCAL_COMMAND_ERROR"
     DIRECT_SSH_NETWORK = "DIRECT_SSH_NETWORK"
+    DIRECT_LOGIN_NETWORK = "DIRECT_LOGIN_NETWORK"
 
 
 class SshFailure(SetupError):
@@ -463,6 +575,7 @@ def classify_ssh_failure(output, *, outer_address, inner_address=None):
 # Existing DIRECT row retains its order; D1b adds rows here, never another stage map.
 FAILURE_KIND_CATEGORY = {
     "DIRECT_SSH_NETWORK": "FAILED_DIRECT_SSH_NETWORK",
+    "DIRECT_LOGIN_NETWORK": "FAILED_DIRECT_LOGIN_NETWORK",
     "OOB_JUMP_UNREACHABLE": "FAILED_OOB_JUMP_UNREACHABLE",
     "OOB_JUMP_AUTHENTICATION": "FAILED_OOB_JUMP_AUTHENTICATION",
     "TARGET_HOST_KEY_CHANGED": "FAILED_TARGET_HOST_KEY_CHANGED",
@@ -854,8 +967,9 @@ def probe_ethernet_key(device: Device, user: str, timeout: int) -> str:
 def inspect_ib_device(target: Target, neighbor: Neighbor, eth_user: str,
                       eth_password: str, ib_user: str, initial_password: str,
                       timeout: int, policy: ProjectPasswordPolicy, *,
-                      apply: bool, authorized: bool, local: bool, strict: bool = False
-                      ) -> tuple[SessionResult, str, bool]:
+                      apply: bool, authorized: bool, local: bool, strict: bool = False,
+                      _management_private_key=None
+                      ) -> tuple[SessionResult, Optional[str], bool]:
     """Inspect first; rotate only when PAM requires it and the operator authorizes.
 
     The one IB authentication readback (P3c map P5; owner Q-035 (a)): v15's credential order
@@ -875,10 +989,17 @@ def inspect_ib_device(target: Target, neighbor: Neighbor, eth_user: str,
     try:
         login = _authenticate_ib_read(
             target, neighbor, eth_user, eth_password, ib_user, initial_password, timeout,
-            local=local, _password_policy=policy, strict=strict)
+            local=local, _password_policy=policy, strict=strict,
+            _management_private_key=_management_private_key)
     except SetupError as exc:
         if str(exc) != _IB_CREDENTIALS_EXHAUSTED:
             raise
+        if (type(exc) is SetupError and type(target) is Target and target.ethernet is None
+                and local is False and isinstance(_management_private_key, Path)
+                and hasattr(exc, "_direct_endpoint")):
+            actual = exc._direct_endpoint
+            _validate_direct_endpoint(target, actual)
+            neighbor = actual
     if login is not None:
         credential, result = login.current_password, login.read_result
     else:
@@ -892,6 +1013,58 @@ def inspect_ib_device(target: Target, neighbor: Neighbor, eth_user: str,
         result = run_on_ib(target, neighbor, eth_user, eth_password, ib_user, credential, timeout,
                            command, local=local, allow_password_change=False,
                            **session("auth-probe-readonly"))
+    if credential is None and apply:
+        # The key proved access, not a password. O6(b) separately authenticates
+        # the verified project candidate before it can become current.
+        if policy is None:
+            raise SetupError("key-authenticated apply requires a verified project IB password")
+        point = getattr(result, "_direct_endpoint", None)
+        _validate_direct_endpoint(target, point)
+        candidate = (_ib_project_value(policy, user=ib_user, fetch=True) if strict
+                     else policy.password())
+        policy.assert_unchanged()
+        rejected = False
+        try:
+            proof = run_on_ib(target, point, "", "", ib_user, candidate, timeout,
+                              ["true"], local=False, password_only=True,
+                              allow_password_change=False)
+        except IBAuthenticationError:
+            rejected = True
+        if rejected:
+            raise IBAuthenticationError("project password-only authentication rejected after key login; "
+                                        "target/current password drift; configuration is blocked")
+        policy.assert_unchanged()
+        if (type(proof) is not SessionResult or type(proof.exit_code) is not int
+                or proof.exit_code != 0 or type(proof.output) is not str
+                or getattr(proof, "cleanup_uncertain", False) is not False
+                or any(getattr(proof, name) is not False for name in (
+                    "password_changed", "password_change_required", "password_change_attempted",
+                    "ib_authentication_rejected"))
+                or _EXPIRED_PASSWORD.search(proof.output)
+                or _pending_diff_has_password_update_notice(proof.output)):
+            raise SetupError("project password-only authentication is unverified; configuration is blocked")
+        actual = getattr(proof, "_direct_endpoint", None)
+        _validate_direct_endpoint(target, actual)
+        if actual != point:
+            if point.interface is None or actual.interface is not None:
+                raise SetupError("project password authentication endpoint transition is unverified")
+            # Never attach true's endpoint to an old-point NVUE result.
+            result = _stage_ib_command(target, actual, "", "", ib_user, candidate,
+                timeout, command, local=False, strict=strict, policy=policy)
+            if (type(result) is not SessionResult or type(result.exit_code) is not int
+                    or result.exit_code != 0 or type(result.output) is not str
+                    or getattr(result, "cleanup_uncertain", False) is not False
+                    or any(getattr(result, name) is not False for name in (
+                        "password_changed", "password_change_required", "password_change_attempted",
+                        "ib_authentication_rejected"))
+                    or _EXPIRED_PASSWORD.search(result.output)
+                    or _pending_diff_has_password_update_notice(result.output)):
+                raise SetupError("new-endpoint NVUE readback is unverified")
+            read_point = getattr(result, "_direct_endpoint", None)
+            _validate_direct_endpoint(target, read_point)
+            if read_point != actual:
+                raise SetupError("new-endpoint NVUE readback changed endpoint")
+        credential = candidate
     if result.password_change_required:
         if not apply:
             return result, credential, authorized
@@ -948,6 +1121,9 @@ class Device:
     eth1_prefix: str
     eth1_gateway: str
     login_interface: str = "eth0"
+    input_issues: tuple = field(default=(), compare=False)
+    eth1_hints: tuple = field(default=(), compare=False)
+    jump_candidates: tuple = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -961,7 +1137,7 @@ class Link:
 @dataclass(frozen=True)
 class Target:
     ib: Device
-    ethernet: Device
+    ethernet: Optional[Device]
     ethernet_port: str
     ib_port_alias: str
     # Populated ONLY by the v15 preflight adapter. Legacy IB stages still use
@@ -969,6 +1145,9 @@ class Target:
     attachment: Optional[Target] = None
     jump_reason: str = ""
     access_vlan: str = ""
+    route: object = field(default=None, compare=False)
+    # Original CSV/P2P topology, independent of runtime transport/spine attachment.
+    source_attachment: object = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -978,6 +1157,12 @@ class Neighbor:
     mac: str
     vrf: str = "default"
     address_source: str = "ND"
+
+
+@dataclass(frozen=True)
+class DirectEndpoint:
+    address: str
+    interface: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1245,55 +1430,82 @@ def resolve_initial_ib_password(
         "Initial IB password [admin; Enter or 5 seconds without a complete line uses admin]: ", 5)
 
 def validate_ib_devices(devices: dict[str, Device]) -> None:
-    addresses: dict[str, tuple[str, str]] = {}
-    gateways_by_network: dict[str, tuple[str, str]] = {}
-    gateway_uses: list[tuple[str, str, str]] = []
-    for device in devices.values():
+    """O9: retain every IB row; conflicts qualify individual interfaces, not CSV."""
+    paths = _import_tools("tools.login_path")
+    issues = {key: list(device.input_issues) for key, device in devices.items()}
+    hints = {key: list(device.eth1_hints) for key, device in devices.items()}
+    original = dict(devices)
+    eth0, eth1 = {}, {}
+    for key, device in devices.items():
         if not valid_hostname(device.hostname):
             raise SetupError(f"invalid IB hostname: {device.hostname!r}")
-        for interface_name, prefix, gateway in (
-            ("eth0", device.eth0_prefix, device.eth0_gateway),
-            ("eth1", device.eth1_prefix, device.eth1_gateway),
-        ):
-            if not prefix:
-                continue
-            interface = ipaddress.IPv4Interface(prefix)
-            address = str(interface.ip)
-            if address in addresses:
-                other_hostname, other_interface = addresses[address]
-                raise SetupError(
-                    f"duplicate IB address {address}: "
-                    f"{other_hostname}.{other_interface} and "
-                    f"{device.hostname}.{interface_name}"
-                )
-            addresses[address] = (device.hostname, interface_name)
-            gateway_address = ipaddress.IPv4Address(gateway)
-            if interface.network.prefixlen <= 30 and gateway_address in {
-                interface.network.network_address, interface.network.broadcast_address,
-            }:
-                raise SetupError(
-                    f"{device.hostname}.{interface_name} gateway {gateway} is a "
-                    "network/broadcast address"
-                )
-            network = str(interface.network)
-            previous = gateways_by_network.get(network)
-            if previous and previous[0] != gateway:
-                raise SetupError(
-                    f"conflicting IB gateways for {network}: {previous[0]} "
-                    f"({previous[1]}) and {gateway} "
-                    f"({device.hostname}.{interface_name})"
-                )
-            gateways_by_network[network] = (
-                gateway, f"{device.hostname}.{interface_name}"
-            )
-            gateway_uses.append((gateway, device.hostname, interface_name))
-    for gateway, hostname, interface_name in gateway_uses:
-        if gateway in addresses:
-            owner_hostname, owner_interface = addresses[gateway]
-            raise SetupError(
-                f"IB gateway {gateway} for {hostname}.{interface_name} duplicates "
-                f"device address {owner_hostname}.{owner_interface}"
-            )
+        for prefix, table in ((device.eth0_prefix, eth0), (device.eth1_prefix, eth1)):
+            if prefix:
+                table[key] = ipaddress.IPv4Interface(prefix)
+
+    def issue(key, field_name, value, problem, *, blocking=True):
+        item = paths.InputIssue(devices[key].hostname, field_name, value, problem, blocking)
+        (issues if blocking else hints)[key].append(item)
+
+    keys = list(devices)
+    for index, left in enumerate(keys):
+        for right in keys[index + 1:]:
+            a, b = eth0.get(left), eth0.get(right)
+            if a is not None and b is not None:
+                if a.ip == b.ip:
+                    for own, other in ((left, right), (right, left)):
+                        issue(own, "eth0_ip", str(eth0[own].ip),
+                              "duplicate address with " + devices[other].hostname)
+                if (a.network == b.network and devices[left].eth0_gateway
+                        and devices[right].eth0_gateway
+                        and devices[left].eth0_gateway != devices[right].eth0_gateway):
+                    for own, other in ((left, right), (right, left)):
+                        issue(own, "eth0_gw", devices[own].eth0_gateway,
+                              "conflicting gateway with " + devices[other].hostname)
+    for key, device in devices.items():
+        for owner, address in eth0.items():
+            if device.eth0_gateway and device.eth0_gateway == str(address.ip):
+                issue(key, "eth0_gw", device.eth0_gateway,
+                      "gateway is device address of " + devices[owner].hostname)
+                if owner != key:
+                    issue(owner, "eth0_ip", str(address.ip),
+                          "address used as gateway by " + device.hostname)
+        if key in eth1:
+            conflicts = [devices[owner].hostname for owner, address in eth0.items()
+                         if address.ip == eth1[key].ip]
+            conflicts += [devices[owner].hostname for owner, address in eth1.items()
+                          if owner != key and address.ip == eth1[key].ip]
+            if conflicts:
+                issue(key, "eth1_ip", str(eth1[key].ip),
+                      "address overlaps " + ", ".join(conflicts), blocking=False)
+                devices[key] = replace(device, eth1_prefix="", eth1_gateway="")
+            if device.eth1_gateway:
+                owners = [original[owner].hostname for owner, address in [*eth0.items(), *eth1.items()]
+                          if owner != key and device.eth1_gateway == str(address.ip)]
+                inconsistent = [original[owner].hostname for owner, address in eth1.items()
+                                if owner != key and address.network == eth1[key].network
+                                and original[owner].eth1_gateway
+                                and original[owner].eth1_gateway != device.eth1_gateway]
+                if owners or inconsistent:
+                    issue(key, "eth1_gw", device.eth1_gateway,
+                          "gateway conflicts with " + ", ".join(owners + inconsistent), blocking=False)
+                    devices[key] = replace(devices[key], eth1_gateway="")
+    for key, device in devices.items():
+        devices[key] = replace(device, input_issues=tuple(issues[key]), eth1_hints=tuple(hints[key]))
+
+
+def _jump_vlan_groups(row, indexes):
+    fields = {position: name for name, positions in indexes.items() for position in positions}
+    boundaries = {"vlan_id", "vlan_ports", "bgp_asn", "bgp_ports", "bond_ports", "evpn_vrf", "evpn_l2vlan"}
+    for start in indexes.get("vlan_id", ()):
+        end = next((index for index in range(start + 1, max(fields) + 1)
+                    if fields[index] in boundaries), max(fields) + 1)
+        for position in indexes.get("svi_ip", ()):
+            if start < position < end:
+                mask = next((index for index in indexes.get("netmask", ()) if position < index < end), None)
+                yield (clean(row[start]) if start < len(row) else "",
+                       clean(row[position]) if position < len(row) else "",
+                       clean(row[mask]) if mask is not None and mask < len(row) else "")
 
 
 def eth_jump_login_address(row, indexes, hostname):
@@ -1338,6 +1550,7 @@ def eth_jump_login_address(row, indexes, hostname):
 
 
 def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
+    paths = _import_tools("tools.login_path")
     try:
         handle = path.open("r", encoding="utf-8-sig", newline="")
     except OSError as exc:
@@ -1406,56 +1619,54 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
             netmask1 = row_value(row, indexes, "netmask", 1) or netmask0
             eth1_gateway = row_value(row, indexes, "eth1_gw")
             login_interface = "eth0"
+            input_issues, eth1_hints, jump_candidates = (), (), ()
             try:
-                if dev_type == "eth_jump":
+                if paths.is_jump_type(dev_type):
                     inventory_errors = _eth_jump_inventory_errors(
                         [clean(field).casefold() for field in raw_header], row,
                         lambda value: not usable(value),
                     )
-                    if inventory_errors:
-                        raise SetupError("; ".join(inventory_errors))
-                eth0_mac = normalize_mac(eth0_mac, field=f"{hostname}.eth0_mac")
+                    input_issues = tuple(paths.InputIssue(hostname, "inventory", "", error, False)
+                                         for error in inventory_errors)
+                    try:
+                        eth0_mac = normalize_mac(eth0_mac, field=f"{hostname}.eth0_mac")
+                    except SetupError:
+                        eth0_mac = ""
                 if dev_type == "ib":
-                    eth0 = ipv4_prefix(
-                        eth0_ip, netmask0, field=f"{hostname}.eth0_ip", required=True
-                    )
-                    eth1 = ipv4_prefix(
-                        eth1_ip, netmask1, field=f"{hostname}.eth1_ip", required=False
-                    )
-                    if not usable(eth0_gateway):
-                        raise SetupError(f"{hostname}.eth0_gw is required")
-                    eth0_gateway = str(ipaddress.IPv4Address(eth0_gateway))
-                    if ipaddress.IPv4Address(eth0_gateway) not in ipaddress.IPv4Interface(eth0).network:
-                        raise SetupError(
-                            f"{hostname}.eth0_gw {eth0_gateway} is outside "
-                            f"{ipaddress.IPv4Interface(eth0).network}"
-                        )
-                    if eth1:
-                        if not usable(eth1_gateway):
-                            raise SetupError(
-                                f"{hostname}.eth1_gw is required when eth1_ip is set"
-                            )
-                        eth1_gateway = str(ipaddress.IPv4Address(eth1_gateway))
-                        if ipaddress.IPv4Address(eth1_gateway) not in ipaddress.IPv4Interface(eth1).network:
-                            raise SetupError(
-                                f"{hostname}.eth1_gw {eth1_gateway} is outside "
-                                f"{ipaddress.IPv4Interface(eth1).network}"
-                            )
-                    elif usable(eth1_gateway):
-                        raise SetupError(
-                            f"{hostname}.eth1_gw is set but eth1_ip is empty"
-                        )
-                    else:
-                        eth1_gateway = ""
+                    plan, input_issues = paths.check_eth0_inputs(hostname, mac=eth0_mac,
+                        address=eth0_ip, netmask=netmask0, gateway=eth0_gateway)
+                    # Keep a syntactically valid address even if another field is bad:
+                    # cross-device address ownership still has to be checked (O9).
+                    try:
+                        eth0 = ipv4_prefix(eth0_ip, netmask0, field=hostname + ".eth0_ip", required=False)
+                    except (SetupError, ValueError):
+                        eth0 = ""
+                    if any(issue.field in {"eth0_ip", "netmask"} for issue in input_issues):
+                        eth0 = ""
+                    try:
+                        eth0_mac = normalize_mac(eth0_mac, field=hostname + ".eth0_mac")
+                    except SetupError:
+                        eth0_mac = ""
+                    eth0_gateway = ("" if any(issue.field == "eth0_gw" for issue in input_issues)
+                                    else str(ipaddress.IPv4Address(eth0_gateway)))
+                    secondary, eth1_hints = paths.check_eth1_inputs(hostname, eth0_mac=eth0_mac,
+                        mac=row_value(row, indexes, "eth1_mac"), address=eth1_ip,
+                        netmask=netmask1, gateway=eth1_gateway)
+                    eth1 = str(secondary.address) if secondary.address is not None else ""
+                    eth1_gateway = secondary.gateway
                     login_ip = eth0.split("/", 1)[0]
-                elif dev_type == "eth_jump":
-                    login_ip, login_interface = eth_jump_login_address(row, indexes, hostname)
+                elif paths.is_jump_type(dev_type):
+                    jump_candidates, candidate_issues = paths.jump_login_candidates(hostname,
+                        eth0_ip=eth0_ip, vlan_groups=tuple(_jump_vlan_groups(row, indexes)))
+                    input_issues += candidate_issues
+                    login_ip = jump_candidates[0].address if jump_candidates else ""
+                    if jump_candidates and jump_candidates[0].entry != "JUMP_ETH0":
+                        login_interface = "vlan" + jump_candidates[0].entry.removeprefix("JUMP_VLAN")
                     eth0 = login_ip if login_interface == "eth0" else ""
                     eth1, eth0_gateway, eth1_gateway = "", "", ""
                 else:
-                    if not usable(eth0_ip):
-                        raise SetupError(f"{hostname}.eth0_ip login address is required")
-                    eth0 = str(ipaddress.IPv4Address(eth0_ip.split("/", 1)[0]))
+                    # A non-jump peer is attachment metadata, not a login endpoint.
+                    eth0 = eth0_mac = ""
                     eth1 = ""
                     eth0_gateway = ""
                     eth1_gateway = ""
@@ -1466,27 +1677,31 @@ def load_devices(path: Path) -> tuple[dict[str, Device], dict[str, Device]]:
             device = Device(
                 hostname, dev_type, login_ip, eth0,
                 eth0_gateway, eth0_mac, eth1, eth1_gateway, login_interface,
+                input_issues, eth1_hints, jump_candidates,
             )
             target_map = ib_devices if dev_type == "ib" else eth_devices
             key = normalize_name(hostname)
-            if key in target_map:
+            if key in ib_devices or key in eth_devices:
                 raise SetupError(f"duplicate device hostname in CSV: {hostname}")
             target_map[key] = device
 
     if not ib_devices:
         raise SetupError(f"device CSV contains no type=ib devices: {path}")
-    if not eth_devices:
-        raise SetupError(f"device CSV contains no Ethernet switch devices: {path}")
     validate_ib_devices(ib_devices)
-    owners = {}
-    for device in (*ib_devices.values(), *eth_devices.values()):
-        for address in [device.login_ip, *([device.eth1_prefix.split("/", 1)[0]] if device.eth1_prefix else [])]:
-            if not address:
-                continue  # an eth_jump without a login address (I19, T13) owns none
-            previous = owners.get(address)
-            if previous is not None and "eth_jump" in {previous.dev_type, device.dev_type}:
-                raise SetupError(f"duplicate eth_jump login address {address}")
-            owners.setdefault(address, device)
+    jump_addresses = {candidate.address: device.hostname for device in eth_devices.values()
+                      for candidate in device.jump_candidates}
+    for key, device in ib_devices.items():
+        issues, hints = list(device.input_issues), list(device.eth1_hints)
+        address = device.eth0_prefix.split("/", 1)[0]
+        if address in jump_addresses:
+            issues.append(paths.InputIssue(device.hostname, "eth0_ip", address,
+                          "duplicate address with " + jump_addresses[address], True))
+        secondary = device.eth1_prefix.split("/", 1)[0]
+        if secondary in jump_addresses:
+            hints.append(paths.InputIssue(device.hostname, "eth1_ip", secondary,
+                         "duplicate address with " + jump_addresses[secondary], False))
+            device = replace(device, eth1_prefix="", eth1_gateway="")
+        ib_devices[key] = replace(device, input_issues=tuple(issues), eth1_hints=tuple(hints))
     return ib_devices, eth_devices
 
 
@@ -1697,6 +1912,7 @@ def resolve_device(name: str, devices: dict[str, Device]) -> Optional[Device]:
 
 def build_targets(links: list[Link], ib_devices: dict[str, Device],
                   eth_devices: dict[str, Device]) -> list[Target]:
+    paths = _import_tools("tools.login_path")
     targets: list[Target] = []
     seen: set[str] = set()
     for link in links:
@@ -1709,26 +1925,20 @@ def build_targets(links: list[Link], ib_devices: dict[str, Device],
             if not ib or clean(ib_port).casefold() not in IB_PORT_ALIASES:
                 continue
             ethernet = resolve_device(eth_name, eth_devices)
-            if not ethernet:
-                raise SetupError(
-                    f"P2P peer {eth_name!r} for IB device {ib.hostname} is not a "
-                    "supported Ethernet transit device with a login IP in the CSV"
-                )
             key = normalize_name(ib.hostname)
             if key in seen:
                 raise SetupError(f"multiple management links found for IB device {ib.hostname}")
             seen.add(key)
-            targets.append(
-                Target(ib, ethernet, cumulus_port_name(eth_port), clean(ib_port))
-            )
-    missing = [device.hostname for key, device in ib_devices.items() if key not in seen]
-    if missing:
-        log("WARNING: no Ethernet management link found for: " + ", ".join(sorted(missing)))
-    if not targets:
-        raise SetupError(
-            "no IB management links to supported Ethernet transit devices "
-            "were found in P2P"
-        )
+            attachment = paths.Attachment(ethernet.hostname if ethernet else eth_name,
+                                          ethernet.dev_type if ethernet else "", cumulus_port_name(eth_port))
+            route = paths.classify([ib], {ib.hostname: attachment}, direct=frozenset(), same_subnet={})[0]
+            targets.append(Target(ib, ethernet if route.path == "jump" else None,
+                                  attachment.port, clean(ib_port), route=route,
+                                  source_attachment=attachment))
+    for key, ib in ib_devices.items():
+        if key not in seen:
+            route = paths.classify([ib], {}, direct=frozenset(), same_subnet={})[0]
+            targets.append(Target(ib, None, "", "eth0", route=route))
     return sorted(targets, key=lambda target: normalize_name(target.ib.hostname))
 
 
@@ -1744,6 +1954,94 @@ def device_to_dict(device: Device) -> dict[str, str]:
         "eth1_gateway": device.eth1_gateway,
         "login_interface": device.login_interface,
     }
+
+
+def _compare_inventory(ib_csv, project, *, checked_by_caller=False):
+    if checked_by_caller:
+        return {"status": "checked_by_caller"}
+    if project is not None:
+        master = project / "02-devices_config.csv"
+    else:
+        script = Path(__file__).resolve()
+        if script.parts[-4:] != ("infiniband", "bringup", "xdr-initial-setup", "initial-setup.py"):
+            raise SetupError(f"repository inventory master is unavailable for {script}; use --project-dir")
+        master = script.parents[3] / "infiniband" / "02-devices_config.csv"
+    try:
+        subset_raw, master_raw = ib_csv.read_bytes(), master.read_bytes()
+        mismatches = ([] if ib_csv.resolve() == master.resolve() else
+                      _import_tools("tools.inventory_subset").compare(ib_csv, master))
+    except (OSError, ValueError, UnicodeError, csv.Error, IndexError) as error:
+        reason = type(error).__name__
+        if isinstance(error, OSError) and type(error.errno) is int:
+            reason += f" errno={error.errno}"
+        raise SetupError(f"cannot compare inventory CSV {ib_csv} and 02 {master}: "
+                         + reason) from None
+    for row in mismatches:
+        print(f"INVENTORY MISMATCH: {row.hostname}; {row.column}; ib.csv={row.subset_value}; "
+              f"02={row.master_value}; {row.kind}")
+    if mismatches:
+        raise SetupError(f"inventory mismatch: {ib_csv} and {master}")
+    return {"status": "compared", "subset_sha256": hashlib.sha256(subset_raw).hexdigest(),
+            "master_sha256": hashlib.sha256(master_raw).hexdigest()}
+
+
+def _read_local_interfaces():
+    if not sys.platform.startswith("linux"):
+        return None
+    result = subprocess.run(["ip", "-j", "address", "show"], capture_output=True,
+                            text=True, timeout=15, check=False)
+    if result.returncode != 0:
+        return None
+    return _import_tools("tools.login_path").parse_local_interfaces(result.stdout)
+
+
+def _classified_target_counts(targets: list[Target]) -> str:
+    linked = sum(target.source_attachment is not None for target in targets)
+    return f"IB targets with P2P management links: {linked}; Classified IB targets: {len(targets)}"
+
+
+def _jump_has_no_login_address(jump: Optional[Device]) -> bool:
+    return jump is not None and not jump.jump_candidates and not jump.login_ip
+
+
+def _runtime_routes(targets, direct, *, emit=log):
+    paths = _import_tools("tools.login_path")
+    rows = []
+    interfaces = ()
+    if direct or any(target.route.path == "direct" for target in targets):
+        try:
+            interfaces = _read_local_interfaces()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            interfaces = None
+        if interfaces is None:
+            emit("Local interfaces unavailable; direct targets are treated as not same subnet.")
+            interfaces = ()
+    reported_jumps = set()
+    for target in targets:
+        route = target.route
+        if target.ib.hostname in direct:
+            route = paths.Route(target.ib.hostname, "direct", "DIRECT_ACCESS", None, None, None)
+        if route.path == "direct" and target.ib.eth0_prefix:
+            route = replace(route, same_subnet=paths.same_subnet_interface(target.ib.eth0_prefix, interfaces))
+        selected = replace(target, ethernet=target.ethernet if route.path == "jump" else None, route=route)
+        rows.append(selected)
+        emit(f"Route {route.hostname}: {route.path} {route.reason}; "
+             f"jump={route.jump or '-'} port={route.port or '-'} same_subnet={route.same_subnet or 'no'}")
+        jump = selected.ethernet
+        if jump is not None and jump.hostname not in reported_jumps:
+            reported_jumps.add(jump.hostname)
+            if jump.input_issues:
+                hints = (
+                    f"{issue.problem.partition('=')[0]}: invalid inventory field"
+                    if issue.field == "inventory" else f"{issue.field}: {issue.problem}"
+                    for issue in jump.input_issues
+                )
+                emit(f"  Jump input hint {jump.hostname}: " + "; ".join(hints))
+        for issue in target.ib.input_issues:
+            emit(f"  SKIPPED_INPUT_INCOMPLETE {issue.field}={issue.value}: {issue.problem}")
+        for issue in target.ib.eth1_hints:
+            emit(f"  eth1 hint {issue.field}={issue.value}: {issue.problem}")
+    return rows
 
 
 def _global_yaml_subset(source: str, *, _password_policy: bool = False) -> dict:
@@ -2169,6 +2467,247 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def validate_replace_release(release_dir, project_dir=None, *, _bindings=None):
+    """D67-O12: validate the published input binding without importing YAML."""
+    try:
+        lexical_release = Path(release_dir).absolute()
+        release = lexical_release.resolve(strict=True)
+        project = (release.parent.parent if project_dir is None
+                   else Path(project_dir).resolve(strict=True))
+        if (not release.is_dir() or release.parent.name != "99-output-ib_nvl"
+                or release.parent != project / "99-output-ib_nvl"):
+            raise ValueError
+        bindings = {}
+
+        def bind(path, digest, resolved=None):
+            if _bindings is not None:
+                path = Path(path).absolute()
+                bindings[path] = (path.resolve(strict=True) if resolved is None else resolved, digest)
+
+        marker = (release / ".published-complete").read_bytes()
+        if not marker:
+            raise ValueError
+        manifest_path = release / "release-manifest.json"
+        manifest_bytes = manifest_path.read_bytes()
+        manifest_digest = hashlib.sha256(manifest_bytes).hexdigest()
+        parent_path = project / "99-output-ztp" / "current-release.json"
+        parent_bytes = parent_path.read_bytes()
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        parent = json.loads(parent_bytes.decode("utf-8"))
+        if (type(manifest) is not dict or manifest.get("schema_version") != 1
+                or type(manifest.get("devices")) is not list
+                or type(parent) is not dict or parent.get("schema_version") != 2):
+            raise ValueError
+        component = parent["components"]["nvos"]
+        component_path = Path(component["release_dir"])
+        if (component_path.is_absolute() or (project / component_path).resolve(strict=True) != release
+                or component["manifest_sha256"] != manifest_digest
+                or component["published_marker_sha256"] != hashlib.sha256(marker).hexdigest()):
+            raise ValueError
+        bind(lexical_release / ".published-complete", hashlib.sha256(marker).hexdigest(),
+             release / ".published-complete")
+        bind(lexical_release / "release-manifest.json", manifest_digest, manifest_path)
+        bind(parent_path, hashlib.sha256(parent_bytes).hexdigest())
+        for name in ("global", "devices", "subnet", "p2p"):
+            declared = parent["input_paths"][name]
+            if type(declared) is not str or not declared:
+                raise ValueError
+            source = Path(declared)
+            if source.is_absolute():
+                if name != "p2p":
+                    raise ValueError
+            else:
+                if ".." in source.parts:
+                    raise ValueError
+                source = project / source
+            digest = _file_sha256(source)
+            if parent["inputs"][name] != digest:
+                raise ValueError
+            bind(source, digest)
+        for row in manifest["devices"]:
+            name = row["hostname"]
+            if type(name) is not str or not name or "/" in name or "\\" in name:
+                raise ValueError
+            # Missing/nonordinary host YAML is a per-device selection failure.
+            candidate = release / (name + ".yaml")
+            try:
+                info = candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_size:
+                digest = _file_sha256(candidate)
+                if row["config_sha256"] != digest:
+                    raise ValueError
+                bind(lexical_release / (name + ".yaml"), digest, candidate)
+        if _bindings is not None:
+            _bindings.update(files=bindings, global_sha256=parent["inputs"]["global"])
+        return manifest
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, SetupError):
+        raise SetupError("replace release is invalid; run load to regenerate configuration") from None
+
+
+def _replace_yaml_hostname(raw):
+    """Read only the generated - set:/system:/hostname indentation path."""
+    stack, values = [], []
+    for line in raw.decode("utf-8").splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip(" "))
+        body = line[indent:]
+        if body == "- set:":
+            stack = [(indent + 2, "set")]
+            continue
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        match = re.fullmatch(r"([A-Za-z0-9_.-]+):(?:\s+(.*))?", body)
+        if match is None:
+            continue
+        key, value = match.group(1), match.group(2)
+        if [item for _at, item in stack] == ["set", "system"] and key == "hostname" and value:
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            values.append(value)
+        if value is None:
+            stack.append((indent, key))
+    return values[0] if len(values) == 1 else None
+
+
+def select_replace_yaml(target, release_dir, manifest, *, _bindings=None):
+    """Select one exact CSV-host YAML; invalid hosts never fall back to patch."""
+    result = {"verdict": "YAML_MISSING_OR_INVALID", "file": "", "sha256": "",
+              "reason": "replace YAML is missing or invalid"}
+    try:
+        name = target.ib.hostname
+        if type(name) is not str or not name or "/" in name or "\\" in name:
+            return result
+        lexical_release = Path(release_dir).absolute()
+        release = lexical_release.resolve(strict=True)
+        path = release / (name + ".yaml")
+        result["file"] = str(path)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or not info.st_size:
+            return result
+        rows = [row for row in manifest["devices"] if row.get("hostname") == name]
+        if len(rows) != 1:
+            return result
+        row = rows[0]
+        mac = normalize_mac(target.ib.eth0_mac, field="CSV eth0 MAC")
+        if (row.get("config") != name + ".yaml" or row.get("identity_state") != "managed"
+                or not mac or mac not in {normalize_mac(value, field="release MAC") for value in row["macs"]}):
+            return result
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if row.get("config_sha256") != digest or _replace_yaml_hostname(raw) != name:
+            return result
+        alias = release / (mac.replace(":", "") + ".yaml")
+        if os.path.lexists(alias) and (not alias.is_symlink() or alias.resolve(strict=True) != path):
+            return result
+        if _bindings is not None:
+            _bindings[lexical_release / path.name] = (path, digest)
+            if os.path.lexists(alias):
+                _bindings[lexical_release / alias.name] = (path, digest)
+        return {"verdict": "WOULD_REPLACE", "file": str(path), "sha256": digest, "reason": ""}
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, SetupError):
+        return result
+
+
+_REPLACE_PAYLOAD_BASE64_MAX = 131072
+
+
+def replace_command(yaml_bytes):
+    """One bounded DATA payload and its digest, never an arbitrary device command."""
+    if type(yaml_bytes) is not bytes or not yaml_bytes:
+        raise SetupError("replace YAML payload is invalid")
+    payload = base64.b64encode(yaml_bytes).decode("ascii")
+    if len(payload) > _REPLACE_PAYLOAD_BASE64_MAX:
+        raise SetupError("replace YAML payload is invalid")
+    return ["sh", "-c", _CONFIG_REPLACE_SCRIPT, "--", payload,
+            hashlib.sha256(yaml_bytes).hexdigest()]
+
+
+def _verify_replace_command_receipt(result, backup_path, expected_sha256) -> None:
+    """Check the replace receipt after framing, using this device's verified backup path."""
+    if (type(backup_path) is not str or not backup_path.startswith("/")
+            or type(expected_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None
+            or type(result) is not SessionResult or type(result.exit_code) is not int
+            or result.exit_code != 0 or type(result.output) is not str
+            or any(getattr(result, name) is not False for name in (
+                "password_changed", "password_change_required", "password_change_attempted",
+                "ib_authentication_rejected"))):
+        raise SetupError("IB configuration replace outcome is unverified")
+    parent = backup_path.rpartition("/")[0]
+    expected = f"path={parent}/initial-setup-replace.yaml\nsha256={expected_sha256}\n"
+    if result.output != expected:
+        raise SetupError("IB configuration replace receipt is unverified")
+
+
+def _replace_failure_is_detach_candidate(operation, rc) -> bool:
+    """Classify proven failure facts only; never grant permission to detach."""
+    return (type(operation) is str and operation in {"replace", "apply"}
+            and type(rc) is int and 1 <= rc <= 255)
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _InitialIPv4ReplaceRequest:
+    state: _IBConfigWriteState
+    authority: RuntimeInputAuthority
+    endpoint: DirectEndpoint
+    stamp: str
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _InitialIPv4ReplaceFailure:
+    request: _InitialIPv4ReplaceRequest
+    rc: int
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _ReplaceSyncFailureScope:
+    """One internal dispatch identity, not an authorization or transport credential."""
+    task: object
+    endpoint: object
+    operation: str
+    marker: str
+
+
+def _replace_receipt_rc(body):
+    """Recognize an exact inner replace receipt, not permission to consume it."""
+    receipt = re.fullmatch(r"rc=([1-9][0-9]{0,2})\nfailed_operation=replace\n", body)
+    if receipt is None or not 1 <= int(receipt[1]) <= 125:
+        return None
+    return int(receipt[1])
+
+
+def _qualify_replace_sync_failure(result, active_scope, result_scope, *,
+                                 cancelled=False, input_changed=False, transport_error=None):
+    """Qualify frame facts once the caller has bound both sides to the authorized dispatch."""
+    if (cancelled is not False or input_changed is not False or transport_error is not None
+            or type(active_scope) is not _ReplaceSyncFailureScope or active_scope is not result_scope
+            or type(active_scope.operation) is not str
+            or active_scope.operation not in {"replace", "apply", "save"}
+            or type(active_scope.marker) is not str
+            or re.fullmatch(r"[A-Za-z0-9_]{1,80}", active_scope.marker) is None
+            or type(result) is not SessionResult or type(result.exit_code) is not int
+            or not 1 <= result.exit_code <= 255 or type(result.output) is not str
+            or getattr(result, "cleanup_uncertain", False) is not False
+            or any(getattr(result, name) is not False for name in (
+                "password_changed", "password_change_required", "password_change_attempted",
+                "ib_authentication_rejected"))):
+        return None
+    try:
+        body = extract_command_output(result.output, active_scope.marker, expected_exit_code=result.exit_code)
+    except (SetupError, ValueError):
+        return None
+    if active_scope.operation == "replace":
+        # The frame surrounds the whole file-preparation/replace program; only
+        # its inner command can attribute the failure to the device operation.
+        if result.exit_code != 1:
+            return None
+        rc = _replace_receipt_rc(body)
+        return ("replace", rc) if rc is not None else None
+    return active_scope.operation, result.exit_code
+
+
 def _cache_authority(ib_csv: Path, p2p: Path,
                      global_file: Optional[Path]) -> dict[str, object]:
     """Record the P1 parser and source authority without requiring YAML on P2.
@@ -2270,6 +2809,91 @@ def _cache_profile_snapshot(services, public_keys):
     return {"services": saved_services, "public_keys": saved_keys}
 
 
+def _cache_route_facts(payload):
+    """Validate schema-six facts separately; the old target/device fields stay fixed."""
+    paths = _import_tools("tools.login_path")
+    inventory = payload.get("inventory_check")
+    if type(inventory) is not dict:
+        raise ValueError("missing inventory qualification")
+    if inventory == {"status": "checked_by_caller"}:
+        pass
+    elif (set(inventory) != {"status", "subset_sha256", "master_sha256"}
+          or inventory["status"] != "compared"
+          or any(type(inventory[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}", inventory[key])
+                 for key in ("subset_sha256", "master_sha256"))
+          or inventory["subset_sha256"] != payload["cache_authority"]["ib_csv_sha256"]):
+        raise ValueError("invalid inventory qualification")
+    maps = {}
+    for name in ("routes", "input_issues", "eth1_hints", "jump_candidates", "source_attachments"):
+        if type(payload.get(name)) is not dict or any(type(key) is not str for key in payload[name]):
+            raise ValueError("missing route facts")
+        maps[name] = payload[name]
+    routes = {}
+    for name, row in maps["routes"].items():
+        if (type(row) is not dict or set(row) != {"hostname", "path", "reason", "jump", "port", "same_subnet"}
+                or row["hostname"] != name or row["path"] not in {"jump", "direct"}
+                or row["reason"] not in {"JUMP_LINK", "NO_MGMT_LINK", "PEER_NOT_JUMP"}
+                or not (row["same_subnet"] is None or type(row["same_subnet"]) is str)
+                or (row["path"] == "jump") != (row["reason"] == "JUMP_LINK")):
+            raise ValueError("invalid route")
+        # Keep optional endpoints typed and consistent; direct is not a fabricated Jump.
+        if row["path"] == "jump":
+            if any(type(row[key]) is not str or not row[key] for key in ("jump", "port")):
+                raise ValueError("invalid jump route")
+        elif row["jump"] is not None or row["port"] is not None:
+            raise ValueError("invalid direct route")
+        routes[name] = paths.Route(**row)
+    if set(maps["source_attachments"]) != set(routes):
+        raise ValueError("invalid source attachment names")
+    sources = {}
+    for host, row in maps["source_attachments"].items():
+        route = routes[host]
+        if row is None:
+            if route.reason != "NO_MGMT_LINK":
+                raise ValueError("missing source attachment")
+            sources[host] = None
+            continue
+        if (type(row) is not dict or set(row) != {"peer", "peer_type", "port"}
+                or any(type(value) is not str for value in row.values())):
+            raise ValueError("invalid source attachment")
+        source = paths.Attachment(**row)
+        if (route.reason == "NO_MGMT_LINK"
+                or (route.reason == "JUMP_LINK" and (
+                    not paths.is_jump_type(source.peer_type)
+                    or (source.peer, source.port) != (route.jump, route.port)))
+                or (route.reason == "PEER_NOT_JUMP" and paths.is_jump_type(source.peer_type))):
+            raise ValueError("source attachment does not match base route")
+        sources[host] = source
+    facts = {"source_attachments": sources}
+    for name in ("input_issues", "eth1_hints"):
+        facts[name] = {}
+        for host, rows in maps[name].items():
+            if type(rows) is not list:
+                raise ValueError("invalid input facts")
+            values = []
+            for row in rows:
+                if (type(row) is not dict or set(row) != {"hostname", "field", "value", "problem", "blocking"}
+                        or row["hostname"] != host or type(row["blocking"]) is not bool
+                        or any(type(row[key]) is not str for key in ("hostname", "field", "value", "problem"))):
+                    raise ValueError("invalid input issue")
+                values.append(paths.InputIssue(**row))
+            facts[name][host] = tuple(values)
+    facts["jump_candidates"] = {}
+    for host, rows in maps["jump_candidates"].items():
+        if type(rows) is not list:
+            raise ValueError("invalid jump candidates")
+        values = []
+        for row in rows:
+            if (type(row) is not dict or set(row) != {"address", "entry"}
+                    or type(row["address"]) is not str or type(row["entry"]) is not str
+                    or not re.fullmatch(r"JUMP_ETH0|JUMP_VLAN[1-9][0-9]{0,3}", row["entry"])):
+                raise ValueError("invalid jump candidate")
+            ipaddress.IPv4Address(row["address"])
+            values.append(paths.JumpCandidate(**row))
+        facts["jump_candidates"][host] = tuple(values)
+    return routes, facts
+
+
 def load_target_cache(cache_path: Path, ib_csv: Path,
                       p2p: Path, *, public_key_tool: Optional[Path] = None,
                       validate_public_keys_with_ssh_keygen: bool = False,
@@ -2278,6 +2902,18 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                       _admission_out=None,
                       public_key_dir: Optional[Path] = None
                       ) -> Optional[tuple[int, list[Target]]]:
+    return _load_target_cache(
+        cache_path, ib_csv, p2p, public_key_tool=public_key_tool,
+        validate_public_keys_with_ssh_keygen=validate_public_keys_with_ssh_keygen,
+        allow_baked_missing_global=allow_baked_missing_global, input_snapshot=input_snapshot,
+        _admission_out=_admission_out, public_key_dir=public_key_dir,
+    )
+
+
+def _load_target_cache(cache_path, ib_csv, p2p, *, public_key_tool=None,
+                       validate_public_keys_with_ssh_keygen=False, allow_baked_missing_global=False,
+                       input_snapshot=None, _admission_out=None, public_key_dir=None,
+                       expected_ib_csv_sha256=None):
     if _admission_out is not None and (
         type(_admission_out) is not dict or _admission_out
     ):
@@ -2318,6 +2954,10 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
             captured.read(current_global)  # Required capture, never a live fallback.
         if not _valid_cache_authority(payload, ib_csv, p2p, current_global, input_snapshot=captured):
             return None
+        if (expected_ib_csv_sha256 is not None
+                and payload["cache_authority"]["ib_csv_sha256"] != expected_ib_csv_sha256):
+            return None
+        routes, facts = _cache_route_facts(payload)
         if "global" not in payload or "services" not in payload or "public_keys" not in payload:
             return None
         _validate_cache_profile(payload)
@@ -2348,13 +2988,33 @@ def load_target_cache(cache_path: Path, ib_csv: Path,
                     public_key_dir=public_key_dir,
                 ) != payload["public_keys"]:
                     return None
-        targets = [
-            Target(
-                Device(**item["ib"]), Device(**item["ethernet"]),
-                clean(item["ethernet_port"]), clean(item["ib_port_alias"]),
-            )
-            for item in payload["targets"]
-        ]
+        targets = []
+        def device(row):
+            if (type(row) is not dict or set(row) != {
+                    "hostname", "dev_type", "login_ip", "eth0_prefix", "eth0_gateway",
+                    "eth0_mac", "eth1_prefix", "eth1_gateway", "login_interface"}
+                    or any(type(value) is not str for value in row.values())):
+                raise ValueError("invalid cached device")
+            value = Device(**row)
+            name = value.hostname
+            return replace(value, input_issues=facts["input_issues"][name],
+                           eth1_hints=facts["eth1_hints"][name],
+                           jump_candidates=facts["jump_candidates"].get(name, ()))
+        for item in payload["targets"]:
+            if (type(item) is not dict or set(item) != {"ib", "ethernet", "ethernet_port", "ib_port_alias"}
+                    or type(item["ethernet_port"]) is not str or type(item["ib_port_alias"]) is not str):
+                return None
+            ib = device(item["ib"])
+            route = routes[ib.hostname]
+            ethernet = device(item["ethernet"]) if item["ethernet"] is not None else None
+            if ((ethernet is None) != (route.path == "direct")
+                    or (ethernet is not None and route.jump != ethernet.hostname)):
+                return None
+            targets.append(Target(ib, ethernet, clean(item["ethernet_port"]),
+                                  clean(item["ib_port_alias"]), route=route,
+                                  source_attachment=facts["source_attachments"][ib.hostname]))
+        if set(routes) != {target.ib.hostname for target in targets} or len(routes) != len(targets):
+            return None
         candidate_count = int(payload["ib_candidate_count"])
         if candidate_count < len(targets) or not targets:
             return None
@@ -2373,7 +3033,12 @@ def save_target_cache(cache_path: Path, ib_csv: Path, p2p: Path,
                       ib_candidate_count: int, targets: list[Target], *,
                       global_file: Optional[Path] = None,
                       services: Optional[dict[str, object]] = None,
-                      public_keys: Optional[list[dict[str, str]]] = None) -> None:
+                      public_keys: Optional[list[dict[str, str]]] = None,
+                      inventory_check: Optional[dict] = None) -> None:
+    if inventory_check is None:
+        raise SetupError("target cache requires the caller's actual inventory qualification")
+    devices = {device.hostname: device for target in targets
+               for device in (target.ib, target.ethernet) if device is not None}
     payload = {
         "version": TARGET_CACHE_VERSION,
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S %Z"),
@@ -2384,10 +3049,21 @@ def save_target_cache(cache_path: Path, ib_csv: Path, p2p: Path,
         "ib_candidate_count": ib_candidate_count,
         "services": services,
         "public_keys": public_keys or [],
+        "inventory_check": inventory_check,
+        "routes": {target.ib.hostname: asdict(target.route) for target in targets},
+        "source_attachments": {target.ib.hostname: (
+            asdict(target.source_attachment) if target.source_attachment is not None else None)
+            for target in targets},
+        "input_issues": {name: [asdict(issue) for issue in device.input_issues]
+                         for name, device in devices.items()},
+        "eth1_hints": {name: [asdict(issue) for issue in device.eth1_hints]
+                       for name, device in devices.items()},
+        "jump_candidates": {name: [asdict(candidate) for candidate in device.jump_candidates]
+                            for name, device in devices.items() if device.dev_type.endswith("jump")},
         "targets": [
             {
                 "ib": device_to_dict(target.ib),
-                "ethernet": device_to_dict(target.ethernet),
+                "ethernet": device_to_dict(target.ethernet) if target.ethernet is not None else None,
                 "ethernet_port": target.ethernet_port,
                 "ib_port_alias": target.ib_port_alias,
             }
@@ -2395,6 +3071,7 @@ def save_target_cache(cache_path: Path, ib_csv: Path, p2p: Path,
         ],
     }
     _validate_cache_profile(payload)
+    _cache_route_facts(payload)
     checksum_path = cache_path.with_name(cache_path.name + ".sha256")
     temporary = cache_path.with_name(cache_path.name + ".tmp")
     checksum_temporary = checksum_path.with_name(checksum_path.name + ".tmp")
@@ -2818,32 +3495,201 @@ def _execute_ib_phase(target, neighbor, eth_user, ethernet_password, ib_user,
     return phase.finish(result)
 
 
+def _execute_ib_direct_phase(target, endpoint, eth_user, ethernet_password, ib_user,
+                             current_password, timeout, ib_command, *, local=False,
+                             allow_password_change=False, ib_new_password=None,
+                             _phase_operation=None, _password_policy=None):
+    if (type(local) is not bool or local or eth_user != "" or ethernet_password != ""
+            or type(eth_user) is not str or type(ethernet_password) is not str
+            or ib_command != ["nv", "config", "show", "-o", "commands"]):
+        raise SetupError("private direct IB phase supports only its admitted read/PAM path")
+    if (type(current_password) is not str or not current_password
+            or any(0xD800 <= ord(char) <= 0xDFFF for char in current_password)
+            or len(current_password.encode("utf-8")) > 4096
+            or re.search(r"[\x00-\x1f\x7f-\x9f]", current_password)
+            or type(timeout) is not int or timeout <= 0):
+        raise SetupError("invalid private IB current credential or timeout")
+    _validate_direct_endpoint(target, endpoint)
+    if type(ib_user) is not str or clean(ib_user) != ib_user or not valid_ssh_user(ib_user):
+        raise SetupError("invalid private direct IB account")
+    if _phase_operation == "password-change":
+        if allow_password_change is not True or type(ib_new_password) is not str:
+            _ib_raise_phase_failure("project")
+        _ib_project_value(_password_policy, ib_new_password, user=ib_user, fetch=True)
+    elif _phase_operation == "post-change-read":
+        _ib_project_value(_password_policy, current_password, user=ib_user, fetch=True)
+    elif _phase_operation != "auth-probe-readonly":
+        raise SetupError("unsupported private IB phase operation")
+    elif _password_policy is not None:
+        _ib_project_value(_password_policy, user=ib_user)
+    point = endpoint
+    for attempt in (0, 1):
+        check_task_cancelled()
+        address = point.address + ("%" + point.interface if point.interface is not None else "")
+        phase = _IBPhase(os.urandom(16).hex(), _phase_operation, ib_user + "@" + address,
+                         "", _password_policy)
+        responder = NestedResponder("", current_password,
+            _phase_operation == "password-change" and allow_password_change is True,
+            ib_new_password=ib_new_password, ib_destination=phase.endpoint, _phase=phase)
+        original_response = phase.response
+
+        def attributed_direct_failure(output, *, complete=False):
+            text = strip_ansi(output)
+            prompts = re.findall(r"(?im)^([^\n]*password[^\n]*):[ \t]*$", text)
+            if (phase.invalid or phase.any_frame
+                    or phase.expiry or phase.updated or phase.denied_count
+                    or any(phase.pam_counts.values()) or phase.pending is not None
+                    or phase.authority_pending or phase.outer_done
+                    or phase.pam_current_done or phase.new_done or phase.confirm_done
+                    or _pending_diff_has_password_update_notice(text)
+                    or any(prompt != phase.endpoint + "'s password" for prompt in prompts)):
+                return "none", None
+            if complete and (phase.incomplete_marker or phase.begin_count != 1
+                    or phase.exit_count != 1 or phase.declared != 255
+                    or not phase.begin_at < phase.exit_at
+                    or (phase.prompt_count and not phase.begin_at < phase.prompt_at < phase.exit_at)):
+                return "none", None
+            if re.search(r"(?i)remote host identification has changed|host key verification failed", text):
+                # A first warning line can precede its fingerprint/address chunks.
+                # Waiting never supplies a credential or grants a typed action.
+                if phase.current_done or phase.prompt_count:
+                    return "none", None
+                try:
+                    classified = _management_host_key_failure(text)
+                except SetupError as error:
+                    if (type(error) is not SetupError or str(error) !=
+                            "host-key change (unparseable); no known_hosts entry removed"):
+                        raise
+                    classified = None
+                if classified is None:
+                    return ("none" if complete else "pending"), None
+                if classified.address != address:
+                    return "none", None
+                return "hostkey", classified
+            if _phase_operation not in ("auth-probe-readonly", "post-change-read"):
+                return "none", None
+            named = re.search(
+                r"(?i)(?:connect to host|connection (?:closed|reset) by)\s+(\S+)", text)
+            if named is None or named.group(1).strip("[]") != address:
+                return "none", None
+            classified = classify_ssh_failure(text, outer_address=None, inner_address=address)
+            if classified is None or classified.kind is not SshFailureKind.DIRECT_SSH_NETWORK:
+                return "none", None
+            return "network", SshFailure(SshFailureKind.DIRECT_LOGIN_NETWORK, "direct", address)
+
+        def direct_response(output, active_responder):
+            try:
+                return original_response(output, active_responder)
+            except SetupError as error:
+                if (type(error) is not SetupError or not phase.network or str(error) !=
+                        "IB phase observation is not safely attributable"):
+                    raise
+                kind, _fact = attributed_direct_failure(output)
+                if kind == "none":
+                    raise
+                return None
+
+        phase.response = direct_response
+        failure = ssh_failure = result = None
+        try:
+            command = direct_ssh_command(target, point, ib_user, timeout, ib_command,
+                marker=phase.nonce, password_only=True, _phase=phase)
+            record_metric("ib_ssh_attempts")
+            result = interactive_run(command, responder, max(timeout * 4, 60))
+            if type(result) is not SessionResult or type(result.exit_code) is not int or type(result.output) is not str:
+                raise SetupError("private direct IB phase result is unverified")
+            if result.exit_code != 0:
+                kind, classified = attributed_direct_failure(result.output, complete=True)
+                if kind in ("hostkey", "network") and (result.exit_code != 255 or any(
+                        getattr(result, name) is not False for name in ("password_changed",
+                        "password_change_required", "password_change_attempted", "ib_authentication_rejected"))):
+                    raise SetupError("direct phase failure has conflicting completion facts")
+                if kind == "hostkey":
+                    classified._direct_endpoint = point
+                    raise classified
+                if kind == "network":
+                    point = _direct_ipv4_after_network(
+                        target, point, classified, timeout, replay_safe=attempt == 0)
+                    continue
+        except (ProjectInputChanged, BatchStopped):
+            raise
+        except (SetupError, OSError) as error:
+            failure = _ib_phase_error_facts(error)
+            ssh_failure = _ssh_failure_fact(error)
+        if failure is not None:
+            _ib_raise_phase_failure("project" if phase.authority_pending else "transport", *failure,
+                                    ssh_failure=ssh_failure)
+        result = phase.finish(result)
+        result._direct_endpoint = point
+        return result
+    _ib_raise_phase_failure("transport")
+
+
 _IB_CREDENTIALS_EXHAUSTED = "known IB credential sources are exhausted; device is HOLD"
 
 
 @dataclass(repr=False)
 class _IBLogin:
-    current_password: str
+    current_password: Optional[str]
     read_result: SessionResult
 
 
 def _authenticate_ib_read(target, neighbor, eth_user, ethernet_password, ib_user,
                           initial_password, timeout, *, local=False, _password_policy=None,
-                          strict=True):
-    """The first two credential sources of the one IB authentication readback (P3c map P5).
+                          strict=True, _management_private_key=None):
+    """Known credential sources of the one IB authentication readback (P3c map P5).
 
-    v15 order (I14): the initial password, then the independently verified project target.
+    I039 direct key first, then independently verified project target and initial.
     strict (a management-server task with the project global): each read is a DEV phase
     session, the target comes through _ib_project_value, and an initial password equal to the
     target is not tried twice (DEV).  Otherwise a v15 password-only session.  When both are
     rejected this raises _IB_CREDENTIALS_EXHAUSTED; inspect_ib_device then asks once (T18).
     """
     command = ["nv", "config", "show", "-o", "commands"]
-    password = initial_password
-    for attempt in (1, 2):
+    paths = _import_tools("tools.login_path")
+    path = "direct" if target.ethernet is None else "jump"
+    key_available = (path == "direct" and local is False
+                     and isinstance(_management_private_key, Path)
+                     and _management_private_key.is_file()
+                     and not _management_private_key.is_symlink())
+    attempted_password = None
+    for source in paths.credential_order(path, key_available=key_available):
+        if source == "ask":
+            break  # The existing inspect layer owns the one current-password answer.
+        if source == "key":
+            _validate_direct_endpoint(target, neighbor)
+            try:
+                result = _run_direct_key_read(target, neighbor, ib_user,
+                    _management_private_key, timeout, command,
+                    strict=strict, policy=_password_policy)
+            except IBAuthenticationError as error:
+                # Only a real key authentication denial reaches password sources.
+                neighbor = getattr(error, "_direct_endpoint", None)
+                _validate_direct_endpoint(target, neighbor)
+            else:
+                actual = getattr(result, "_direct_endpoint", None)
+                _validate_direct_endpoint(target, actual)
+                return _IBLogin(None, result)
+            continue
+        if source == "project":
+            if _password_policy is None:
+                continue
+            password = (_ib_project_value(_password_policy, user=ib_user, fetch=True) if strict
+                        else _password_policy.password())
+        else:
+            password = initial_password
+        if attempted_password is not None and hmac.compare_digest(
+                attempted_password.encode("utf-8"), password.encode("utf-8")):
+            continue
+        attempted_password = password
         rejected = False
         try:
-            if strict:
+            if strict and type(target) is Target and target.ethernet is None:
+                result = _execute_ib_direct_phase(
+                    target, neighbor, eth_user, ethernet_password, ib_user, password, timeout,
+                    command, local=local, _phase_operation="auth-probe-readonly",
+                    _password_policy=_password_policy)
+            elif strict:
                 record_metric("ib_ssh_attempts")
                 result = _execute_ib_phase(
                     target, neighbor, eth_user, ethernet_password, ib_user, password, timeout,
@@ -2857,18 +3703,18 @@ def _authenticate_ib_read(target, neighbor, eth_user, ethernet_password, ib_user
             rejected = True
         if not rejected:
             return _IBLogin(password, result)
-        if attempt == 2:
-            break
-        # Not inside the caught rejection's exception scope; the target is lazy.
+        # Not inside the caught rejection's exception scope; other errors never advance.
         if _password_policy is None:
             raise SetupError("IB initial credential rejected; project global is needed to verify "
                              "an already-changed password")
-        password = (_ib_project_value(_password_policy, user=ib_user, fetch=True) if strict
-                    else _password_policy.password())
-        log("Initial IB credential rejected; trying the project IB password (no rotation).")
-        if strict and hmac.compare_digest(initial_password.encode("utf-8"), password.encode("utf-8")):
-            break
-    raise SetupError(_IB_CREDENTIALS_EXHAUSTED)
+        if source == "project":
+            log("Project IB credential rejected; trying the initial IB password (no rotation).")
+    exhausted = SetupError(_IB_CREDENTIALS_EXHAUSTED)
+    if key_available:
+        # This point was validated after the actual key session's denial;
+        # preserve it across the existing inspect-owned one-current handoff.
+        exhausted._direct_endpoint = neighbor
+    raise exhausted
 
 
 def interactive_run(command: list[str], responder: Callable[[str], Optional[str]],
@@ -3346,24 +4192,103 @@ def ethernet_command_argv(argv: object) -> list[str]:
     table = (
         (("hostname",), None), (("nv", "show", "interface"), None),
         (("nv", "config", "show"), None), (("ip", "-d", "link", "show"), None),
-        (("bridge", "fdb", "show"), None), (("ip", "neighbor"), None),
+        (("bridge", "fdb", "show"), None), (("bridge", "vlan", "show"), None),
+        (("ip", "neighbor"), None),
         (("ip", "-j", "address", "show"), None),
         (("ifquery", None), lambda value: bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value))),
+        (("ip", "vrf", "exec", None, "ping", "-6", "-c", "2", "-W", "1", None),
+         lambda value: bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value))
+         if "%" not in value else bool(re.fullmatch(
+             r"[0-9A-Fa-f:]+%[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value))),
         (("ssh-keygen", "-l", "-F", None, "-f", "/home/cumulus/.ssh/known_hosts"),
          lambda value: _import_tools("tools.login_path")._host_key_address(value)),
     )
     if any(len(command) == len(pattern) and all(
             token == expected if expected is not None else validator(token)
             for token, expected in zip(command, pattern)) for pattern, validator in table):
-        return command
+        if command[:3] != ["ip", "vrf", "exec"]:
+            return command
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", command[3]) and "%" in command[10]:
+            try:
+                if ipaddress.IPv6Address(command[10].split("%", 1)[0]) in ipaddress.IPv6Network("fe80::/64"):
+                    return command
+            except ValueError:
+                pass  # A malformed address is refused by the same argv boundary.
     raise SetupError(
         "Ethernet jump command is not allowed by the read-only argv allowlist: "
         + shlex.join(command)
     )
 
 
+def _is_replace_command(argv):
+    """Admit only the complete D7 program and its two bounded typed DATA words."""
+    return (type(argv) is list and len(argv) == 6
+            and all(type(item) is str for item in argv)
+            and argv[:2] == ["sh", "-c"] and argv[2] == _CONFIG_REPLACE_SCRIPT
+            and argv[3] == "--" and 0 < len(argv[4]) <= _REPLACE_PAYLOAD_BASE64_MAX
+            and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", argv[4]) is not None
+            and re.fullmatch(r"[0-9a-f]{64}", argv[5]) is not None)
+
+
+def _is_readonly_key_command(argv):
+    """One exact typed program/payload admission, shared by every carrier."""
+    return (type(argv) is list and len(argv) == 5
+            and all(type(item) is str for item in argv)
+            and argv[:2] == ["sh", "-c"] and argv[2] == _KEY_READONLY_SCRIPT
+            and argv[3] == "--" and len(argv[4]) <= 131072
+            and re.fullmatch(r"[A-Za-z0-9+/=]+", argv[4]) is not None)
+
+
+def _readonly_key_result(result, marker, *, responder=None):
+    """Only the sealed read may report an empty, authenticated 0/34 frame."""
+    if (type(result) is not SessionResult or type(result.exit_code) is not int
+            or result.exit_code not in (0, 34) or type(result.output) is not str
+            or getattr(result, "cleanup_uncertain", False) is not False
+            or any(getattr(result, name, None) is not False for name in (
+                "password_changed", "password_change_required", "password_change_attempted",
+                "ib_authentication_rejected"))
+            or (responder is not None and any(getattr(responder, name, None) is not False
+                for name in ("password_change_attempted", "password_change_blocked")))
+            or _EXPIRED_PASSWORD.search(result.output)
+            or _pending_diff_has_password_update_notice(result.output)
+            or _NETWORK_FAILURE.search(result.output)
+            or re.search(r"(?i)permission denied|authentication (?:failed|failure)|"
+                         r"too many authentication failures", result.output)):
+        raise SetupError("readonly public-key check outcome is unverified")
+    normalized = strip_ansi(result.output)
+    markers = re.findall(r"(?m)^__HTTP_IB_(?:AUTH|BEGIN|END)_[^\n]*$", normalized)
+    if markers != ["__HTTP_IB_BEGIN_" + marker + "__",
+                   "__HTTP_IB_END_" + marker + "__=" + str(result.exit_code)]:
+        raise SetupError("readonly public-key check frame is unverified")
+    body = extract_command_output(result.output, marker, expected_exit_code=result.exit_code)
+    if body != "":
+        raise SetupError("readonly public-key check returned unexpected content")
+    result.output = body
+    return result
+
+
+def _closed_ib_script_argv(argv):
+    """Recognize only the fixed shell programs for ordinary IB operations."""
+    if _is_replace_command(argv):
+        return list(argv)
+    if _is_readonly_key_command(argv):
+        return list(argv)
+    if (type(argv) is list and len(argv) == 5
+            and all(type(item) is str for item in argv)
+            and argv[:2] == ["sh", "-c"] and argv[3] == "--"
+            and argv[2] in (_CONFIG_BACKUP_SCRIPT, _DEFERRED_APPLY_SCRIPT,
+                            _DEFERRED_APPLY_RC_SCRIPT, _REPLACE_DEFERRED_APPLY_SCRIPT,
+                            _REPLACE_DEFERRED_RC_SCRIPT)
+            and re.fullmatch(r"[0-9]{8}-[0-9]{6}", argv[4])):
+        return list(argv)
+    return None
+
+
 def ib_command_argv(argv: object) -> list[str]:
     """Enforce the NVOS command vectors used by this Network workflow."""
+    closed = _closed_ib_script_argv(argv)
+    if closed is not None:
+        return closed
     command = typed_argv(argv, label="NVOS command")
     tokens = tuple(command)
     if (
@@ -3375,6 +4300,8 @@ def ib_command_argv(argv: object) -> list[str]:
         return command
     if tokens in {
         ("true",),
+        ("ip", "addr", "show", "eth0"),
+        ("ip", "route"),
         ("nv", "config", "show"),
         ("nv", "config", "show", "-o", "commands"),
         ("nv", "config", "diff", "-o", "commands"),
@@ -3383,6 +4310,7 @@ def ib_command_argv(argv: object) -> list[str]:
         ("nv", "set", "system", "config", "auto-save", "state", "enabled"),
         ("nv", "set", "system", "ztp", "config-save", "enabled"),
         ("nv", "config", "save"),
+        ("nv", "config", "detach"),
         ("cat", "/etc/ssh/ssh_host_rsa_key.pub"),
         ("cat", "/etc/ssh/ssh_host_ecdsa_key.pub"),
         ("cat", "/etc/ssh/ssh_host_ed25519_key.pub"),
@@ -3445,7 +4373,62 @@ def ib_command_argv(argv: object) -> list[str]:
 def outer_ssh_command(ethernet: Device, user: str, remote_argv: list[str],
                       timeout: int, *, tty: bool = False,
                       local: bool = False, control_path: Optional[str] = None) -> list[str]:
-    command = typed_argv(remote_argv, label="outer SSH command")
+    if (type(remote_argv) is list and remote_argv
+            and type(remote_argv[-1]) is str and "\n" in remote_argv[-1]):
+        # Only the original nested-SSH carrier may carry a fixed multiline
+        # NVOS program. All ordinary typed argv/control-byte rules stay intact.
+        prefix = typed_argv(remote_argv[:-1], label="outer SSH command")
+        if type(timeout) is not int or timeout <= 0 or len(prefix) not in (22, 26):
+            raise SetupError("invalid closed NVOS outer carrier")
+        validate_network_selector(prefix[3], label="closed NVOS VRF")
+        validate_network_selector(prefix[-2], label="closed NVOS interface")
+        destination = prefix[-1]
+        account, separator, address = destination.rpartition("@")
+        try:
+            link_local = ipaddress.IPv6Address(address).is_link_local
+        except ipaddress.AddressValueError:
+            link_local = False
+        if not separator or not valid_ssh_user(account) or "%" in address or not link_local:
+            raise SetupError("invalid closed NVOS outer endpoint")
+        expected = [
+            "ip", "vrf", "exec", prefix[3], "ssh", "-6", "-tt",
+            "-o", f"ConnectTimeout={timeout}",
+            "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "NumberOfPasswordPrompts=1",
+        ]
+        if len(prefix) == 26:
+            expected += ["-o", "PubkeyAuthentication=no",
+                         "-o", "PreferredAuthentications=password,keyboard-interactive"]
+        expected += ["-B", prefix[-2], destination]
+        if prefix != expected:
+            raise SetupError("invalid closed NVOS outer command")
+        try:
+            remote = shlex.split(remote_argv[-1])
+        except ValueError:
+            raise SetupError("invalid closed NVOS command frame") from None
+        if (len(remote) != 3 or remote[:2] != ["sh", "-c"]
+                or shlex.join(remote) != remote_argv[-1]):
+            raise SetupError("invalid closed NVOS command frame")
+        match = re.match(r'^printf "\\n__HTTP_IB_BEGIN_([A-Za-z0-9_]{1,80})__\\n"; ', remote[2])
+        if match is None:
+            raise SetupError("invalid closed NVOS command frame")
+        marker = match.group(1)
+        start = 'printf "\\n__HTTP_IB_BEGIN_' + marker + '__\\n"; '
+        end = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + marker
+               + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+        if not remote[2].endswith(end):
+            raise SetupError("invalid closed NVOS command frame")
+        try:
+            body = shlex.split(remote[2][len(start):-len(end)])
+        except ValueError:
+            raise SetupError("invalid closed NVOS command frame") from None
+        closed = _closed_ib_script_argv(body)
+        if closed is None or _framed_script(closed, marker) != remote[2]:
+            raise SetupError("invalid closed NVOS command frame")
+        command = [*prefix, remote_argv[-1]]
+    else:
+        command = typed_argv(remote_argv, label="outer SSH command")
     # Local execution uses the same fixed PATH as the remote wrapper (v15; T14).
     script = "export PATH=" + shlex.quote(_SAFE_PATH) + "; exec " + shlex.join(command)
     wrapper = ["sh", "-c", script]
@@ -3558,12 +4541,12 @@ def collect_ethernet_network_tables(ethernet: Device, user: str,
         ethernet, user, password, ["bridge", "fdb", "show"], timeout,
         local=local,
     )
-    neighbors = run_on_ethernet(
-        ethernet, user, password, ["ip", "neighbor"], timeout, local=local,
+    vlans = run_on_ethernet(
+        ethernet, user, password, ["bridge", "vlan", "show"], timeout, local=local,
     )
     if not links.strip():
         raise SetupError(f"empty 'ip -d link show' output from {ethernet.hostname}")
-    return links.strip(), fdb.strip(), neighbors.strip()
+    return links.strip(), fdb.strip(), vlans.strip()
 
 
 def snapshot_filename(hostname: str) -> str:
@@ -3612,7 +4595,7 @@ def discover_input_file(explicit: Optional[Path], preferred_name: str,
 def save_ethernet_snapshot(directory: Path, ethernet: Device,
                            actual_hostname: str, location: str,
                            interfaces: str, links: str, fdb: str,
-                           neighbors: str) -> Path:
+                           vlans: str) -> Path:
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -3632,8 +4615,8 @@ def save_ethernet_snapshot(directory: Path, ethernet: Device,
         f"{links.rstrip()}\n"
         "\n===== bridge fdb show =====\n"
         f"{fdb.rstrip()}\n"
-        "\n===== ip neighbor =====\n"
-        f"{neighbors.rstrip()}\n"
+        "\n===== bridge vlan show =====\n"
+        f"{vlans.rstrip()}\n"
     )
     try:
         temporary.write_text(content, encoding="utf-8")
@@ -3918,6 +4901,227 @@ class NestedResponder:
             return self.ib_default_password if len(ib_lines) == 1 else None
         return None
 
+class _DirectResponder(NestedResponder):
+    """The ordinary direct session has no outer credential recipient."""
+    def __call__(self, output):
+        prompts = re.findall(r"(?im)^([^\n]*password[^\n]*):[ \t]*$", strip_ansi(output))
+        pam_patterns = (
+            r"[ \t]*(?:\(current\)|current|old)[^\n]*password[ \t]*",
+            r"[ \t]*[^\n]*(?:retype|repeat|confirm)[^\n]*password[ \t]*",
+            r"[ \t]*(?![^\n]*(?:retype|repeat|confirm))[^\n]*new[^\n]*password[ \t]*",
+        )
+        for prompt in prompts:
+            if prompt == self.ib_destination + "'s password":
+                continue
+            # Preserve the original PAM-role handling, never classify a host
+            # credential request as PAM just because it contains a role word.
+            if (not re.search(r"@|fe80:|'s[ \t]+password", prompt, re.I)
+                    and any(re.fullmatch(pattern, prompt, re.I) for pattern in pam_patterns)):
+                continue
+            raise SetupError("direct credential prompt differs from the requested endpoint")
+        return super().__call__(output)
+
+
+def _direct_endpoint_for(target):
+    paths = _import_tools("tools.login_path")
+    if target.route.same_subnet is not None:
+        return DirectEndpoint(paths.link_local_from_mac(target.ib.eth0_mac), target.route.same_subnet)
+    return DirectEndpoint(target.ib.login_ip)
+
+
+def _validate_direct_endpoint(target, endpoint):
+    paths = _import_tools("tools.login_path")
+    if (type(target) is not Target or type(target.ib) is not Device
+            or target.ib.dev_type != "ib" or target.ethernet is not None
+            or type(target.route) is not paths.Route or target.route.path != "direct"
+            or target.route.jump is not None or type(endpoint) is not DirectEndpoint
+            or type(endpoint.address) is not str):
+        raise SetupError("invalid direct IB target or endpoint")
+    try:
+        address = ipaddress.ip_address(endpoint.address)
+        if str(address) != endpoint.address:
+            raise ValueError("noncanonical direct address")
+        if address.version == 4:
+            if endpoint.address != target.ib.login_ip or endpoint.interface is not None:
+                raise ValueError("direct IPv4 differs from CSV")
+        elif (not address.is_link_local or "%" in endpoint.address
+                or endpoint.address != paths.link_local_from_mac(target.ib.eth0_mac)
+                or endpoint.interface != target.route.same_subnet):
+            raise ValueError("direct link-local differs from CSV/route")
+        else:
+            validate_network_selector(endpoint.interface, label="direct interface")
+    except ValueError:
+        raise SetupError("direct endpoint differs from the admitted CSV/route") from None
+
+
+def direct_ssh_command(target, endpoint, ib_user, timeout, ib_command, *, marker=None,
+                       password_only=False, _phase=None, _key_file=None):
+    """The single closed manager-to-IB argv builder, with no transit."""
+    _validate_direct_endpoint(target, endpoint)
+    if (type(ib_user) is not str or clean(ib_user) != ib_user or not valid_ssh_user(ib_user)
+            or type(timeout) is not int or timeout <= 0 or type(password_only) is not bool):
+        raise SetupError("invalid direct account or timeout")
+    command = ib_command_argv(ib_command)
+    if _key_file is not None:
+        if (password_only or _phase is not None or not isinstance(_key_file, Path)
+                or not _key_file.is_file() or _key_file.is_symlink()
+                or (command not in (["nv", "config", "show", "-o", "commands"],
+                                    ["ip", "addr", "show", "eth0"], ["ip", "route"],
+                                    ["nv", "show", "system", "ztp"])
+                    and not _is_readonly_key_command(command))):
+            raise SetupError("explicit direct key mode supports only its admitted read vectors")
+    nonce = marker or os.urandom(16).hex()
+    if type(nonce) is not str or not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        raise SetupError("invalid direct command marker")
+    address = endpoint.address + ("%" + endpoint.interface if endpoint.interface is not None else "")
+    destination = ib_user + "@" + address
+    argv = ["ssh", "-6" if endpoint.interface is not None else "-4", "-tt",
+            *ssh_options(timeout), "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
+            "-o", "ControlMaster=no", "-o", "ControlPath=none",
+            "-o", "NumberOfPasswordPrompts=1"]
+    if _key_file is not None:
+        argv += ["-i", str(_key_file), "-o", "BatchMode=yes",
+                 "-o", "PreferredAuthentications=publickey", "-o", "PasswordAuthentication=no",
+                 "-o", "KbdInteractiveAuthentication=no", "-o", "IdentitiesOnly=yes"]
+    elif password_only:
+        argv += ["-o", "PubkeyAuthentication=no",
+                 "-o", "PreferredAuthentications=password,keyboard-interactive"]
+    argv += [destination, shlex.join(["sh", "-c", _framed_script(command, nonce)])]
+    if _phase is not None:
+        if (type(_phase) is not _IBPhase or marker != _phase.nonce or not password_only
+                or command != ["nv", "config", "show", "-o", "commands"]
+                or _phase.endpoint != destination or _phase.outer_endpoint != ""):
+            raise SetupError("private direct phase differs from the exact SSH request")
+        return ["sh", "-c", _ib_phase_script(argv, _phase)]
+    return argv
+
+
+def _run_direct_key_read(target, endpoint, ib_user, key_file, timeout, command, *,
+                         strict=False, policy=None):
+    """One explicit key-only read; it never acquires a password or write permit."""
+    _validate_direct_endpoint(target, endpoint)
+    if (type(strict) is not bool or (strict and policy is None)
+            or type(command) is not list
+            or (command not in (["nv", "config", "show", "-o", "commands"],
+                                ["ip", "addr", "show", "eth0"], ["ip", "route"],
+                                ["nv", "show", "system", "ztp"])
+                and not _is_readonly_key_command(command))
+            or not isinstance(key_file, Path)):
+        raise SetupError("invalid explicit direct key read")
+    try:
+        before = key_file.lstat()
+        if not stat.S_ISREG(before.st_mode) or key_file.is_symlink():
+            raise SetupError("explicit management key is not a regular non-link file")
+    except OSError:
+        raise SetupError("explicit management key is unavailable") from None
+    fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_size",
+              "st_mtime_ns", "st_ctime_ns")
+    key_binding = tuple(getattr(before, name) for name in fields)
+    point = endpoint
+    for attempt in (0, 1):
+        check_task_cancelled()
+        if policy is not None:
+            _ib_project_value(policy, user=ib_user)
+        marker = os.urandom(16).hex()
+        argv = direct_ssh_command(target, point, ib_user, timeout, command,
+                                  marker=marker, _key_file=key_file)
+        address = point.address + ("%" + point.interface if point.interface is not None else "")
+
+        def no_input(_output):
+            return None  # No password, passphrase, PAM answer, or empty newline.
+
+        no_input.ib_destination = ib_user + "@" + address
+        record_metric("ib_ssh_attempts")
+        result = interactive_run(argv, no_input, max(timeout * 4, 60))
+        try:
+            after = key_file.lstat()
+            if tuple(getattr(after, name) for name in fields) != key_binding:
+                raise SetupError("explicit management key metadata changed during the read")
+        except OSError:
+            raise SetupError("explicit management key became unavailable during the read") from None
+        if policy is not None:
+            _ib_project_value(policy, user=ib_user)
+        if (type(result) is not SessionResult or type(result.exit_code) is not int
+                or type(result.output) is not str
+                or getattr(result, "cleanup_uncertain", False) is not False
+                or any(getattr(result, name) is not False for name in (
+                    "password_changed", "password_change_required", "password_change_attempted"))
+                or _EXPIRED_PASSWORD.search(result.output)
+                or _pending_diff_has_password_update_notice(result.output)
+                or re.search(r"(?im)^[^\n]*(?:password|passphrase)[^\n]*:[ \t]*$",
+                             strip_ansi(result.output))):
+            raise SetupError("explicit key read has unverified authentication or completion facts")
+        if _is_readonly_key_command(command) and result.exit_code in (0, 34):
+            result = _readonly_key_result(result, marker)
+            result._direct_endpoint = point
+            _validate_direct_endpoint(target, result._direct_endpoint)
+            return result
+        if result.exit_code != 0:
+            failure = _management_host_key_failure(result.output)
+            if failure is not None:
+                if failure.address != address:
+                    raise SetupError("key host-key warning differs from the attempted endpoint")
+                failure._direct_endpoint = point
+                raise failure
+            failure = classify_ssh_failure(result.output, outer_address=None, inner_address=address)
+            if failure is not None and failure.kind is SshFailureKind.DIRECT_SSH_NETWORK:
+                safe = (result.exit_code == 255 and result.ib_authentication_rejected is False
+                        and not re.search(r"(?m)^__HTTP_IB_(?:AUTH|BEGIN|END)_", strip_ansi(result.output)))
+                point = _direct_ipv4_after_network(target, point,
+                    SshFailure(SshFailureKind.DIRECT_LOGIN_NETWORK, "direct", address), timeout,
+                    replay_safe=safe and attempt == 0)
+                continue
+            denied = re.fullmatch(re.escape(ib_user + "@" + address)
+                + r": Permission denied \([A-Za-z0-9,_-]+\)\.?\s*", strip_ansi(result.output))
+            if (result.exit_code == 255 and result.ib_authentication_rejected is True
+                    and denied is not None):
+                error = IBAuthenticationError("IB key authentication rejected for " + target.ib.hostname)
+                error._direct_endpoint = point
+                raise error
+            raise SetupError("explicit key read failed; device state is UNKNOWN")
+        if result.ib_authentication_rejected is not False:
+            raise SetupError("explicit key read has conflicting authentication facts")
+        result.output = extract_command_output(result.output, marker)
+        result._direct_endpoint = point
+        _validate_direct_endpoint(target, result._direct_endpoint)
+        return result
+    raise SetupError("explicit key read endpoint is exhausted")
+
+
+def _direct_ipv4_after_network(target, endpoint, error, timeout, *, replay_safe):
+    """One bounded LL-to-CSV-IPv4 transition; never a transport callback."""
+    failure = _ssh_failure_fact(error)
+    attempted = endpoint.address + ("%" + endpoint.interface if endpoint.interface is not None else "")
+    if (replay_safe is not True or endpoint.interface is None
+            or failure is None or failure.kind is not SshFailureKind.DIRECT_LOGIN_NETWORK
+            or failure.hop != "direct" or failure.address != attempted
+            or getattr(error, "cleanup_uncertain", False)):
+        raise error
+    address = target.ib.login_ip
+    paths = _import_tools("tools.login_path")
+    try:
+        for read in (0, 1):
+            result = subprocess.run(["ip", "-4", "neigh", "show", address],
+                capture_output=True, text=True, timeout=timeout, check=False)
+            if result.returncode != 0 or not isinstance(result.stdout, str) or result.stderr.strip():
+                raise SetupError("direct IPv4 neighbor lookup is unverified")
+            mac = paths.neighbor_mac(result.stdout, address)
+            if mac is not None:
+                if mac != paths.normalize_mac(target.ib.eth0_mac):
+                    raise SetupError("direct IPv4 neighbor MAC differs from CSV for " + address)
+                return DirectEndpoint(address)
+            if read == 0:
+                subprocess.run(["ping", "-c", "1", "-W", "1", address],
+                    capture_output=True, text=True, timeout=timeout, check=False)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        error = SshFailure(SshFailureKind.DIRECT_LOGIN_NETWORK, "direct", address)
+        error.args = ("direct IPv4 neighbor lookup failed for " + address + ": " + type(exc).__name__,)
+        raise error from None
+    error = SshFailure(SshFailureKind.DIRECT_LOGIN_NETWORK, "direct", address)
+    error.args = ("邻居表里没有 " + address + "; no IPv4 login attempted",)
+    raise error
+
+
 def validate_jump_target(target: Target) -> None:
     """Bind a jump operation to one IB target and one supported transit."""
     if target.ib.dev_type != "ib":
@@ -4001,36 +5205,243 @@ def _pending_diff_has_password_update_notice(output: str) -> bool:
     return False
 
 
+def _run_on_ib_direct(target, endpoint, eth_user, ethernet_password, ib_user,
+                      current_password, timeout, ib_command, *, local=False,
+                      allow_password_change=False, ib_new_password=None, password_only=False,
+                      _replace_sync_failure_task=None):
+    if (type(local) is not bool or local or eth_user != "" or ethernet_password != ""
+            or type(eth_user) is not str or type(ethernet_password) is not str
+            or type(current_password) is not str or not current_password
+            or any(0xD800 <= ord(char) <= 0xDFFF for char in current_password)
+            or len(current_password.encode("utf-8")) > 4096
+            or re.search(r"[\x00-\x1f\x7f-\x9f]", current_password)):
+        raise SetupError("invalid direct IB credentials or locality")
+    if allow_password_change and ib_command != ["nv", "config", "show", "-o", "commands"]:
+        raise SetupError("password change is allowed only for the authentication NVUE read")
+    category = "password" if allow_password_change else _ib_write_category(ib_command)
+    mutating = category is not None
+    point = endpoint
+    for attempt in (0, 1):
+        check_task_cancelled()
+        marker = os.urandom(16).hex()
+        command = direct_ssh_command(target, point, ib_user, timeout, ib_command,
+                                     marker=marker, password_only=password_only)
+        address = point.address + ("%" + point.interface if point.interface is not None else "")
+        if mutating:
+            if category == "nvue":
+                _ensure_ib_config_backup(target, point, eth_user, ethernet_password, ib_user,
+                                         current_password, timeout, local=local)
+            obtain_write_permit(category)
+        sync_scope = None
+        if (_replace_sync_failure_task is not None and allow_password_change is False
+                and category == "nvue"):
+            operation = _replace_sync_operation(_replace_sync_failure_task, target, point,
+                eth_user, ethernet_password, ib_user, current_password, ib_command, direct=True)
+            if operation is not None:
+                sync_scope = _ReplaceSyncFailureScope(_replace_sync_failure_task, point, operation, marker)
+        responder = _DirectResponder("", current_password, allow_password_change,
+            ib_new_password=ib_new_password, ib_destination=ib_user + "@" + address)
+        record_metric("ib_ssh_attempts")
+        result = interactive_run(command, responder, max(timeout * 4, 60))
+        if (type(result) is not SessionResult or type(result.output) is not str
+                or type(result.exit_code) is not int):
+            raise SetupError("direct IB command outcome is unverified")
+        if result.exit_code != 0:
+            failure = _management_host_key_failure(result.output)
+            if failure is not None:
+                if failure.address != address:
+                    raise SetupError("direct host-key warning differs from this attempted endpoint")
+                failure._direct_endpoint = point
+                raise failure
+            failure = classify_ssh_failure(result.output, outer_address=None, inner_address=address)
+            if failure is not None and failure.kind is SshFailureKind.DIRECT_SSH_NETWORK:
+                failure = SshFailure(SshFailureKind.DIRECT_LOGIN_NETWORK, "direct", address)
+                safe = (not mutating and not responder.password_change_attempted
+                        and not responder.password_change_blocked
+                        and all(getattr(result, name) is False for name in (
+                            "password_changed", "password_change_required", "password_change_attempted",
+                            "ib_authentication_rejected"))
+                        and not _EXPIRED_PASSWORD.search(result.output)
+                        and not _pending_diff_has_password_update_notice(result.output)
+                        and not re.search(r"(?m)^__HTTP_IB_(?:AUTH|BEGIN|END)_", strip_ansi(result.output)))
+                point = _direct_ipv4_after_network(target, point, failure, timeout,
+                                                   replay_safe=safe and attempt == 0)
+                continue
+        if _is_readonly_key_command(ib_command):
+            result = _readonly_key_result(result, marker, responder=responder)
+            result._direct_endpoint = point
+            _validate_direct_endpoint(target, result._direct_endpoint)
+            return result
+        if ib_command == ["nv", "config", "diff", "-o", "commands"] and (
+                any((result.password_changed, result.password_change_required,
+                     result.password_change_attempted, result.ib_authentication_rejected,
+                     responder.password_change_attempted, responder.password_change_blocked))
+                or _EXPIRED_PASSWORD.search(result.output)
+                or _pending_diff_has_password_update_notice(result.output)):
+            raise SetupError("read-only pending diff has unverified authentication or password-change evidence")
+        if result.password_change_required or (_EXPIRED_PASSWORD.search(result.output)
+                                               and not allow_password_change):
+            if ib_command != ["nv", "config", "show", "-o", "commands"]:
+                raise SetupError("IB requires a password change; command success is unverified")
+            result.password_change_required = True
+            result._direct_endpoint = point
+            return result
+        if result.password_changed or (allow_password_change and result.password_change_attempted):
+            result._direct_endpoint = point
+            return result
+        if result.exit_code != 0:
+            if result.ib_authentication_rejected or (
+                    not _NETWORK_FAILURE.search(result.output) and re.search(
+                        re.escape(ib_user + "@" + address) + r":[^\n]*Permission denied",
+                        result.output, re.I)):
+                raise IBAuthenticationError("IB authentication rejected for " + target.ib.hostname)
+            if (ib_command == ["nv", "config", "diff", "-o", "commands"]
+                    and result.exit_code == 1 and not _NETWORK_FAILURE.search(result.output)):
+                pending = _split_comma_interface_lines(
+                    extract_command_output(result.output, marker, expected_exit_code=1))
+                if not _validate_owned_pending(target.ib, pending):
+                    raise SetupError("pending diff returned 1 without verifiable owned changes")
+                result.output = pending
+                result._direct_endpoint = point
+                return result
+            error = SetupError("direct IB command failed; device state is UNKNOWN")
+            if sync_scope is not None:
+                operation = _replace_sync_operation(sync_scope.task, target, point, eth_user,
+                    ethernet_password, ib_user, current_password, ib_command, direct=True)
+                fact = _bound_replace_sync_failure(result, responder, sync_scope, operation)
+                if fact is not None:
+                    error._replace_sync_failure = fact
+            raise error
+        if allow_password_change and responder.password_change_attempted:
+            raise SetupError("IB password change outcome is UNKNOWN; reconnect before retrying")
+        result.output = extract_command_output(result.output, marker)
+        if ib_command == ["nv", "config", "diff", "-o", "commands"]:
+            result.output = _split_comma_interface_lines(result.output)
+            _validate_owned_pending(target.ib, result.output)
+        result._direct_endpoint = point
+        return result
+    raise SetupError("direct IB path is exhausted; device state is UNKNOWN")
+
+
+def _replace_sync_operation(state, target, neighbor, eth_user, ethernet_password,
+                            ib_user, current_password, command, *, direct=False):
+    initial = state if type(state) is _InitialIPv4ReplaceRequest else None
+    if initial is not None:
+        state = initial.state
+        if (direct is not True or type(neighbor) is not DirectEndpoint or neighbor.interface is not None
+                or type(state) is not _IBConfigWriteState or initial.endpoint is not neighbor
+                or initial.endpoint is not state.endpoint or type(initial.authority) is not RuntimeInputAuthority
+                or type(initial.stamp) is not str or initial.stamp != state.stamp):
+            return None
+    if (type(state) is not _IBConfigWriteState or state is not _TASK_IB_CONFIG
+            or type(state.task) is not PreparedIBTask or state.task.target is not target
+            or state.task.local is not False or state.apply is not True
+            or state.identity_verified is not True or state.backup_state != "VERIFIED"
+            or state.endpoint != neighbor
+            or state.task.ethernet_password != ethernet_password or state.eth_user != eth_user
+            or state.ib_user != ib_user or state.current_password != current_password):
+        return None
+    if direct:
+        # The existing direct builder has already qualified the endpoint against
+        # its route and CSV. Raw sync state still excludes IPv4.
+        if (target.ethernet is not None or type(neighbor) is not DirectEndpoint
+                or (neighbor.interface is None and initial is None)):
+            return None
+    elif type(neighbor) is not Neighbor:
+        return None
+    if _is_replace_command(command):
+        return "replace"
+    if initial is not None:
+        return None
+    if command == ["nv", "config", "apply", "-y"]:
+        return "apply"
+    if command == ["nv", "config", "save"]:
+        return "save"
+    return None
+
+
+def _bound_replace_sync_failure(result, responder, scope, operation):
+    if (operation != scope.operation
+            or _NETWORK_FAILURE.search(result.output)
+            or _EXPIRED_PASSWORD.search(result.output)
+            or _pending_diff_has_password_update_notice(result.output)
+            or responder.password_change_attempted or responder.password_change_blocked):
+        return None
+    try:
+        check_task_cancelled()
+    except SetupError:
+        return None  # Leave the original error unchanged.
+    fact = _qualify_replace_sync_failure(result, scope, scope)
+    if type(scope.task) is _InitialIPv4ReplaceRequest and fact is not None:
+        return _InitialIPv4ReplaceFailure(scope.task, fact[1]) if fact[0] == "replace" else None
+    return fact
+
+
+def _replace_failure_operation(request, fact):
+    if type(request) is _InitialIPv4ReplaceRequest:
+        if (type(fact) is _InitialIPv4ReplaceFailure and fact.request is request
+                and type(fact.rc) is int and 1 <= fact.rc <= 125):
+            return "replace"
+    elif (type(fact) is tuple and len(fact) == 2 and type(fact[0]) is str
+            and type(fact[1]) is int and 1 <= fact[1] <= 255):
+        return fact[0]
+    return None
+
+
 def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
               ethernet_password: str, ib_user: str, ib_default_password: str,
               timeout: int, ib_command: list[str], *, local: bool = False,
               allow_password_change: bool = False,
               ib_new_password: Optional[str] = None,
               password_only: bool = False,
-              _phase_operation: Optional[str] = None, _password_policy=None) -> SessionResult:
+              _phase_operation: Optional[str] = None, _password_policy=None,
+              _replace_sync_failure_task=None) -> SessionResult:
     if (ib_command == ["nv", "config", "diff", "-o", "commands"]
             and allow_password_change):
         raise SetupError("read-only pending diff cannot allow password change")
+    if allow_password_change and ib_command != ["nv", "config", "show", "-o", "commands"]:
+        raise SetupError("password change is allowed only for the authentication NVUE read")
     check_task_cancelled()
     if _phase_operation is not None:
         if _phase_operation == "password-change":
             obtain_write_permit("password")
+        if type(target) is Target and target.ethernet is None:
+            return _execute_ib_direct_phase(
+                target, neighbor, eth_user, ethernet_password, ib_user, ib_default_password,
+                timeout, ib_command, local=local, allow_password_change=allow_password_change,
+                ib_new_password=ib_new_password, _phase_operation=_phase_operation,
+                _password_policy=_password_policy)
         record_metric("ib_ssh_attempts")
         return _execute_ib_phase(
             target, neighbor, eth_user, ethernet_password, ib_user, ib_default_password,
             timeout, ib_command, local=local, allow_password_change=allow_password_change,
             ib_new_password=ib_new_password, _phase_operation=_phase_operation,
             _password_policy=_password_policy)
-    mutating = (allow_password_change or ib_command[:2] in (["nv", "set"], ["sh", "-c"])
-                or ib_command[:3] in (["nv", "config", "apply"], ["nv", "config", "save"]))
+    if type(target) is Target and target.ethernet is None:
+        evidence_options = ({"_replace_sync_failure_task": _replace_sync_failure_task}
+                            if _replace_sync_failure_task is not None else {})
+        return _run_on_ib_direct(target, neighbor, eth_user, ethernet_password, ib_user,
+            ib_default_password, timeout, ib_command, local=local,
+            allow_password_change=allow_password_change, ib_new_password=ib_new_password,
+            password_only=password_only, **evidence_options)
+    category = "password" if allow_password_change else _ib_write_category(ib_command)
     marker = os.urandom(16).hex()
     command = nested_ssh_command(
         target, neighbor, eth_user, ib_user, timeout, ib_command,
         local=local, marker=marker, password_only=password_only,
     )
-    if mutating:
-        obtain_write_permit("password" if allow_password_change else
-                            "public_key" if ib_command[:2] == ["sh", "-c"] else "nvue")
+    if category is not None:
+        if category == "nvue":
+            _ensure_ib_config_backup(target, neighbor, eth_user, ethernet_password, ib_user,
+                                     ib_default_password, timeout, local=local)
+        obtain_write_permit(category)
+    sync_scope = None
+    if (_replace_sync_failure_task is not None and local is False and allow_password_change is False
+            and category == "nvue"):
+        operation = _replace_sync_operation(_replace_sync_failure_task, target, neighbor,
+            eth_user, ethernet_password, ib_user, ib_default_password, ib_command)
+        if operation is not None:
+            sync_scope = _ReplaceSyncFailureScope(_replace_sync_failure_task, neighbor, operation, marker)
     responder = NestedResponder(
         ethernet_password, ib_default_password, allow_password_change,
         ib_new_password=ib_new_password,
@@ -4047,6 +5458,8 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
         if re.search(r"(?i)WARNING:\s+REMOTE HOST IDENTIFICATION HAS CHANGED", result.output):
             raise SshFailure(SshFailureKind.TARGET_HOST_KEY_CHANGED, "inner", neighbor.ipv6,
                              None if local else target.ethernet.hostname)
+    if _is_readonly_key_command(ib_command):
+        return _readonly_key_result(result, marker, responder=responder)
     if ib_command == ["nv", "config", "diff", "-o", "commands"] and (
         result.password_changed or result.password_change_required
         or result.password_change_attempted or result.ib_authentication_rejected
@@ -4088,10 +5501,23 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
                 raise SetupError("pending diff returned 1 without verifiable owned changes")
             result.output = pending
             return result
-        detail = _ib_failure_detail(
-            result.output, marker,
-            (ethernet_password, ib_default_password, ib_new_password or ""),
-        )
+        fact = None
+        if sync_scope is not None:
+            operation = _replace_sync_operation(sync_scope.task, target, neighbor, eth_user,
+                ethernet_password, ib_user, ib_default_password, ib_command)
+            fact = _bound_replace_sync_failure(result, responder, sync_scope, operation)
+        # Error presentation must not depend on retaining cleanup eligibility.
+        replace_receipt = None
+        if type(result.exit_code) is int and result.exit_code == 1 and _is_replace_command(ib_command):
+            try:
+                body = extract_command_output(result.output, marker, expected_exit_code=1)
+            except (SetupError, ValueError):
+                pass
+            else:
+                replace_receipt = _replace_receipt_rc(body)
+        detail = ("IB configuration replace failed" if replace_receipt is not None else
+                  _ib_failure_detail(result.output, marker,
+                      (ethernet_password, ib_default_password, ib_new_password or "")))
         error = SetupError(
             f"nested SSH to {target.ib.hostname} via {target.ethernet.hostname} "
             f"failed, exit={result.exit_code}: {detail}"
@@ -4102,6 +5528,8 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
             f"nested SSH to {target.ib.hostname} via {target.ethernet.hostname} "
             f"failed, exit={result.exit_code}; device output withheld"
         )
+        if fact is not None:
+            error._replace_sync_failure = fact
         raise error
     if allow_password_change and responder.password_change_attempted:
         raise SetupError("IB password change outcome is UNKNOWN; reconnect before retrying")
@@ -4248,13 +5676,13 @@ def desired_commands(device: Device) -> list[list[str]]:
     if device.dev_type != "ib":
         raise SetupError("configuration commands require a type=ib device; transit is read-only")
     commands = [["nv", "set", "interface", "eth0", "ipv4", "address", device.eth0_prefix]]
-    if device.eth1_prefix and device.eth1_gateway != device.eth0_gateway:
-        commands.extend([
-            ["nv", "set", "interface", "eth0", "ipv4", "gateway", device.eth0_gateway],
-            ["nv", "set", "interface", "eth1", "ipv4", "gateway", device.eth1_gateway],
-        ])
-    else:
+    if (device.eth1_prefix and device.eth1_gateway
+            and device.eth1_gateway == device.eth0_gateway):
         commands.append(["nv", "set", "interface", "eth0-1", "ipv4", "gateway", device.eth0_gateway])
+    else:
+        commands.append(["nv", "set", "interface", "eth0", "ipv4", "gateway", device.eth0_gateway])
+        if device.eth1_prefix and device.eth1_gateway:
+            commands.append(["nv", "set", "interface", "eth1", "ipv4", "gateway", device.eth1_gateway])
     commands.extend([
         ["nv", "set", "interface", "eth0-1", "link", "state", "up"],
         ["nv", "set", "interface", "eth0-1", "type", "eth"],
@@ -4462,6 +5890,22 @@ def _management_network_facts(current: str) -> tuple[DeviceState, frozenset[str]
             raise
 
 
+def management_conflicts(device: Device, state: DeviceState) -> list[tuple[str, str, object]]:
+    """Return existing required-field conflicts without planning or changing state."""
+    conflicts: list[tuple[str, str, object]] = []
+    hostname = normalize_name(state.hostname)
+    if hostname not in DEFAULT_HOSTNAMES and hostname != normalize_name(device.hostname):
+        conflicts.append(("hostname", device.hostname, state.hostname))
+    for field, expected, actual in (
+            ("eth0 address", device.eth0_prefix, state.eth0_addresses),
+            ("eth1 address", device.eth1_prefix, state.eth1_addresses),
+            ("eth0 gateway", device.eth0_gateway, state.eth0_gateways),
+            ("eth1 gateway", device.eth1_gateway if device.eth1_prefix else "", state.eth1_gateways)):
+        if expected and actual and expected not in actual:
+            conflicts.append((field, expected, actual))
+    return conflicts
+
+
 def _management_network_commands(device: Device, current: str) -> list[list[str]]:
     """Return only missing setters; no apply/save, prompt, policy or transport."""
     failed = False
@@ -4480,31 +5924,25 @@ def _management_network_commands(device: Device, current: str) -> list[list[str]
             raise SetupError("invalid management Network primary input")
         if device.eth1_prefix and (
                 str(ipaddress.IPv4Interface(device.eth1_prefix)) != device.eth1_prefix
-                or str(ipaddress.IPv4Address(device.eth1_gateway)) != device.eth1_gateway):
+                or (device.eth1_gateway
+                    and str(ipaddress.IPv4Address(device.eth1_gateway)) != device.eth1_gateway)):
             raise SetupError("invalid management Network secondary input")
         state, up_ports, eth_ports = _management_network_facts(current)
         expected_name = normalize_name(device.hostname)
         actual_name = normalize_name(state.hostname)
-        if actual_name not in DEFAULT_HOSTNAMES and actual_name != expected_name:
-            failure_field = "hostname"
-            raise SetupError("management Network hostname conflicts")
-        required_gateways = [(state.eth0_gateways, device.eth0_gateway, "eth0 gateway")]
-        if device.eth1_prefix:
-            required_gateways.append((state.eth1_gateways, device.eth1_gateway, "eth1 gateway"))
-        for actual, expected, field in required_gateways:
-            if actual and expected not in actual:
-                failure_field = field
-                raise SetupError("management Network gateway conflicts")
+        conflicts = management_conflicts(device, state)
+        if conflicts:
+            failure_field = conflicts[0][0]
+            raise SetupError("management Network field conflicts")
         commands: list[list[str]] = []
         if device.eth0_prefix not in state.eth0_addresses:
             commands.append(["nv", "set", "interface", "eth0", "ipv4", "address", device.eth0_prefix])
         if device.eth1_prefix and device.eth1_prefix not in state.eth1_addresses:
             commands.append(["nv", "set", "interface", "eth1", "ipv4", "address", device.eth1_prefix])
         need_zero = device.eth0_gateway not in state.eth0_gateways
-        need_one = bool(device.eth1_prefix) and device.eth1_gateway not in state.eth1_gateways
+        need_one = bool(device.eth1_prefix and device.eth1_gateway) and device.eth1_gateway not in state.eth1_gateways
         shared_missing = (
-            need_zero and not state.eth1_gateways and not device.eth1_prefix
-            or need_zero and need_one and device.eth0_gateway == device.eth1_gateway
+            need_zero and need_one and device.eth0_gateway == device.eth1_gateway
         )
         if shared_missing:
             commands.append(["nv", "set", "interface", "eth0-1", "ipv4", "gateway", device.eth0_gateway])
@@ -4529,6 +5967,8 @@ def _management_network_commands(device: Device, current: str) -> list[list[str]
         messages = {
             None: "management Network setter plan is not qualified",
             "hostname": "management Network hostname conflict; device state is UNKNOWN",
+            "eth0 address": "management Network eth0 address conflict; device state is UNKNOWN",
+            "eth1 address": "management Network eth1 address conflict; device state is UNKNOWN",
             "eth0 gateway": "management Network eth0 gateway conflict; device state is UNKNOWN",
             "eth1 gateway": "management Network eth1 gateway conflict; device state is UNKNOWN",
         }
@@ -4558,7 +5998,8 @@ def _verify_management_network_state(device: Device, current: str) -> DeviceStat
             raise SetupError("invalid management Network primary input")
         if device.eth1_prefix and (
                 str(ipaddress.IPv4Interface(device.eth1_prefix)) != device.eth1_prefix
-                or str(ipaddress.IPv4Address(device.eth1_gateway)) != device.eth1_gateway):
+                or (device.eth1_gateway
+                    and str(ipaddress.IPv4Address(device.eth1_gateway)) != device.eth1_gateway)):
             raise SetupError("invalid management Network secondary input")
         state, up_ports, eth_ports = _management_network_facts(current)
         verify_state(device, state)
@@ -4578,21 +6019,12 @@ def _verify_management_network_state(device: Device, current: str) -> DeviceStat
 
 
 def base_stage_needed(device: Device, state: DeviceState, force: bool) -> bool:
-    if state_is_unconfigured(state):
-        return True
-    if force:
-        return force_day0_needed(device, state) or not _management_ports_ready(state.raw_commands)
-    if classify_auto_day0(device, state) != "complete":
-        raise SetupError(
-            "Network fields are partial or conflict with CSV; no initialization/infra "
-            "writes are permitted. Inspect applied and pending configuration. "
-            "--force may only fill missing fields, never overwrite a conflict."
-        )
-    return not _management_ports_ready(state.raw_commands)
+    # Patch is the default; --force remains the same fill-missing operation.
+    return force_day0_needed(device, state) or not _management_ports_ready(state.raw_commands)
 
 
-def _ztp_disabled(output: str) -> bool:
-    """Read the operational service/state, not config-save or stage history."""
+def parse_ztp_status(output: str) -> dict[str, Optional[str]]:
+    """Read the first operational word, excluding config-save and stage history."""
     top = re.split(r"(?im)^\s*ZTP stages\b", strip_ansi(output), maxsplit=1)[0]
 
     def row(name: str) -> Optional[str]:
@@ -4601,15 +6033,26 @@ def _ztp_disabled(output: str) -> bool:
             raise SetupError("duplicate ZTP " + name + " rows; operational state is unknown")
         return values[0].casefold() if values else None
 
-    service, state = row("service"), row("state")
+    facts = {name: row(name) for name in ("service", "state", "status")}
+    service, state = facts["service"], facts["state"]
+    if ((service == "disabled" and state == "enabled")
+            or (service in {"enabled", "active", "active-discovery", "running", "starting", "stopping"}
+                and state not in {None, "enabled"})):
+        raise SetupError("contradictory ZTP operational state; initialization is blocked")
+    return facts
+
+
+def _ztp_disabled(output: str) -> bool:
+    """Use the shared operational parser; unknown states never authorize writes."""
+    facts = parse_ztp_status(output)
+    service, state = facts["service"], facts["state"]
     if service == "disabled" and state in {None, "disabled"}:
         return True
     if service in {None, "inactive"} and state in {"enabled", "disabled"}:
         return state == "disabled"
     if service in {"enabled", "active", "active-discovery", "running", "starting", "stopping"}:
-        if state not in {None, "enabled"}:
-            raise SetupError("contradictory ZTP operational state; initialization is blocked")
         return False
+    top = re.split(r"(?im)^\s*ZTP stages\b", strip_ansi(output), maxsplit=1)[0]
     detail = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", "", top).strip()[-1500:]
     raise SetupError("cannot verify current ZTP state; initialization is blocked; "
                      "nv show system ztp: " + (detail or "<empty>"))
@@ -4635,9 +6078,10 @@ def _validate_owned_pending(device: Device, output: str) -> int:
         allowed.add(("nv", "set", "interface", port, "link", "state", "up"))
     for port, gateway in (
         ("eth0", device.eth0_gateway),
-        ("eth1", device.eth1_gateway if device.eth1_prefix else device.eth0_gateway),
+        ("eth1", device.eth1_gateway if device.eth1_prefix else ""),
     ):
-        allowed.add(("nv", "set", "interface", port, "ipv4", "gateway", gateway))
+        if gateway:
+            allowed.add(("nv", "set", "interface", port, "ipv4", "gateway", gateway))
     count = 0
     for raw in output.splitlines():
         line = raw.strip()
@@ -4707,27 +6151,72 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
                                ethernet_password: str, ib_user: str,
                                current_password: str, timeout: int,
                                ib_command: list[str], *, local: bool = False,
-                               _password_policy=None) -> SessionResult:
+                               _password_policy=None, _replace_sync_failure_task=None,
+                               _preserve_replace_cleanup_veto=False) -> SessionResult:
     """Authorize one ordinary management command without changing credential roles."""
+    evidence_options = ({"_replace_sync_failure_task": _replace_sync_failure_task}
+                        if _replace_sync_failure_task is not None else {})
+    if _preserve_replace_cleanup_veto is True:
+        evidence_options["_preserve_replace_cleanup_veto"] = True
+    return _run_authorized_ib_command_core(target, neighbor, eth_user, ethernet_password,
+        ib_user, current_password, timeout, ib_command, local=local, direct=False,
+        _password_policy=_password_policy, **evidence_options)
+
+
+def _run_authorized_ib_direct_command(target, neighbor, eth_user, ethernet_password,
+                                      ib_user, current_password, timeout, ib_command, *,
+                                      local=False, _password_policy=None, _replace_sync_failure_task=None,
+                                      _preserve_replace_cleanup_veto=False):
+    evidence_options = ({"_replace_sync_failure_task": _replace_sync_failure_task}
+                        if _replace_sync_failure_task is not None else {})
+    if _preserve_replace_cleanup_veto is True:
+        evidence_options["_preserve_replace_cleanup_veto"] = True
+    return _run_authorized_ib_command_core(target, neighbor, eth_user, ethernet_password,
+        ib_user, current_password, timeout, ib_command, local=local, direct=True,
+        _password_policy=_password_policy, **evidence_options)
+
+
+def _run_authorized_ib_command_core(target, endpoint, eth_user, ethernet_password, ib_user,
+                                    current_password, timeout, ib_command, *, local=False,
+                                    direct, _password_policy=None, _replace_sync_failure_task=None,
+                                    _preserve_replace_cleanup_veto=False):
+    """Two fixed admissions share the original command/authority/result choke."""
+    neighbor = endpoint
     result = None
     failure = None
     ssh_failure = None
     summary = None
     withheld = None
+    readonly_session_active = False
+    readonly_session_timeout = False
+    replace_failure = None
+    cleanup_veto_active = False
     try:
-        if (type(local) is not bool or local
+        if type(direct) is not bool:
+            raise SetupError("invalid authorized management path")
+        if direct:
+            if (type(local) is not bool or local or eth_user != "" or ethernet_password != ""
+                    or type(eth_user) is not str or type(ethernet_password) is not str
+                    or type(timeout) is not int or timeout <= 0):
+                raise SetupError("invalid authorized direct management operation")
+            _validate_direct_endpoint(target, neighbor)
+            if (type(ib_user) is not str or clean(ib_user) != ib_user
+                    or not valid_ssh_user(ib_user)):
+                raise SetupError("invalid authorized management account")
+        elif (type(local) is not bool or local
                 or type(target) is not Target
                 or type(target.ib) is not Device
                 or type(target.ethernet) is not Device
                 or type(neighbor) is not Neighbor
                 or type(timeout) is not int or timeout <= 0):
             raise SetupError("invalid authorized management operation")
-        validate_jump_target(target)
-        validate_neighbor_boundary(neighbor)
-        if (type(eth_user) is not str or type(ib_user) is not str
-                or clean(eth_user) != eth_user or clean(ib_user) != ib_user
-                or not valid_ssh_user(eth_user) or not valid_ssh_user(ib_user)):
-            raise SetupError("invalid authorized management account")
+        if not direct:
+            validate_jump_target(target)
+            validate_neighbor_boundary(neighbor)
+            if (type(eth_user) is not str or type(ib_user) is not str
+                    or clean(eth_user) != eth_user or clean(ib_user) != ib_user
+                    or not valid_ssh_user(eth_user) or not valid_ssh_user(ib_user)):
+                raise SetupError("invalid authorized management account")
         # P3 (owner Q-032 default): an OOB public-key login leaves the Ethernet
         # password empty; the IB current credential must still be non-empty.
         for credential, required in ((ethernet_password, False), (current_password, True)):
@@ -4741,14 +6230,27 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
         # inner credential. This value must never replace current_password;
         # it is kept only to withhold it from a failure summary.
         withheld = _ib_project_value(_password_policy, user=ib_user, fetch=True)
+        readonly_session_active = direct is True and _ib_write_category(command) is None
+        evidence_options = ({"_replace_sync_failure_task": _replace_sync_failure_task}
+                            if _replace_sync_failure_task is not None else {})
+        cleanup_veto_active = (
+            _preserve_replace_cleanup_veto is True
+            and (command == ["nv", "config", "detach"]
+                 or (direct is True and neighbor.interface is None
+                     and command in (["ip", "addr", "show", "eth0"], ["ip", "route"]))))
         result = run_on_ib(
             target, neighbor, eth_user, ethernet_password, ib_user,
             current_password, timeout, command, local=False,
-            allow_password_change=False,
+            allow_password_change=False, **evidence_options,
         )
+        cleanup_veto_active = False
+        readonly_session_active = False
         if (type(result) is not SessionResult
-                or type(result.exit_code) is not int or result.exit_code != 0
+                or type(result.exit_code) is not int
+                or result.exit_code not in ((0, 34) if _is_readonly_key_command(command) else (0,))
                 or type(result.output) is not str
+                or (_is_readonly_key_command(command) and (
+                    result.output != "" or getattr(result, "cleanup_uncertain", False) is not False))
                 or any(getattr(result, name) is not False for name in (
                     "password_changed", "password_change_required",
                     "password_change_attempted", "ib_authentication_rejected"))
@@ -4757,6 +6259,9 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
             raise SetupError("management command outcome is unverified")
         _password_policy.assert_unchanged()
     except (SetupError, OSError) as error:
+        if cleanup_veto_active and type(error) in (ProjectInputChanged, BatchStopped):
+            # Preserve the existing batch-stop contract only for this cleanup call.
+            raise
         uncertain, number = _ib_phase_error_facts(error)
         if number is None:
             candidate = getattr(error, "io_errno", None)
@@ -4764,6 +6269,25 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
                 number = candidate
         failure = uncertain, number
         ssh_failure = _ssh_failure_fact(error)
+        if (_replace_sync_failure_task is not None
+                and type(error) is SetupError and not uncertain and number is None and ssh_failure is None):
+            fact = getattr(error, "_replace_sync_failure", None)
+            operation = _replace_failure_operation(_replace_sync_failure_task, fact)
+            if (operation is not None
+                    and _replace_sync_operation(_replace_sync_failure_task, target, neighbor,
+                        eth_user, ethernet_password, ib_user, current_password, command, direct=direct) == operation):
+                try:
+                    check_task_cancelled()
+                    _password_policy.assert_unchanged()
+                except (SetupError, OSError):
+                    pass  # Preserve the wrapped error and decline stale attribution.
+                else:
+                    replace_failure = fact
+        readonly_session_timeout = (
+            readonly_session_active is True and type(error) is SetupError
+            and error.args == ("SSH/PAM session timed out; device state may be unknown",)
+            and ssh_failure is None
+            and getattr(error, "cleanup_uncertain", False) is False)
         summary = _authorized_failure_summary(
             error, (ethernet_password, current_password, withheld))
     if failure is not None:
@@ -4773,6 +6297,10 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
             error.cleanup_uncertain = True
         if failure[1] is not None:
             error.io_errno = failure[1]
+        if readonly_session_timeout:
+            error._ib_readonly_session_timeout = True
+        if replace_failure is not None:
+            error._replace_sync_failure = replace_failure
         _AUTHORIZED_FAILURE_NOTE[:] = [(weakref.ref(error), summary)] if summary else []
         try:
             raise error from None
@@ -4786,16 +6314,36 @@ def _run_authorized_ib_command(target: Target, neighbor: Neighbor, eth_user: str
 def _stage_ib_command(target: Target, neighbor: Neighbor, eth_user: str,
                       ethernet_password: str, ib_user: str, ib_password: str, timeout: int,
                       command: list[str], *, local: bool, strict: bool,
-                      policy=None) -> SessionResult:
+                      policy=None, _ib_read_context=None, _replace_sync_failure_task=None,
+                      _preserve_replace_cleanup_veto=False) -> SessionResult:
     """One ordinary IB command of a stage.  A management-server task with the project global
     (strict) sends it through the DEV authorized helper, any other task through v15's run_on_ib
     (P3c map D32d and section 9 item 1); the stage logic around it is the same."""
+    if _ib_read_context is not None:
+        key_file = _readonly_key_file(_ib_read_context, target, neighbor, ib_user,
+                                     ib_password, local=local, apply=False)
+        if eth_user != "" or ethernet_password != "":
+            raise SetupError("readonly key stage cannot carry outer credentials")
+        result = _run_direct_key_read(target, neighbor, ib_user, key_file, timeout,
+                                     command, strict=strict, policy=policy)
+        actual = getattr(result, "_direct_endpoint", None)
+        _validate_direct_endpoint(target, actual)
+        if actual != neighbor:
+            raise SetupError("readonly key read changed the verified task endpoint")
+        return result
+    evidence_options = ({"_replace_sync_failure_task": _replace_sync_failure_task}
+                        if _replace_sync_failure_task is not None else {})
     if strict:
+        if _preserve_replace_cleanup_veto is True:
+            evidence_options["_preserve_replace_cleanup_veto"] = True
+        if type(target) is Target and target.ethernet is None:
+            return _run_authorized_ib_direct_command(target, neighbor, eth_user, ethernet_password, ib_user,
+                ib_password, timeout, command, local=local, _password_policy=policy, **evidence_options)
         return _run_authorized_ib_command(target, neighbor, eth_user, ethernet_password, ib_user,
                                           ib_password, timeout, command, local=False,
-                                          _password_policy=policy)
+                                          _password_policy=policy, **evidence_options)
     return run_on_ib(target, neighbor, eth_user, ethernet_password, ib_user, ib_password,
-                     timeout, command, local=local)
+                     timeout, command, local=local, **evidence_options)
 
 
 def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
@@ -4804,7 +6352,8 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
                       _ib_current_password=None, _password_policy=None,
                       ib_password: Optional[str] = None,
                       policy: Optional[ProjectPasswordPolicy] = None,
-                      details: Optional[dict] = None) -> tuple[str, bool]:
+                      details: Optional[dict] = None, _ib_read_context=None,
+                      initial_ztp_output: Optional[str] = None) -> tuple[str, bool]:
     """Stage 1 (v15): auto-save and ZTP config-save, saved, then ZTP verified disabled.
 
     Returns (readback, authorized): the readback after the Initial writes, else `current`;
@@ -4818,7 +6367,14 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
     `details["needed"]` tells the caller whether Initial could be skipped (owner Q-037 (b)).
     """
     strict = _ib_current_password is not None or _password_policy is not None
-    if strict:
+    if _ib_read_context is not None:
+        _readonly_key_file(_ib_read_context, target, neighbor, ib_user, ib_password,
+                           local=local, apply=apply)
+        if _ib_current_password is not None:
+            raise SetupError("readonly key Initial cannot carry a selected password")
+        credential, guard = None, _password_policy if strict else policy
+        strict = False  # This read never enters the password-only authorized core.
+    elif strict:
         if (type(local) is not bool or local or type(apply) is not bool
                 or type(authorized) is not bool or type(current) is not str
                 or _ib_current_password is None or _password_policy is None):
@@ -4859,10 +6415,12 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
     failure = None
     try:
         ready = enabled(current)
-        status = _stage_ib_command(target, neighbor, eth_user, ethernet_password, ib_user, credential,
-                                   timeout, ["nv", "show", "system", "ztp"], local=local,
-                                   strict=strict and apply, policy=guard)
-        ztp_disabled = _ztp_disabled(status.output)
+        status_output = initial_ztp_output
+        if status_output is None:
+            status_output = _stage_ib_command(target, neighbor, eth_user, ethernet_password, ib_user, credential,
+                timeout, ["nv", "show", "system", "ztp"], local=local,
+                strict=strict and apply, policy=guard, _ib_read_context=_ib_read_context).output
+        ztp_disabled = _ztp_disabled(status_output)
         if details is not None:
             details["needed"] = not (ready and ztp_disabled)
         if ready and ztp_disabled:
@@ -4955,32 +6513,22 @@ def desired_service_commands(services: dict[str, object], current: str) -> list[
 
 def force_day0_needed(device: Device, state: DeviceState) -> bool:
     """Fill missing required values without removing extra applied settings."""
-    fields = (
-        ("eth0 address", state.eth0_addresses, device.eth0_prefix),
-        ("eth1 address", state.eth1_addresses, device.eth1_prefix),
-        ("eth0 gateway", state.eth0_gateways, device.eth0_gateway),
-        ("eth1 gateway", state.eth1_gateways, device.eth1_gateway if device.eth1_prefix else ""),
-    )
-    missing = False
-    conflicts: list[str] = []
-    for label, actual, expected in fields:
-        if not expected or expected in actual:
-            continue
-        if actual and label.endswith("gateway"):
-            conflicts.append(f"{label}: expected {expected}, found {actual}")
-        else:
-            missing = True
-    hostname = normalize_name(state.hostname)
-    if hostname in DEFAULT_HOSTNAMES:
-        missing = True
-    elif hostname != normalize_name(device.hostname):
-        conflicts.append(f"hostname: expected {device.hostname}, found {state.hostname}")
+    conflicts = management_conflicts(device, state)
     if conflicts:
-        raise SetupError("Network conflict; manual resolution required: " + "; ".join(conflicts))
-    return missing
+        raise SetupError("Network conflict; manual resolution required: " + "; ".join(
+            field + ": expected CSV value, found conflicting applied value"
+            for field, _expected, _actual in conflicts))
+    fields = (
+        (state.eth0_addresses, device.eth0_prefix),
+        (state.eth1_addresses, device.eth1_prefix),
+        (state.eth0_gateways, device.eth0_gateway),
+        (state.eth1_gateways, device.eth1_gateway if device.eth1_prefix else ""),
+    )
+    return (normalize_name(state.hostname) in DEFAULT_HOSTNAMES
+            or any(expected and expected not in actual for actual, expected in fields))
 
-def key_install_command(keys: list[dict[str, str]]) -> list[str]:
-    """Carry only validated public lines through a fixed, closed shell program."""
+def _key_payload(keys: list[dict[str, str]]) -> str:
+    """Encode the same qualified public entries for either closed key program."""
     if not isinstance(keys, list) or not keys:
         raise SetupError("public-key installation needs nonempty cache entries")
     lines: list[str] = []
@@ -4996,8 +6544,17 @@ def key_install_command(keys: list[dict[str, str]]) -> list[str]:
         if entry.get("fingerprint") != fingerprint:
             raise SetupError("target cache has mismatched public-key fingerprint")
         lines.append(line)
-    encoded = base64.b64encode(("\n".join(lines) + "\n").encode("utf-8")).decode("ascii")
-    return ib_command_argv(["sh", "-c", _KEY_INSTALL_SCRIPT, "--", encoded])
+    return base64.b64encode(("\n".join(lines) + "\n").encode("utf-8")).decode("ascii")
+
+
+def key_install_command(keys: list[dict[str, str]]) -> list[str]:
+    """Carry only validated public lines through a fixed, closed shell program."""
+    return ib_command_argv(["sh", "-c", _KEY_INSTALL_SCRIPT, "--", _key_payload(keys)])
+
+
+def readonly_key_command(keys: list[dict[str, str]]) -> list[str]:
+    """Check required public identities without writing the remote key file."""
+    return ib_command_argv(["sh", "-c", _KEY_READONLY_SCRIPT, "--", _key_payload(keys)])
 
 
 def verify_state(device: Device, state: DeviceState) -> None:
@@ -5012,7 +6569,7 @@ def verify_state(device: Device, state: DeviceState) -> None:
             f"eth0 gateway expected {device.eth0_gateway}, "
             f"got {state.eth0_gateways or 'none'}"
         )
-    if device.eth1_prefix and device.eth1_gateway not in state.eth1_gateways:
+    if device.eth1_prefix and device.eth1_gateway and device.eth1_gateway not in state.eth1_gateways:
         errors.append(
             f"eth1 gateway expected {device.eth1_gateway}, "
             f"got {state.eth1_gateways or 'none'}"
@@ -5064,9 +6621,15 @@ def _readiness_failure_result(failure):
     return "FATAL", failure
 
 
-def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout, *,
-                       local, strict, password, destination, strict_inner, password_policy):
-    """One read-only probe, after the caller's wait; never replay a fatal operation."""
+def _probe_ipv4_read_once(target, vrf, eth_user, ethernet_password, ib_user, timeout,
+                          read_command, *, local, strict, password, destination,
+                          strict_inner, password_policy):
+    """One of the two fixed fresh-identity reads; no wait or retry loop."""
+    if type(read_command) is not list or read_command not in (
+            ["ip", "addr", "show", "eth0"], ["ip", "route"]):
+        raise SetupError("IPv4 identity probe accepts only its two fixed reads")
+    if strict:
+        password_policy.assert_unchanged()
     nonretryable = re.compile(
         r"(?i)permission denied|authentication failed|"
         r"host key verification failed|remote host identification has changed|"
@@ -5081,8 +6644,12 @@ def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout
     if path is not None:
         outer_options["control_path"] = path
     if strict:
+        # verify_ipv4_login owns the validated prefix. Replace only its last
+        # remote command with this read's complete, independently framed body.
+        inner = [*strict_inner[:-1],
+                 shlex.join(["sh", "-c", _framed_script(read_command, marker)])]
         probe = typed_argv(outer_ssh_command(
-            target.ethernet, eth_user, strict_inner, timeout, **outer_options,
+            target.ethernet, eth_user, inner, timeout, **outer_options,
         ), label="IPv4 management outer command")
     else:
         probe = outer_ssh_command(target.ethernet, eth_user, [
@@ -5092,7 +6659,7 @@ def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout
             "-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
             "-o", "PreferredAuthentications=password,keyboard-interactive",
             f"{ib_user}@{destination}",
-            shlex.join(["sh", "-c", _framed_script(["true"], marker)]),
+            shlex.join(["sh", "-c", _framed_script(read_command, marker)]),
         ], timeout, **outer_options)
     responder = NestedResponder(ethernet_password, password, False,
                                 ib_destination=f"{ib_user}@{destination}")
@@ -5102,11 +6669,18 @@ def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout
     except SshFailure as failure:
         return _readiness_failure_result(failure)
     except SetupError as exc:
-        if not str(exc).startswith("SSH/PAM session timed out;"):
+        if (not str(exc).startswith("SSH/PAM session timed out;")
+                or getattr(exc, "cleanup_uncertain", False) is True):
             raise
+        if strict:
+            password_policy.assert_unchanged()
         return "RETRY", "SSH session timed out"
-    if (type(result) is SessionResult and type(result.exit_code) is int and result.exit_code != 0
-            and type(result.output) is str):
+    if (type(result) is not SessionResult or type(result.exit_code) is not int
+            or type(result.output) is not str):
+        raise SetupError("IPv4 identity read outcome is unverified")
+    if strict:
+        password_policy.assert_unchanged()
+    if result.exit_code != 0:
         classified = (classify_ssh_failure(result.output, outer_address=None, inner_address=destination)
                       if local else _classify_jump_output(result.output, target.ethernet, destination))
         if local and classified is not None and classified.kind is not SshFailureKind.TARGET_HOST_KEY_CHANGED:
@@ -5128,10 +6702,7 @@ def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout
     if result.ib_authentication_rejected or nonretryable.search(result.output):
         raise SetupError(f"IPv4 SSH verification blocked for {target.ib.hostname}: "
                          f"authentication/host-key/local command failure; {detail}")
-    if strict and (type(result) is not SessionResult
-                   or type(result.exit_code) is not int
-                   or type(result.output) is not str
-                   or any(getattr(result, name) is not False for name in (
+    if (any(getattr(result, name) is not False for name in (
                        "password_changed", "password_change_required",
                        "password_change_attempted", "ib_authentication_rejected"))
                    or responder.password_change_attempted
@@ -5139,20 +6710,57 @@ def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout
                    or _pending_diff_has_password_update_notice(result.output)):
         raise SetupError("IPv4 management outcome is unverified")
     if result.exit_code == 0:
-        if strict:
-            password_policy.assert_unchanged()
-        else:
-            extract_command_output(result.output, marker)
-        log(f"  IPv4 SSH SUCCESS: {'management' if strict else 'password-only'} login verified.")
-        return "READY", None
+        output = extract_command_output(result.output, marker)
+        return "READY", output
     return "RETRY", f"exit={result.exit_code}; {detail}"
+
+
+def _probe_ipv4_login(target, vrf, eth_user, ethernet_password, ib_user, timeout, *,
+                       local, strict, password, destination, strict_inner, password_policy,
+                       details=None):
+    """One full attempt owns both fresh reads and their IPv4 identity check."""
+    if details is not None:
+        details.clear()
+    state, address_output = _probe_ipv4_read_once(
+        target, vrf, eth_user, ethernet_password, ib_user, timeout,
+        ["ip", "addr", "show", "eth0"], local=local, strict=strict,
+        password=password, destination=destination, strict_inner=strict_inner,
+        password_policy=password_policy)
+    if state != "READY":
+        return state, address_output
+    state, route_output = _probe_ipv4_read_once(
+        target, vrf, eth_user, ethernet_password, ib_user, timeout,
+        ["ip", "route"], local=local, strict=strict,
+        password=password, destination=destination, strict_inner=strict_inner,
+        password_policy=password_policy)
+    if state != "READY":
+        return state, route_output
+    try:
+        identity = _check_ib_identity(target, address_output, route_output, via_ipv4=True)
+    except SetupError:
+        if details is not None:
+            details["identity_failed"] = True
+        raise
+    if details is not None:
+        details["identity"] = identity
+    if identity["ok"] is not True:
+        if details is not None:
+            details["identity_failed"] = True
+        mismatch_detail = "; ".join(
+            f"{item['field']}: expected={item['expected']} observed={item['observed']}"
+            for item in identity["mismatches"])
+        return "FATAL", SetupError("IB identity differs from CSV; " + mismatch_detail
+                                    + "; no further configuration write authorized")
+    log(f"  IPv4 SSH SUCCESS: {'management' if strict else 'password-only'} identity verified.")
+    return "READY", None
 
 
 def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
                       ethernet_password: str, ib_user: str, timeout: int, *,
                       local: bool = False, _ib_current_password=None,
                       _password_policy=None, ib_password: Optional[str] = None,
-                      readiness_policy: ReadinessPolicy = IPV4_READINESS) -> None:
+                      readiness_policy: ReadinessPolicy = IPV4_READINESS,
+                      _identity_details=None) -> None:
     """Read-only IPv4 readiness with independent 15/10/9 policy (v3.1.4 WP-3).
 
     One loop (guide 2.3 :204).  Authentication, host-key, local-command and password-change
@@ -5163,6 +6771,8 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
     the v15 password-only probe runs with the selected IB credential (ib_password).
     """
     strict = _ib_current_password is not None or _password_policy is not None
+    if _identity_details is not None:
+        _identity_details.clear()
     failure = None
     try:
         if strict:
@@ -5215,7 +6825,8 @@ def verify_ipv4_login(target: Target, vrf: str, eth_user: str,
         wait_until_ready(lambda: _probe_ipv4_login(
             target, validated_vrf, eth_user, ethernet_password, ib_user, timeout,
             local=local, strict=strict, password=password, destination=destination,
-            strict_inner=strict_inner, password_policy=_password_policy),
+            strict_inner=strict_inner, password_policy=_password_policy,
+            details=_identity_details),
             readiness_policy, label=target.ib.hostname, sleep=time.sleep)
         return
     except (ProjectInputChanged, BatchStopped):
@@ -5464,11 +7075,32 @@ def _refresh_host_key(change, editor, *, apply, read_device_fingerprint, retry,
     return record
 
 
+def _direct_host_key_task_gate(task, change, *, apply):
+    if (type(task) is not PreparedIBTask or type(task.local) is not bool or task.local
+            or task.ethernet_password != "" or type(apply) is not bool or not apply):
+        raise SetupError("host-key change is outside this direct IB task scope; no entry removed")
+    _validate_direct_endpoint(task.target, task.neighbor)
+    library = _import_tools("tools.login_path")
+    if (type(change) is not library.HostKeyChange or change.location != "local"
+            or change.jump is not None or not library._host_key_address(change.address)
+            or not change.lines or any(type(line) is not int or line < 1 for line in change.lines)
+            or type(change.new_fingerprint) is not str
+            or not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", change.new_fingerprint)):
+        raise SetupError("host-key warning facts are unverified; no entry removed")
+    endpoint = task.neighbor
+    address = endpoint.address + ("%" + endpoint.interface if endpoint.interface is not None else "")
+    if change.address != address:
+        raise SetupError("host-key warning differs from this attempted direct endpoint; no entry removed")
+
+
 def refresh_ib_host_key(change, task, *, eth_user, timeout, apply,
                         read_device_fingerprint, retry, operator_forced, host_key_records):
     library = _import_tools("tools.login_path")
     try:
-        if task.local:
+        if type(task.target) is Target and task.target.ethernet is None:
+            _direct_host_key_task_gate(task, change, apply=True)
+            editor = library.LocalKnownHostsEditor(Path(change.known_hosts_path), home=Path.home())
+        elif task.local:
             _host_key_task_gate(task, change, eth_user=eth_user, apply=True)
             editor = library.LocalKnownHostsEditor(Path(change.known_hosts_path), home=Path.home())
         else:
@@ -5649,10 +7281,17 @@ def log_management_direct_summary(rows: list[dict[str, str]], *, console=True) -
 
 def local_ethernet_keys(targets: list[Target], mode: str,
                         override: str) -> set[str]:
-    switches = {
-        normalize_name(target.ethernet.hostname): target.ethernet
-        for target in targets
-    }
+    # Physical location is based on original source facts, not a runtime route.
+    # Legacy callers with a real Jump Device retain their established matching.
+    switches = set()
+    for target in targets:
+        source = target.source_attachment
+        if source is not None:
+            kind = clean(source.peer_type).casefold()
+            if kind in TRANSIT_DEVICE_TYPES or kind.endswith("jump"):
+                switches.add(normalize_name(source.peer))
+        elif target.ethernet is not None:
+            switches.add(normalize_name(target.ethernet.hostname))
     if mode == "management":
         if override:
             raise SetupError(
@@ -5704,16 +7343,57 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
     switch) means this switch is never logged in to."""
     if supplied is not None:
         raise SetupError("passwords in command-line arguments are not supported; use hidden prompts")
-    switches = {normalize_name(target.ethernet.hostname): target.ethernet for target in targets}
+    switches = {normalize_name(target.ethernet.hostname): target.ethernet for target in targets
+                if target.ethernet is not None}
     passwords = {}
     pending = []
+    master_options = {}
     for key, switch in sorted(switches.items()):
         if key in local_keys:
             passwords[key] = ""
             continue
         try:
-            mode = (probe_ethernet_key(switch, eth_user, timeout) if jump_sessions is None
-                    else jump_sessions.probe_jump_key(switch, eth_user))
+            if jump_sessions is None:
+                mode = probe_ethernet_key(switch, eth_user, timeout)
+            else:
+                paths = _import_tools("tools.login_path")
+                candidates = tuple(item.address for item in switch.jump_candidates) or (switch.login_ip,)
+                eth0_addresses = {item.address for item in switch.jump_candidates if item.entry == "JUMP_ETH0"}
+                if not switch.jump_candidates:
+                    eth0_addresses = {switch.login_ip}
+                try:
+                    expected_mac = paths.normalize_mac(switch.eth0_mac)
+                except ValueError:
+                    expected_mac = ""  # O2a explicitly permits hostname-only for an invalid cell.
+                if not expected_mac:
+                    log(f"{switch.hostname}: eth0_mac missing or invalid; hostname-only identity verification")
+                def verify_jump_identity(jump, address, *, expected=expected_mac, eth0=eth0_addresses):
+                    if address not in eth0 or not expected:
+                        return
+                    record = jump_sessions.records[normalize_name(jump.hostname)]
+                    output = run_on_ethernet(replace(jump, login_ip=address), eth_user, "",
+                        ["ip", "-j", "address", "show"], timeout, control_path=record["path"])
+                    rows = [row for row in parse_oob_addresses(output) if row["ifname"] == "eth0"]
+                    raw_mac = rows[0].get("address", "") if len(rows) == 1 else ""
+                    try:
+                        observed = paths.normalize_mac(raw_mac) if isinstance(raw_mac, str) else ""
+                    except ValueError:
+                        observed = "invalid"
+                    if observed != expected:
+                        log(f"{jump.hostname}: eth0 MAC identity mismatch expected={expected} observed={observed or 'missing'}")
+                        raise SetupError("jump eth0 MAC identity mismatch")
+                options = dict(candidates=candidates, verify_identity=verify_jump_identity)
+                master_options[key] = options
+                try:
+                    jump_sessions.open_jump_master(switch, eth_user, None, **options)
+                    mode = "key"
+                except SshFailure as error:
+                    if error.kind != SshFailureKind.JUMP_AUTHENTICATION:
+                        raise
+                    # Continue the original password path only at the address
+                    # which requested it; do not retry exhausted network entries.
+                    options["candidates"] = (jump_sessions.records[key]["address"],)
+                    mode = "password"
         except SetupError as exc:
             log(f"OOB access unavailable: {exc}; snapshot collection will report its dependents.")
             passwords[key] = ""
@@ -5730,7 +7410,8 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
                 if passwords.get(key) is None:
                     continue
                 try:
-                    jump_sessions.open_jump_master(switch, eth_user, ethernet_responder(passwords[key]))
+                    jump_sessions.open_jump_master(switch, eth_user, ethernet_responder(passwords[key]),
+                                                   **master_options[key])
                 except SshFailure as error:
                     # Retain the typed failure in the coordinator's record; its snapshot
                     # fails without another login or a guessed credential.
@@ -5766,12 +7447,16 @@ def prompt_ethernet_passwords(targets: list[Target], supplied: Optional[str],
     return passwords
 
 
-def _ask_first_device_change(target: Target, reason: str) -> bool:
+def _ask_first_device_change(target: Target, reason: str, *, replace_mode=False) -> bool:
+    via = ("direct" if replace_mode and target.ethernet is None
+           else f"{target.ethernet.hostname}:{target.ethernet_port}")
     log(
         f"\nFIRST DEVICE CHANGE: {target.ib.hostname} via "
-        f"{target.ethernet.hostname}:{target.ethernet_port}"
+        f"{via}"
     )
     log(f"  Required action: {reason}")
+    if replace_mode:
+        log("  整份替换（会清掉 yaml 以外的配置）")
     answer = input(
         "Authorize this change and subsequent eligible IB devices? [y/N]: "
     ).strip().casefold()
@@ -5786,12 +7471,26 @@ def confirm_first_device_change(target: Target, reason: str) -> bool:
     return _ask_first_device_change(target, reason)
 
 
+def _checked_replace_stage_output(result, message) -> str:
+    if (type(result) is not SessionResult or type(result.exit_code) is not int
+            or result.exit_code != 0 or type(result.output) is not str
+            or getattr(result, "cleanup_uncertain", False) is not False
+            or any(getattr(result, name) is not False for name in (
+                "password_changed", "password_change_required", "password_change_attempted",
+                "ib_authentication_rejected"))
+            or _EXPIRED_PASSWORD.search(result.output)
+            or _pending_diff_has_password_update_notice(result.output)):
+        raise SetupError(message)
+    return result.output
+
+
 def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
                       eth_password: str, ib_user: str, timeout: int,
                       services: Optional[dict[str, object]], current: str,
                       *, local: bool, apply: bool, authorized: bool,
                       _ib_current_password=None, _password_policy=None,
-                      ib_password: Optional[str] = None) -> tuple[bool, bool]:
+                      ib_password: Optional[str] = None, _ib_read_context=None,
+                      _replace_restore=False) -> tuple[bool, bool]:
     """Infra Services stage (v15); returns (authorized, skipped).
 
     One implementation (owner Q-035 (a)): the management-server context
@@ -5800,8 +7499,40 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
     (ib_password).
     A write or verification failure is IBConfigurationStageUncertain on both (map 2.3).
     """
+    if type(_replace_restore) is not bool:
+        raise SetupError("invalid replace service restore option")
+
+    def missing_commands(body):
+        if _replace_restore and type(body) is not str:
+            raise SetupError("replace auto-save configuration is UNKNOWN")
+        commands = [] if services is None else desired_service_commands(services, body)
+        if not _replace_restore:
+            return commands
+        state = parse_nvue_state(body)
+        setting = ["nv", "set", "system", "config", "auto-save", "state"]
+        values = set()
+        try:
+            for line in state.raw_commands.splitlines():
+                words = shlex.split(line)
+                if words[:5] == setting[:5]:
+                    if words[:-1] != setting or words[-1] not in {"enabled", "disabled"}:
+                        raise SetupError("replace auto-save configuration is UNKNOWN")
+                    values.add(words[-1])
+                elif len(words) < 5 and words == setting[:len(words)]:
+                    raise SetupError("replace auto-save configuration fact is truncated")
+        except ValueError:
+            raise SetupError("replace auto-save configuration syntax is UNKNOWN") from None
+        if len(values) > 1:
+            raise SetupError("replace auto-save configuration is contradictory")
+        return commands if values == {"enabled"} else [[*setting, "enabled"], *commands]
+
     strict = _ib_current_password is not None or _password_policy is not None
-    if strict:
+    if _ib_read_context is not None:
+        _readonly_key_file(_ib_read_context, target, neighbor, ib_user, ib_password,
+                           local=local, apply=apply)
+        if _ib_current_password is not None:
+            raise SetupError("readonly key Services cannot carry a selected password")
+    elif strict:
         if type(apply) is not bool or type(authorized) is not bool:
             error = SetupError("management IB operation failed; device state is UNKNOWN")
             try:
@@ -5823,10 +7554,10 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
     elif type(ib_password) is not str:
         raise SetupError("Infra Services stage needs the selected IB credential")
     log("  Stage 3: Infra Services configuration")
-    if services is None:
+    if services is None and not _replace_restore:
         log("  Infra Services SKIP: 01-global.yaml was unavailable at cache generation.")
         return authorized, True
-    commands = desired_service_commands(services, current)
+    commands = missing_commands(current)
     if not commands:
         log("  Infra Services SKIP: all desired values are already present; no flash save.")
         return authorized, True
@@ -5846,13 +7577,17 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
     try:
         for index, command in enumerate(stage_commands, 1):
             log(f"  INFRA SERVICES RUN [{index}/{len(stage_commands)}]: {shlex.join(command)}")
-            _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, password, timeout,
-                              command, local=local, strict=strict, policy=_password_policy)
+            result = _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, password, timeout,
+                                       command, local=local, strict=strict, policy=_password_policy)
+            if _replace_restore:
+                _checked_replace_stage_output(result, "replace service restore outcome is unverified")
             log(f"  INFRA SERVICES OK  [{index}/{len(stage_commands)}]")
         result = _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, password, timeout,
                                    ["nv", "config", "show", "-o", "commands"], local=local,
                                    strict=strict, policy=_password_policy)
-        remaining = desired_service_commands(services, result.output)
+        body = (_checked_replace_stage_output(result, "replace service restore readback is unverified")
+                if _replace_restore else result.output)
+        remaining = missing_commands(body)
         if remaining:
             raise SetupError("service verification failed: " +
                              ", ".join(shlex.join(command) for command in remaining))
@@ -5866,6 +7601,46 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
             + _authorized_failure_text(exc)), exc) from None
     log("  Infra Services SUCCESS: desired values verified.")
     return authorized, False
+
+
+def _restore_replace_services(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                              services, current, *, local, authorized, _password_policy=None):
+    """Restore missing values after a verified replace, as a distinct T15 transaction."""
+    if authorized is not True:
+        raise SetupError("replace service restore requires existing authorization")
+    _require_empty_pending(target, neighbor, eth_user, eth_password, ib_user, ib_password,
+                           timeout, local=local)
+    stage_context = ({"ib_password": ib_password} if _password_policy is None else
+                     {"_ib_current_password": ib_password, "_password_policy": _password_policy})
+    return run_service_stage(target, neighbor, eth_user, eth_password, ib_user, timeout,
+                             services, current, local=local, apply=True, authorized=authorized,
+                             _replace_restore=True, **stage_context)
+
+
+def _restore_replace_services_and_verify_ztp(state, services, current, *, timeout,
+                                             authorized, strict, policy=None):
+    """Complete service restoration and attest fresh ZTP before later stages."""
+    if (type(state) is not _IBConfigWriteState or state is not _TASK_IB_CONFIG
+            or type(state.task) is not PreparedIBTask or state.task.local is not False
+            or state.apply is not True or state.identity_verified is not True or authorized is not True
+            or type(state.current_password) is not str or not state.current_password
+            or type(timeout) is not int or timeout <= 0 or type(strict) is not bool
+            or (strict and policy is None)):
+        raise SetupError("replace service and ZTP context is not qualified")
+    context = (state.task.target, state.endpoint, state.eth_user, state.task.ethernet_password,
+               state.ib_user, state.current_password, timeout)
+    check_task_cancelled()
+    authorized, skipped = _restore_replace_services(
+        *context, services, current, local=False, authorized=authorized,
+        _password_policy=policy if strict else None)
+    check_task_cancelled()
+    result = _stage_ib_command(*context, ["nv", "show", "system", "ztp"],
+                               local=False, strict=strict, policy=policy)
+    output = _checked_replace_stage_output(result, "replace post-restoration ZTP outcome is unverified")
+    _verify_ztp_disabled(output)
+    check_task_cancelled()
+    return authorized, skipped, output
+
 
 def verify_management_key_possession(target: Target, ib_user: str,
                                      entry: dict[str, str], private_key: Path,
@@ -6117,12 +7892,17 @@ def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
                   _ib_current_password=None, _password_policy=None,
                   ib_password: Optional[str] = None,
                   details: Optional[dict] = None, read_device_fingerprint=None,
-                  operator_forced=False, host_key_records=None) -> bool:
+                  operator_forced=False, host_key_records=None, _ib_read_context=None) -> bool:
     """Public-key stage: the management-server context installs through the
     authorized helper (DEV), otherwise with the selected IB credential (v15);
     only the two canonical receipts are accepted (DEV)."""
     strict = _ib_current_password is not None or _password_policy is not None
-    if strict:
+    if _ib_read_context is not None:
+        _readonly_key_file(_ib_read_context, target, neighbor, ib_user, ib_password,
+                           local=local, apply=apply)
+        if _ib_current_password is not None:
+            raise SetupError("readonly key public-key stage cannot carry a selected password")
+    elif strict:
         if type(apply) is not bool or type(authorized) is not bool:
             error = SetupError("management IB operation failed; device state is UNKNOWN")
             try:
@@ -6152,6 +7932,14 @@ def run_key_stage(target: Target, neighbor: Neighbor, eth_user: str,
         log(f"  Public key {'PLAN INSTALL' if apply else 'WOULD INSTALL'}: "
             f"{entry['name']} {entry['fingerprint']}")
     if not apply:
+        result = _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user,
+            _ib_current_password if strict else ib_password, timeout, readonly_key_command(keys),
+            local=local, strict=strict, policy=_password_policy, _ib_read_context=_ib_read_context)
+        if (type(result) is not SessionResult or type(result.exit_code) is not int
+                or result.exit_code not in (0, 34) or result.output != ""):
+            raise SetupError("readonly public-key stage outcome is unverified")
+        if details is not None:
+            details["present"] = result.exit_code == 0
         return authorized
     if not authorized:
         authorized = confirm_first_device_change(
@@ -6284,6 +8072,13 @@ def parse_args() -> argparse.Namespace:
                         help=("optional explicit Spine names from CSV type=eth_jump; default: "
                               "CSV short names beginning oob-spine. UP Leaf LLDP presence "
                               "and actual SVI/address checks are always required"))
+    parser.add_argument("--direct-access", metavar="HOST[,HOST...]",
+                        help="use direct login for selected CSV IB names (supports ranges, *, all)")
+    parser.add_argument("--devices", metavar="SELECTOR",
+                        help="process only matching CSV IB names (comma list, *, digit or letter ranges; all is a literal name)")
+    parser.add_argument("--ignore-cable-check", action="store_true",
+                        help="ignore the cable-check decision for this run")
+    parser.add_argument("--inventory-checked", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ib-user", default="admin",
                         help="NVOS SSH user (default: admin)")
     password_source = parser.add_mutually_exclusive_group()
@@ -6310,6 +8105,8 @@ def parse_args() -> argparse.Namespace:
                         help="print full device log blocks and phase events; default: compact progress and modular summary (full reports are always kept)")
     parser.add_argument("--apply", action="store_true",
                         help="configure devices that pass the all-unconfigured check")
+    parser.add_argument("--config-mode", choices=("patch", "replace"), default="patch",
+                        help="patch missing configuration (default) or replace from the published host YAML")
     parser.add_argument("--force", action="store_true",
                         help="only complete missing Network fields; refuse conflicts")
     parser.add_argument("--refresh-host-key", metavar="HOST[,HOST...]",
@@ -6362,9 +8159,411 @@ def parse_args() -> argparse.Namespace:
 @dataclass(frozen=True)
 class PreparedIBTask:
     target: Target
-    neighbor: Neighbor
+    neighbor: Optional[Neighbor]
     ethernet_password: str
     local: bool
+
+
+@dataclass(repr=False)
+class _IBConfigWriteState:
+    """One execute invocation owns this state; never serialize its credentials."""
+    task: PreparedIBTask
+    ib_user: str
+    eth_user: str
+    stamp: object
+    apply: bool
+    endpoint: object = None
+    current_password: Optional[str] = None
+    identity_verified: bool = False
+    backup_state: str = "NEW"
+    backup_receipt: Optional[dict] = None
+    failure_category: Optional[str] = None
+    readonly_key_file: Optional[Path] = None
+
+
+def _readonly_key_file(context, target, endpoint, ib_user, current_password, *, local, apply):
+    """Select only this already-key-authenticated task's readonly transport."""
+    if (type(context) is not _IBConfigWriteState or context is not _TASK_IB_CONFIG
+            or context.task.target is not target or target.ethernet is not None
+            or local is not False or context.task.local is not False
+            or apply is not False or context.apply is not False
+            or current_password is not None or context.current_password is not None
+            or context.ib_user != ib_user or context.identity_verified is not True
+            or type(endpoint) is not DirectEndpoint or context.endpoint != endpoint
+            or not isinstance(context.readonly_key_file, Path)
+            or not context.readonly_key_file.is_file() or context.readonly_key_file.is_symlink()):
+        raise SetupError("readonly key context is not bound to this verified direct task")
+    return context.readonly_key_file
+
+
+def _check_ib_identity(target, addr_output, route_output, *, via_ipv4):
+    """Return only parsed identity facts; raw device output stays out of records."""
+    paths = _import_tools("tools.login_path")
+    try:
+        observed = paths.parse_ip_addr(addr_output)
+        if via_ipv4:
+            for line in route_output.splitlines():
+                if (re.match(r"^\s*(?:\S+[ \t]+)?default(?:\s|$)", line)
+                        and not re.match(r"^default[ \t]+via[ \t]+\S+(?:[ \t]|$)", line)):
+                    raise SetupError("IB default route has no verifiable gateway")
+            observed = replace(observed, gateways=paths.parse_default_routes(route_output))
+        check = paths.check_identity(target.ib.eth0_mac, observed, via_ipv4=via_ipv4,
+                                     expected_ipv4=target.ib.eth0_prefix,
+                                     expected_gateway=target.ib.eth0_gateway)
+    except ValueError:
+        raise SetupError("IB identity readback is not verifiable") from None
+    return {"ok": check.ok, "via_ipv4": via_ipv4,
+            "expected": {"mac": paths.normalize_mac(target.ib.eth0_mac),
+                         "ipv4": target.ib.eth0_prefix if via_ipv4 else None,
+                         "gateway": target.ib.eth0_gateway if via_ipv4 else None},
+            "observed": {"mac": observed.mac, "ipv4": list(map(str, observed.ipv4)),
+                         "gateways": list(observed.gateways)},
+            "mismatches": [{"field": name, "expected": expected, "observed": actual}
+                           for name, expected, actual in check.mismatches]}
+
+
+def _ib_write_category(ib_command):
+    """Classify only admitted vectors, not every shell command as a key write."""
+    command = ib_command_argv(ib_command)
+    if command[:2] == ["sh", "-c"]:
+        if command[2] == _CONFIG_BACKUP_SCRIPT:
+            return "config_backup"
+        if command[2] in (_DEFERRED_APPLY_SCRIPT, _REPLACE_DEFERRED_APPLY_SCRIPT):
+            return "nvue"
+        if command[2] == _CONFIG_REPLACE_SCRIPT:
+            return "nvue"
+        if command[2] == _KEY_INSTALL_SCRIPT:
+            return "public_key"
+        return None  # The only other admitted closed script reads its rc.
+    if (command[:2] == ["nv", "set"]
+            or command[:3] in (["nv", "config", "apply"], ["nv", "config", "save"],
+                                ["nv", "config", "replace"], ["nv", "config", "detach"])):
+        return "nvue"
+    return None
+
+
+def _read_direct_ipv4_command(target, point, ib_user, current_password, timeout, command, *,
+                              strict, policy, details, _require_certain=False,
+                              _preserve_replace_cleanup_veto=False):
+    """One direct-read qualification shared by D4 and the D7 fence."""
+    options = {"_preserve_replace_cleanup_veto": True} if _preserve_replace_cleanup_veto is True else {}
+    result = _stage_ib_command(target, point, "", "", ib_user, current_password,
+        timeout, command, local=False, strict=strict, policy=policy, **options)
+    if (type(result) is not SessionResult or type(result.exit_code) is not int
+            or result.exit_code != 0 or type(result.output) is not str
+            or any(getattr(result, name) is not False for name in (
+                "password_changed", "password_change_required", "password_change_attempted",
+                "ib_authentication_rejected"))
+            or _EXPIRED_PASSWORD.search(result.output)
+            or _pending_diff_has_password_update_notice(result.output)
+            or type(getattr(result, "_direct_endpoint", None)) is not DirectEndpoint
+            or result._direct_endpoint != point
+            or (_require_certain is True and getattr(result, "cleanup_uncertain", False) is not False)):
+        raise SetupError("direct IPv4 readiness outcome is unverified")
+    details["endpoint"] = result._direct_endpoint
+    return result.output
+
+
+_REPLACE_DEFERRED_APPLY_SCRIPT = r"""set -eu
+umask 077
+fail() { printf '%s\n' 'IB deferred configuration launch failed' >&2; exit 1; }
+[ "$#" -eq 1 ] || fail
+stamp=$1
+case "$stamp" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) fail ;;
+esac
+case "${HOME-}" in /*) ;; *) fail ;; esac
+rc_file="$HOME/.initial-setup-${stamp}.rc"
+[ ! -e "$rc_file" ] && [ ! -L "$rc_file" ] || fail
+(set -C; : > "$rc_file") 2>/dev/null || fail
+chmod 600 "$rc_file" || fail
+setsid nohup sh -c '
+set -u
+umask 077
+rc_file=$1
+sleep 3 || exit 1
+nv config apply -y
+status=$?
+failed_operation=apply
+if [ "$status" -eq 0 ]; then
+    nv config save
+    status=$?
+    failed_operation=save
+    if [ "$status" -eq 0 ]; then failed_operation=none; fi
+fi
+tmp=
+trap '\''if [ -n "$tmp" ]; then rm -f -- "$tmp"; fi'\'' EXIT
+trap '\''exit 1'\'' HUP INT TERM
+tmp=$(mktemp "${rc_file}.tmp.XXXXXX" 2>/dev/null) || exit 1
+printf "rc=%s\nfailed_operation=%s\n" "$status" "$failed_operation" > "$tmp" || exit 1
+chmod 600 "$tmp" || exit 1
+mv -fT -- "$tmp" "$rc_file" || exit 1
+tmp=
+exit "$status"
+' -- "$rc_file" > /dev/null 2>&1 < /dev/null &
+exit 0
+"""
+
+_REPLACE_DEFERRED_RC_SCRIPT = r"""set -eu
+fail() { printf '%s\n' 'IB deferred configuration result is unverified' >&2; exit 1; }
+[ "$#" -eq 1 ] || fail
+stamp=$1
+case "$stamp" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) fail ;;
+esac
+case "${HOME-}" in /*) ;; *) fail ;; esac
+rc_file="$HOME/.initial-setup-${stamp}.rc"
+[ ! -L "$rc_file" ] || fail
+if [ ! -e "$rc_file" ]; then printf 'rc=\nfailed_operation=pending\n'; exit 0; fi
+[ -f "$rc_file" ] || fail
+if [ ! -s "$rc_file" ]; then printf 'rc=\nfailed_operation=pending\n'; exit 0; fi
+{
+    IFS= read -r rc_line || fail
+    IFS= read -r operation_line || fail
+} < "$rc_file"
+case "$rc_line" in
+    rc=*) status=${rc_line#rc=} ;;
+    *) fail ;;
+esac
+case "$status" in
+    0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) ;;
+    *) fail ;;
+esac
+case "$operation_line" in
+    failed_operation=none) [ "$status" -eq 0 ] || fail ;;
+    failed_operation=apply|failed_operation=save) [ "$status" -ne 0 ] || fail ;;
+    *) fail ;;
+esac
+bytes=$(wc -c < "$rc_file" | tr -d '[:space:]') || fail
+case "$bytes" in ''|*[!0-9]*) fail ;; esac
+[ "$bytes" -eq "$((${#rc_line} + ${#operation_line} + 2))" ] || fail
+printf '%s\n%s\n' "$rc_line" "$operation_line"
+"""
+
+
+def _parse_replace_completion(wire):
+    """Return the observed command status and its fixed operation, never infer one."""
+    if type(wire) is str:
+        if wire == "rc=\nfailed_operation=pending\n":
+            return None, "pending"
+        match = re.fullmatch(r"rc=(0|[1-9][0-9]{0,2})\nfailed_operation=(none|apply|save)\n", wire)
+        if match is not None:
+            rc, operation = int(match[1]), match[2]
+            if rc <= 255 and (rc == 0) == (operation == "none"):
+                return rc, operation
+    raise SetupError("deferred configuration result is unverified")
+
+
+def _require_replace_completion_supervisor():
+    if (_TASK_DEADLINE is None
+            and (_WORKER_CONNECTION is None or _WORKER_STOP is None)):
+        raise SetupError("replace completion requires the original task deadline or worker supervisor")
+
+
+def _wait_replace_deferred_completion(target, ib_user, current_password, timeout, *,
+                                       strict, policy, stamp, details, _replace_completion=False):
+    """Read completion under the original task authority, not a second D4 loop."""
+    if type(_replace_completion) is not bool:
+        raise SetupError("replace completion mode must be boolean")
+    _require_replace_completion_supervisor()
+    if _replace_completion:
+        details.update(deferred_rc=None, deferred_failed_operation=None)
+    check_task_cancelled()
+    point = DirectEndpoint(target.ib.login_ip, None)
+    rc_confirmed = False
+
+    def read(command):
+        check_task_cancelled()
+        output = _read_direct_ipv4_command(target, point, ib_user, current_password,
+            timeout, command, strict=strict, policy=policy, details=details,
+            _require_certain=_replace_completion)
+        check_task_cancelled()
+        return output
+
+    while True:
+        check_task_cancelled()
+        try:
+            if not rc_confirmed:
+                if _replace_completion:
+                    receipt = read(["sh", "-c", _REPLACE_DEFERRED_RC_SCRIPT, "--", stamp])
+                    details.update(deferred_rc=None, deferred_failed_operation=None)
+                    rc, operation = _parse_replace_completion(receipt)
+                    details.update(deferred_rc=rc, deferred_failed_operation=operation)
+                    if rc is not None and rc != 0:
+                        raise SetupError(f"deferred configuration {operation} failed (rc={rc})")
+                    rc_confirmed = rc == 0
+                else:
+                    receipt = read(["sh", "-c", _DEFERRED_APPLY_RC_SCRIPT, "--", stamp])
+                    if receipt == "rc=0\n":
+                        rc_confirmed = True
+                    elif receipt != "rc=\n":
+                        raise SetupError("deferred configuration result is failed or unverified")
+            if rc_confirmed:
+                address_output = read(["ip", "addr", "show", "eth0"])
+                route_output = read(["ip", "route"])
+                try:
+                    identity = _check_ib_identity(target, address_output, route_output, via_ipv4=True)
+                except SetupError:
+                    details["identity_failed"] = True
+                    raise
+                details["identity"] = identity
+                if not identity["ok"]:
+                    details["identity_failed"] = True
+                    mismatch_detail = "; ".join(
+                        f"{item['field']}: expected={item['expected']} observed={item['observed']}"
+                        for item in identity["mismatches"])
+                    raise SetupError("IB identity differs from CSV; " + mismatch_detail
+                                     + "; no further configuration write authorized")
+                return read(["nv", "config", "show", "-o", "commands"])
+        except SetupError as error:
+            if getattr(error, "cleanup_uncertain", False) is True:
+                raise
+            failure = _ssh_failure_fact(error)
+            network_retry = (failure is not None and failure.hop == "direct"
+                             and failure.kind in (SshFailureKind.DIRECT_LOGIN_NETWORK,
+                                                  SshFailureKind.DIRECT_SSH_NETWORK))
+            clean_timeout = (strict and failure is None
+                             and getattr(error, "_ib_readonly_session_timeout", None) is True)
+            legacy_timeout = not strict and str(error).startswith("SSH/PAM session timed out;")
+            if not (network_retry or clean_timeout or legacy_timeout):
+                raise
+        check_task_cancelled()
+        delay = 10
+        if _TASK_DEADLINE is not None:
+            delay = min(delay, max(0, _TASK_DEADLINE - time.monotonic()))
+        time.sleep(delay)
+        check_task_cancelled()
+
+
+def _wait_direct_ipv4_readback(target, ib_user, current_password, timeout, *,
+                               strict, policy, readiness_policy, deferred_stamp=None,
+                               details):
+    """One direct IPv4 readiness loop; an accepted launch is not completion."""
+    point = DirectEndpoint(target.ib.login_ip, None)
+    ready = {}
+    rc_confirmed = deferred_stamp is None
+
+    def read(command):
+        return _read_direct_ipv4_command(target, point, ib_user, current_password,
+            timeout, command, strict=strict, policy=policy, details=details)
+
+    def probe():
+        nonlocal rc_confirmed
+        try:
+            if not rc_confirmed:
+                receipt = read(["sh", "-c", _DEFERRED_APPLY_RC_SCRIPT, "--", deferred_stamp])
+                if receipt == "rc=\n":
+                    return "RETRY", "deferred configuration has not reported completion"
+                if receipt != "rc=0\n":
+                    return "FATAL", SetupError("deferred configuration result is failed or unverified")
+                rc_confirmed = True
+            address_output = read(["ip", "addr", "show", "eth0"])
+            route_output = read(["ip", "route"])
+            try:
+                identity = _check_ib_identity(target, address_output, route_output, via_ipv4=True)
+            except SetupError:
+                details["identity_failed"] = True
+                raise
+            details["identity"] = identity
+            if not identity["ok"]:
+                details["identity_failed"] = True
+                mismatch_detail = "; ".join(
+                    f"{item['field']}: expected={item['expected']} observed={item['observed']}"
+                    for item in identity["mismatches"])
+                return "FATAL", SetupError("IB identity differs from CSV; " + mismatch_detail
+                                           + "; no further configuration write authorized")
+            ready["readback"] = read(["nv", "config", "show", "-o", "commands"])
+            return "READY", None
+        except SetupError as error:
+            if getattr(error, "cleanup_uncertain", False) is True:
+                return "FATAL", error
+            failure = _ssh_failure_fact(error)
+            if (failure is not None and failure.hop == "direct"
+                    and failure.kind in (SshFailureKind.DIRECT_LOGIN_NETWORK,
+                                         SshFailureKind.DIRECT_SSH_NETWORK)):
+                return "RETRY", "direct IPv4 SSH endpoint network is not ready"
+            if (strict and failure is None
+                    and getattr(error, "_ib_readonly_session_timeout", None) is True):
+                return "RETRY", "direct IPv4 SSH session timed out"
+            if not strict and str(error).startswith("SSH/PAM session timed out;"):
+                return "RETRY", "direct IPv4 SSH session timed out"
+            return "FATAL", error
+
+    wait_until_ready(probe, readiness_policy, label=target.ib.hostname, sleep=time.sleep)
+    return ready["readback"]
+
+
+def _ensure_ib_config_backup(target, endpoint, eth_user, ethernet_password, ib_user,
+                             current_password, timeout, *, local):
+    """A qualified NVUE request needs this task's identity and one real backup."""
+    state = _TASK_IB_CONFIG
+    if (type(state) is not _IBConfigWriteState or state.task.target is not target
+            or state.task.local is not local or state.ib_user != ib_user
+            or state.eth_user != eth_user or state.task.ethernet_password != ethernet_password
+            or state.apply is not True or state.identity_verified is not True
+            or state.endpoint != endpoint or state.current_password != current_password
+            or type(current_password) is not str or not current_password
+            or type(state.stamp) is not str
+            or not re.fullmatch(r"[0-9]{8}-[0-9]{6}", state.stamp)):
+        raise SetupError("NVUE write lacks this task's verified identity/credential/report binding")
+    if state.backup_state == "VERIFIED":
+        return
+    if state.backup_state != "NEW":
+        raise SetupError("IB configuration backup is failed or uncertain; no automatic replay")
+    check_task_cancelled()
+    state.backup_state = "RUNNING"
+    try:
+        # Its config_backup permit checks the original apply/authorization and
+        # input/cancellation boundaries once. The NVUE permit still follows.
+        result = run_on_ib(target, endpoint, eth_user, ethernet_password, ib_user,
+                           current_password, timeout,
+                           ["sh", "-c", _CONFIG_BACKUP_SCRIPT, "--", state.stamp],
+                           local=local, allow_password_change=False, password_only=True)
+        if (type(result) is not SessionResult or type(result.exit_code) is not int
+                or result.exit_code != 0 or type(result.output) is not str
+                or any(getattr(result, name) is not False for name in (
+                    "password_changed", "password_change_required", "password_change_attempted",
+                    "ib_authentication_rejected"))
+                or _EXPIRED_PASSWORD.search(result.output)
+                or _pending_diff_has_password_update_notice(result.output)):
+            raise SetupError("IB configuration backup outcome is unverified")
+        receipt = re.fullmatch(r"path=([^\n]+)\nbytes=([1-9][0-9]*)\n", result.output)
+        if receipt is None:
+            raise SetupError("IB configuration backup receipt is unverified")
+        path, size = receipt.groups()
+        if (not path.startswith("/") or len(path) > 4096
+                or re.search(r"[\x00-\x1f\x7f-\x9f]", path)
+                or any(part in {"", ".", ".."} for part in path.split("/")[1:])
+                or path.rsplit("/", 1)[-1] != "current_" + state.stamp + ".yaml"):
+            raise SetupError("IB configuration backup path is unverified")
+        state.backup_receipt = {"path": path, "bytes": int(size)}
+        state.backup_state = "VERIFIED"
+    except (ProjectInputChanged, BatchStopped):
+        state.backup_state = "FAILED"
+        raise
+    except (SetupError, OSError, subprocess.SubprocessError) as original:
+        state.backup_state = "FAILED"
+        state.failure_category = "FAILED_CONFIG_BACKUP"
+        error = SetupError("IB configuration backup failed or is unverified; no NVUE write issued")
+        _retain_ssh_failure(error, _ssh_failure_fact(original))
+        uncertain, number = _ib_phase_error_facts(original)
+        if uncertain:
+            error.cleanup_uncertain = True
+        if number is not None:
+            error.io_errno = number
+        # Neither the public message nor a hidden chain retains configuration
+        # output/hashes from a transport or an unqualified backup receipt.
+        try:
+            raise error from None
+        except SetupError:
+            error.__cause__ = None
+            error.__context__ = None
+            raise
+    except BaseException:
+        state.backup_state = "FAILED"
+        raise  # Never turn a programming error/cancellation into backup proof.
 
 
 def automatic_worker_count(count: int, max_workers: int = 16) -> int:
@@ -6525,10 +8724,33 @@ class RuntimeInputAuthority:
 
     @staticmethod
     def signature(path):
-        value = path.stat()
+        return RuntimeInputAuthority._stat_signature(path.stat())
+
+    @staticmethod
+    def _stat_signature(value):
         return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
-    def assert_unchanged(self):
+    def _stable_regular_digest(self, path, expected):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        changed = f"input changed during revalidation: {path}"
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or self._stat_signature(info) != expected:
+                raise ProjectInputChanged(changed)
+            digest, count = hashlib.sha256(), 0
+            while count <= info.st_size:
+                chunk = os.read(fd, min(65536, info.st_size + 1 - count))
+                if not chunk:
+                    break
+                digest.update(chunk)
+                count += len(chunk)
+            if count != info.st_size or self._stat_signature(os.fstat(fd)) != expected:
+                raise ProjectInputChanged(changed)
+            return digest.hexdigest()
+        finally:
+            os.close(fd)
+
+    def assert_unchanged(self, *, _stable_file_refresh=False):
         for entry in self.entries:
             path, resolved, old_stat, digest = entry
             try:
@@ -6536,11 +8758,363 @@ class RuntimeInputAuthority:
                     raise ProjectInputChanged(f"input link target changed: {path}")
                 current = self.signature(resolved)
                 if current != old_stat:
-                    if _file_sha256(resolved) != digest:
+                    if _stable_file_refresh is True:
+                        observed = self._stable_regular_digest(resolved, current)
+                        if path.resolve(strict=True) != resolved or self.signature(resolved) != current:
+                            raise ProjectInputChanged(f"input changed during revalidation: {path}")
+                    else:
+                        observed = _file_sha256(resolved)
+                    if observed != digest:
                         raise ProjectInputChanged(f"input bytes changed: {path}")
                     entry[2] = current
             except OSError as exc:
                 raise ProjectInputChanged(f"input disappeared/unreadable: {path}") from exc
+
+
+def _bound_replace_yaml(task, args):
+    """Find the existing per-task selection without reopening or rebuilding it."""
+    invalid = "replace YAML is not bound to the admitted task selection"
+    if (type(task) is not PreparedIBTask or type(task.target) is not Target or task.local is not False
+            or getattr(args, "config_mode", None) != "replace" or getattr(args, "apply", None) is not True):
+        raise SetupError(invalid)
+    authority = getattr(args, "_replace_runtime_authority", None)
+    selections = getattr(args, "_replace_selected", None)
+    release = getattr(args, "_replace_release", None)
+    name = task.target.ib.hostname
+    if (type(authority) is not RuntimeInputAuthority or type(selections) is not dict
+            or not isinstance(release, Path)
+            or type(name) is not str or not name or "/" in name or "\\" in name):
+        raise SetupError(invalid)
+    selection = selections.get(normalize_name(name))
+    if (type(selection) is not dict or set(selection) != {"verdict", "file", "sha256", "reason"}
+            or selection["verdict"] != "WOULD_REPLACE"
+            or type(selection["file"]) is not str or type(selection["sha256"]) is not str):
+        raise SetupError(invalid)
+    path, digest = Path(selection["file"]), selection["sha256"]
+    named = release.absolute() / (name + ".yaml")
+    entry = next((item for item in authority.entries
+                  if item[0] == named and item[1] == path and item[3] == digest), None)
+    if not path.is_absolute() or path.name != named.name or entry is None:
+        raise SetupError(invalid)
+    return authority, path, digest, entry
+
+
+def _read_admitted_replace_yaml(task, args) -> bytes:
+    """Read only the selected CSV-host file from this run's admitted input snapshot."""
+    authority, path, digest, entry = _bound_replace_yaml(task, args)
+    check_task_cancelled()
+    authority.assert_unchanged(_stable_file_refresh=True)
+    check_task_cancelled()
+
+    maximum = _REPLACE_PAYLOAD_BASE64_MAX // 4 * 3
+    changed = "selected replace YAML changed or became unreadable; run load"
+
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or authority._stat_signature(info) != entry[2]:
+                raise ProjectInputChanged(changed)
+            if not 0 < info.st_size <= maximum:
+                raise SetupError("replace YAML payload is invalid")
+            raw = bytearray()
+            while len(raw) <= maximum:
+                chunk = os.read(fd, min(65536, maximum + 1 - len(raw)))
+                if not chunk:
+                    break
+                raw.extend(chunk)
+            if (len(raw) != info.st_size or authority._stat_signature(os.fstat(fd)) != entry[2]
+                    or hashlib.sha256(raw).hexdigest() != digest):
+                raise ProjectInputChanged(changed)
+        finally:
+            os.close(fd)
+    except OSError:
+        raise ProjectInputChanged(changed) from None
+    authority.assert_unchanged(_stable_file_refresh=True)
+    check_task_cancelled()
+    return bytes(raw)
+
+
+def _check_replace_detach_preconditions(authority, operation, rc) -> bool:
+    """Recheck the caller's complete admitted inputs; this never grants a write permit."""
+    if (type(authority) is not RuntimeInputAuthority
+            or not _replace_failure_is_detach_candidate(operation, rc)):
+        return False
+    check_task_cancelled()
+    authority.assert_unchanged()
+    check_task_cancelled()
+    return True
+
+
+def run_replace_stage(state, data, authority, *, timeout, authorized, strict, policy=None) -> str:
+    """Apply a caller-admitted replacement on the existing synchronous device path."""
+    if (type(state) is not _IBConfigWriteState or state is not _TASK_IB_CONFIG
+            or type(state.task) is not PreparedIBTask or state.task.local is not False
+            or state.apply is not True or state.identity_verified is not True or authorized is not True
+            or type(authority) is not RuntimeInputAuthority or type(strict) is not bool
+            or (strict and policy is None)
+            or type(timeout) is not int or timeout <= 0
+            or type(state.current_password) is not str or not state.current_password):
+        raise SetupError("synchronous replace context is not qualified")
+    endpoint = state.endpoint
+    target = state.task.target
+    if type(target) is not Target or (
+            type(endpoint) is not Neighbor if target.ethernet is not None else
+            type(endpoint) is not DirectEndpoint or endpoint.interface is None):
+        raise SetupError("synchronous replace endpoint is not qualified")
+    command = replace_command(data)
+    check_task_cancelled()
+    authority.assert_unchanged()
+    check_task_cancelled()
+    context = (target, endpoint, state.eth_user, state.task.ethernet_password,
+               state.ib_user, state.current_password, timeout)
+    _require_empty_pending(*context, local=False)
+
+    def checked_output(result):
+        return _checked_replace_stage_output(result, "synchronous replace operation is unverified")
+
+    for operation, argv in (("replace", command), ("apply", ["nv", "config", "apply", "-y"]),
+                            ("save", ["nv", "config", "save"])):
+        try:
+            result = _stage_ib_command(*context, argv, local=False, strict=strict, policy=policy,
+                                       _replace_sync_failure_task=state)
+        except SetupError as error:
+            fact = getattr(error, "_replace_sync_failure", None)
+            if (type(error) is SetupError and type(fact) is tuple and len(fact) == 2
+                    and type(fact[0]) is str and fact[0] == operation
+                    and _check_replace_detach_preconditions(authority, *fact)):
+                # Keep the original failure; an unconfirmed cleanup is not proof
+                # that a second operation reached the device.
+                try:
+                    cleanup_options = {"_preserve_replace_cleanup_veto": True} if strict else {}
+                    cleaned = _stage_ib_command(*context, ["nv", "config", "detach"],
+                                                local=False, strict=strict, policy=policy, **cleanup_options)
+                    checked_output(cleaned)
+                except (ProjectInputChanged, BatchStopped):
+                    raise
+                except (SetupError, OSError):
+                    error._replace_cleanup_outcome = "FAILED_DETACH_FAILED"
+                else:
+                    error._replace_cleanup_outcome = "FAILED_DETACHED"
+            raise
+        checked_output(result)
+        if operation == "replace":
+            receipt = state.backup_receipt
+            if state.backup_state != "VERIFIED" or type(receipt) is not dict:
+                raise SetupError("synchronous replace lacks a verified backup receipt")
+            _verify_replace_command_receipt(result, receipt.get("path"), command[-1])
+    result = _stage_ib_command(*context, ["nv", "config", "show", "-o", "commands"],
+                               local=False, strict=strict, policy=policy)
+    readback = checked_output(result)
+    if normalize_name(parse_nvue_state(readback).hostname) != normalize_name(target.ib.hostname):
+        raise SetupError("synchronous replace readback differs from the selected target")
+    return readback
+
+
+@dataclass(frozen=True, eq=False, repr=False)
+class _DeferredReplaceApplyFailure:
+    state: _IBConfigWriteState
+    authority: RuntimeInputAuthority
+    endpoint: DirectEndpoint
+    stamp: str
+    rc: int
+
+
+def _run_replace_deferred_stage(state, data, authority, *, timeout, authorized, strict, policy=None) -> str:
+    """Complete the IPv4 replacement base without replaying any unverified write."""
+    if (type(state) is not _IBConfigWriteState or state is not _TASK_IB_CONFIG
+            or type(state.task) is not PreparedIBTask or state.task.local is not False
+            or state.apply is not True or state.identity_verified is not True or authorized is not True
+            or type(authority) is not RuntimeInputAuthority or type(strict) is not bool
+            or (strict and policy is None) or type(timeout) is not int or timeout <= 0
+            or type(state.current_password) is not str or not state.current_password
+            or type(state.stamp) is not str or re.fullmatch(r"[0-9]{8}-[0-9]{6}", state.stamp) is None):
+        raise SetupError("deferred replace context is not qualified")
+    target, endpoint = state.task.target, state.endpoint
+    stamp = state.stamp
+    _validate_direct_endpoint(target, endpoint)
+    if endpoint.interface is not None:
+        raise SetupError("deferred replace requires the verified IPv4 endpoint")
+    _require_replace_completion_supervisor()
+    command = replace_command(data)
+    context = (target, endpoint, state.eth_user, state.task.ethernet_password,
+               state.ib_user, state.current_password, timeout)
+
+    def recheck():
+        check_task_cancelled()
+        authority.assert_unchanged(_stable_file_refresh=True)
+        check_task_cancelled()
+
+    def check_result(result, message):
+        _checked_replace_stage_output(result, message)
+        if (type(getattr(result, "_direct_endpoint", None)) is not DirectEndpoint
+                or result._direct_endpoint != endpoint):
+            raise SetupError(message)
+
+    recheck()
+    _require_empty_pending(*context, local=False)
+    request = _InitialIPv4ReplaceRequest(state, authority, endpoint, stamp)
+    try:
+        replaced = _stage_ib_command(*context, command, local=False, strict=strict, policy=policy,
+                                     _replace_sync_failure_task=request)
+    except SetupError as error:
+        if type(error) is SetupError:
+            fact = error.__dict__.pop("_replace_sync_failure", None)
+            if _replace_failure_operation(request, fact) == "replace":
+                error._replace_initial_ipv4_failure = fact
+        raise
+    check_result(replaced, "deferred replace receipt is unverified")
+    receipt = state.backup_receipt
+    if state.backup_state != "VERIFIED" or type(receipt) is not dict:
+        raise SetupError("deferred replace lacks a verified backup receipt")
+    _verify_replace_command_receipt(replaced, receipt.get("path"), command[-1])
+    recheck()
+    launched = _stage_ib_command(*context, ["sh", "-c", _REPLACE_DEFERRED_APPLY_SCRIPT, "--", stamp],
+                                 local=False, strict=strict, policy=policy)
+    check_result(launched, "deferred replace launch outcome is unverified")
+    details = {}
+    try:
+        readback = _wait_replace_deferred_completion(
+            target, state.ib_user, state.current_password, timeout, strict=strict, policy=policy,
+            stamp=stamp, details=details, _replace_completion=True)
+    except SetupError as error:
+        rc = details.get("deferred_rc")
+        if (type(error) is SetupError and details.get("deferred_failed_operation") == "apply"
+                and _replace_failure_is_detach_candidate("apply", rc)
+                and details.get("endpoint") == endpoint):
+            error._replace_deferred_apply_failure = _DeferredReplaceApplyFailure(
+                state, authority, endpoint, stamp, rc)
+        raise
+    identity = details.get("identity")
+    if (type(details.get("deferred_rc")) is not int or details["deferred_rc"] != 0
+            or details.get("deferred_failed_operation") != "none" or details.get("endpoint") != endpoint
+            or type(identity) is not dict or identity.get("ok") is not True or identity.get("via_ipv4") is not True
+            or normalize_name(parse_nvue_state(readback).hostname) != normalize_name(target.ib.hostname)):
+        raise SetupError("deferred replace readback differs from the selected target")
+    recheck()
+    return readback
+
+
+def _try_cleanup_deferred_apply_failure(state, authority, error, *, timeout, strict, policy):
+    if type(error) is not SetupError:
+        return
+    deferred = error.__dict__.pop("_replace_deferred_apply_failure", None)
+    initial = error.__dict__.pop("_replace_initial_ipv4_failure", None)
+    if state is not _TASK_IB_CONFIG or (deferred is None) == (initial is None):
+        return
+    if initial is not None:
+        if type(initial) is not _InitialIPv4ReplaceFailure or type(initial.request) is not _InitialIPv4ReplaceRequest:
+            return
+        request = initial.request
+        if (request.state is not state or request.authority is not authority
+                or request.endpoint is not state.endpoint or request.stamp != state.stamp
+                or _replace_failure_operation(request, initial) != "replace"):
+            return
+    elif (type(deferred) is not _DeferredReplaceApplyFailure or deferred.state is not state
+            or deferred.authority is not authority or deferred.endpoint is not state.endpoint
+            or deferred.stamp != state.stamp or not _replace_failure_is_detach_candidate("apply", deferred.rc)):
+        return
+    target, endpoint = state.task.target, state.endpoint
+
+    def recheck():
+        check_task_cancelled()
+        authority.assert_unchanged(_stable_file_refresh=True)
+        check_task_cancelled()
+
+    def read(command):
+        check_task_cancelled()
+        options = {"_preserve_replace_cleanup_veto": True} if strict else {}
+        return _read_direct_ipv4_command(target, endpoint, state.ib_user, state.current_password,
+            timeout, command, strict=strict, policy=policy, details={}, _require_certain=True, **options)
+
+    recheck()
+    try:
+        address = read(["ip", "addr", "show", "eth0"])
+        routes = read(["ip", "route"])
+        identity = _check_ib_identity(target, address, routes, via_ipv4=True)
+    except (ProjectInputChanged, BatchStopped):
+        raise
+    except (SetupError, OSError):
+        return
+    if identity["ok"] is not True:
+        return
+    recheck()
+    try:
+        options = {"_preserve_replace_cleanup_veto": True} if strict else {}
+        cleaned = _stage_ib_command(target, endpoint, "", "", state.ib_user, state.current_password,
+            timeout, ["nv", "config", "detach"], local=False, strict=strict, policy=policy, **options)
+        _checked_replace_stage_output(cleaned, "deferred replace cleanup outcome is unverified")
+        if (type(getattr(cleaned, "_direct_endpoint", None)) is not DirectEndpoint
+                or cleaned._direct_endpoint != endpoint):
+            raise SetupError("deferred replace cleanup endpoint is unverified")
+    except (ProjectInputChanged, BatchStopped):
+        raise
+    except (SetupError, OSError):
+        error._replace_cleanup_outcome = "FAILED_DETACH_FAILED"
+    else:
+        error._replace_cleanup_outcome = "FAILED_DETACHED"
+
+
+def _run_admitted_replace_to_ztp(state, args, services, *, timeout, authorized, strict, policy=None):
+    """Send the admitted replacement down one verified route, then restore and check ZTP."""
+    if (type(state) is not _IBConfigWriteState or state is not _TASK_IB_CONFIG
+            or type(state.task) is not PreparedIBTask or state.task.local is not False
+            or state.apply is not True or state.identity_verified is not True or authorized is not True
+            or type(state.current_password) is not str or not state.current_password
+            or type(timeout) is not int or timeout <= 0 or type(strict) is not bool
+            or (strict and policy is None)):
+        raise SetupError("replace task context is not qualified")
+    target, endpoint = state.task.target, state.endpoint
+    authority = getattr(args, "_replace_runtime_authority", None)
+    if (type(target) is not Target or type(target.ib) is not Device
+            or type(authority) is not RuntimeInputAuthority):
+        raise SetupError("replace task context is not qualified")
+    if target.ethernet is not None:
+        if type(target.ethernet) is not Device or type(endpoint) is not Neighbor:
+            raise SetupError("replace jump endpoint is not qualified")
+        validate_jump_target(target)
+        validate_neighbor_boundary(endpoint)
+        base = run_replace_stage
+    else:
+        _validate_direct_endpoint(target, endpoint)
+        base = _run_replace_deferred_stage if endpoint.interface is None else run_replace_stage
+    check_task_cancelled()
+    data = _read_admitted_replace_yaml(state.task, args)
+    try:
+        readback = base(state, data, authority, timeout=timeout, authorized=authorized, strict=strict, policy=policy)
+    except SetupError as error:
+        if base is _run_replace_deferred_stage:
+            _try_cleanup_deferred_apply_failure(state, authority, error, timeout=timeout, strict=strict, policy=policy)
+        raise
+    check_task_cancelled()
+    authority.assert_unchanged(_stable_file_refresh=True)
+    check_task_cancelled()
+    return _restore_replace_services_and_verify_ztp(
+        state, services, readback, timeout=timeout, authorized=authorized, strict=strict, policy=policy)
+
+
+def _run_admitted_replace_through_readiness(state, args, services, *, timeout, authorized, strict,
+                                             policy, key_stage, verify_ready):
+    """Order the existing post-replace stages; execute owns their bound callbacks."""
+    authority = getattr(args, "_replace_runtime_authority", None)
+    restored = _run_admitted_replace_to_ztp(
+        state, args, services, timeout=timeout, authorized=authorized, strict=strict, policy=policy)
+
+    def recheck():
+        check_task_cancelled()
+        if state is not _TASK_IB_CONFIG or getattr(args, "_replace_runtime_authority", None) is not authority:
+            raise SetupError("replace completion context is not qualified")
+        authority.assert_unchanged(_stable_file_refresh=True)
+        check_task_cancelled()
+
+    recheck()
+    if key_stage() is not True:
+        raise SetupError("replace public key stage did not retain authorization")
+    recheck()
+    # Deferred apply/identity readback is not this final D4 check.
+    readback = verify_ready(ReadinessPolicy(first_delay=15))
+    recheck()
+    return restored, readback
 
 
 def redact_text(value, secrets):
@@ -6658,6 +9232,8 @@ class RuntimeCoordinator:
         self.authorized = bool(args.apply and args.yes)
         self.stopped, self.fatal, self.writes_attempted = False, "", False
         self.secrets = [initial_password, *(task.ethernet_password for task in tasks)]
+        if policy is not None and policy._password:
+            self.secrets.append(policy._password)
         self.paused_seconds = 0.0
         self.current_target = None
         self.host_key_tasks = {normalize_name(task.target.ib.hostname): task for task in tasks}
@@ -6705,7 +9281,9 @@ class RuntimeCoordinator:
         if self.stopped:
             raise BatchStopped(self.fatal or "batch stopped")
         if not self.authorized:
-            self.authorized = self.prompt(lambda: _ask_first_device_change(target, reason))
+            replace_mode = self.args.apply is True and getattr(self.args, "config_mode", "patch") == "replace"
+            options = {"replace_mode": True} if replace_mode else {}
+            self.authorized = self.prompt(lambda: _ask_first_device_change(target, reason, **options))
             if not self.authorized:
                 self.stopped, self.fatal = True, "device changes were not authorized"
                 raise BatchStopped(self.fatal)
@@ -6721,7 +9299,8 @@ class RuntimeCoordinator:
         # Pairs keep this write-category table (not a credential) outside the
         # public audit's literal-credential pattern.
         metric = dict((("nvue", "nvue_write_commands"), ("public_key", "public_key_install_attempts"),
-                       ("password", "password_change_sessions"), ("host_key", "host_key_remove_attempts"))).get(category)
+                       ("password", "password_change_sessions"), ("host_key", "host_key_remove_attempts"),
+                       ("config_backup", "config_backup_attempts"))).get(category)
         if metric is None:
             raise SetupError("unknown device write category")
         self.metrics[metric] = self.metrics.get(metric, 0) + 1
@@ -6772,6 +9351,59 @@ class RuntimeCoordinator:
         raise SetupError("unknown worker coordinator request")
 
 
+def _configuration_result_facts(device, state, services, current, *, strict=False):
+    """Project original observed values and missing settings, never write authority."""
+    existing, planned = [], []
+    fields = (
+        ("hostname", (state.hostname,) if normalize_name(state.hostname) not in DEFAULT_HOSTNAMES else (), device.hostname),
+        ("eth0 address", state.eth0_addresses, device.eth0_prefix),
+        ("eth0 gateway", state.eth0_gateways, device.eth0_gateway),
+        ("eth1 address", state.eth1_addresses, device.eth1_prefix),
+        ("eth1 gateway", state.eth1_gateways, device.eth1_gateway if device.eth1_prefix else ""),
+    )
+    for item, observed, desired in fields:
+        for value in observed:
+            same = (normalize_name(value) == normalize_name(desired) if item == "hostname"
+                    else value == desired)
+            existing.append({"item": item, "relation": "same" if same else "extra", "value": value})
+        present = (any(normalize_name(value) == normalize_name(desired) for value in observed)
+                   if item == "hostname" else desired in observed)
+        if desired and not present:
+            planned.append({"item": item, "value": desired})
+    if services is not None:
+        for line in current.splitlines():
+            if not re.match(r"^\s*nv\s+set\s+system\s+(?:dns|ntp|date-time)\b", line):
+                continue
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                raise SetupError("Initial stage failed; device state is UNKNOWN" if strict
+                                 else "Initial configuration command syntax is UNKNOWN") from None
+            if tokens[:4] != ["nv", "set", "system", "dns"] and tokens[:4] != ["nv", "set", "system", "ntp"]:
+                if tokens[:5] == ["nv", "set", "system", "date-time", "timezone"] and len(tokens) == 6:
+                    existing.append({"item": "timezone", "value": tokens[5],
+                        "relation": "same" if tokens[5] == services["timezone"] else "overwritten"})
+                continue
+            if len(tokens) < 6 or tokens[4] != "server":
+                continue
+            item, value = tokens[3], tokens[5]
+            same = (any(_ntp_server_is_configured(desired, line) for desired in services["ntp"])
+                    if item == "ntp" else value in services["dns"])
+            entry = {"item": item, "value": value, "relation": "same" if same else "extra"}
+            if entry not in existing:
+                existing.append(entry)
+        for command in desired_service_commands(services, current):
+            item = "timezone" if command[3:5] == ["date-time", "timezone"] else command[3]
+            planned.append({"item": item, "value": command[-1]})
+    return {"existing_configuration": existing, "planned_changes": planned}
+
+
+def _result_needs_change(needs):
+    """Three-valued OR: one known change dominates other unknown observations."""
+    values = tuple(needs)
+    return True if any(value is True for value in values) else False if all(value is False for value in values) else None
+
+
 def execute_ib_task(task, args, policy, initial_password, services, keys,
                     management_private_key, authorized=False):
     """One IB owns its full ordered pipeline. Never retries an uncertain write.
@@ -6785,188 +9417,496 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
     authorized helper and passes the per-task cache/project admission first; a write stage starts
     only on an empty pending diff (T15) and Network writes only the missing setters (T16).
     """
+    global _TASK_IB_CONFIG
     target, neighbor = task.target, task.neighbor
+    config_mode = getattr(args, "config_mode", "patch")
+    replace_mode = config_mode == "replace"
+    ib_eth_user = "" if target.ethernet is None else args.eth_user
     result_record = {"hostname": target.ib.hostname, "outcome": "FAILED", "reason": "",
                      "direct_rows": [], "writes_attempted": False, "batch_error": "",
+                     "identity": None, "backup": None,
+                     "device_state": "unknown",
+                     "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
+                     "existing_configuration": [], "planned_changes": [], "conflicts": [],
+                     "needs_change": None, "verified_complete": False, "config_mode": config_mode,
+                     "attention_category": None,
                      "stage_status": {stage: "NOT_REACHED" for stage in
                          ("authentication", "initial", "day0", "ipv4_readiness", "services", "public_keys", "direct_ssh")}}
     stages = result_record["stage_status"]
+    change_needs = {"network": None, "initial": None,
+                    "services": False if services is None else None,
+                    "public_keys": False if not keys else None}
     stage = "authentication"
     credential = None
     readback = ""
     base_verified = False
+    deferred_stamp = None
+    readiness_details = {}
+    initial_details = {}
     host_key_records = []
     fingerprint_reader = None
     operator_forced = normalize_name(target.ib.hostname) in getattr(args, "_refresh_host_key_names", ())
     strict_cache = getattr(args, "_strict_cache", None)
     strict = strict_cache is not None and policy is not None and not task.local
-    log(f"[{target.ib.hostname}] via {target.ethernet.hostname}:{target.ethernet_port}")
+    log(f"[{target.ib.hostname}] via " +
+        (f"{target.ethernet.hostname}:{target.ethernet_port}" if target.ethernet is not None else "direct"))
     if target.attachment is not None:
         physical = target.attachment
         log(f"  Attachment: {physical.ethernet.hostname}:{physical.ethernet_port} "
             f"VLAN={target.access_vlan}; Jump={target.ethernet.hostname}; reason={target.jump_reason}")
-    log(f"  IB IPv6 path: {neighbor.ipv6} dev {neighbor.interface} vrf {neighbor.vrf}; source={neighbor.address_source}")
+    if type(neighbor) is DirectEndpoint:
+        log(f"  IB direct path: {neighbor.address} dev {neighbor.interface or '-'}; source=CSV")
+    else:
+        log(f"  IB IPv6 path: {neighbor.ipv6} dev {neighbor.interface} vrf {neighbor.vrf}; source={neighbor.address_source}")
+    previous_config = _TASK_IB_CONFIG
+    config_state = _IBConfigWriteState(task, args.ib_user, ib_eth_user,
+                                      getattr(args, "run_stamp", None), args.apply)
+    _TASK_IB_CONFIG = config_state
     try:
-        check_task_cancelled()
-        if policy is not None:
-            policy.assert_unchanged()
-        task_phase("IB authentication/readback")
-        stages[stage] = "RUNNING"
-        if strict:
-            cache_payload, ib_csv_path, p2p_path, global_path = strict_cache
-            strict_failure = None
-            try:
-                if not _valid_cache_authority(cache_payload, ib_csv_path, p2p_path, global_path):
-                    raise SetupError("manual target cache authority is stale")
+        replace_selection = None
+        if replace_mode:
+            authority = getattr(args, "_replace_runtime_authority", None)
+            if type(authority) is not RuntimeInputAuthority:
+                raise SetupError("replace execution context is not qualified")
+            if args.apply:
+                coordinator = _ACTIVE_COORDINATOR
+                if (task.local is not False or args.execution_mode == "ethernet"
+                        or getattr(args, "_on_management_server", None) is not True
+                        or type(policy) not in (ProjectPasswordPolicy, WorkerPasswordPolicy)
+                        or (_WORKER_CONNECTION is None and (
+                            type(coordinator) is not RuntimeCoordinator or coordinator.args is not args
+                            or coordinator.authority is not authority or coordinator.policy is not policy))
+                        or (_WORKER_CONNECTION is not None and type(policy) is not WorkerPasswordPolicy)):
+                    raise SetupError("replace execution context is not qualified")
+                check_task_cancelled()
+                authority.assert_unchanged(_stable_file_refresh=True)
                 _ib_project_value(policy, user=args.ib_user)
-            except (SetupError, OSError) as error:
-                strict_failure = _ib_phase_error_facts(error)
-            if strict_failure is not None:
-                _ib_raise_phase_failure("project", *strict_failure)
-        def inspect_once():
-            return inspect_ib_device(target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-                initial_password, args.connect_timeout, policy, apply=args.apply,
-                authorized=authorized, local=task.local, strict=strict)
-        try:
-            current, credential, authorized = inspect_once()
-        except SetupError as error:
-            failure = _ssh_failure_fact(error)
-            change = getattr(failure, "host_key_change", None)
-            if change is None:
-                raise
-            retried = []
-            refresh_ib_host_key(change, task, eth_user=args.eth_user, timeout=args.connect_timeout,
-                apply=args.apply, read_device_fingerprint=None,
-                retry=lambda: retried.append(inspect_once()), operator_forced=operator_forced,
-                host_key_records=host_key_records)
-            current, credential, authorized = retried[0]
-        if current.password_change_required:
-            result_record["outcome"] = "PASSWORD_CHANGE_REQUIRED"
-            stages[stage] = "PASSWORD_CHANGE_REQUIRED"
-            log("  BLOCKED: initial IB password change required; read-only mode made no change.")
-            return result_record
-        stages[stage] = "VERIFIED"
-        fingerprint_reader = ib_host_key_reader(task, args.eth_user, args.ib_user,
-                                               credential, args.connect_timeout, policy=policy)
-        # I-005: each Network readback enters here once; comma interface lines are split and
-        # every later consumer reads `body`.  `readback` keeps the device text for the location.
-        readback = current.output
-        body = _split_comma_interface_lines(readback)
-        state = parse_nvue_state(body)
-        log(f"  Current: hostname={state.hostname or 'unset'} "
-            f"eth0={','.join(state.eth0_addresses) or 'unset'} "
-            f"eth1={','.join(state.eth1_addresses) or 'unset'}")
-        # The stages' credential context: the DEV phase/helper authority on a strict task.
-        stage_context = ({"_ib_current_password": credential, "_password_policy": policy} if strict
-                         else {"ib_password": credential})
-        base_stage_needed(target.ib, state, args.force)
-        task_phase("initial configuration")
-        stage = "initial"
-        stages[stage] = "RUNNING"
-        initial_details = {}
-        readback, authorized = run_initial_stage(
-            target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-            args.connect_timeout, current.output, local=task.local,
-            apply=args.apply, authorized=authorized, policy=policy, details=initial_details,
-            **stage_context)
-        body = _split_comma_interface_lines(readback)
-        stages[stage] = "VERIFIED" if args.apply else "CHECKED"
-        state = parse_nvue_state(body)
-        needs_base = base_stage_needed(target.ib, state, args.force)
-        stage = "day0"
-        stages[stage] = "RUNNING" if needs_base else "ALREADY_PRESENT"
-        if needs_base:
-            task_phase("base management configuration")
-            # T16: only the missing setters (DEV), then apply and save.
-            commands = [*_management_network_commands(target.ib, body),
-                        ["nv", "config", "apply", "-y"], ["nv", "config", "save"]]
-            for command in commands:
-                log(f"  {'PLAN' if args.apply else 'WOULD APPLY'}: {shlex.join(command)}")
-            if not args.apply:
-                result_record["outcome"] = "CHECK_ONLY"
-                stages[stage] = "NEEDS_CONFIGURATION"
-                return result_record
-            if not authorized:
-                authorized = confirm_first_device_change(target, "apply Network commands and verify IPv4 SSH")
-            _require_empty_pending(target, neighbor, args.eth_user, task.ethernet_password,
-                                   args.ib_user, credential, args.connect_timeout, local=task.local)
-            for index, command in enumerate(commands, 1):
-                if policy is not None:
-                    policy.assert_unchanged()
-                log(f"  BASE RUN [{index}/{len(commands)}]: {shlex.join(command)}")
-                _stage_ib_command(target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-                                  credential, args.connect_timeout, command, local=task.local,
-                                  strict=strict, policy=policy)
-                log(f"  BASE OK [{index}/{len(commands)}]")
-            readback = _stage_ib_command(target, neighbor, args.eth_user, task.ethernet_password,
-                                         args.ib_user, credential, args.connect_timeout,
-                                         ["nv", "config", "show", "-o", "commands"], local=task.local,
-                                         strict=strict, policy=policy).output
-            body = _split_comma_interface_lines(readback)
-            state = parse_nvue_state(body)
-        verify_state(target.ib, state)
-        if needs_base:
-            # The reserved ports are verified from actual tokens (WP-1 difficulty 3).
-            _verify_management_network_state(target.ib, body)
-        stages[stage] = "VERIFIED" if needs_base else "ALREADY_PRESENT"
-        base_verified = True
-        if args.apply:
-            stage = "ipv4_readiness"
+                if not any(str(resolved) == policy.binding[0] and digest == policy.binding[3]
+                           for _, resolved, _, digest in authority.entries):
+                    raise SetupError("replace global differs from the admitted run; run load")
+            else:
+                authority.assert_unchanged()
+            selections = getattr(args, "_replace_selected", None)
+            if type(selections) is not dict:
+                raise SetupError("replace execution context is not qualified")
+            replace_selection = selections.get(normalize_name(target.ib.hostname))
+            if (type(replace_selection) is not dict
+                    or set(replace_selection) != {"verdict", "file", "sha256", "reason"}
+                    or replace_selection["verdict"] not in {"WOULD_REPLACE", "YAML_MISSING_OR_INVALID"}):
+                raise SetupError("replace execution context is not qualified")
+            result_record["replace"] = dict(replace_selection)
+            if args.apply and replace_selection["verdict"] == "WOULD_REPLACE":
+                _bound_replace_yaml(task, args)
+        if replace_mode and replace_selection["verdict"] == "YAML_MISSING_OR_INVALID":
+            log("  Replace mode: 整份替换（会清掉 yaml 以外的配置）")
+            result_record["outcome"] = "CHECK_ONLY"
+            result_record["needs_configuration"] = True
+            result_record["reason"] = replace_selection["reason"]
+        else:
+            check_task_cancelled()
+            if policy is not None:
+                policy.assert_unchanged()
+            task_phase("IB authentication/readback")
             stages[stage] = "RUNNING"
-            task_phase("IPv4 readiness: up to 9 attempts, Network write waits 15s first, then 10s")
+            if strict:
+                cache_payload, ib_csv_path, p2p_path, global_path = strict_cache
+                strict_failure = None
+                try:
+                    if not _valid_cache_authority(cache_payload, ib_csv_path, p2p_path, global_path):
+                        raise SetupError("manual target cache authority is stale")
+                    _ib_project_value(policy, user=args.ib_user)
+                except (SetupError, OSError) as error:
+                    strict_failure = _ib_phase_error_facts(error)
+                if strict_failure is not None:
+                    _ib_raise_phase_failure("project", *strict_failure)
+            def inspect_once():
+                return inspect_ib_device(target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                    initial_password, args.connect_timeout, policy, apply=args.apply,
+                    authorized=authorized, local=task.local, strict=strict,
+                    _management_private_key=management_private_key)
             try:
-                verify_ipv4_login(target, neighbor.vrf, args.eth_user, task.ethernet_password,
-                    args.ib_user, args.connect_timeout, local=task.local,
-                    readiness_policy=ReadinessPolicy(first_delay=15 if needs_base else 0), **stage_context)
+                current, credential, authorized = inspect_once()
             except SetupError as error:
                 failure = _ssh_failure_fact(error)
                 change = getattr(failure, "host_key_change", None)
                 if change is None:
                     raise
-                refresh_ib_host_key(change, task, eth_user=args.eth_user, timeout=args.connect_timeout,
-                    apply=args.apply, read_device_fingerprint=fingerprint_reader,
-                    retry=lambda: verify_ipv4_login(target, neighbor.vrf, args.eth_user,
-                        task.ethernet_password, args.ib_user, args.connect_timeout, local=task.local,
-                        readiness_policy=ReadinessPolicy(first_delay=0, attempts=1), **stage_context),
-                    operator_forced=operator_forced, host_key_records=host_key_records)
+                retried = []
+                refresh_task = (replace(task, neighbor=getattr(failure, "_direct_endpoint", None))
+                                if target.ethernet is None else task)
+                refresh_ib_host_key(change, refresh_task, eth_user=ib_eth_user, timeout=args.connect_timeout,
+                    apply=args.apply, read_device_fingerprint=None,
+                    retry=lambda: retried.append(inspect_once()), operator_forced=operator_forced,
+                    host_key_records=host_key_records)
+                current, credential, authorized = retried[0]
+            if current.password_change_required:
+                result_record["device_state"] = "password_change_required"
+                result_record["outcome"] = "PASSWORD_CHANGE_REQUIRED"
+                stages[stage] = "PASSWORD_CHANGE_REQUIRED"
+                log("  BLOCKED: initial IB password change required; read-only mode made no change.")
+                return result_record
             stages[stage] = "VERIFIED"
-        else:
-            stages["ipv4_readiness"] = "NOT_REQUESTED"
-        if not needs_base:
-            log("  Network SKIP: all required CSV values are present; extra applied settings preserved.")
-        task_phase("Infra Services")
-        stage = "services"
-        stages[stage] = "RUNNING"
-        services_missing = services is not None and bool(desired_service_commands(services, body))
-        if args.apply and services_missing:
-            _require_empty_pending(target, neighbor, args.eth_user, task.ethernet_password,
-                                   args.ib_user, credential, args.connect_timeout, local=task.local)
-        authorized, service_skipped = run_service_stage(
-            target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-            args.connect_timeout, services, body, local=task.local, apply=args.apply,
-            authorized=authorized, **stage_context)
-        stages[stage] = ("NOT_CONFIGURED" if services is None else "ALREADY_PRESENT" if not services_missing
-                         else "UNVERIFIED" if service_skipped else "VERIFIED" if args.apply else "PLANNED_NOT_APPLIED")
-        task_phase("IB public keys")
-        stage = "public_keys"
-        stages[stage] = "RUNNING"
-        key_details = {}
-        result_record["public_key_update"] = key_details
-        authorized = run_key_stage(
-            target, neighbor, args.eth_user, task.ethernet_password, args.ib_user,
-            args.connect_timeout, keys, local=task.local, apply=args.apply, authorized=authorized,
-            management_private_key=management_private_key, details=key_details,
-            read_device_fingerprint=fingerprint_reader, operator_forced=operator_forced,
-            host_key_records=host_key_records, **stage_context)
-        stages[stage] = "NO_KEYS_PROVIDED" if not keys else "COMPLETED" if args.apply else "PLANNED_NOT_APPLIED"
-        # Owner 04 Q-037 (b) (R-260): on a check-only run an Initial stage that cannot be skipped
-        # also needs configuration; --apply keeps the v15 formula.
-        result_record["needs_configuration"] = bool(
-            needs_base or (services is not None and not service_skipped)
-            or (not args.apply and initial_details.get("needed") is True))
-        result_record["outcome"] = ("CHECK_ONLY" if not args.apply and result_record["needs_configuration"]
-                                    else "CONFIGURED" if needs_base else "ALREADY_CONFIGURED")
-        log("  Configuration-stage checks finished; final direct SSH verification follows.")
+            if target.ethernet is None:
+                neighbor = getattr(current, "_direct_endpoint", None)
+                _validate_direct_endpoint(target, neighbor)
+            # Each read owns its actual endpoint. One safe LL-to-IPv4 transition
+            # discards all old-point facts and restarts the full identity check.
+            for identity_attempt in (0, 1):
+                via_ipv4 = type(neighbor) is DirectEndpoint and neighbor.interface is None
+                identity_outputs = []
+                identity_commands = [["ip", "addr", "show", "eth0"]]
+                if via_ipv4:
+                    identity_commands.append(["ip", "route"])
+                moved = False
+                for identity_command in identity_commands:
+                    if credential is None:
+                        if args.apply or task.local or target.ethernet is not None:
+                            raise SetupError("key-only identity read requires a direct readonly task")
+                        # O5 has not succeeded yet: no post-O5 context is fabricated.
+                        observed = _run_direct_key_read(target, neighbor, args.ib_user,
+                            management_private_key, args.connect_timeout, identity_command,
+                            strict=strict, policy=policy)
+                    else:
+                        observed = _stage_ib_command(target, neighbor, ib_eth_user, task.ethernet_password,
+                            args.ib_user, credential, args.connect_timeout, identity_command,
+                            local=task.local, strict=strict, policy=policy)
+                    if (type(observed) is not SessionResult or type(observed.exit_code) is not int
+                            or observed.exit_code != 0 or type(observed.output) is not str
+                            or any(getattr(observed, name) is not False for name in (
+                                "password_changed", "password_change_required", "password_change_attempted",
+                                "ib_authentication_rejected"))
+                            or _EXPIRED_PASSWORD.search(observed.output)
+                            or _pending_diff_has_password_update_notice(observed.output)):
+                        raise SetupError("IB identity command outcome is unverified")
+                    if target.ethernet is None:
+                        actual_point = getattr(observed, "_direct_endpoint", None)
+                        _validate_direct_endpoint(target, actual_point)
+                        if actual_point != neighbor:
+                            if (identity_attempt != 0 or neighbor.interface is None
+                                    or actual_point.interface is not None):
+                                raise SetupError("IB identity endpoint transition is unverified")
+                            neighbor = actual_point
+                            moved = True
+                            break
+                    identity_outputs.append(observed.output)
+                if moved:
+                    continue
+                try:
+                    identity = _check_ib_identity(target, identity_outputs[0],
+                        identity_outputs[1] if via_ipv4 else "", via_ipv4=via_ipv4)
+                except SetupError:
+                    config_state.failure_category = "FAILED_IDENTITY_MISMATCH"
+                    raise
+                result_record["identity"] = identity
+                if not identity["ok"]:
+                    config_state.failure_category = "FAILED_IDENTITY_MISMATCH"
+                    mismatch_detail = "; ".join(
+                        f"{item['field']}: expected={item['expected']} observed={item['observed']}"
+                        for item in identity["mismatches"])
+                    raise SetupError("IB identity differs from CSV; " + mismatch_detail
+                                     + "; no configuration write authorized")
+                config_state.endpoint = neighbor
+                config_state.current_password = credential
+                config_state.identity_verified = True
+                if credential is None:
+                    config_state.readonly_key_file = management_private_key
+                break
+            if not config_state.identity_verified:
+                raise SetupError("IB identity endpoint did not stabilize")
+            fingerprint_reader = (ib_host_key_reader(replace(task, neighbor=neighbor), ib_eth_user, args.ib_user,
+                                                    credential, args.connect_timeout, policy=policy)
+                                  if credential is not None else None)
+            # I-005: each Network readback enters here once; comma interface lines are split and
+            # every later consumer reads `body`.  `readback` keeps the device text for the location.
+            readback = current.output
+            body = _split_comma_interface_lines(readback)
+            state = parse_nvue_state(body)
+            log(f"  Current: hostname={state.hostname or 'unset'} "
+                f"eth0={','.join(state.eth0_addresses) or 'unset'} "
+                f"eth1={','.join(state.eth1_addresses) or 'unset'}")
+            # The stages' credential context: the DEV phase/helper authority on a strict task.
+            stage_context = ({"ib_password": None, "_ib_read_context": config_state} if credential is None else
+                             {"_ib_current_password": credential, "_password_policy": policy} if strict
+                             else {"ib_password": credential})
+
+            def verify_ready(readiness_policy):
+                nonlocal base_verified
+                readiness_details.clear()
+                try:
+                    if target.ethernet is None:
+                        return _wait_direct_ipv4_readback(target, args.ib_user, credential,
+                            args.connect_timeout, strict=strict, policy=policy,
+                            readiness_policy=readiness_policy, deferred_stamp=deferred_stamp,
+                            details=readiness_details)
+                    return verify_ipv4_login(target, neighbor.vrf, ib_eth_user, task.ethernet_password,
+                        args.ib_user, args.connect_timeout, local=task.local,
+                        readiness_policy=readiness_policy, _identity_details=readiness_details,
+                        **stage_context)
+                finally:
+                    latest_identity = readiness_details.get("identity")
+                    if readiness_details.get("identity_failed") is True:
+                        base_verified = False
+                        config_state.failure_category = "FAILED_IDENTITY_MISMATCH"
+                        if (type(latest_identity) is not dict
+                                or latest_identity.get("ok") is not False):
+                            latest_identity = None
+                    result_record["identity"] = latest_identity
+
+            def verify_ready_with_refresh(readiness_policy):
+                try:
+                    return verify_ready(readiness_policy)
+                except SetupError as error:
+                    failure = _ssh_failure_fact(error)
+                    change = getattr(failure, "host_key_change", None)
+                    if change is None:
+                        raise
+                    refresh_task = (replace(task, neighbor=getattr(failure, "_direct_endpoint", None))
+                                    if target.ethernet is None else task)
+                    retried_readback = []
+                    refresh_ib_host_key(change, refresh_task, eth_user=ib_eth_user, timeout=args.connect_timeout,
+                        apply=args.apply, read_device_fingerprint=fingerprint_reader,
+                        retry=lambda: retried_readback.append(verify_ready(
+                            ReadinessPolicy(first_delay=0, attempts=1))),
+                        operator_forced=operator_forced, host_key_records=host_key_records)
+                    return retried_readback[0]
+
+            result_record["device_state"] = "factory" if state_is_unconfigured(state) else "existing"
+            stage = "initial"
+            stages[stage] = "RUNNING"
+            initial_ztp_output = _stage_ib_command(
+                target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                credential, args.connect_timeout, ["nv", "show", "system", "ztp"],
+                local=task.local, strict=strict and args.apply, policy=policy,
+                _ib_read_context=config_state if credential is None else None).output
+            result_record["ztp"]["read"] = True
+            ztp = parse_ztp_status(initial_ztp_output)
+            result_record["ztp"].update(service=ztp["service"], status=ztp["status"],
+                provisioned=(None if result_record["device_state"] != "existing" or ztp["status"] is None
+                             else ztp["status"] == "success"))
+            if replace_mode and args.apply:
+                task_phase("initial configuration")
+                readback, authorized = run_initial_stage(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                    args.connect_timeout, current.output, local=task.local,
+                    apply=True, authorized=authorized, policy=policy, details=initial_details,
+                    initial_ztp_output=initial_ztp_output, **stage_context)
+                stages["initial"] = "VERIFIED"
+                stage = "day0"
+                stages[stage] = "RUNNING"
+                if not authorized:
+                    authorized = confirm_first_device_change(target, "replace configuration from the admitted YAML")
+
+                def replace_keys():
+                    nonlocal stage, authorized
+                    stages["day0"] = stages["services"] = "VERIFIED"
+                    task_phase("IB public keys")
+                    stage = "public_keys"
+                    stages[stage] = "RUNNING"
+                    key_details = {}
+                    result_record["public_key_update"] = key_details
+                    authorized = run_key_stage(
+                        target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                        args.connect_timeout, keys, local=task.local, apply=True, authorized=authorized,
+                        management_private_key=management_private_key, details=key_details,
+                        read_device_fingerprint=fingerprint_reader, operator_forced=operator_forced,
+                        host_key_records=host_key_records, **stage_context)
+                    stages[stage] = "COMPLETED" if keys else "NO_KEYS_PROVIDED"
+                    return authorized
+
+                def replace_ready(readiness_policy):
+                    nonlocal stage, readback, neighbor, fingerprint_reader
+                    stage = "ipv4_readiness"
+                    stages[stage] = "RUNNING"
+                    task_phase("IPv4 readiness: up to 9 attempts, replacement waits 15s first, then 10s")
+                    fresh = verify_ready_with_refresh(readiness_policy)
+                    identity = readiness_details.get("identity")
+                    if type(identity) is not dict or identity.get("ok") is not True:
+                        raise SetupError("replace final IPv4 identity is unverified")
+                    if target.ethernet is None:
+                        readback = fresh
+                        verify_state(target.ib, parse_nvue_state(_split_comma_interface_lines(readback)))
+                        neighbor = readiness_details.get("endpoint")
+                        _validate_direct_endpoint(target, neighbor)
+                        config_state.endpoint = neighbor
+                        fingerprint_reader = ib_host_key_reader(replace(task, neighbor=neighbor), ib_eth_user,
+                            args.ib_user, credential, args.connect_timeout, policy=policy)
+                    stages[stage] = "VERIFIED"
+                    return fresh
+
+                restored, _ = _run_admitted_replace_through_readiness(
+                    config_state, args, services, timeout=args.connect_timeout, authorized=authorized,
+                    strict=strict, policy=policy, key_stage=replace_keys, verify_ready=replace_ready)
+                ztp = parse_ztp_status(restored[2])
+                result_record["ztp"].update(service=ztp["service"], status=ztp["status"],
+                    provisioned=ztp["status"] == "success")
+                stages["services"] = "ALREADY_PRESENT" if restored[1] else "VERIFIED"
+                result_record["replace"]["verdict"] = "REPLACED"
+                result_record["needs_configuration"] = False
+                result_record["outcome"] = "CONFIGURED"
+                base_verified = True
+            elif replace_mode:
+                result_record["outcome"] = "CHECK_ONLY"
+                result_record["needs_configuration"] = True
+                stages["initial"] = "CHECKED"
+                stages["day0"] = "PLANNED_NOT_APPLIED"
+                log("  WOULD REPLACE: 整份替换（会清掉 yaml 以外的配置）")
+            else:
+                try:
+                    change_needs["network"] = base_stage_needed(target.ib, state, args.force)
+                except SetupError:
+                    conflicts = management_conflicts(target.ib, state)
+                    if conflicts:
+                        change_needs["network"] = True
+                        result_record["conflicts"] = [
+                            {"field": field, "expected": expected, "actual": actual}
+                            for field, expected, actual in conflicts]
+                        config_state.failure_category = "BLOCKED_NETWORK_CONFLICT"
+                        for field, expected, actual in conflicts:
+                            log(f"  CONFLICT {field}: expected={expected}, actual={actual}")
+                    raise
+                result_record.update(_configuration_result_facts(target.ib, state, services, body, strict=strict and credential is not None))
+                change_needs["services"] = services is not None and bool(desired_service_commands(services, body))
+                task_phase("initial configuration")
+                stage = "initial"
+                stages[stage] = "RUNNING"
+                readback, authorized = run_initial_stage(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                    args.connect_timeout, current.output, local=task.local,
+                    apply=args.apply, authorized=authorized, policy=policy, details=initial_details,
+                    initial_ztp_output=initial_ztp_output,
+                    **stage_context)
+                change_needs["initial"] = initial_details.get("needed")
+                body = _split_comma_interface_lines(readback)
+                stages[stage] = "VERIFIED" if args.apply else "CHECKED"
+                state = parse_nvue_state(body)
+                needs_base = base_stage_needed(target.ib, state, args.force)
+                stage = "day0"
+                stages[stage] = "RUNNING" if needs_base else "ALREADY_PRESENT"
+                if needs_base:
+                    task_phase("base management configuration")
+                    # T16: only the missing setters (DEV), then apply and save.
+                    setters = _management_network_commands(target.ib, body)
+                    address_changes = any(command[:3] == ["nv", "set", "interface"]
+                        and command[3] in ("eth0", "eth0-1")
+                        and command[4:6] == ["ipv4", "address"] for command in setters)
+                    if (args.apply and target.ethernet is None and type(neighbor) is DirectEndpoint
+                            and neighbor.interface is None and address_changes):
+                        deferred_stamp = config_state.stamp
+                        commands = [*setters, ["sh", "-c", _DEFERRED_APPLY_SCRIPT, "--", deferred_stamp]]
+                    else:
+                        commands = [*setters, ["nv", "config", "apply", "-y"], ["nv", "config", "save"]]
+                    for command in commands:
+                        log(f"  {'PLAN' if args.apply else 'WOULD APPLY'}: {shlex.join(command)}")
+                    if not args.apply:
+                        result_record["outcome"] = "CHECK_ONLY"
+                        stages[stage] = "NEEDS_CONFIGURATION"
+                    else:
+                        if not authorized:
+                            authorized = confirm_first_device_change(target, "apply Network commands and verify IPv4 SSH")
+                        _require_empty_pending(target, neighbor, ib_eth_user, task.ethernet_password,
+                                               args.ib_user, credential, args.connect_timeout, local=task.local)
+                        for index, command in enumerate(commands, 1):
+                            if policy is not None:
+                                policy.assert_unchanged()
+                            log(f"  BASE RUN [{index}/{len(commands)}]: {shlex.join(command)}")
+                            applied = _stage_ib_command(target, neighbor, ib_eth_user, task.ethernet_password,
+                                args.ib_user, credential, args.connect_timeout, command, local=task.local,
+                                strict=strict, policy=policy)
+                            if deferred_stamp is not None and command[:2] == ["sh", "-c"]:
+                                if (type(applied) is not SessionResult or type(applied.exit_code) is not int
+                                        or applied.exit_code != 0 or type(applied.output) is not str
+                                        or any(getattr(applied, name) is not False for name in (
+                                            "password_changed", "password_change_required", "password_change_attempted",
+                                            "ib_authentication_rejected"))
+                                        or _EXPIRED_PASSWORD.search(applied.output)
+                                        or _pending_diff_has_password_update_notice(applied.output)
+                                        or type(getattr(applied, "_direct_endpoint", None)) is not DirectEndpoint
+                                        or applied._direct_endpoint != neighbor):
+                                    raise SetupError("deferred configuration launch outcome is unverified")
+                            log(f"  BASE OK [{index}/{len(commands)}]")
+                        if deferred_stamp is None:
+                            readback = _stage_ib_command(target, neighbor, ib_eth_user, task.ethernet_password,
+                                                         args.ib_user, credential, args.connect_timeout,
+                                                         ["nv", "config", "show", "-o", "commands"], local=task.local,
+                                                         strict=strict, policy=policy).output
+                            body = _split_comma_interface_lines(readback)
+                            state = parse_nvue_state(body)
+                if deferred_stamp is None and not (needs_base and not args.apply):
+                    verify_state(target.ib, state)
+                    if needs_base:
+                        # The reserved ports are verified from actual tokens (WP-1 difficulty 3).
+                        _verify_management_network_state(target.ib, body)
+                    stages[stage] = "VERIFIED" if needs_base else "ALREADY_PRESENT"
+                    base_verified = True
+                if args.apply:
+                    stage = "ipv4_readiness"
+                    stages[stage] = "RUNNING"
+                    task_phase("IPv4 readiness: up to 9 attempts, Network write waits 15s first, then 10s")
+                    fresh_readback = verify_ready_with_refresh(ReadinessPolicy(first_delay=15 if needs_base else 0))
+                    if target.ethernet is None:
+                        result_record["identity"] = readiness_details["identity"]
+                        readback = fresh_readback
+                        body = _split_comma_interface_lines(readback)
+                        state = parse_nvue_state(body)
+                        verify_state(target.ib, state)
+                        if needs_base:
+                            _verify_management_network_state(target.ib, body)
+                        neighbor = readiness_details["endpoint"]
+                        config_state.endpoint = neighbor
+                        fingerprint_reader = ib_host_key_reader(replace(task, neighbor=neighbor), ib_eth_user,
+                            args.ib_user, credential, args.connect_timeout, policy=policy)
+                        stages["day0"] = "VERIFIED" if needs_base else "ALREADY_PRESENT"
+                        base_verified = True
+                    stages[stage] = "VERIFIED"
+                else:
+                    stages["ipv4_readiness"] = "NOT_REQUESTED"
+                if not needs_base:
+                    log("  Network SKIP: all required CSV values are present; extra applied settings preserved.")
+                task_phase("Infra Services")
+                stage = "services"
+                stages[stage] = "RUNNING"
+                services_missing = services is not None and bool(desired_service_commands(services, body))
+                if args.apply and services_missing:
+                    _require_empty_pending(target, neighbor, ib_eth_user, task.ethernet_password,
+                                           args.ib_user, credential, args.connect_timeout, local=task.local)
+                authorized, service_skipped = run_service_stage(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                    args.connect_timeout, services, body, local=task.local, apply=args.apply,
+                    authorized=authorized, **stage_context)
+                stages[stage] = ("NOT_CONFIGURED" if services is None else "ALREADY_PRESENT" if not services_missing
+                                 else "UNVERIFIED" if service_skipped else "VERIFIED" if args.apply else "PLANNED_NOT_APPLIED")
+                task_phase("IB public keys")
+                stage = "public_keys"
+                stages[stage] = "RUNNING"
+                key_details = {}
+                result_record["public_key_update"] = key_details
+                authorized = run_key_stage(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                    args.connect_timeout, keys, local=task.local, apply=args.apply, authorized=authorized,
+                    management_private_key=management_private_key, details=key_details,
+                    read_device_fingerprint=fingerprint_reader, operator_forced=operator_forced,
+                    host_key_records=host_key_records, **stage_context)
+                key_needed = None
+                if args.apply and key_details.get("content_action") in {"UPDATED", "UNCHANGED"}:
+                    key_needed = key_details["content_action"] == "UPDATED"
+                elif type(key_details.get("present")) is bool:
+                    key_needed = not key_details["present"]
+                change_needs["public_keys"] = key_needed if keys else False
+                if key_needed is True:
+                    result_record["planned_changes"].append(
+                        {"item": "public_keys", "value": "append missing required public keys"})
+                    if not args.apply:
+                        result_record["reason"] = "Missing required public keys; install with --apply."
+                stages[stage] = ("NO_KEYS_PROVIDED" if not keys else "COMPLETED" if args.apply
+                                 else "ALREADY_PRESENT" if key_details.get("present") is True else "PLANNED_NOT_APPLIED")
+                # Owner 04 Q-037 (b) (R-260): on a check-only run an Initial stage that cannot be skipped
+                # also needs configuration; --apply keeps the v15 formula.
+                result_record["needs_configuration"] = bool(
+                    needs_base or (services is not None and not service_skipped)
+                    or (not args.apply and (initial_details.get("needed") is True or key_needed is True)))
+                result_record["outcome"] = ("CHECK_ONLY" if not args.apply and result_record["needs_configuration"]
+                                            else "CONFIGURED" if needs_base else "ALREADY_CONFIGURED")
+                log("  Configuration-stage checks finished; final direct SSH verification follows.")
     except ProjectInputChanged as exc:
         result_record["failed_stage"] = stage
         stages[stage] = "UNVERIFIED"
@@ -6983,6 +9923,10 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
     except SetupError as exc:
         result_record["failed_stage"] = stage
         ssh_failure = _ssh_failure_fact(exc)
+        cleanup_outcome = getattr(exc, "_replace_cleanup_outcome", None)
+        if (replace_mode and "replace" in result_record and type(cleanup_outcome) is str
+                and cleanup_outcome in {"FAILED_DETACHED", "FAILED_DETACH_FAILED"}):
+            result_record["replace"]["verdict"] = cleanup_outcome
         if ssh_failure is not None:
             result_record["failure_kind"] = ssh_failure.kind.value
             if ssh_failure.kind is SshFailureKind.HOST_KEY_REFRESH_PENDING:
@@ -6992,8 +9936,20 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
         elif isinstance(exc, DirectSSHNetworkError):
             result_record["failure_kind"] = "DIRECT_SSH_NETWORK"
         stages[stage] = "FAILED"
-        result_record["reason"] = _authorized_failure_text(exc)
-        log(f"  ERROR: {_authorized_failure_text(exc)}")
+        failure_text = _authorized_failure_text(exc)
+        if stage == "ipv4_readiness" and readiness_details.get("identity_failed") is True:
+            identity_facts = result_record["identity"]
+            identity_detail = "fresh IPv4 identity could not be verified"
+            if type(identity_facts) is dict and identity_facts.get("ok") is False:
+                mismatch_detail = "; ".join(
+                    f"{item['field']}: expected={item['expected']} observed={item['observed']}"
+                    for item in identity_facts["mismatches"])
+                identity_detail = "fresh IPv4 identity mismatch: " + mismatch_detail
+            safe_detail = _authorized_failure_summary(SetupError(identity_detail),
+                (task.ethernet_password, credential, getattr(policy, "_password", None)))
+            failure_text += "; " + (safe_detail or "fresh IPv4 identity details withheld")
+        result_record["reason"] = failure_text
+        log(f"  ERROR: {failure_text}")
         # I-005 O15: a management Network error keeps its fixed text; where an unqualified
         # interface member sits (line, name, setting; never a value) is a separate line.
         if str(exc) in ("management Network readback is UNKNOWN",
@@ -7005,6 +9961,21 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 number, member, setting = location
                 log(f"  LOCATION: readback line {number}, interface {member}, setting {setting or '-'}")
         log("  DEVICE STOP: no further writes or automatic replay; other IB tasks remain eligible.")
+    finally:
+        # Restore first, including early returns/BaseException and even if the
+        # following metadata/log operation itself raises.
+        _TASK_IB_CONFIG = previous_config
+        if type(initial_details.get("needed")) is bool:
+            change_needs["initial"] = initial_details["needed"]
+        result_record["needs_change"] = True if replace_mode else _result_needs_change(change_needs.values())
+        if config_state.failure_category is not None:
+            result_record["category"] = config_state.failure_category
+            if replace_mode and config_state.failure_category == "FAILED_IDENTITY_MISMATCH" and "replace" in result_record:
+                result_record["replace"]["verdict"] = "IDENTITY_MISMATCH"
+        if config_state.backup_receipt is not None:
+            result_record["backup"] = dict(config_state.backup_receipt)
+            log(f"  Configuration backup: {config_state.backup_receipt['path']} "
+                f"({config_state.backup_receipt['bytes']} bytes)")
     # Keep the final direct probe inside this task, rather than a serial tail.
     prior_failure = bool(result_record.get("failed_stage")
                          and result_record.get("failure_kind") != "HOST_KEY_REFRESH_PENDING")
@@ -7032,6 +10003,7 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
             result_record.setdefault("failed_stage", "direct_ssh")
             result_record["outcome"], result_record["reason"] = "FAILED", str(exc)
     result_record["host_key"] = [asdict(record) for record in host_key_records]
+    _complete_result_fields(result_record)
     return result_record
 
 
@@ -7107,8 +10079,16 @@ def print_worker_progress(active, queued, completed, total, *, now=None, secrets
             log(f"  [WAIT] {name}: {phase} elapsed={elapsed}s phase-elapsed={phase_elapsed}s")
 
 
+def _login_path_record_metadata(target):
+    """Copy current input/route facts without inventing login observations."""
+    return {"route": asdict(target.route) if target.route is not None else None,
+            "input_issues": [asdict(issue) for issue in target.ib.input_issues],
+            "eth1_hints": [asdict(issue) for issue in target.ib.eth1_hints]}
+
+
 def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
-                       management_private_key, authority=None, method_cycle=None):
+                       management_private_key, authority=None, method_cycle=None, *,
+                       preflight_records=None):
     """Global dynamic task queue; up to 16 process slots, never OOB-affine.
 
     A fresh process handles each task in a reused slot. One-slot runs execute
@@ -7128,6 +10108,8 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
     result = {"outcomes": {}, "direct_rows": [], "records": {}, "fatal": "", "workers": count}
     # O12: the run's report timestamp; a direct caller without one gets the current time.
     stamp = getattr(args, "run_stamp", None) or time.strftime("%Y%m%d-%H%M%S")
+    args = copy.copy(args)
+    args.run_stamp = stamp
     directory = Path(tempfile.mkdtemp(prefix=f"devices-{stamp}-", dir=Path(args.report).resolve().parent))
     result["log_dir"] = str(directory)
     log(f"Run evidence: {directory} (parent-only writes)")
@@ -7186,6 +10168,12 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
         path.rename(attempt)
         evidence = {**record, "writes_attempted": bool(writes), "metrics": dict(metrics),
                     "category": record_category(record)}
+        evidence.setdefault("config_mode", getattr(args, "config_mode", "patch"))
+        if evidence["config_mode"] == "replace":
+            evidence["needs_change"] = True
+            selected = getattr(args, "_replace_selected", {}).get(name)
+            if selected is not None:
+                evidence.setdefault("replace", dict(selected))
         attempt.with_suffix(".json").write_text(
             json.dumps(redact_data(evidence, coordinator.secrets), indent=2) + "\n", encoding="utf-8")
         report_detail(f"[REQUEUE] {task.target.ib.hostname}: unwritten jump failure; evidence {attempt}")
@@ -7214,19 +10202,31 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                           "interface": task.neighbor.interface, "vrf": task.neighbor.vrf,
                           "access_vlan": task.target.access_vlan or None,
                           "selection_reason": task.target.jump_reason or "LEAF_LOCAL_PATH"} if jump is not None else None)
+        preflight = (preflight_records or {}).get(name, {})
+        if jump is not None:
+            selected = preflight.get("jump") or {}
+            if (selected.get("hostname") == jump.hostname and selected.get("login_ip") == address
+                    and selected.get("entry") is not None):
+                record["jump"]["entry"] = selected["entry"]
+        record["cable_check"] = preflight.get("cable_check") if jump is not None else None
         record.setdefault("failure_kind", None)
         record.pop("_jump_candidates_exhausted", None)
         record["category"] = record_category(record)
+        record.setdefault("config_mode", getattr(args, "config_mode", "patch"))
+        if record["config_mode"] == "replace":
+            selected = getattr(args, "_replace_selected", {}).get(name)
+            if selected is not None:
+                record.setdefault("replace", dict(selected))
+        _complete_result_fields(record)
         if writes and record["failure_kind"] == "OOB_JUMP_UNREACHABLE":
             record["reason"] = record.get("reason", "") + "; writes attempted; result unverified; no automatic replay"
-        record["neighbor"] = {"ipv6": task.neighbor.ipv6, "interface": task.neighbor.interface,
-                              "vrf": task.neighbor.vrf, "mac": task.neighbor.mac,
-                              "address_source": task.neighbor.address_source}
-        expected_mac = task.target.ib.eth0_mac
-        record["csv_fdb_mac_check"] = {
-            "expected": expected_mac or None, "observed": task.neighbor.mac,
-            "status": ("NOT_CONFIGURED" if not expected_mac else
-                       "MATCH" if expected_mac == task.neighbor.mac else "MISMATCH")}
+        if type(task.neighbor) is DirectEndpoint:
+            record["neighbor"] = None
+        else:
+            record["neighbor"] = {"ipv6": task.neighbor.ipv6, "interface": task.neighbor.interface,
+                                  "vrf": task.neighbor.vrf, "mac": task.neighbor.mac,
+                                  "address_source": task.neighbor.address_source}
+        record.update(_login_path_record_metadata(task.target))
         record["log"] = str(path)
         record = redact_data(record, coordinator.secrets)
         result["records"][name] = record
@@ -7245,6 +10245,9 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
         state = " ".join(f"{label}={stages.get(key, '-')}" for key, label in
                          (("day0", "base"), ("services", "svc"), ("public_keys", "keys"), ("direct_ssh", "ssh")))
         log(f"[DONE {len(outcomes)}/{len(tasks)}] {task.target.ib.hostname}: {record_category(record)} | {state}")
+        if not verbose and not args.apply and record["config_mode"] == "replace":
+            # Full report already includes the worker detail; keep this notice terminal-only.
+            print("  整份替换（会清掉 yaml 以外的配置）", flush=True)
         if record.get("reason"):
             reason = " ".join(redact_text(record["reason"], coordinator.secrets).split())
             log("  Reason: " + (reason if len(reason) <= 180 else reason[:177] + "... (full evidence in device log/JSON)"))
@@ -7493,76 +10496,90 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
 
 
 def prepare_ready_ib_tasks(targets, args, passwords, local_keys, interface_tables,
-                            network_tables, table_failures, outcomes, records=None):
+                            network_tables, table_failures, outcomes, records=None, *,
+                            cable_checks=None, endpoints=None):
     ready = []
     vrfs = {}
+    paths = _import_tools("tools.login_path")
     records = records if records is not None else {}
     for target in targets:
         name, eth_key = normalize_name(target.ib.hostname), normalize_name(target.ethernet.hostname)
+        physical = target.attachment or target
+        leaf_key = normalize_name(physical.ethernet.hostname)
+        fact = None
+        selected = getattr(_JUMP_SESSIONS, "records", {}).get(eth_key, {})
+        address = selected.get("address") or target.ethernet.login_ip
+        jump = {"hostname": target.ethernet.hostname, "login_ip": address,
+                "entry": next((item.entry for item in target.ethernet.jump_candidates
+                               if item.address == address), "JUMP_ETH0"),
+                "type": target.ethernet.dev_type, "interface": None, "vrf": None,
+                "access_vlan": target.access_vlan or None,
+                "selection_reason": target.jump_reason or "LEAF_LOCAL_PATH"}
+        def cable_fact():
+            return dict(asdict(fact), ignored=(fact.verdict != "MATCH" and
+                        bool(getattr(args, "ignore_cable_check", False))))
         def skipped(category, reason):
             failure = _ssh_failure_fact(reason)
             mapped = FAILURE_KIND_CATEGORY.get(failure.kind.value) if failure is not None else None
             category = mapped or category
             outcomes[name] = "FAILED" if mapped is not None else "SKIPPED"
-            record = getattr(_JUMP_SESSIONS, "records", {}).get(eth_key, {})
             records[name] = {"hostname": target.ib.hostname, "oob": target.ethernet.hostname,
                 "outcome": outcomes[name], "category": category, "reason": str(reason),
                 "port": target.ethernet_port, "metrics": {}, "stage_status": {}, "writes_attempted": False,
                 "failure_kind": failure.kind.value if failure is not None else None,
-                "jump": {"hostname": target.ethernet.hostname,
-                         "login_ip": record.get("address") or target.ethernet.login_ip,
-                         "type": target.ethernet.dev_type, "interface": None, "vrf": None,
-                         "access_vlan": target.access_vlan or None,
-                         "selection_reason": target.jump_reason or "LEAF_LOCAL_PATH"}}
+                "jump": dict(jump)}
+            if fact is not None:
+                records[name]["cable_check"] = cable_fact()
             log(f"[SKIP] {target.ib.hostname} | {category} | {target.ethernet.hostname}:{target.ethernet_port}")
             if isinstance(reason, IBMacMismatch) and reason.expected_mac and reason.observed_mac:
                 records[name]["mac_mismatch"] = {"expected": reason.expected_mac, "observed": reason.observed_mac}
                 log(f"  MAC: expected={reason.expected_mac} observed={reason.observed_mac}; no IB login/write attempted")
             report_detail(f"  Full skip reason: {reason}")
         try:
-            if eth_key in table_failures:
-                reason = table_failures[eth_key]
+            if eth_key in table_failures or leaf_key in table_failures:
+                reason = table_failures.get(eth_key, table_failures.get(leaf_key))
                 category = ("SKIPPED_OOB_IDENTITY_CONFLICT" if re.search(r"(?i)identity|host key|identification", str(reason))
                     else "SKIPPED_OOB_UNREACHABLE" if re.search(r"(?i)route|unreachable|timed? out|timeout|connect|permission denied|authentication", str(reason))
                     else "SKIPPED_OOB_SNAPSHOT_FAILED")
                 skipped(category, reason)
                 continue
             try:
-                line = interface_status_line(interface_tables[eth_key], target.ethernet_port)
-                oper = interface_oper_status(line, target.ethernet_port)
+                line = interface_status_line(interface_tables[leaf_key], physical.ethernet_port)
+                interface_oper_status(line, physical.ethernet_port)
             except SetupError as exc:
                 skipped("SKIPPED_PORT_STATE_UNKNOWN", exc)
                 continue
-            if oper != "up":
-                skipped("SKIPPED_LINK_DOWN", f"{target.ethernet_port}: Oper Status {oper.upper()}")
-                continue
-            links, fdb, neighbors = network_tables[eth_key]
             try:
-                fdb_port = fdb_port_for_interface(links, target.ethernet_port)
-                try:
-                    neighbor = neighbor_for_port(fdb, neighbors, fdb_port)
-                except NeighborNotLearned:
-                    neighbor = derived_neighbor_for_port(target, fdb, links, fdb_port)
-            except IBMacMismatch as exc:
-                skipped("SKIPPED_MAC_MISMATCH", exc)
+                fact = (cable_checks[name] if cable_checks is not None else paths.check_cable(
+                    target.ib.hostname, target.ib.eth0_mac, (target.ethernet.hostname, target.ethernet_port),
+                    [paths.JumpTables(target.ethernet.hostname, *network_tables[eth_key])],
+                    cascade_ports=frozenset()))
+                if isinstance(fact, SetupError):
+                    error, fact = fact, None
+                    raise error
+            except ValueError as exc:
+                raise SetupError(str(exc)) from exc
+            if fact.verdict != "MATCH" and not getattr(args, "ignore_cable_check", False):
+                reason = ("ping 后仍没学到" if fact.after_ping and fact.verdict == "NOT_LEARNED"
+                          else "cable check failed")
+                skipped("SKIPPED_CABLE_CHECK_FAILED", f"{reason}; expected={fact.expected}; actual={fact.actual}")
                 continue
-            except SetupError as exc:
-                skipped("SKIPPED_NEIGHBOR_UNRESOLVED", exc)
-                continue
-            try:
-                verify_fdb_eth0_mac(target, neighbor.mac)
-            except SetupError as exc:
-                skipped("SKIPPED_MAC_MISMATCH", exc)
-                continue
+            neighbor = endpoints.get(name) if endpoints is not None else None
+            endpoint_verified = neighbor is not None
+            if neighbor is None:
+                if fact.login_interface is None:
+                    raise SetupError("login VLAN has no real Leaf SVI and no qualified Spine")
+                neighbor = Neighbor(fact.link_local, fact.login_interface, fact.mac, address_source="CSV_EUI64")
             key = (eth_key, neighbor.interface)
             if key not in vrfs:
-                vrfs[key] = interface_vrf(target.ethernet, args.eth_user, passwords[eth_key],
-                    neighbor.interface, args.connect_timeout, local=eth_key in local_keys)
+                vrfs[key] = (neighbor.vrf if endpoint_verified else interface_vrf(
+                    target.ethernet, args.eth_user, passwords[eth_key], neighbor.interface,
+                    args.connect_timeout, local=eth_key in local_keys))
             neighbor = Neighbor(neighbor.ipv6, neighbor.interface, neighbor.mac, vrfs[key], neighbor.address_source)
-            if neighbor.address_source == "FDB_EUI64_CANDIDATE":
-                log(f"[FALLBACK] {target.ib.hostname}: ND missing; FDB/CSV MAC {neighbor.mac} -> "
-                    f"candidate {neighbor.ipv6} dev {neighbor.interface} vrf {neighbor.vrf}; "
-                    "SSH authentication and configuration readback are still required")
+            jump.update(interface=neighbor.interface, vrf=neighbor.vrf)
+            records[name] = {"hostname": target.ib.hostname, "oob": target.ethernet.hostname,
+                "port": target.ethernet_port, "outcome": "NOT_ATTEMPTED", "writes_attempted": False,
+                "metrics": {}, "stage_status": {}, "jump": dict(jump), "cable_check": cable_fact()}
             ready.append(PreparedIBTask(target, neighbor, passwords[eth_key], eth_key in local_keys))
             outcomes[name] = "NOT_ATTEMPTED"
         except SetupError as exc:
@@ -7687,70 +10704,29 @@ def svi_address_ready(rows, interface, *, require_ipv6=False):
 
 
 def _access_vlan_facts(target, interfaces, network):
-    """Preserve Leaf-port/MAC checks before considering any upstream Jump."""
+    """Read physical port/VLAN scope, independently of learned device MACs."""
     line = interface_status_line(interfaces, target.ethernet_port)
-    if interface_oper_status(line, target.ethernet_port) != "up":
-        raise SetupError("ACCESS_LINK_DOWN: " + line)
-    links, fdb, _ = network
-    port = fdb_port_for_interface(links, target.ethernet_port)
-    contexts = set()
-    for line in fdb.splitlines():
-        fields = line.split()
-        if not fields or "dev" not in fields or set(fields) & {"permanent", "static", "local", "self"}:
-            continue
-        try:
-            if fields[fields.index("dev")+1] != port or not MAC_RE.fullmatch(fields[0]):
-                continue
-            mac = normalize_mac(fields[0], field="Leaf FDB MAC")
-            bridge = fields[fields.index("master")+1] if "master" in fields else ""
-            vlan = fields[fields.index("vlan")+1] if "vlan" in fields else ""
-        except IndexError as exc:
-            raise SetupError("ambiguous Leaf FDB VLAN/bridge context") from exc
-        contexts.add((mac, bridge, vlan))
-    if len(contexts) != 1:
-        raise SetupError("Leaf access port needs exactly one dynamic MAC/VLAN context")
-    mac, bridge, vlan = next(iter(contexts))
-    verify_fdb_eth0_mac(target, mac)
-    if vlan and (not vlan.isdigit() or not 1 <= int(vlan) <= 4094):
-        raise SetupError("invalid Leaf access VLAN")
-    if bridge and not vlan:
-        raise SetupError("bridged Leaf access port has no unambiguous VLAN")
+    interface_oper_status(line, target.ethernet_port)
+    paths = _import_tools("tools.login_path")
+    try:
+        bridge, vlan, interfaces = paths._login_interface_facts(network[0], network[2], target.ethernet_port)
+        if len(interfaces) > 1:
+            raise ValueError("multiple Leaf SVIs match the access VLAN")
+        mac = paths.normalize_mac(target.ib.eth0_mac)
+        paths.link_local_from_mac(mac)
+    except ValueError as exc:
+        raise SetupError(str(exc)) from exc
     return mac, bridge, vlan
 
 
 def _spine_neighbor(target, network, interface, vrf, learned_mac):
-    """Use ND on the chosen SVI; otherwise the already verified FDB MAC only."""
-    matches = {}
-    for line in network[2].splitlines():
-        fields = line.split()
-        if "dev" not in fields or "lladdr" not in fields or set(fields) & {"FAILED", "INCOMPLETE"}:
-            continue
-        try:
-            address = ipaddress.IPv6Address(fields[0].split("%", 1)[0])
-            dev = fields[fields.index("dev")+1]
-            mac = normalize_mac(fields[fields.index("lladdr")+1], field="Spine ND MAC")
-        except (ValueError, IndexError):
-            continue
-        if dev == interface and address.is_link_local and mac == learned_mac:
-            matches[str(address)] = Neighbor(str(address), interface, mac, vrf)
-    if len(matches) > 1:
-        raise SetupError("multiple IPv6 link-local neighbors match the target on the Spine SVI")
-    if matches:
-        return next(iter(matches.values()))
-    if not target.ib.eth0_mac:
-        raise SetupError("Spine EUI-64 fallback requires a real CSV IB eth0 MAC")
-    address = mac_to_link_local(learned_mac)
-    # An explicit conflicting ND entry must not be bypassed by derivation.
-    for line in network[2].splitlines():
-        fields = line.split()
-        if fields and fields[0].split("%", 1)[0] == address and "dev" in fields and "lladdr" in fields:
-            try:
-                if (fields[fields.index("dev")+1] == interface
-                        and fields[fields.index("lladdr")+1].casefold() != learned_mac):
-                    raise SetupError("Spine derived address has a conflicting neighbor MAC")
-            except IndexError as exc:
-                raise SetupError("invalid Spine neighbor context") from exc
-    return Neighbor(address, interface, learned_mac, vrf, "FDB_EUI64_CANDIDATE")
+    """The physical CSV identity is authoritative, never a Spine neighbor table."""
+    paths = _import_tools("tools.login_path")
+    try:
+        mac = paths.normalize_mac(target.ib.eth0_mac)
+        return Neighbor(paths.link_local_from_mac(mac), interface, mac, vrf, "CSV_EUI64")
+    except ValueError as exc:
+        raise SetupError(str(exc)) from exc
 
 
 def choose_oob_spine(candidates):
@@ -7760,15 +10736,33 @@ def choose_oob_spine(candidates):
 
 def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tables,
                             network_tables, table_failures, outcomes, records, *,
-                            spines, fetch_addresses, collect_spines, jump_routes=None):
-    """Small v15 adapter; the v14 Leaf path and complete IB pipeline stay intact."""
+                            spines, fetch_addresses, collect_spines, jump_routes=None,
+                            cascade_ports=frozenset()):
+    """Keep physical cable evidence separate from the selected execution Jump."""
+    paths = _import_tools("tools.login_path")
     normal, groups, address_cache = [], {}, {}
+    checks, endpoints = {}, {}
+    names = {normalize_name(item.hostname): item.hostname for item in spines}
+    names.update((normalize_name(t.ethernet.hostname), t.ethernet.hostname) for t in targets)
+    def cable(target, *, after_ping=False, ping_ok=None):
+        return paths.check_cable(target.ib.hostname, target.ib.eth0_mac,
+            (target.ethernet.hostname, target.ethernet_port),
+            [paths.JumpTables(names[key], *table) for key, table in network_tables.items()
+             if key in names and key not in table_failures], cascade_ports=cascade_ports,
+            after_ping=after_ping, ping_ok=ping_ok)
+    for target in targets:
+        try:
+            checks[normalize_name(target.ib.hostname)] = cable(target)
+        except ValueError as exc:
+            checks[normalize_name(target.ib.hostname)] = SetupError(str(exc))
     def skip(target, category, reason):
         name = normalize_name(target.ib.hostname)
         outcomes[name] = "SKIPPED"
         records[name] = {"hostname": target.ib.hostname, "oob": target.ethernet.hostname,
             "port": target.ethernet_port, "outcome": "SKIPPED", "category": category,
             "reason": str(reason), "metrics": {}, "stage_status": {}, "writes_attempted": False}
+        if name in checks and not isinstance(checks[name], SetupError):
+            records[name]["cable_check"] = dict(asdict(checks[name]), ignored=False)
         if isinstance(reason, IBMacMismatch):
             records[name]["mac_mismatch"] = {"expected": reason.expected_mac, "observed": reason.observed_mac}
         log(f"[SKIP] {target.ib.hostname} | {category} | {target.ethernet.hostname}:{target.ethernet_port}")
@@ -7779,6 +10773,11 @@ def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tabl
         leaf = normalize_name(target.ethernet.hostname)
         # Original handling owns unavailable snapshots/ports and its diagnostics.
         if leaf in table_failures:
+            normal.append(target)
+            continue
+        fact = checks[normalize_name(target.ib.hostname)]
+        if (not isinstance(fact, SetupError) and fact.verdict == "ELSEWHERE"
+                and not getattr(args, "ignore_cable_check", False)):
             normal.append(target)
             continue
         try:
@@ -7792,7 +10791,8 @@ def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tabl
         except IBMacMismatch as exc:
             skip(target, "SKIPPED_MAC_MISMATCH", exc)
             continue
-        except SetupError:
+        except SetupError as exc:
+            checks[normalize_name(target.ib.hostname)] = exc
             normal.append(target)
             continue
         try:
@@ -7813,9 +10813,6 @@ def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tabl
             continue
         reason = "LEAF_SVI_MISSING" if not svis else "LEAF_SVI_HAS_NO_IPV4"
         groups.setdefault(leaf, []).append((target, mac, vlan, reason))
-    ready = prepare_ready_ib_tasks(targets=normal, args=args, passwords=passwords,
-        local_keys=local_keys, interface_tables=interface_tables, network_tables=network_tables,
-        table_failures=table_failures, outcomes=outcomes, records=records)
     candidates_by_leaf, requested = {}, {}
     for leaf, members in groups.items():
         try:
@@ -7888,11 +10885,74 @@ def prepare_routed_ib_tasks(targets, args, passwords, local_keys, interface_tabl
             neighbor = routes[normalize_name(target.ib.hostname)]
             routed = replace(target, ethernet=spine, ethernet_port=neighbor.interface,
                              attachment=target, jump_reason=reason, access_vlan=vlan)
-            ready.append(PreparedIBTask(routed, neighbor, passwords[key], key in local_keys))
-            outcomes[normalize_name(target.ib.hostname)] = "NOT_ATTEMPTED"
+            normal.append(routed)
+            endpoints[normalize_name(target.ib.hostname)] = neighbor
             if rejected:
                 report_detail(f"  {target.ib.hostname}: rejected Spine candidates: {rejected}")
-    return ready
+    # Build transport endpoints without replacing physical Leaf facts. No ping
+    # result is an admission decision: the subsequent Leaf FDB is authoritative.
+    eligible_targets = {normalize_name(t.ib.hostname): t for t in normal}
+    for name, target in eligible_targets.items():
+        fact = checks.get(name)
+        if isinstance(fact, SetupError) or fact is None or name in endpoints or fact.login_interface is None:
+            continue
+        key = normalize_name(target.ethernet.hostname)
+        if key in table_failures:
+            continue
+        try:
+            vrf = interface_vrf(target.ethernet, args.eth_user, passwords[key], fact.login_interface,
+                                args.connect_timeout, local=key in local_keys)
+            endpoints[name] = Neighbor(fact.link_local, fact.login_interface, fact.mac, vrf, "CSV_EUI64")
+        except SetupError as exc:
+            checks[name] = exc
+    ping_results, reread = {}, {}
+    for leaf, pending_checks in paths.ping_plan(
+            [fact for name, fact in checks.items() if name in eligible_targets
+             and not isinstance(fact, SetupError)]).items():
+        for fact in pending_checks:
+            name = normalize_name(fact.hostname)
+            if name not in endpoints:
+                continue
+            target, neighbor = eligible_targets[name], endpoints[name]
+            key = normalize_name(target.ethernet.hostname)
+            try:
+                run_on_ethernet(target.ethernet, args.eth_user, passwords[key],
+                    paths.ping_argv(neighbor.vrf, neighbor.ipv6, neighbor.interface),
+                    args.connect_timeout, local=key in local_keys)
+                ping_results[name] = True
+            except (ProjectInputChanged, BatchStopped):
+                raise
+            except SshFailure as exc:
+                checks[name] = exc
+                continue
+            except SetupError:
+                ping_results[name] = False
+            physical = target.attachment or target
+            reread[normalize_name(physical.ethernet.hostname)] = physical.ethernet
+    # One barrier: finish every ping before the first second FDB read.
+    for key, device in reread.items():
+        try:
+            fdb = run_on_ethernet(device, args.eth_user, passwords[key], ["bridge", "fdb", "show"],
+                                  args.connect_timeout, local=key in local_keys)
+            links, _, vlans = network_tables[key]
+            network_tables[key] = (links, fdb, vlans)
+        except (ProjectInputChanged, BatchStopped):
+            raise
+        except SetupError as exc:
+            table_failures[key] = exc
+    if reread:
+        for name, target in eligible_targets.items():
+            if isinstance(checks.get(name), SetupError):
+                continue
+            try:
+                checks[name] = cable(target.attachment or target, after_ping=name in ping_results,
+                                     ping_ok=ping_results.get(name))
+            except ValueError as exc:
+                checks[name] = SetupError(str(exc))
+    return prepare_ready_ib_tasks(
+        sorted(normal, key=lambda target: normalize_name(target.ib.hostname)), args, passwords, local_keys,
+        interface_tables, network_tables, table_failures, outcomes, records,
+        cable_checks=checks, endpoints=endpoints)
 
 
 def compact_ports(ports):
@@ -7910,6 +10970,62 @@ def compact_ports(ports):
                 start = end = number
         groups.append(f"swp{start}" if start == end else f"swp{start}-{end}")
     return ",".join(groups + others) or "-"
+
+
+RESULT_SCHEMA_VERSION = 1
+RESULT_CATEGORIES = frozenset({
+    "NOT_ATTEMPTED", "SKIPPED", "CHECKED_AND_CONFIGURED", "CHECKED_EXISTING_CONFIGURATION",
+    "CHECKED_EXISTING_KEYS_VERIFIED", "CHECKED_EXISTING_KEYS_REFRESHED", "CHECKED_EXISTING_KEY_INSTALL_COMPLETED",
+    "CHECKED_NEEDS_CONFIGURATION", "CHECKED_HOST_KEY_REFRESH_PENDING", "BLOCKED_PASSWORD_CHANGE_REQUIRED",
+    "BLOCKED_NETWORK_CONFLICT", "FAILED_CHECK_OR_LOGIN", "FAILED_AFTER_WRITE_UNVERIFIED",
+    "FAILED_SHARED_INPUT", "FAILED_SCRIPT_EXECUTION", "FAILED_OOB_IPV4_READINESS",
+    "FAILED_IDENTITY_MISMATCH", "FAILED_CONFIG_BACKUP", "FAILED_DIRECT_LOGIN_NETWORK",
+    "FAILED_DIRECT_SSH_NETWORK", "FAILED_OOB_JUMP_UNREACHABLE", "FAILED_OOB_JUMP_AUTHENTICATION",
+    "FAILED_TARGET_HOST_KEY_CHANGED", "SKIPPED_CABLE_CHECK_FAILED", "SKIPPED_DEPENDENCY_UNVERIFIED",
+    "SKIPPED_INPUT_INCOMPLETE", "SKIPPED_INVENTORY_MAC_UNAVAILABLE", "SKIPPED_JUMP_ADDRESS_INVALID",
+    "SKIPPED_LINK_DOWN", "SKIPPED_LLDP_SPINE_IDENTITY", "SKIPPED_MAC_MISMATCH",
+    "SKIPPED_NEIGHBOR_UNRESOLVED", "SKIPPED_NO_LLDP_SPINE", "SKIPPED_NO_QUALIFIED_SPINE",
+    "SKIPPED_OOB_ADDRESS_UNVERIFIED", "SKIPPED_OOB_IDENTITY_CONFLICT", "SKIPPED_OOB_SNAPSHOT_FAILED",
+    "SKIPPED_OOB_UNREACHABLE", "SKIPPED_PORT_STATE_UNKNOWN",
+})
+ATTENTION_CATEGORIES = (RESULT_CATEGORIES - {
+    "CHECKED_AND_CONFIGURED", "CHECKED_EXISTING_CONFIGURATION", "CHECKED_EXISTING_KEYS_VERIFIED",
+    "CHECKED_EXISTING_KEYS_REFRESHED", "CHECKED_EXISTING_KEY_INSTALL_COMPLETED",
+}) | frozenset({
+    "UNVERIFIED_CONFIGURATION", "DIRECT_SSH_NOT_TESTED", "FAILED_DIRECT_SSH_HOST_KEY",
+    "FAILED_DIRECT_SSH_AUTHENTICATION", "FAILED_DIRECT_SSH_CHECK", "FAILED_AUTHENTICATION",
+    "FAILED_INITIAL_CONFIGURATION", "FAILED_BASE_CONFIGURATION", "FAILED_SERVICES_CONFIGURATION",
+    "FAILED_PUBLIC_KEYS",
+})
+
+
+def _setup_record_verified(record, rows):
+    """The original summary's per-device completion predicate, shared verbatim."""
+    return (any(row["status"] == "PASS" for row in rows)
+            and record.get("outcome") in {"CONFIGURED", "ALREADY_CONFIGURED"}
+            and not any(state in {"FAILED", "UNVERIFIED", "PLANNED_NOT_APPLIED", "NEEDS_CONFIGURATION", "RUNNING"}
+                        for state in record.get("stage_status", {}).values()))
+
+
+def _complete_result_fields(record):
+    """Close the same result before persistence and before summary consumption."""
+    for key, value in {"device_state": "unknown", "existing_configuration": [],
+                       "planned_changes": [], "conflicts": [], "needs_change": None,
+                       "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
+                       "config_mode": "patch"}.items():
+        record.setdefault(key, value)
+    if record["config_mode"] == "replace":
+        record["needs_change"] = True
+    name = normalize_name(record["hostname"])
+    rows = [row for row in record.get("direct_rows", [])
+            if normalize_name(row["hostname"]) == name]
+    category = record_category(record)
+    attention = initial_setup_attention({name: record}, rows)
+    record["attention_category"] = attention[0]["category"] if attention else None
+    record["verified_complete"] = _setup_record_verified(record, rows)
+    if (category not in RESULT_CATEGORIES
+            or record["attention_category"] is not None and record["attention_category"] not in ATTENTION_CATEGORIES):
+        raise SetupError("initial-setup result has an unrecognized category")
 
 
 def record_category(record):
@@ -7968,8 +11084,8 @@ def attention_guidance(category):
         "BLOCKED_PASSWORD_CHANGE_REQUIRED": "Use the verified project IB target password with --apply and authorize rotation; do not use the OOB password.",
         "CHECKED_NEEDS_CONFIGURATION": "Review the proposed missing settings; re-run with --apply only when ready to authorize device changes.",
         "FAILED_DIRECT_SSH_NETWORK": "Check management-server routes, neighbor convergence, firewall rules and TCP/22 to the listed IB addresses. Re-test SSH; do not assume the installed key is wrong or replay configuration writes.",
-        "FAILED_OOB_JUMP_UNREACHABLE": "Check the named jump login address, network routes and TCP/22; restore the jump connection before retrying downstream devices. Verify any attempted writes; do not replay them automatically.",
-        "FAILED_OOB_JUMP_AUTHENTICATION": "Verify authentication to the named OOB jump and the intended jump account; this is not an IB target-password failure.",
+        "FAILED_OOB_JUMP_UNREACHABLE": "Check the named jump login address, network routes and TCP/22; restore the jump connection before retrying downstream devices. Verify any attempted writes; do not replay them automatically. Select --direct-access <this-IB> explicitly for a separate direct attempt; no automatic path switch is made.",
+        "FAILED_OOB_JUMP_AUTHENTICATION": "Verify authentication to the named OOB jump and the intended jump account; this is not an IB target-password failure. Select --direct-access <this-IB> explicitly for a separate direct attempt; no automatic path switch is made.",
         "FAILED_TARGET_HOST_KEY_CHANGED": "Verify this IB host key through an authenticated path, or use --refresh-host-key only after confirming its reset. No unverified entry is removed automatically.",
         "CHECKED_HOST_KEY_REFRESH_PENDING": "The authenticated IB fingerprint matches; re-run with --apply to refresh only this host-key entry. No entry was removed during this read-only run.",
         "FAILED_DIRECT_SSH_AUTHENTICATION": "Verify the intended IB credentials or matching management private/public key. Connectivity alone does not prove authentication.",
@@ -8037,6 +11153,53 @@ def initial_setup_attention(records, direct_rows):
             for key, devices in sorted(groups.items())]
 
 
+def _log_initial_setup_device_facts(records):
+    """Display existing per-device facts without probing or changing outcomes."""
+    def encoded(value):
+        return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+
+    def yes_no(value):
+        return "yes" if value is True else "no" if value is False else "unknown"
+
+    for name, record in sorted(records.items()):
+        log(f"  Device facts: {name}")
+        route = record.get("route")
+        if route:
+            log(f"    Route: path={encoded(route.get('path'))} "
+                f"reason={encoded(route.get('reason'))} "
+                f"same_subnet={encoded(route.get('same_subnet'))}")
+        cable = record.get("cable_check")
+        if cable:
+            expected = ":".join(cable["expected"])
+            actual = [":".join(position) for position in cable["actual"]]
+            verdict = cable["verdict"]
+            unlearned = " unlearned=yes" if verdict == "NOT_LEARNED" else ""
+            log(f"    Cable: expected={encoded(expected)} actual={encoded(actual)} "
+                f"verdict={verdict}{unlearned} after_ping={yes_no(cable.get('after_ping'))} "
+                f"ping_ok={yes_no(cable.get('ping_ok'))} "
+                f"ignored={yes_no(cable.get('ignored', False))}")
+        identity = record.get("identity")
+        if identity:
+            expected, observed = identity["expected"], identity["observed"]
+            line = (f"    Identity: ok={yes_no(identity.get('ok'))} "
+                    f"via_ipv4={yes_no(identity.get('via_ipv4'))} "
+                    f"mac_expected={encoded(expected.get('mac'))} "
+                    f"mac_observed={encoded(observed.get('mac'))}")
+            if identity.get("via_ipv4"):
+                line += (f" ipv4_expected={encoded(expected.get('ipv4'))} "
+                         f"ipv4_observed={encoded(observed.get('ipv4'))} "
+                         f"gateway_expected={encoded(expected.get('gateway'))} "
+                         f"gateways_observed={encoded(observed.get('gateways'))}")
+            log(line)
+        for key, label in (("input_issues", "Input issue"), ("eth1_hints", "eth1 hint")):
+            for issue in record.get(key, ()):
+                log(f"    {label}: field={encoded(issue.get('field'))} "
+                    f"value={encoded(issue.get('value'))} problem={encoded(issue.get('problem'))}")
+        backup = record.get("backup")
+        if backup:
+            log(f"    Backup: path={encoded(backup.get('path'))} bytes={encoded(backup.get('bytes'))}")
+
+
 def initial_setup_facts(records, direct_rows):
     categories, metrics, stages, address_sources = {}, {}, {}, {}
     for record in records.values():
@@ -8048,37 +11211,53 @@ def initial_setup_facts(records, direct_rows):
             state = record.get("stage_status", {}).get(key, "NOT_REACHED")
             counts = stages.setdefault(key, {})
             counts[state] = counts.get(state, 0) + 1
-        source = record.get("neighbor", {}).get("address_source", "NOT_SELECTED")
-        address_sources[source] = address_sources.get(source, 0) + 1
+        if (record.get("route") or {}).get("path") != "direct":
+            source = (record.get("neighbor") or {}).get("address_source", "NOT_SELECTED")
+            address_sources[source] = address_sources.get(source, 0) + 1
     passed = {normalize_name(row["hostname"]) for row in direct_rows if row["status"] == "PASS"}
-    ready = sum(normalize_name(name) in passed and record.get("outcome") in {"CONFIGURED", "ALREADY_CONFIGURED"}
-                and not any(state in {"FAILED", "UNVERIFIED", "PLANNED_NOT_APPLIED", "NEEDS_CONFIGURATION", "RUNNING"}
-                            for state in record.get("stage_status", {}).values())
+    ready = sum(_setup_record_verified(record, [row for row in direct_rows
+                if normalize_name(row["hostname"]) == normalize_name(name)])
                 for name, record in records.items())
     mismatch = sum(normalize_name(name) in passed and record.get("stage_status", {}).get("ipv4_readiness") == "FAILED"
                    for name, record in records.items())
     fallback = [record for record in records.values()
-                if record.get("neighbor", {}).get("address_source") == "FDB_EUI64_CANDIDATE"]
+                if (record.get("route") or {}).get("path") != "direct"
+                and (record.get("neighbor") or {}).get("address_source") == "FDB_EUI64_CANDIDATE"]
     fallback_verified = sum(record.get("stage_status", {}).get("authentication") == "VERIFIED" for record in fallback)
+    csv_candidates = [record for record in records.values()
+                      if (record.get("route") or {}).get("path") != "direct"
+                      and (record.get("neighbor") or {}).get("address_source") == "CSV_EUI64"]
+    csv_verified = sum(record.get("stage_status", {}).get("authentication") == "VERIFIED"
+                       for record in csv_candidates)
     return {"categories": categories, "metrics": metrics, "stages": stages,
             "direct_ssh": summarize_management_direct_checks(direct_rows),
             "setup_and_direct_ssh_verified": ready, "oob_ipv4_failed_direct_ssh_passed": mismatch,
             "ipv6_address_sources": address_sources,
             "ipv6_fallback": {"candidates": len(fallback), "authenticated": fallback_verified,
                               "not_verified": len(fallback)-fallback_verified},
+            "ipv6_csv_eui64": {"candidates": len(csv_candidates), "authenticated": csv_verified,
+                               "not_verified": len(csv_candidates)-csv_verified},
             "attention": initial_setup_attention(records, direct_rows)}
 
 
 def print_initial_setup_summary(project, args, targets, candidate_count, snapshots_failed,
                                 records, direct_rows, workers, fatal="", jump_routes=None):
     """English, mutually exclusive device outcomes; reasons never imply IB state."""
+    # Display defaults belong to this projection, not to the caller's verified records.
+    records = {name: dict(record) for name, record in records.items()}
     for target in targets:
         name = normalize_name(target.ib.hostname)
-        records.setdefault(name, {"hostname": target.ib.hostname, "oob": target.ethernet.hostname,
+        records.setdefault(name, {"hostname": target.ib.hostname, "oob": target.ethernet.hostname if target.ethernet else None,
                                  "outcome": "NOT_ATTEMPTED", "reason": "task was not dispatched"})
         records[name].setdefault("hostname", target.ib.hostname)
-        records[name].setdefault("oob", target.ethernet.hostname)
+        records[name].setdefault("oob", target.ethernet.hostname if target.ethernet else None)
         records[name].setdefault("port", target.ethernet_port)
+        records[name].setdefault("config_mode", getattr(args, "config_mode", "patch"))
+        if records[name]["config_mode"] == "replace":
+            records[name]["needs_change"] = True
+            selected = getattr(args, "_replace_selected", {}).get(name)
+            if selected is not None:
+                records[name].setdefault("replace", dict(selected))
     categories = {}
     totals = {key: 0 for key in ("ib_ssh_attempts", "direct_ssh_attempts", "public_key_ssh_attempts",
                                "nvue_write_commands", "public_key_install_attempts", "password_change_sessions")}
@@ -8089,7 +11268,8 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
             totals[key] += metrics.get(key, 0)
         category = record_category(record)
         categories[category] = categories.get(category, 0) + 1
-    oobs = {normalize_name(target.ethernet.hostname): target.ethernet for target in targets}
+    oobs = {normalize_name(target.ethernet.hostname): target.ethernet for target in targets
+            if target.ethernet is not None}
     direct = summarize_management_direct_checks(direct_rows)
     facts = initial_setup_facts(records, direct_rows)
     execution_failed = bool(fatal or any(record.get("script_error") or record.get("batch_error")
@@ -8106,17 +11286,13 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
     log(f"CSV IB candidates: {candidate_count}")
     log(f"P2P management targets: {len(targets)}")
     log(f"Unmapped CSV IB candidates: {max(0, candidate_count - len(targets))}")
-    missing_mac = sorted({target.ib.hostname for target in targets if not target.ib.eth0_mac})
-    if missing_mac:
-        log(f"CSV eth0 MAC unavailable: {len(missing_mac)}; not checked against inventory MAC")
-        for start in range(0, len(missing_mac), 4):
-            log("  " + ", ".join(missing_mac[start:start+4]))
     log("SUCCESS = all required setup/access checks passed; INCOMPLETE = device work remains; FAILED = run execution failed/aborted.")
     summary_panel(2, "OOB SNAPSHOTS")
     log(f"OOB snapshots: {len(oobs)} total, {len(oobs)-len(snapshots_failed)} collected, {len(snapshots_failed)} failed")
     log("\nOOB Leaf                 Login IP         IB Targets  Snapshot   Impact / Reason")
     for key, device in sorted(oobs.items()):
-        attached = [target for target in targets if normalize_name(target.ethernet.hostname) == key]
+        attached = [target for target in targets if target.ethernet is not None
+                    and normalize_name(target.ethernet.hostname) == key]
         related = [records[normalize_name(target.ib.hostname)] for target in attached]
         if key in snapshots_failed:
             impact = snapshots_failed[key]
@@ -8159,6 +11335,7 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
     for category in sorted(set(categories)-known):
         log(f"    {category}: {categories[category]}")
     log(f"  TOTAL: {sum(categories.values())}")
+    _log_initial_setup_device_facts(records)
     summary_panel(4, "CONFIGURATION STAGES")
     for stage, label in (("initial", "1. Initial"), ("day0", "2. Network"),
                          ("services", "3. Infra Services"), ("public_keys", "4. Public Keys")):
@@ -8185,6 +11362,8 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
         log(label + ": " + ", ".join(f"{state}={number}" for state, number in sorted(facts["stages"].get(stage, {}).items())))
     fallback = facts["ipv6_fallback"]
     log(f"FDB-derived IPv6 candidates: {fallback['candidates']}; authenticated={fallback['authenticated']}; not-verified={fallback['not_verified']}")
+    csv_candidates = facts["ipv6_csv_eui64"]
+    log(f"CSV-derived IPv6 candidates: {csv_candidates['candidates']}; authenticated={csv_candidates['authenticated']}; not-verified={csv_candidates['not_verified']}")
     log("A derived IPv6 candidate alone is not proof of login or configuration success.")
     log(f"Management-key SSH verification: verified={key_verified} failed/unverified={key_unverified} "
         f"not-attempted={len(targets)-key_verified-key_unverified}")
@@ -8219,8 +11398,6 @@ def print_initial_setup_summary(project, args, targets, candidate_count, snapsho
         log("  Run execution: resolve the batch stop above and verify any partial writes before a new run.")
     if candidate_count != len(targets):
         log("  Unmapped CSV IB candidates: reconcile CSV hostnames with P2P management links before retrying.")
-    if missing_mac:
-        log("  Inventory: supply the real CSV eth0 MAC before MAC-required upgrade preflight; never insert a dummy MAC.")
     if not facts["attention"] and not fatal and candidate_count == len(targets):
         log("All required setup and SSH access checks passed; retain the run evidence.")
     log(f"\nSee {Path(args.report).resolve()} and the per-device .log/.json files for evidence.")
@@ -8238,6 +11415,26 @@ def main(*, method_cycle=None) -> int:
     """
     global REPORT_HANDLE, _CONSOLE_VERBOSE, _CREDENTIALS_FD_MODE, _JUMP_SESSIONS
     args = parse_args()
+    replace_mode = getattr(args, "config_mode", "patch") == "replace"
+    replace_bindings = {}
+    if replace_mode:
+        if args.execution_mode == "ethernet":
+            raise SetupError("replace is not supported in ethernet execution mode")
+        if method_cycle is not None:
+            raise SetupError("replace is not supported by the managed entry")
+        if args.generate_json:
+            raise SetupError("replace is not supported with --generate-json")
+        if args.plan and args.apply:
+            raise SetupError("--plan cannot be combined with --apply")
+        args._replace_release = (args.project_dir.expanduser() / "99-output-ib_nvl/latest"
+                                 if args.project_dir is not None
+                                 else Path(__file__).resolve().parent / "latest_yaml")
+        binding_out = {}
+        args._replace_manifest = validate_replace_release(
+            args._replace_release,
+            args.project_dir.expanduser() if args.project_dir is not None else None,
+            _bindings=binding_out)
+        replace_bindings = binding_out["files"]
     _CONSOLE_VERBOSE = args.verbose
     if args.ethernet_password is not None:
         raise SetupError("Do not put passwords in argv; use hidden OOB prompts")
@@ -8273,10 +11470,9 @@ def main(*, method_cycle=None) -> int:
                              "for the first-change confirmation")
         jump_password_for = lambda hostname: jump_table.get(jump_key(hostname))  # noqa: E731
     # WP4/r6: mandatory even for read-only, plan and generation; fail before device contact.
-    _import_tools("tools.login_path")
-    if _TOOLS_ROOT == Path(__file__).resolve().parent:
-        _import_tools("tools.device_identity")
-        _import_tools("tools.hostname_ranges")
+    _import_tools("tools.device_identity")
+    hostname_ranges = _import_tools("tools.hostname_ranges")
+    paths = _import_tools("tools.login_path")
     project = None
     if args.project_dir is not None:
         project = args.project_dir.expanduser().resolve(strict=True)
@@ -8324,10 +11520,108 @@ def main(*, method_cycle=None) -> int:
     p2p_path = discover_input_file(
         args.p2p, "p2p.xlsx", ".xlsx", "P2P workbook"
     )
-    # K11: resolve once against all CSV IB names before any device/output/cache path.
+    if args.direct_access is not None and args.execution_mode == "ethernet":
+        raise SetupError("--direct-access is not allowed with --execution-mode ethernet")
+    # Module layout selects code authority, not the physical execution role.
+    # Resolve auto before any output. A cache supplies only already-qualified
+    # source targets here; the original profile admission below still applies.
+    leaf = False
+    cold_inputs = None
+    if args.execution_mode in {"ethernet", "auto"} and not args.generate_json:
+        role_cache = load_target_cache(args.target_cache.resolve(), ib_csv_path, p2p_path)
+        if args.execution_mode == "ethernet" and role_cache is None:
+            raise SetupError(
+                "target cache is missing or invalid; regenerate version 6 on the management server"
+            )
+    if args.execution_mode == "auto" and not args.generate_json:
+        if role_cache is not None:
+            role_targets = role_cache[1]
+        else:
+            ib_devices, eth_devices = load_devices(ib_csv_path)
+            links = parse_p2p(p2p_path)
+            validate_p2p_links(links)
+            role_targets = build_targets(links, ib_devices, eth_devices)
+            cold_inputs = (ib_devices, role_targets)
+        leaf = bool(local_ethernet_keys(
+            role_targets, args.execution_mode, args.local_ethernet_hostname))
+        if replace_mode and leaf:
+            raise SetupError("replace is not supported on a local Leaf")
+        if leaf and role_cache is None:
+            raise SetupError(
+                "target cache is missing or invalid; regenerate version 6 on the management server"
+            )
+    inventory_check = None
+    if (args.generate_json or args.execution_mode == "management"
+            or (args.execution_mode == "auto" and not leaf)):
+        inventory_check = _compare_inventory(ib_csv_path,
+                                             method_cycle.project if method_cycle is not None else project,
+                                             checked_by_caller=args.inventory_checked)
     selector_value = getattr(args, "refresh_host_key", None)
+    role_csv_sha256 = None
+    if ((args.execution_mode == "ethernet" or leaf) and not args.generate_json
+            and method_cycle is None and not replace_mode and selector_value is None):
+        # P1 validated these exact v6 source bytes. A selection needs original
+        # spelling and CSV row order, not a second Device/route build.
+        try:
+            role_csv = ib_csv_path.read_bytes()
+        except OSError as exc:
+            raise SetupError(f"cannot open device CSV {ib_csv_path}: {exc}") from exc
+        role_csv_sha256 = hashlib.sha256(role_csv).hexdigest()
+        if _load_target_cache(args.target_cache.resolve(), ib_csv_path, p2p_path,
+                              expected_ib_csv_sha256=role_csv_sha256) is None:
+            raise SetupError(
+                "target cache is missing or invalid; regenerate version 6 on the management server"
+            )
+        inventory_devices = {}
+        rows = csv.reader(io.StringIO(role_csv.decode("utf-8-sig"), newline=""))
+        header = next(rows, None)
+        if header is None:
+            raise SetupError(f"device CSV is empty: {ib_csv_path}")
+        indexes = header_indexes(header)
+        missing = sorted({"hostname", "type", "eth0_ip"} - indexes.keys())
+        if missing:
+            raise SetupError(f"device CSV missing column(s): {', '.join(missing)}")
+        inventory_names = [name for row in rows
+                           if row_value(row, indexes, "type").casefold() == "ib"
+                           and (name := row_value(row, indexes, "hostname"))]
+        if not inventory_names:
+            raise SetupError(f"device CSV contains no type=ib devices: {ib_csv_path}")
+    else:
+        inventory_devices = load_devices(ib_csv_path)[0]
+        inventory_names = [device.hostname for device in inventory_devices.values()]
+    devices_selector = getattr(args, "devices", None)
+    try:
+        selected_names = (inventory_names if devices_selector is None else hostname_ranges.select(
+            hostname_ranges.parse_selector(devices_selector, option="--devices"), inventory_names))
+    except hostname_ranges.SelectorError as error:
+        raise SetupError(str(error)) from None
+    selected_keys = {normalize_name(name) for name in selected_names}
+    selected_candidate_count = len(selected_names)
+    try:
+        direct = (paths.select_direct_access(args.direct_access, inventory_names)
+                  if args.direct_access is not None else frozenset())
+    except paths.SelectorError as error:
+        raise SetupError(str(error)) from None
+    # K11: resolve once against all CSV IB names before any device/output/cache path.
     args._refresh_host_key_names = resolve_host_key_refresh_selector(selector_value,
-        load_devices(ib_csv_path)[0] if selector_value is not None else {})
+        inventory_devices if selector_value is not None else {})
+    if replace_mode:
+        args._replace_selected = {}
+        for device in inventory_devices.values():
+            if normalize_name(device.hostname) in selected_keys:
+                args._replace_selected[normalize_name(device.hostname)] = select_replace_yaml(
+                    Target(device, None, "", "eth0"), args._replace_release,
+                    args._replace_manifest, _bindings=replace_bindings)
+        profile_root = project if project is not None else Path(__file__).resolve().parent
+        try:
+            global_path = profile_root / "01-global.yaml"
+            global_target = global_path.resolve(strict=True)
+            global_digest = _file_sha256(global_target)
+            if global_digest != binding_out["global_sha256"]:
+                raise ValueError
+        except (OSError, ValueError):
+            raise SetupError("replace global differs from the published release; run load") from None
+        replace_bindings[global_path.absolute()] = (global_target, global_digest)
     # O12 (guide :1071): without --report every run writes its own report in the default directory,
     # initial-setup-report-<YYYYmmdd-HHMMSS>.log, with -<pid> when that name exists; the devices-*
     # evidence directory starts with the same timestamp (run_prepared_tasks).  --report is used as given.
@@ -8384,14 +11678,16 @@ def main(*, method_cycle=None) -> int:
             cache_path, ib_csv_path, p2p_path, len(ib_devices), targets,
             global_file=global_file if global_file.is_file() else None,
             services=services, public_keys=public_keys,
+            inventory_check=inventory_check,
         )
+        _runtime_routes(targets, direct, emit=print)
         print(f"Input CSV: {ib_csv_path}")
         print(f"Input P2P: {p2p_path}")
         print(f"Generated: {cache_path}")
         print(f"Generated: {cache_path.with_name(cache_path.name + '.sha256')}")
         print(
             f"IB candidates: {len(ib_devices)}; "
-            f"P2P management links: {len(targets)}"
+            + _classified_target_counts(targets)
         )
         return 0
     try:
@@ -8421,19 +11717,32 @@ def main(*, method_cycle=None) -> int:
     authority_paths = [ib_csv_path, p2p_path, _SELF_SOURCE_PATH]
     if (tool / "01-global.yaml").is_file():
         authority_paths.append(tool / "01-global.yaml")
+    if replace_mode:
+        authority_paths.extend(replace_bindings)
     runtime_authority = RuntimeInputAuthority(authority_paths)
+    if replace_mode:
+        # Bind the checked snapshot, not a fresh value accepted after it changed.
+        for path, resolved, _signature, digest in runtime_authority.entries:
+            expected = replace_bindings.get(path)
+            if expected is not None and (resolved, digest) != expected:
+                raise ProjectInputChanged("replace input changed after validation; run load")
+        runtime_authority.assert_unchanged()
+        args._replace_runtime_authority = runtime_authority
     # The admitted profile travels with the accepted cache (DEV); the strict
     # management-server admission below compares it with what the run uses.
     cache_observe_profile = args.execution_mode != "ethernet"
     cache_admission_out = {} if cache_observe_profile else None
     cache_generated_profile = None
-    cached = load_target_cache(
+    cache_loader = load_target_cache if role_csv_sha256 is None else _load_target_cache
+    selection_binding = ({} if role_csv_sha256 is None else
+                         {"expected_ib_csv_sha256": role_csv_sha256})
+    cached = cache_loader(
         cache_path, ib_csv_path, p2p_path,
         public_key_tool=tool if source_inputs_available else None,
         validate_public_keys_with_ssh_keygen=args.execution_mode == "management",
         allow_baked_missing_global=args.execution_mode != "management",
         **({"_admission_out": cache_admission_out} if cache_observe_profile else {}),
-        **key_option,
+        **key_option, **selection_binding,
     )
     if cached is not None and args.execution_mode == "auto":
         # A disconnected Ethernet leaf legitimately has neither project link.
@@ -8444,28 +11753,31 @@ def main(*, method_cycle=None) -> int:
         )
         if not local_for_cache:
             cache_admission_out = {} if cache_observe_profile else None
-            cached = load_target_cache(
+            cached = cache_loader(
                 cache_path, ib_csv_path, p2p_path, public_key_tool=tool,
                 validate_public_keys_with_ssh_keygen=True,
                 allow_baked_missing_global=False,
                 **({"_admission_out": cache_admission_out} if cache_observe_profile else {}),
-                **key_option,
+                **key_option, **selection_binding,
             )
     if cached is not None:
         ib_candidate_count, targets = cached
         log(f"Target cache: reused {cache_path}")
     else:
-        if args.execution_mode == "ethernet":
+        if args.execution_mode == "ethernet" or (args.execution_mode == "auto" and leaf):
             if cache_path.is_file():
                 raise SetupError(
                     "target cache version, checksum, or input identity is invalid; "
-                    "regenerate version 5 on the management server"
+                    "regenerate version 6 on the management server"
                 )
-            raise SetupError("target cache is missing; generate version 5 on the management server")
-        ib_devices, eth_devices = load_devices(ib_csv_path)
-        links = parse_p2p(p2p_path)
-        validate_p2p_links(links)
-        targets = build_targets(links, ib_devices, eth_devices)
+            raise SetupError("target cache is missing; generate version 6 on the management server")
+        if cold_inputs is not None:
+            ib_devices, targets = cold_inputs
+        else:
+            ib_devices, eth_devices = load_devices(ib_csv_path)
+            links = parse_p2p(p2p_path)
+            validate_p2p_links(links)
+            targets = build_targets(links, ib_devices, eth_devices)
         ib_candidate_count = len(ib_devices)
         services = _service_profile(tool, **neutral_option)
         public_keys = _public_key_profile(tool, **key_option)
@@ -8478,10 +11790,14 @@ def main(*, method_cycle=None) -> int:
             cache_path, ib_csv_path, p2p_path, ib_candidate_count, targets,
             global_file=global_file if global_file.is_file() else None,
             services=services, public_keys=public_keys,
+            inventory_check=inventory_check,
         )
         cache_generated_profile = cache_generated_candidate
         log(f"Target cache: generated {cache_path}")
     cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    base_targets = targets
+    targets = _runtime_routes(base_targets, direct)
+    targets = [target for target in targets if normalize_name(target.ib.hostname) in selected_keys]
     services = cache_payload["services"]
     public_keys = cache_payload["public_keys"]
     log(f"Public-key input: {key_dir}; usable entries={len(public_keys)}")
@@ -8491,13 +11807,14 @@ def main(*, method_cycle=None) -> int:
         log("WARNING: no usable *.pub keys found; no IB public key will be installed.")
 
     log(f"IB candidates in CSV: {ib_candidate_count}")
-    log(f"P2P management links: {len(targets)}")
+    log(_classified_target_counts(targets))
     for target in targets:
-        report_detail(
-            f"  {target.ib.hostname:<32} {target.ib_port_alias:<6} <- "
-            f"{target.ethernet.hostname}:{target.ethernet_port} "
-            f"({target.ethernet.login_ip})"
-        )
+        if target.ethernet is not None:
+            report_detail(
+                f"  {target.ib.hostname:<32} {target.ib_port_alias:<6} <- "
+                f"{target.ethernet.hostname}:{target.ethernet_port} "
+                f"({target.ethernet.login_ip})"
+            )
     if args.apply:
         log(
             "Device changes: REQUESTED by --apply; confirmation will occur "
@@ -8506,8 +11823,29 @@ def main(*, method_cycle=None) -> int:
     else:
         log("Device changes: DISABLED (no --apply); read-only device mode.")
     if args.plan:
+        if replace_mode:
+            for target in targets:
+                selected = args._replace_selected[normalize_name(target.ib.hostname)]
+                log(f"  [{target.ib.hostname}] {selected['verdict']}: {selected['file']}")
+                log("    整份替换（会清掉 yaml 以外的配置）")
+                if selected["sha256"]:
+                    log("    sha256=" + selected["sha256"])
+                if selected["reason"]:
+                    log("    " + selected["reason"])
+                if selected["verdict"] == "WOULD_REPLACE":
+                    log("    Identity -> backup -> Initial/ZTP check -> nv config replace")
+                    log("    -> apply/save -> restore missing services -> ZTP check -> public keys")
+                    log("    -> final management IPv4 verification (first delay 15s)")
+            runtime_authority.assert_unchanged()
+            return 0
         log("Plan lists potential commands; already-present values may be omitted at runtime.")
         for target in targets:
+            if target.ib.input_issues:
+                continue
+            if _jump_has_no_login_address(target.ethernet):
+                log(f"  [{target.ib.hostname}] SKIPPED_JUMP_ADDRESS_INVALID: "
+                    f"{target.ethernet.hostname} has no valid login candidate.")
+                continue
             log(f"  [{target.ib.hostname}] Initial configuration commands:")
             for command in initial_configuration_commands():
                 log("    " + shlex.join(command))
@@ -8533,34 +11871,36 @@ def main(*, method_cycle=None) -> int:
 
     initial_ib_password = ""  # Prompt only after snapshots identify at least one eligible IB task.
 
-    local_keys = local_ethernet_keys(
-        targets, args.execution_mode, args.local_ethernet_hostname
+    jump_access_targets = [target for target in targets if target.ethernet is not None
+                           and not target.ib.input_issues
+                           and (target.ethernet.jump_candidates or target.ethernet.login_ip)]
+    physical_keys = local_ethernet_keys(
+        base_targets, args.execution_mode, args.local_ethernet_hostname
     )
+    local_keys = physical_keys & {
+        normalize_name(target.ethernet.hostname) for target in targets if target.ethernet is not None
+    }
     # A remote Spine task does not turn a process running on a Leaf into a
     # management server. Preserve the actual location for the final direct probe.
-    args._on_management_server = args.execution_mode != "ethernet" and not local_keys
+    args._on_management_server = args.execution_mode != "ethernet" and not physical_keys
     management_private_key = None
-    if args.execution_mode != "ethernet" and not local_keys:
+    if args._on_management_server:
         candidate_private_key = Path.home() / ".ssh" / "id_ed25519"
         if candidate_private_key.is_file() and not candidate_private_key.is_symlink():
             management_private_key = candidate_private_key
-    if local_keys:
-        log("Local Ethernet execution: " + ", ".join(sorted(local_keys)))
+    if physical_keys:
+        log("Local Ethernet execution: " + ", ".join(sorted(physical_keys)))
     else:
         log("Execution location: management server (all Ethernet access uses SSH)")
     if method_cycle is not None:
-        if local_keys or args.execution_mode == "ethernet" or not args.apply:
+        if physical_keys or args.execution_mode == "ethernet" or not args.apply:
             raise SetupError("managed method authority requires an explicit management --apply execution")
-        # The cache's targets, not the Spine-routed copies (config_sync_authority _inputs).
-        method_cycle.start(tool, cache_path, ib_csv_path, p2p_path, targets, services, public_keys)
-    _JUMP_SESSIONS = _new_jump_sessions(local_keys=local_keys, timeout=args.connect_timeout)
-    passwords = prompt_ethernet_passwords(
-        targets, args.ethernet_password, local_keys,
-        eth_user=args.eth_user, timeout=args.connect_timeout,
-        password_for=jump_password_for,
-        jump_sessions=_JUMP_SESSIONS,
-    )
-
+        # The cache's targets, not argv overrides or Spine-routed copies
+        # (config_sync_authority _inputs).
+        selection_options = ({} if devices_selector is None else
+                             {"selected_names": tuple(selected_names)})
+        method_cycle.start(tool, cache_path, ib_csv_path, p2p_path, base_targets, services, public_keys,
+                           **selection_options)
     # Project password authority.  On the management server a present global is
     # admitted together with the cache records and profile it produced (DEV strict
     # admission); its tasks then run the strict stages (args._strict_cache).  Without
@@ -8592,11 +11932,11 @@ def main(*, method_cycle=None) -> int:
                 strict_actual_targets = [
                     {
                         "ib": device_to_dict(item.ib),
-                        "ethernet": device_to_dict(item.ethernet),
+                        "ethernet": device_to_dict(item.ethernet) if item.ethernet is not None else None,
                         "ethernet_port": item.ethernet_port,
                         "ib_port_alias": item.ib_port_alias,
                     }
-                    for item in targets
+                    for item in base_targets
                 ]
                 strict_reported_targets = cache_payload.get("targets")
                 if (
@@ -8626,6 +11966,10 @@ def main(*, method_cycle=None) -> int:
                     for strict_role in ("ib", "ethernet"):
                         strict_actual_device = strict_actual[strict_role]
                         strict_reported_device = strict_reported[strict_role]
+                        if (strict_role == "ethernet" and strict_actual_device is None
+                                and strict_reported_device is None
+                                and cache_payload["routes"][strict_actual["ib"]["hostname"]]["path"] == "direct"):
+                            continue
                         if (
                             type(strict_reported_device) is not dict
                             or set(strict_reported_device) != strict_device_fields
@@ -8688,6 +12032,28 @@ def main(*, method_cycle=None) -> int:
             args._strict_cache = (cache_payload, ib_csv_path, p2p_path, policy_path)
     elif policy_path.is_file():
         policy = ProjectPasswordPolicy(policy_path, args.ib_user, **policy_options)
+    replace_apply = replace_mode and args.apply
+    if replace_apply:
+        # Only the admitted management project can enter a write-capable path.
+        if (args._on_management_server is not True or args._strict_cache is None
+                or type(policy) is not ProjectPasswordPolicy
+                or args._replace_runtime_authority is not runtime_authority):
+            raise SetupError("replace apply requires a qualified management project")
+        runtime_authority.assert_unchanged(_stable_file_refresh=True)
+    if policy is not None:
+        # I039: qualify the real target before the first OOB or IB session,
+        # even when later cable preparation yields no eligible IB task.
+        policy.password()
+    if replace_apply:
+        # Qualification may wait for input; keep the same publication snapshot.
+        runtime_authority.assert_unchanged(_stable_file_refresh=True)
+    _JUMP_SESSIONS = _new_jump_sessions(local_keys=local_keys, timeout=args.connect_timeout)
+    passwords = prompt_ethernet_passwords(
+        jump_access_targets, args.ethernet_password, local_keys,
+        eth_user=args.eth_user, timeout=args.connect_timeout,
+        password_for=jump_password_for,
+        jump_sessions=_JUMP_SESSIONS,
+    )
     apply_authorized = bool(args.apply and args.yes)
     if apply_authorized:
         log("Device changes: pre-authorized by --apply --yes.")
@@ -8701,7 +12067,8 @@ def main(*, method_cycle=None) -> int:
     direct_credentials: dict[str, str] = {}
     ethernet_switches = {
         normalize_name(target.ethernet.hostname): target.ethernet
-        for target in targets
+        for target in targets if target.ethernet is not None and not target.ib.input_issues
+        and (target.ethernet.jump_candidates or target.ethernet.login_ip)
     }
     log("\nCollecting Ethernet snapshots ...")
     def collect_leaf_snapshot(ethernet):
@@ -8717,9 +12084,9 @@ def main(*, method_cycle=None) -> int:
             ethernet, args.eth_user, eth_password, args.connect_timeout, local=ethernet_is_local)
         network = collect_ethernet_network_tables(
             ethernet, args.eth_user, eth_password, args.connect_timeout, local=ethernet_is_local)
-        links, fdb, neighbors = network
+        links, fdb, vlans = network
         snapshot_path = save_ethernet_snapshot(
-            snapshot_directory, ethernet, actual_hostname, location, interfaces, links, fdb, neighbors)
+            snapshot_directory, ethernet, actual_hostname, location, interfaces, links, fdb, vlans)
         interface_tables[eth_key], network_tables[eth_key] = interfaces, network
         log(f"    Snapshot saved: {snapshot_path}")
 
@@ -8736,6 +12103,13 @@ def main(*, method_cycle=None) -> int:
     # Read the same hash-pinned CSV even when static P2P target cache is reused.
     _, transit_inventory = load_devices(ib_csv_path)
     spine_inventory = select_spine_inventory(transit_inventory, args.oob_spines)
+    cascade_ports = set()
+    for link in parse_p2p(p2p_path):
+        left = resolve_device(link.left_device, transit_inventory)
+        right = resolve_device(link.right_device, transit_inventory)
+        if left is not None and right is not None:
+            cascade_ports.add((left.hostname, cumulus_port_name(link.left_port)))
+            cascade_ports.add((right.hostname, cumulus_port_name(link.right_port)))
     leaf_snapshot_failures = {key: str(value) for key, value in table_failures.items()}
     jump_routes = []
 
@@ -8780,10 +12154,37 @@ def main(*, method_cycle=None) -> int:
         for key, error in failed.items():
             log(f"  [SPINE] {key}: snapshot failed; {redact_text(str(error), list(passwords.values()))}")
 
+    jump_targets, direct_targets = [], []
+    for target in targets:
+        name = normalize_name(target.ib.hostname)
+        blocked = target.ib.input_issues
+        invalid_jump = _jump_has_no_login_address(target.ethernet)
+        leaf_direct = target.ethernet is None and not args._on_management_server
+        if blocked or invalid_jump or leaf_direct:
+            if blocked or invalid_jump:
+                category = "SKIPPED_INPUT_INCOMPLETE" if blocked else "SKIPPED_JUMP_ADDRESS_INVALID"
+                issues = blocked if blocked else target.ethernet.input_issues
+                reason = "; ".join(item.field + "=" + item.value + ": " + item.problem for item in issues)
+            else:
+                category = "SKIPPED"
+                reason = "直接登录只在管理服务器上执行"
+            outcomes[name] = "SKIPPED"
+            records[name] = {"hostname": target.ib.hostname,
+                "oob": target.ethernet.hostname if target.ethernet is not None else None,
+                "port": target.ethernet_port, "outcome": "SKIPPED", "category": category,
+                "reason": reason,
+                "writes_attempted": False, "metrics": {}, "stage_status": {}}
+        elif target.ethernet is None:
+            direct_targets.append(target)
+        else:
+            jump_targets.append(target)
     ready_tasks = prepare_routed_ib_tasks(
-        targets, args, passwords, local_keys, interface_tables, network_tables, table_failures,
+        jump_targets, args, passwords, local_keys, interface_tables, network_tables, table_failures,
         outcomes, records, spines=spine_inventory, fetch_addresses=fetch_oob_addresses,
-        collect_spines=collect_spine_snapshots, jump_routes=jump_routes)
+        collect_spines=collect_spine_snapshots, jump_routes=jump_routes,
+        cascade_ports=frozenset(cascade_ports))
+    ready_tasks.extend(PreparedIBTask(target, _direct_endpoint_for(target), "", False)
+                       for target in direct_targets)
     runtime_authority.assert_unchanged()
     try:
         snapshot_directory.mkdir(parents=True, exist_ok=True)
@@ -8798,15 +12199,27 @@ def main(*, method_cycle=None) -> int:
                                 args.ib_initial_password_env,
                                 factory_default_admin=args.factory_default_admin))
                            if ready_tasks else "")
-    log(f"IB selection: total-ib={ib_candidate_count} "
-        f"filtered-ib={ib_candidate_count-len(ready_tasks)} ready-ib={len(ready_tasks)} "
+    log(f"IB selection: total-ib={selected_candidate_count} "
+        f"filtered-ib={selected_candidate_count-len(ready_tasks)} ready-ib={len(ready_tasks)} "
         f"(prerequisite-blocked={len(targets)-len(ready_tasks)} "
-        f"unmapped={ib_candidate_count-len(targets)})")
+        f"unmapped={selected_candidate_count-len(targets)})")
     batch = run_prepared_tasks(
         ready_tasks, args, policy, initial_ib_password, services, public_keys,
-        management_private_key, authority=runtime_authority, method_cycle=method_cycle)
+        management_private_key, authority=runtime_authority, method_cycle=method_cycle,
+        preflight_records=records)
     outcomes.update(batch["outcomes"])
     records.update(batch["records"])
+    for target in targets:
+        record = records.setdefault(normalize_name(target.ib.hostname), {"hostname": target.ib.hostname})
+        for key, value in _login_path_record_metadata(target).items():
+            record.setdefault(key, value)
+        record.setdefault("category", record_category(record))
+        record.setdefault("config_mode", getattr(args, "config_mode", "patch"))
+        if record["config_mode"] == "replace":
+            selected = getattr(args, "_replace_selected", {}).get(normalize_name(target.ib.hostname))
+            if selected is not None:
+                record.setdefault("replace", dict(selected))
+        _complete_result_fields(record)
     try:
         runtime_authority.assert_unchanged()
     except ProjectInputChanged as exc:
@@ -8847,7 +12260,7 @@ def main(*, method_cycle=None) -> int:
         "SKIPPED", "FAILED", "NOT_ATTEMPTED")}
     summary = "Summary: targets=" + str(len(targets)) + " " + " ".join(
         key.lower().replace("_", "-") + "=" + str(value) for key, value in counts.items())
-    summary += " unmapped-csv=" + str(max(0, ib_candidate_count - len(targets)))
+    summary += " unmapped-csv=" + str(max(0, selected_candidate_count - len(targets)))
     summary += (f" direct-ssh-pass={direct_summary['ready']} "
                 f"direct-ssh-fail={direct_summary['failed']} "
                 f"direct-ssh-not-tested={direct_summary['not_tested']} "
@@ -8856,18 +12269,24 @@ def main(*, method_cycle=None) -> int:
     report_detail("\n" + summary)
     # The DEV policy keeps the resolved global in binding[0] (v15 read policy.resolved).
     project_name = Path(policy.binding[0]).parent.name if policy is not None else ib_csv_path.resolve().parent.name
-    summary_status = print_initial_setup_summary(project_name, args, targets, ib_candidate_count,
+    summary_status = print_initial_setup_summary(project_name, args, targets, selected_candidate_count,
         leaf_snapshot_failures, records, direct_rows, batch["workers"], batch["fatal"], jump_routes=jump_routes)
-    evidence = {"project": project_name, "revision": _REPOSITORY_REVISION,
+    evidence = {"schema_version": RESULT_SCHEMA_VERSION, "config_mode": getattr(args, "config_mode", "patch"),
+                "selection": {"selector": devices_selector, "selected": selected_names,
+                              "unmapped": [name for name in selected_names if normalize_name(name) not in records]},
+                "project": project_name, "revision": _REPOSITORY_REVISION,
                 "source_sha256": next(entry[3] for entry in runtime_authority.entries
                                       if entry[0] == _SELF_SOURCE_PATH.absolute()),
                 "mode": "APPLY" if args.apply else "CHECK_ONLY", "result": summary_status,
-                "workers": batch["workers"], "csv_ib_candidates": ib_candidate_count,
+                "workers": batch["workers"], "csv_ib_candidates": selected_candidate_count,
                 "p2p_management_targets": len(targets), "oob_snapshot_failures": leaf_snapshot_failures,
                 "spine_snapshot_failures": {key: str(value) for key, value in table_failures.items()
                                             if key not in ethernet_switches},
                 "spine_jump_routes": jump_routes,
                 "records": records, "direct_rows": direct_rows, "batch_stop_reason": batch["fatal"],
+                "routes": {target.ib.hostname: asdict(target.route) for target in targets},
+                "input_issues": cache_payload["input_issues"],
+                "eth1_hints": cache_payload["eth1_hints"],
                 "summary": initial_setup_facts(records, direct_rows)}
     results_path = Path(batch["log_dir"]) / "summary.json"
     with results_path.open("x", encoding="utf-8") as handle:

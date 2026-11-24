@@ -33,6 +33,7 @@ import contextlib
 from dataclasses import replace
 import io
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -69,9 +70,39 @@ class DirectRetryTests(unittest.TestCase):
         app.verify_ipv4_login(target(), "oob", "cumulus", OOB_CREDENTIAL, "admin", 10,
                               ib_password=IB_CREDENTIAL)
 
-    def ipv4_success(self):
+    def ipv4_command(self, argv):
+        outer = shlex.split(argv[-1])
+        safe = "export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; exec "
+        self.assertEqual(["sh", "-c"], outer[:2])
+        self.assertEqual(3, len(outer))
+        self.assertTrue(outer[2].startswith(safe))
+        inner = shlex.split(outer[2][len(safe):])
+        self.assertEqual(["ip", "vrf", "exec", "oob", "ssh"], inner[:5])
+        self.assertEqual("admin@192.0.2.10", inner[-2])
+        frame = shlex.split(inner[-1])
+        self.assertEqual(["sh", "-c"], frame[:2])
+        self.assertEqual(3, len(frame))
+        prefix = 'printf "\\n__HTTP_IB_BEGIN_' + MARKER + '__\\n"; '
+        suffix = ('; task_rc=$?; printf "\\n__HTTP_IB_END_' + MARKER
+                  + '__=%s\\n" "$task_rc"; exit "$task_rc"')
+        self.assertTrue(frame[2].startswith(prefix) and frame[2].endswith(suffix))
+        text = frame[2][len(prefix):-len(suffix)]
+        command = tuple(shlex.split(text))
+        self.assertEqual(text, shlex.join(command))
+        self.assertIn(command, (("ip", "addr", "show", "eth0"), ("ip", "route")))
+        return command
+
+    def ipv4_success(self, argv, *_args):
+        command = self.ipv4_command(argv)
+        replies = {
+            ("ip", "addr", "show", "eth0"): (
+                "2: eth0: <UP> mtu 1500 state UP\n"
+                "    link/ether 02:00:00:00:00:10 brd ff:ff:ff:ff:ff:ff\n"
+                "    inet 192.0.2.10/24 scope global eth0\n"),
+            ("ip", "route"): "default via 192.0.2.1 dev eth0\n",
+        }
         return app.SessionResult("__HTTP_IB_BEGIN_" + MARKER + "__\n"
-                                 "__HTTP_IB_END_" + MARKER + "__=0\n", 0)
+                                 + replies[command] + "__HTTP_IB_END_" + MARKER + "__=0\n", 0)
 
     # -- helpers (v15 ManagementServerDirectSSHTests.output/dual_target) --------------------------
     def direct_output(self, hostname="example-ib001"):
@@ -118,23 +149,30 @@ class DirectRetryTests(unittest.TestCase):
     def test_first_success_waits_fifteen_seconds_and_stops(self):
         with patch.object(app.time, "sleep") as sleep, \
              patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
-             patch.object(app, "interactive_run", return_value=self.ipv4_success()) as run:
+             patch.object(app, "interactive_run", side_effect=self.ipv4_success) as run:
             self.ipv4_verify()
         # r504 WP-3 :631 / D34-O8 replaces only this IPv4 readiness schedule.
         self.assertEqual([c.args for c in sleep.call_args_list], [(15,)])
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual([("ip", "addr", "show", "eth0"), ("ip", "route")],
+                         [self.ipv4_command(call.args[0]) for call in run.call_args_list])
         self.assertNotIn("nv config apply", str(run.call_args.args[0]))
         self.assertNotIn("nv config save", str(run.call_args.args[0]))
 
     # v15 IPv4ReadinessRetryTests.test_third_attempt_can_succeed_after_network_convergence (test_desktop_initial_setup.py:533)
     def test_third_attempt_can_succeed_after_network_convergence(self):
         failure = app.SessionResult("ssh: connect to host 192.0.2.10 port 22: Connection refused\n", 255)
+        commands = []
+        def answer(argv, *_args):
+            commands.append(self.ipv4_command(argv))
+            return failure if len(commands) <= 2 else self.ipv4_success(argv)
         with patch.object(app.time, "sleep") as sleep, \
              patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
-             patch.object(app, "interactive_run", side_effect=[failure, failure, self.ipv4_success()]) as run:
+             patch.object(app, "interactive_run", side_effect=answer) as run:
             self.ipv4_verify()
         self.assertEqual([c.args for c in sleep.call_args_list], [(15,), (10,), (10,)])
-        self.assertEqual(run.call_count, 3)
+        self.assertEqual(run.call_count, 4)
+        self.assertEqual([("ip", "addr", "show", "eth0")] * 3 + [("ip", "route")], commands)
 
     # v15 IPv4ReadinessRetryTests.test_all_attempts_fail_without_fourth_wait_or_attempt (test_desktop_initial_setup.py:542)
     def test_all_attempts_fail_without_tenth_wait_or_attempt(self):
@@ -169,13 +207,18 @@ class DirectRetryTests(unittest.TestCase):
 
     # v15 IPv4ReadinessRetryTests.test_transport_timeout_can_retry_but_other_safety_errors_cannot (test_desktop_initial_setup.py:570)
     def test_transport_timeout_can_retry_but_other_safety_errors_cannot(self):
+        commands = []
+        def answer(argv, *_args):
+            commands.append(self.ipv4_command(argv))
+            if len(commands) == 1:
+                raise app.SetupError("SSH/PAM session timed out; device state may be unknown")
+            return self.ipv4_success(argv)
         with patch.object(app.time, "sleep"), \
              patch.object(app.os, "urandom", return_value=bytes.fromhex(MARKER)), \
-             patch.object(app, "interactive_run", side_effect=[
-                 app.SetupError("SSH/PAM session timed out; device state may be unknown"),
-                 self.ipv4_success()]) as run:
+             patch.object(app, "interactive_run", side_effect=answer) as run:
             self.ipv4_verify()
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual([("ip", "addr", "show", "eth0")] * 2 + [("ip", "route")], commands)
         with patch.object(app.time, "sleep"), \
              patch.object(app, "interactive_run",
                           side_effect=app.SetupError("SSH output exceeded the safety limit")) as run:
