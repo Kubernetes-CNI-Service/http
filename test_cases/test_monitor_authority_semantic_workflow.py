@@ -3,23 +3,27 @@
 
 from __future__ import annotations
 
+from array import array
 from contextlib import ExitStack
 from contextlib import redirect_stderr
 from contextlib import redirect_stdout
 from contextlib import contextmanager
 import ast
+import fcntl
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import inspect
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import sys
@@ -107,17 +111,94 @@ def shell_function(path: Path, name: str) -> str:
     return match.group(0)
 
 
+def _ordinary_darwin_capture_fixture(capture: str) -> str:
+    """Adapt the four no-descendant ordinary workflows, preserving real capture."""
+    boundary = "\ncapture_monitor_authority_decision() {\n"
+    if capture.count(boundary) != 1:
+        raise AssertionError("ordinary capture source boundary changed")
+    body = "capture_monitor_authority_decision() {\n" + capture.split(boundary)[1]
+
+    def replace_once(old, new):
+        nonlocal body
+        if body.count(old) != 1:
+            raise AssertionError(f"ordinary capture fixture source changed at {old!r}")
+        body = body.replace(old, new)
+
+    start = '  IFS= read -r result_parent < <(monitor_authority_result_directory) || return 1'
+    replace_once(start, start + r'''
+  local fixture_tmp="${TMPDIR:-}"
+  [[ -n "$fixture_tmp" && -d "$result_parent" && ! -L "$result_parent" ]] || return 1
+  case "$result_parent" in "${fixture_tmp%/}/"*) ;; *) return 1 ;; esac
+  case "$1" in
+    control_auth_helper|python3) declare -F "$1" >/dev/null || return 1 ;;
+    "$result_parent/installed-helper"|"$result_parent/control-auth")
+      [[ -f "$1" && ! -L "$1" && -x "$1" ]] || return 1 ;;
+    *) return 1 ;;
+  esac''')
+    for stream in ("stdout", "stderr"):
+        pipe, output = f"${stream}_pipe", f"${stream}_file"
+        raw = f'/usr/bin/timeout --signal=KILL 11 \\\n    head -c 4097 <"{pipe}" >"{output}" &'
+        owned = (
+            'timeout --signal=KILL 2.0 /bin/bash --noprofile --norc '
+            f"""-c 'exec /usr/bin/head -c 4097 <"$1"' c4-ordinary-reader "{pipe}" >"{output}" &"""
+        )
+        replace_once(raw, owned)
+    raw_writer = 'exec /usr/bin/timeout --signal=KILL 11 \\\n        "$@" >"$stdout_pipe" 2>"$stderr_pipe"'
+    replace_once(raw_writer, r'''
+      if declare -F "$1" >/dev/null; then export -f "$1"; fi
+      export HTTP_C4_FIXTURE_TERMINAL="$holder_file.fixture-wait"
+      timeout --signal=KILL 2.0 /bin/bash --noprofile --norc \
+        -c 'exec 1>"$1" 2>"$2"; shift 2; if declare -F "$1" >/dev/null; then "$@"; else exec "$@"; fi' \
+        c4-ordinary-writer "$stdout_pipe" "$stderr_pipe" "$@"'''.lstrip())
+    replace_once('command -v /usr/bin/timeout', 'command -v timeout')
+    after_wait = 'kill -KILL -- "-$command_pid" 2>/dev/null'
+    replace_once(after_wait, '! fixture_capture_terminal_receipt "$holder_file"')
+    replace_once(
+        '"$holder_file" "$residual_file" "$cleanup_file" ||',
+        '"$holder_file" "$residual_file" "$cleanup_file" "$holder_file.fixture-wait" ||',
+    )
+    timeout = test_timeout_shell()
+    if timeout.count(" -B -c") != 1 or timeout.count("    command_rc=command.wait()") != 1:
+        raise AssertionError("portable ordinary capture wait template changed")
+    timeout = timeout.replace(" -B -c", " -I -S -B -c").replace(
+        "    command_rc=command.wait()", "\n".join((
+            "    command_rc=command.wait(timeout=2.0)",
+            '    receipt=os.environ.get("HTTP_C4_FIXTURE_TERMINAL")',
+            "    if receipt:",
+            "        import stat",
+            '        marker=os.path.join(os.path.dirname(receipt),"holder")',
+            "        opened, current=os.fstat(8),os.lstat(marker)",
+            "        if (not stat.S_ISREG(current.st_mode)",
+            "                or (opened.st_dev,opened.st_ino)!=(current.st_dev,current.st_ino)",
+            '                or receipt!=marker+".fixture-wait"):',
+            '            raise RuntimeError("original private capture marker did not bind")',
+            '        with open(receipt,"xb") as stream:stream.write(b"joined"+bytes([10]))',
+        )),
+    )
+    return r'''
+fixture_capture_terminal_receipt() {
+  local joined
+  [[ "$1" == "$holder_file" && -f "$1" && ! -L "$1" &&
+     -f "$1.fixture-wait" && ! -L "$1.fixture-wait" ]] || return 1
+  IFS= read -r joined <"$1.fixture-wait" || return 1
+  [[ "$joined" == joined ]]
+}
+terminate_monitor_authority_capture_holders() {
+  [[ $# == 6 && "$1" == "$holder_file" &&
+     "$2" == "$stdout_pipe" && "$3" == "$stderr_pipe" &&
+     -p "$2" && ! -L "$2" && -p "$3" && ! -L "$3" ]] || return 1
+  fixture_capture_terminal_receipt "$1"
+}
+''' + body + timeout
+
+
 def decision_capture_shell(path: Path, *, portable: bool = True) -> str:
     source = (
         shell_function(path, "terminate_monitor_authority_capture_holders")
         + shell_function(path, "capture_monitor_authority_decision")
     )
     if portable and sys.platform == "darwin":
-        return (
-            source.replace("exec /usr/bin/timeout", "timeout")
-            .replace("/usr/bin/timeout", "timeout")
-            + test_timeout_shell()
-        )
+        return _ordinary_darwin_capture_fixture(source)
     return source
 
 
@@ -197,6 +278,17 @@ raise SystemExit(command_rc if command_rc >= 0 else 128-command_rc)' \
     return body.replace("/usr/bin/python3 -c", shlex.quote(os.path.realpath(sys.executable)) + " -B -c")
 
 
+def _darwin_runtime_timeout_shell() -> str:
+    body = test_timeout_shell()
+    if sys.platform == "darwin":
+        if body.count(" -B -c") != 1 or body.count("command_rc=command.wait()") != 1:
+            raise AssertionError("portable runtime supervisor template changed")
+        return body.replace(" -B -c", " -I -S -B -c").replace(
+            "command_rc=command.wait()", "command_rc=command.wait(timeout=2.0)",
+        )
+    return body
+
+
 def timeout_with_owned_pid_receipt(pid_file: Path) -> str:
     """Publish the supervisor's original Popen PID inside its kill/reap scope."""
     portable_timeout = test_timeout_shell()
@@ -222,26 +314,1220 @@ def timeout_with_owned_pid_receipt(pid_file: Path) -> str:
     return portable_timeout.replace(checkpoint, receipt)
 
 
-def darwin_python_holder_terminator(holder_path: str, identities: set) -> bool:
-    """Test-only macOS stand-in for infra-setup.py's /proc holder scan (lsof on the holder file)."""
-    del identities
-    clean = True
-    for _attempt in range(4):
-        listed = subprocess.run(
-            ["/usr/sbin/lsof", "-t", "--", holder_path], text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-        )
-        holders = [int(value) for value in listed.stdout.split()
-                   if value.isdigit() and int(value) != os.getpid()]
-        if not holders:
-            break
-        clean = False
-        for holder in holders:
+def _run_darwin_portable_timeout_receipts(
+    pid_file: Path, terminal_file: Path, ready: Path, *, fault: bool,
+) -> subprocess.CompletedProcess[str] | None:
+    """Use the portable supervisor's own wait, not a lookup of its old PID."""
+    root = pid_file.parent
+    if (sys.platform != "darwin" or root.resolve() != root or terminal_file.parent != root
+            or ready.parent != root or terminal_file == pid_file):
+        raise AssertionError("unscoped Darwin readiness fixture")
+    timeout = timeout_with_owned_pid_receipt(pid_file)
+    end = "    command_rc=command.wait()"
+    if timeout.count(end) != 1 or timeout.count(" -B -c") != 1:
+        raise AssertionError("portable owned-wait surface changed")
+    # The portable body is a shell single-quoted Python program. Relative
+    # quoting new paths would reopen shell parsing; use fixed hex literals.
+    root_hex = os.fspath(root).encode("utf-8").hex()
+    terminal_hex = os.fspath(terminal_file).encode("utf-8").hex()
+    receipt = "\n".join((
+        "    command_rc=command.wait(timeout=2.0)",
+        "    import json,tempfile",
+        f'    terminal_dir=bytes.fromhex("{root_hex}").decode("utf-8")',
+        f'    terminal_path=bytes.fromhex("{terminal_hex}").decode("utf-8")',
+        '    terminal_fd,terminal_stage=tempfile.mkstemp(dir=terminal_dir,prefix=".readiness-terminal-")',
+        "    try:",
+        '        with os.fdopen(terminal_fd,"wb") as terminal_stream:',
+        '            terminal_stream.write(json.dumps(dict(pid=command.pid,wait_returncode=command_rc,reaped=True)).encode("ascii"))',
+        "            terminal_stream.flush();os.fsync(terminal_stream.fileno())",
+        "        os.replace(terminal_stage,terminal_path)",
+        "    finally:",
+        "        if os.path.exists(terminal_stage):os.unlink(terminal_stage)",
+    ))
+    timeout = timeout.replace(" -B -c", " -I -S -B -c").replace(end, receipt)
+    if fault:
+        checkpoint = "    deadline=time.monotonic()+2.0"
+        if timeout.count(checkpoint) != 1:
+            raise AssertionError("portable injected fault surface changed")
+        timeout = timeout.replace(checkpoint, "\n".join((
+            '    if not os.path.exists(ready):raise AssertionError("no original child-start receipt")',
+            "    raise SystemExit(125)",
+            checkpoint,
+        )))
+    command = shlex.join([
+        os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", "import time; time.sleep(60)",
+    ])
+    harness = timeout + f'''
+export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(os.fspath(ready))}
+if timeout --signal=KILL 0.1 {command}; then
+  timeout_rc=0
+else
+  timeout_rc=$?
+fi
+printf 'timeout rc=%s\\n' "$timeout_rc"
+'''
+    return run_shell(harness, timeout_seconds=3)
+
+
+class _FixtureDescriptorHandoff:
+    """Single-use receipt for the actual private marker, not process custody.
+
+    The fixture owns both ends of an unnamed datagram socketpair. Its receiver
+    is single-threaded and may not launch children while receiving descriptors.
+    A separate owner must still retain and reap its original test child.
+    """
+
+    def __init__(self, generation: bytes, expected: tuple[int, int], *, deadline: float,
+                 clock=time.monotonic):
+        if type(generation) is not bytes or len(generation) != 16 or not math.isfinite(deadline):
+            raise ValueError("invalid private fixture generation or deadline")
+        self._generation = generation
+        self._expected = expected
+        self._deadline = deadline
+        self._clock = clock
+        self._fd = None
+        self._used = self._closed = False
+
+    @staticmethod
+    def _identity(descriptor: int) -> tuple[int, int] | None:
+        info = os.fstat(descriptor)
+        return (info.st_dev, info.st_ino) if stat.S_ISREG(info.st_mode) else None
+
+    def receive(self, channel: socket.socket) -> bool:
+        if self._closed or self._used or self._fd is not None:
+            return False
+        budget = self._deadline - self._clock()
+        if budget <= 0:
+            self.close()
+            return False
+        try:
+            if (channel.family != socket.AF_UNIX
+                    or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_DGRAM
+                    or channel.getpeername() not in ("", b"")):
+                return False
+            original_timeout = channel.gettimeout()
+            channel.settimeout(budget if original_timeout is None else min(budget, original_timeout))
+        except (OSError, ValueError):
+            return False
+        restored = True
+        try:
+            data, ancillary, flags, _ = channel.recvmsg(
+                len(self._generation) + 1, socket.CMSG_SPACE(2 * array("i").itemsize),
+                getattr(socket, "MSG_CMSG_CLOEXEC", 0),
+            )
+        except (OSError, ValueError):
+            return False
+        finally:
             try:
-                os.kill(holder, signal.SIGKILL)
-            except ProcessLookupError:
+                channel.settimeout(original_timeout)
+            except OSError:
+                restored = False
+        descriptors = array("i")
+        valid = restored and data == self._generation and len(ancillary) == 1
+        valid = valid and not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        try:
+            for level, kind, payload in ancillary:
+                if (level, kind) != (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                    valid = False
+                    continue
+                remainder = len(payload) % descriptors.itemsize
+                if remainder:
+                    valid = False
+                descriptors.frombytes(payload[:len(payload) - remainder])
+            for descriptor in descriptors:
+                os.set_inheritable(descriptor, False)
+            if (not valid or len(descriptors) != 1 or self._clock() >= self._deadline
+                    or self._identity(descriptors[0]) != self._expected):
+                return False
+            self._fd = descriptors.pop()
+            return True
+        except OSError:
+            return False
+        finally:
+            for descriptor in descriptors:
+                os.close(descriptor)
+
+    def claim(self, generation: bytes, observed: tuple[int, int]) -> bool:
+        if self._closed or self._used or self._fd is None:
+            return False
+        if self._clock() >= self._deadline:
+            self.close()
+            return False
+        if generation != self._generation or observed != self._expected:
+            return False
+        try:
+            if self._identity(self._fd) != self._expected:
+                return False
+        except OSError:
+            return False
+        self._used = True
+        return True
+
+    def close(self) -> None:
+        self._closed = True
+        descriptor, self._fd = self._fd, None
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+class _FixtureOwnedMarkerCleanup:
+    """Use only the handle retained by this fixture's single owning supervisor.
+
+    A descriptor claim is additional evidence, not permission to adopt a
+    process. On any error the original caller retains its child for rescue.
+    """
+
+    def __init__(self, child: subprocess.Popen, receipt: _FixtureDescriptorHandoff):
+        if not isinstance(child, subprocess.Popen) or type(receipt) is not _FixtureDescriptorHandoff:
+            raise TypeError("fixture cleanup requires the original child handle and private receipt")
+        self._child = child
+        self._receipt = receipt
+        self._spent = False
+
+    def terminate(self, generation: bytes, observed: tuple[int, int]) -> bool:
+        if self._spent:
+            return False
+        try:
+            if self._child.poll() is not None:
+                self._spent = True
+                return False
+            if not self._receipt.claim(generation, observed):
+                return False
+            self._spent = True
+            self._child.kill()
+            return self._child.wait(timeout=2.0) == -signal.SIGKILL
+        except (OSError, subprocess.TimeoutExpired):
+            self._spent = True
+            return False
+
+
+def _accept_capture_fixture_descriptors(
+    channel: socket.socket, generation: bytes, expected: tuple[tuple[int, int], ...], *, deadline: float,
+) -> tuple[int, int, int] | None:
+    """Validate one fixture message's ordered marker, stdout and stderr.
+
+    The expected identities describe the sender's marker and *write* ends.
+    On Darwin fstat() of the opposite end of an anonymous pipe may differ.
+    This acquires descriptors only; the caller owns deadline and process
+    custody, and closes successful results.
+    """
+    remaining = deadline - time.monotonic()
+    if (type(generation) is not bytes or len(generation) != 16 or len(expected) != 3
+            or len(set(expected)) != 3 or not math.isfinite(remaining) or remaining <= 0):
+        return None
+    try:
+        if (channel.family != socket.AF_UNIX
+                or channel.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_DGRAM
+                or channel.getpeername() not in ("", b"")):
+            return None
+        old_timeout = channel.gettimeout()
+        channel.settimeout(remaining if old_timeout is None else min(remaining, old_timeout))
+    except (OSError, ValueError):
+        return None
+    descriptors = array("i")
+    restored = True
+    try:
+        try:
+            data, messages, flags, _ = channel.recvmsg(
+                17, socket.CMSG_SPACE(4 * descriptors.itemsize),
+                getattr(socket, "MSG_CMSG_CLOEXEC", 0),
+            )
+        finally:
+            try:
+                channel.settimeout(old_timeout)
+            except OSError:
+                restored = False
+        valid = restored and data == generation and len(messages) == 1
+        valid = valid and not flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC)
+        for level, kind, payload in messages:
+            if (level, kind) != (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                valid = False
+                continue
+            remainder = len(payload) % descriptors.itemsize
+            descriptors.frombytes(payload[:len(payload) - remainder])
+            valid = valid and not remainder
+        for descriptor in descriptors:
+            os.set_inheritable(descriptor, False)
+        if not valid or len(descriptors) != 3 or time.monotonic() >= deadline:
+            return None
+        marker, stdout, stderr = descriptors
+        for index, descriptor in enumerate(descriptors):
+            info = os.fstat(descriptor)
+            if (info.st_dev, info.st_ino) != expected[index]:
+                return None
+            if index == 0:
+                if not stat.S_ISREG(info.st_mode):
+                    return None
+            elif (not stat.S_ISFIFO(info.st_mode)
+                    or fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE != os.O_WRONLY):
+                return None
+        if time.monotonic() >= deadline:
+            return None
+        del descriptors[:]
+        return marker, stdout, stderr
+    except (OSError, ValueError):
+        return None
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+class _FixturePythonCapture:
+    """Private custody adapter for the original Python decision capture."""
+
+    _program = """
+from array import array
+import os, socket, stat, sys
+
+mode, endpoint, generation, *ids = sys.argv[1:]
+generation = bytes.fromhex(generation)
+with socket.socket(fileno=int(endpoint)) as channel:
+    channel.settimeout(4.0)
+    if mode == "produce":
+        marker = int(ids[0])
+        os.write(1, b"restart-allowed:complete;reset-invalid-cache=false")
+        channel.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [marker, 1, 2]))])
+        raise SystemExit(0 if channel.recv(1) == b"a" else 2)
+    if mode != "hold":
+        raise SystemExit(2)
+    expected = tuple(map(int, ids))
+    fds = array("i")
+    try:
+        data, messages, flags, _ = channel.recvmsg(17, socket.CMSG_SPACE(4 * fds.itemsize))
+        valid = data == generation and len(messages) == 1
+        for level, kind, payload in messages:
+            if (level, kind) != (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                valid = False
+                continue
+            remainder = len(payload) % fds.itemsize
+            fds.frombytes(payload[:len(payload) - remainder])
+            valid = valid and not remainder
+        if not valid or len(fds) != 3 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+            raise SystemExit(3)
+        identities = []
+        for index, descriptor in enumerate(fds):
+            os.set_inheritable(descriptor, False)
+            info = os.fstat(descriptor)
+            if not (stat.S_ISREG if index == 0 else stat.S_ISFIFO)(info.st_mode):
+                raise SystemExit(4)
+            identities.extend([info.st_dev, info.st_ino])
+        if tuple(identities) != expected:
+            raise SystemExit(5)
+        channel.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+        channel.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [fds[0]]))])
+        raise SystemExit(0 if channel.recv(1) == b"x" else 6)
+    finally:
+        for descriptor in fds:
+            os.close(descriptor)
+"""
+
+    def __init__(self, root: Path, *, mode: str):
+        if root != root.resolve() or not root.is_dir() or mode not in {"clean", "residual", "deny-cleanup"}:
+            raise ValueError("invalid isolated capture fixture")
+        self.root = root
+        self.mode = mode
+        self.producer = self.holder = None
+        self.forwarded = False
+        self.cleanup_calls = []
+        self.rescue_rc = None
+        self._owned = ExitStack()
+        self._generation = os.urandom(16)
+        self._helper = root / "private-c4-producer"
+        self._stop = None
+        self._authority = None
+        self._cleaned = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        try:
+            try:
+                if self.holder is not None and self.holder.poll() is None:
+                    try:
+                        self._stop.send(b"x")
+                    except (AttributeError, OSError):
+                        pass
+                    self.rescue_rc = self._rescue(self.holder, 0.5)
+            finally:
+                if self.producer is not None and self.producer.poll() is None:
+                    self._rescue(self.producer, 0.25)
+        finally:
+            self._owned.close()
+
+    @staticmethod
+    def _rescue(child, grace):
+        try:
+            return child.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            return child.wait(timeout=2.0)
+
+    @staticmethod
+    def _identity(descriptor):
+        info = os.fstat(descriptor)
+        return info.st_dev, info.st_ino
+
+    @staticmethod
+    def _socket_pair(scope):
+        a, b = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        scope.enter_context(a)
+        scope.enter_context(b)
+        a.settimeout(0.35)
+        b.settimeout(0.35)
+        return a, b
+
+    def _start(self, mode, endpoint, params, *, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+               also=()):
+        return subprocess.Popen(
+            [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", self._program,
+             mode, str(endpoint.fileno()), self._generation.hex(), *[str(arg) for arg in params]],
+            cwd=self.root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+            stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+            close_fds=True, pass_fds=(endpoint.fileno(), *also), start_new_session=True,
+        )
+
+    def _pipe(self, launch):
+        read, write = os.pipe()
+        try:
+            reader = os.fdopen(read, "rb", buffering=0)
+        except BaseException:
+            os.close(read)
+            os.close(write)
+            raise
+        self._owned.enter_context(reader)
+        try:
+            writer = os.fdopen(write, "wb", buffering=0)
+        except BaseException:
+            os.close(write)
+            raise
+        return reader, launch.enter_context(writer)
+
+    def _capture_popen(self, args, *, stdin, stdout, stderr, pass_fds, start_new_session):
+        if (args != [os.fspath(self._helper), "private-decision"] or self.producer is not None
+                or stdin != subprocess.DEVNULL or stdout != subprocess.PIPE or stderr != subprocess.PIPE
+                or not start_new_session or len(pass_fds) != 1):
+            raise AssertionError("capture requested an unexpected fixture launch")
+        (marker,) = pass_fds
+        # The real capture just created this sole marker under our private root.
+        (directory,) = self.root.glob("http-ztp-monitor-decision.*")
+        self._marker_path = directory / "holder"
+        marker_stat = self._marker_path.lstat()
+        self._marker_identity = (marker_stat.st_dev, marker_stat.st_ino)
+        if not stat.S_ISREG(marker_stat.st_mode) or self._identity(marker) != self._marker_identity:
+            raise AssertionError("capture passed the wrong marker")
+        deadline = time.monotonic() + 0.60
+        with ExitStack() as launch:
+            stdout_reader, stdout_writer = self._pipe(launch)
+            stderr_reader, stderr_writer = self._pipe(launch)
+            self._reader_identities = {
+                self._marker_identity, self._identity(stdout_reader.fileno()), self._identity(stderr_reader.fileno()),
+            }
+            expected = self._marker_identity, self._identity(stdout_writer.fileno()), self._identity(stderr_writer.fileno())
+            parent, producer_endpoint = self._socket_pair(launch)
+            self.producer = self._start(
+                "produce", producer_endpoint, (marker,), stdout=stdout_writer, stderr=stderr_writer, also=(marker,),
+            )
+            self.producer.stdout, self.producer.stderr = stdout_reader, stderr_reader
+            producer_endpoint.close()
+            transferred = _accept_capture_fixture_descriptors(parent, self._generation, expected, deadline=deadline)
+            if transferred is None:
+                raise AssertionError("producer did not send all three actual descriptors")
+            for fd in transferred:
+                launch.callback(os.close, fd)
+            if self.mode != "clean":
+                self._forward_to_holder(launch, transferred, expected, deadline)
+            parent.send(b"a")
+        return self.producer
+
+    def _forward_to_holder(self, launch, descriptors, expected, deadline):
+        self._stop, holder_endpoint = self._socket_pair(self._owned)
+        self.holder = self._start("hold", holder_endpoint, [value for identity in expected for value in identity])
+        holder_endpoint.close()
+        self._stop.sendmsg([self._generation], [
+            (socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", descriptors)),
+        ])
+        echoed = _accept_capture_fixture_descriptors(self._stop, self._generation, expected, deadline=deadline)
+        if echoed is None:
+            raise AssertionError("holder did not echo all three actual descriptors")
+        for fd in echoed:
+            launch.callback(os.close, fd)
+        receipt = _FixtureDescriptorHandoff(
+            self._generation, expected[0], deadline=time.monotonic() + 3.0,
+        )
+        self._owned.callback(receipt.close)
+        if not receipt.receive(self._stop) or self.holder.poll() is not None:
+            raise AssertionError("actual live holder missing its single marker receipt")
+        self._authority = _FixtureOwnedMarkerCleanup(self.holder, receipt)
+        self.forwarded = True
+
+    def _fixture_group_boundary(self, group):
+        if self.producer is None or group != self.producer.pid:
+            raise AssertionError("capture requested cleanup for an unknown fixture launch")
+        # Fixed fixture program never forks. No native group effect in this case.
+        if self.producer.poll() is None:
+            self.producer.kill()
+            return True
+        return False
+
+    def _fixture_holder_boundary(self, path, identities):
+        if Path(path) != self._marker_path or identities != self._reader_identities:
+            raise AssertionError("capture cleanup identities differ from the actual fixture streams")
+        marker = self._marker_path.lstat()
+        if (marker.st_dev, marker.st_ino) != self._marker_identity:
+            raise AssertionError("capture switched its actual marker")
+        if self.mode == "clean":
+            self.cleanup_calls.append("clean")
+            return True
+        if self._cleaned:
+            self.cleanup_calls.append("clean-after-reap")
+            return True
+        if not self.forwarded or self.holder.poll() is not None:
+            raise AssertionError("expected the original live out-of-group holder")
+        if self.mode == "deny-cleanup":
+            self.cleanup_calls.append("residual-held")
+            return False
+        if not self._authority.terminate(self._generation, self._marker_identity):
+            raise AssertionError("owned holder did not reap using its live marker receipt")
+        self._cleaned = True
+        self.cleanup_calls.append("residual-reaped")
+        return False
+
+    def capture(self) -> str:
+        local_subprocess = SimpleNamespace(
+            Popen=self._capture_popen, TimeoutExpired=subprocess.TimeoutExpired, DEVNULL=subprocess.DEVNULL,
+            PIPE=subprocess.PIPE,
+        )
+        with ExitStack() as scope:
+            scope.enter_context(mock.patch.object(INFRA_SETUP, "subprocess", local_subprocess))
+            scope.enter_context(mock.patch.object(INFRA_SETUP, "kill_process_group", self._fixture_group_boundary))
+            scope.enter_context(mock.patch.object(INFRA_SETUP, "terminate_descriptor_holders",
+                                                  self._fixture_holder_boundary))
+            if self.mode == "deny-cleanup":
+                scope.enter_context(mock.patch.object(INFRA_SETUP, "MONITOR_DECISION_TIMEOUT", 0.75))
+            return INFRA_SETUP.capture_decision(self._helper, "private-decision", self.root)
+
+
+class _FixtureShellCapture(_FixturePythonCapture):
+    """Own the local relay; use original shell capture in the isolated harness."""
+
+    _shell_actor = """
+from array import array
+import json, os, socket, sys
+
+action, fd, nonce, *paths = sys.argv[1:]
+generation = bytes.fromhex(nonce)
+with socket.socket(fileno=int(fd)) as channel:
+    channel.settimeout(1.0)
+    if action in ("producer", "bind") and not paths:
+        if action == "producer":
+            os.write(1, b"restart-allowed:complete;reset-invalid-cache=false")
+        channel.send(generation + b"R")
+        channel.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [8, 1, 2]))])
+        raise SystemExit(0 if channel.recv(1) == b"a" else 2)
+    if action == "group" and not paths:
+        channel.send(generation + b"G")
+        raise SystemExit(1 if channel.recv(1) == b"n" else 2)
+    if action == "check" and len(paths) == 4:
+        channel.send(generation + b"H" + json.dumps(paths).encode("utf-8"))
+        reply = channel.recv(1)
+        if reply == b"r":
+            with open(paths[-1], "xb"):
                 pass
-    return clean
+            raise SystemExit(1)
+        raise SystemExit(0 if reply == b"c" else 2)
+    raise SystemExit(2)
+"""
+
+    _shell_group_writer = """
+from array import array
+from contextlib import ExitStack
+import json, os, signal, socket, subprocess, sys, time
+
+child_program = '''
+import json, os, signal, socket, sys
+socket_fd, group, challenge = sys.argv[1:]
+with socket.socket(fileno=int(socket_fd)) as channel:
+    channel.settimeout(1.6)
+    os.setpgid(0, int(group))
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    identities = [(info.st_dev, info.st_ino) for info in map(os.fstat, (8, 1, 2))]
+    ready = [challenge, os.getpid(), os.getsid(0), os.getpgrp(), identities]
+    channel.send(json.dumps(ready).encode("ascii"))
+    raise SystemExit(0 if channel.recv(1) == b"x" else 2)
+'''
+
+endpoint, nonce = sys.argv[1:]
+generation = bytes.fromhex(nonce)
+own = os.getpid()
+os.setsid()
+if own <= 1 or os.getsid(0) != own or os.getpgrp() != own:
+    raise RuntimeError("not a new private writer session")
+expected = [[info.st_dev, info.st_ino] for info in map(os.fstat, (8, 1, 2))]
+children = []
+with socket.socket(fileno=int(endpoint)) as parent, ExitStack() as scope:
+    parent.settimeout(0.40)
+    parent.send(generation + b"R")
+    parent.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [8, 1, 2]))])
+    if parent.recv(1) != b"a":
+        raise RuntimeError("shell did not bind the actual private marker and FIFO writers")
+
+    def start(group):
+        control, inherited = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        scope.enter_context(control)
+        scope.enter_context(inherited)
+        control.settimeout(0.35)
+        child = subprocess.Popen(
+            [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", child_program,
+             str(inherited.fileno()), str(group), nonce],
+            stdin=subprocess.DEVNULL, close_fds=True, pass_fds=(8, inherited.fileno()),
+        )
+        children.append((child, control))
+        inherited.close()
+        wanted = group or child.pid
+        if json.loads(control.recv(1024)) != [nonce, child.pid, own, wanted, expected] or child.poll() is not None:
+            raise RuntimeError("original member did not prove group/descriptor custody")
+        return child
+
+    try:
+        started = time.monotonic()
+        deadline = started + 0.75
+        leader = start(0)
+        follower = start(leader.pid)
+        while time.monotonic() < deadline:
+            time.sleep(max(0.0, deadline - time.monotonic()))
+        if leader.pid == follower.pid or leader.pid in (0, own):
+            raise RuntimeError("invalid private group")
+        if any(child.poll() is not None or os.getsid(child.pid) != own or os.getpgid(child.pid) != leader.pid
+               for child in (leader, follower)):
+            raise RuntimeError("refuse group signal outside the two retained live members")
+        os.killpg(leader.pid, signal.SIGKILL)
+        reaped = [leader.wait(timeout=0.35), follower.wait(timeout=0.35)]
+        if reaped != [-signal.SIGKILL, -signal.SIGKILL]:
+            raise RuntimeError("both original members must be reaped after the private group signal")
+        report = dict(member_count=len(children), distinct=True, native_group_calls=1, reaped=reaped)
+    finally:
+        errors = []
+        for child, control in reversed(children):
+            try:
+                if child.poll() is None:
+                    try:
+                        control.send(b"x")
+                    except OSError:
+                        pass
+                    try:
+                        child.wait(timeout=0.15)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=0.35)
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("private writer could not reap an original member") from errors[0]
+    parent.send(generation + b"J" + json.dumps(report).encode("ascii"))
+raise SystemExit(124)
+"""
+
+    def __init__(self, root: Path, *, mode: str, omit_writer: bool = False,
+                 group_deadline: bool = False, binary_producer: Path | None = None):
+        super().__init__(root, mode=mode)
+        self.group_checks = 0
+        probes = (omit_writer, group_deadline, binary_producer is not None)
+        if (any(probes) and mode != "clean") or sum(probes) > 1:
+            raise ValueError("writer probes are independent of holder cleanup")
+        self.omit_writer = omit_writer
+        self.group_deadline = group_deadline
+        self.group_result = None
+        self.binary_producer = binary_producer
+
+    def _fixture_script(self, script, descriptor):
+        eligible = (ROOT / "infra/infra-setup.sh", ROOT / "infra/infra-teardown.sh",
+                    ROOT / "infra/docker/deploy.sh")
+        if script not in eligible or script.resolve() != script:
+            raise AssertionError("unexpected shell fixture source")
+        body = shell_function(script, "capture_monitor_authority_decision")
+        if body.count("/usr/bin/timeout --signal=KILL 11") != 3:
+            raise AssertionError("raw capture timeout surface changed")
+        # The portable supervisor must start BEFORE a FIFO is opened. Bash
+        # otherwise blocks in the redirection before timeout owns a child.
+        reader_limit = (
+            "0.20" if self.omit_writer else "0.75"
+            if self.group_deadline or self.mode == "deny-cleanup" else "2.0"
+        )
+        for stream in ("stdout", "stderr"):
+            raw = f'/usr/bin/timeout --signal=KILL 11 \\\n    head -c 4097 <"${stream}_pipe" >"${stream}_file" &'
+            owned = (
+                f'timeout --signal=KILL {reader_limit} /bin/bash --noprofile --norc '
+                f"""-c 'exec /usr/bin/head -c 4097 <"$1"' c4-fifo-reader "${stream}_pipe" >"${stream}_file" &"""
+            )
+            if body.count(raw) != 1:
+                raise AssertionError("unexpected reader deadline or FIFO surface")
+            body = body.replace(raw, owned)
+        raw_writer = 'exec /usr/bin/timeout --signal=KILL 11 \\\n        "$@" >"$stdout_pipe" 2>"$stderr_pipe"'
+        # Group mode has a separate 0.75 s inner deadline. The wrapper
+        # must let its owner finish even the two-member fault cleanup.
+        writer_limit = "6.0" if self.group_deadline else "2.0"
+        writer = (
+            f"""timeout --signal=KILL {writer_limit} /bin/bash --noprofile --norc """
+            """-c 'exec 1>"$1" 2>"$2"; shift 2; "$@"' c4-fifo-writer "$stdout_pipe" "$stderr_pipe" "$@" """
+        ).rstrip()
+        if body.count(raw_writer) != 1:
+            raise AssertionError("unexpected writer deadline or FIFO surface")
+        body = body.replace(raw_writer, "false" if self.omit_writer else writer)
+        body = body.replace("/usr/bin/timeout", "timeout")
+        timeout = test_timeout_shell()
+        if timeout.count(" -B -c") != 1 or timeout.count("command_rc=command.wait()") != 1:
+            raise AssertionError("portable timeout interpreter surface changed")
+        timeout = timeout.replace(" -B -c", " -I -S -B -c").replace(
+            "command_rc=command.wait()", "command_rc=command.wait(timeout=2.0)",
+        )
+        actor = shlex.join([os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", self._shell_actor])
+        producer = (
+            shlex.join([os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", self._shell_group_writer])
+            if self.group_deadline else actor + " producer"
+        )
+        actor_args = f"{descriptor} {self._generation.hex()}"
+        launch_producer = f"exec {producer} {actor_args}"
+        if self.binary_producer is not None:
+            _require_darwin_private_binary_producer(self.binary_producer, self.root)
+            launch_producer = (
+                f"{actor} bind {actor_args} || return $?\n"
+                f"  exec {shlex.quote(os.fspath(self.binary_producer))}"
+            )
+            outcome = r'''
+if capture_monitor_authority_decision fixture_producer; then
+  printf 'accepted:%s\n' "$monitor_authority_decision"
+  exit 0
+fi
+exit 9
+'''
+        else:
+            outcome = r'''
+if capture_monitor_authority_decision fixture_producer; then
+  capture_state=accepted
+  capture_rc=0
+else
+  capture_rc=$?
+  capture_state=rejected
+fi
+printf 'capture=%s rc=%s token=<%s>\n' "$capture_state" "$capture_rc" "$monitor_authority_decision"
+'''
+        return body + timeout + f'''
+fixture_actor() {{
+  local action=$1
+  shift
+  {actor} "$action" {descriptor} {self._generation.hex()} "$@"
+}}
+fixture_producer() {{
+  {launch_producer}
+}}
+export -f fixture_producer
+monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(os.fspath(self.root))}; }}
+kill() {{
+  [[ $# == 3 && $1 == -KILL && $2 == -- && -n "${{command_pid:-}}" && $3 == "-$command_pid" ]] || return 2
+  fixture_actor group
+}}
+terminate_monitor_authority_capture_holders() {{
+  [[ $# == 6 ]] || return 2
+  fixture_actor check "$1" "$2" "$3" "$6"
+}}
+''' + outcome
+
+    def _fixture_paths(self):
+        (directory,) = self.root.glob("http-ztp-monitor-decision.*")
+        if directory.parent != self.root or directory.resolve() != directory or not directory.is_dir():
+            raise AssertionError("non-private capture result")
+        paths = tuple(directory / name for name in ("holder", "stdout.pipe", "stderr.pipe"))
+        info = tuple(path.lstat() for path in paths)
+        if (not stat.S_ISREG(info[0].st_mode)
+                or any(not stat.S_ISFIFO(metadata.st_mode) for metadata in info[1:])):
+            raise AssertionError("unexpected private marker or FIFO types")
+        expected = tuple((metadata.st_dev, metadata.st_ino) for metadata in info)
+        self._marker_path = paths[0]
+        self._marker_identity = expected[0]
+        self._reader_identities = set(expected)  # opposite named FIFO ends have the same inode
+        return paths, expected
+
+    def _request(self, parent, deadline, prefix):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError("shell fixture exchange exceeded its bound")
+        parent.settimeout(remaining)
+        data = parent.recv(16384)
+        token = self._generation + prefix
+        if not data.startswith(token):
+            raise AssertionError("unexpected shell fixture handshake")
+        return data[len(token):]
+
+    def _serve(self, parent, deadline):
+        if self._request(parent, deadline, b"G" if self.omit_writer else b"R"):
+            raise AssertionError("invalid shell fixture first message")
+        paths, expected = self._fixture_paths()
+        if not self.omit_writer:
+            with ExitStack() as transfer:
+                descriptors = _accept_capture_fixture_descriptors(parent, self._generation, expected, deadline=deadline)
+                if descriptors is None:
+                    raise AssertionError("shell producer did not send its actual marker and both FIFO writers")
+                for fd in descriptors:
+                    transfer.callback(os.close, fd)
+                if self.mode != "clean":
+                    self._forward_to_holder(transfer, descriptors, expected, deadline)
+            parent.send(b"a")
+            if self.group_deadline:
+                self.group_result = json.loads(self._request(parent, deadline, b"J"))
+                if self.group_result.get("reaped") != [-signal.SIGKILL, -signal.SIGKILL]:
+                    raise AssertionError("missing actual original group wait evidence")
+        if not self.omit_writer and self._request(parent, deadline, b"G"):
+            raise AssertionError("invalid shell fixture group request")
+        self.group_checks += 1
+        parent.send(b"n")  # no native numeric group effect; fixed producer has no descendants
+        for report in ("residual-holder", "cleanup-holder"):
+            reported = json.loads(self._request(parent, deadline, b"H"))
+            required = [os.fspath(path) for path in (*paths, paths[0].parent / report)]
+            if reported != required or self._fixture_paths()[1] != expected:
+                raise AssertionError("shell capture did not request the actual private cleanup")
+            clean = self._fixture_holder_boundary(paths[0], set(expected))
+            parent.send(b"c" if clean else b"r")
+
+    def capture(self, script: Path) -> subprocess.CompletedProcess[str] | None:
+        started = time.monotonic()
+        deadline = started + (2.5 if self.mode == "deny-cleanup" else 3.5)
+        with ExitStack() as launch:
+            parent, endpoint = self._socket_pair(launch)
+            descriptor = fcntl.fcntl(endpoint.fileno(), fcntl.F_DUPFD, 20)
+            launch.callback(os.close, descriptor)
+            os.set_inheritable(descriptor, False)
+            harness = self.root / "c4-capture.sh"
+            harness.write_text(self._fixture_script(script, descriptor), encoding="utf-8")
+            self.producer = subprocess.Popen(
+                ["/bin/bash", "--noprofile", "--norc", os.fspath(harness)],
+                cwd=self.root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TMPDIR": os.fspath(self.root)},
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                close_fds=True, pass_fds=(descriptor,), start_new_session=True, text=True,
+            )
+            self._owned.enter_context(self.producer.stdout)
+            self._owned.enter_context(self.producer.stderr)
+            endpoint.close()
+            self._serve(parent, deadline)
+            stdout, stderr = self.producer.communicate(timeout=max(0.01, deadline - time.monotonic()))
+            return subprocess.CompletedProcess(self.producer.args, self.producer.returncode, stdout, stderr)
+
+    def __exit__(self, *_):
+        # Let the original private Bash collect its bounded reader/writer
+        # supervisors. Killing Bash first could orphan its waitable children.
+        shell, self.producer = self.producer, None
+        try:
+            super().__exit__(*_)
+        finally:
+            if shell is not None:
+                try:
+                    shell.wait(timeout=15.0)
+                except subprocess.TimeoutExpired as expired:
+                    shell.kill()
+                    shell.wait(timeout=2.0)
+                    raise AssertionError("bounded shell supervisors did not join") from expired
+
+
+def _require_darwin_private_binary_producer(producer: Path, root: Path) -> None:
+    if (sys.platform != "darwin" or root.resolve() != root or producer.parent != root
+            or not re.fullmatch(r"producer-[a-z-]+\.sh", producer.name)
+            or not stat.S_ISREG(producer.lstat().st_mode)):
+        raise AssertionError("unscoped private byte-matrix producer")
+
+
+def _fixture_darwin_shell_binary_capture(
+    script: Path, producer: Path, root: Path,
+) -> subprocess.CompletedProcess[str] | None:
+    _require_darwin_private_binary_producer(producer, root)
+    with _FixtureShellCapture(root, mode="clean", binary_producer=producer) as fixture:
+        result = fixture.capture(script)
+        if (fixture.group_checks != 1 or fixture.cleanup_calls != ["clean", "clean"]
+                or fixture.holder is not None or fixture.forwarded):
+            raise AssertionError("missing checked shell custody stop in byte matrix")
+        return result
+
+
+def _fixture_darwin_python_binary_capture(producer: Path, root: Path) -> str | None:
+    _require_darwin_private_binary_producer(producer, root)
+    return _capture_with_owned_python_producer(
+        INFRA_SETUP.capture_decision, producer, "decision", root,
+        {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TMPDIR": os.fspath(root)},
+    )
+
+
+def _capture_with_owned_python_producer(native, producer: Path, operation: str, root: Path, environment) -> str:
+    """Run the real capture/reader with an exact private producer and handle."""
+    with _FixturePythonCapture(root, mode="clean") as fixture:
+        holder_checks = []
+
+        def launch(args, *, stdin, stdout, stderr, pass_fds, start_new_session):
+            if (fixture.producer is not None or args != [os.fspath(producer), operation]
+                    or stdin != subprocess.DEVNULL or stdout != subprocess.PIPE or stderr != subprocess.PIPE
+                    or len(pass_fds) != 1 or not start_new_session):
+                raise AssertionError("unexpected native byte-matrix launch")
+            (marker_fd,) = pass_fds
+            (result_dir,) = root.glob("http-ztp-monitor-decision.*")
+            fixture._marker_path = result_dir / "holder"
+            marker = fixture._marker_path.lstat()
+            fixture._marker_identity = (marker.st_dev, marker.st_ino)
+            if not stat.S_ISREG(marker.st_mode) or fixture._identity(marker_fd) != fixture._marker_identity:
+                raise AssertionError("original capture did not supply its private marker")
+            # The fixed producers in these fixture calls only use Bash
+            # builtins. The original handle is the only group authority.
+            fixture.producer = subprocess.Popen(
+                args, cwd=root, env=environment,
+                stdin=stdin, stdout=stdout, stderr=stderr, pass_fds=pass_fds, start_new_session=True,
+            )
+            fixture._owned.enter_context(fixture.producer.stdout)
+            fixture._owned.enter_context(fixture.producer.stderr)
+            fixture._reader_identities = {
+                fixture._marker_identity, fixture._identity(fixture.producer.stdout.fileno()),
+                fixture._identity(fixture.producer.stderr.fileno()),
+            }
+            return fixture.producer
+
+        def holder_boundary(path, identities):
+            if fixture.producer is None or fixture.producer.poll() is None:
+                raise AssertionError("capture ran holder checks before original wait")
+            clean = fixture._fixture_holder_boundary(path, identities)
+            holder_checks.append(clean)
+            return clean
+
+        local = SimpleNamespace(Popen=launch, TimeoutExpired=subprocess.TimeoutExpired,
+                                DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE)
+        with mock.patch.object(INFRA_SETUP, "subprocess", local), \
+                mock.patch.object(INFRA_SETUP, "kill_process_group", fixture._fixture_group_boundary), \
+                mock.patch.object(INFRA_SETUP, "terminate_descriptor_holders", holder_boundary):
+            decision = native(producer, operation, root)
+        if not holder_checks or not all(holder_checks):
+            raise AssertionError("missing real marker/reader boundary in byte matrix")
+        return decision
+
+
+@contextmanager
+def _darwin_owned_python_adapter_capture(root: Path, helper: Path):
+    """Guard only the two ordinary Darwin adapter fixtures, not their oracle."""
+    if sys.platform != "darwin":
+        yield
+        return
+
+    expected_helper = root / INFRA_SETUP.CONTROL_AUTH_HELPER.lstrip("/")
+    if (root.resolve() != root or helper != expected_helper or helper.resolve() != helper
+            or not stat.S_ISREG(helper.lstat().st_mode)):
+        raise AssertionError("unscoped private adapter helper")
+    native = INFRA_SETUP.capture_decision
+    allowed = {
+        "monitor-authority-recover-decision", "monitor-authority-provision-decision",
+        "monitor-authority-attest-decision",
+    }
+
+    def scoped(producer, operation, result_parent):
+        expected_parent = root / "run"
+        if (Path(producer) != helper or operation not in allowed
+                or result_parent != expected_parent or expected_parent.resolve() != expected_parent
+                or not stat.S_ISREG(helper.lstat().st_mode)):
+            raise AssertionError("ordinary native adapter capture must hold the original producer")
+        environment = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "TMPDIR": os.fspath(root)}
+        if "EVENT_LOG" in os.environ:
+            if os.environ["EVENT_LOG"] != os.fspath(root / "events"):
+                raise AssertionError("unexpected private adapter event file")
+            environment["EVENT_LOG"] = os.fspath(root / "events")
+        for key in ("HELPER_FAILURE", "RECOVERY_DECISION", "DECISION_RC"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+        return _capture_with_owned_python_producer(native, helper, operation, expected_parent, environment)
+
+    with mock.patch.object(INFRA_SETUP, "capture_decision", scoped):
+        yield
+
+
+def _probe_shell_capture_deadline_group(root: Path, script: Path) -> tuple | None:
+    """Keep the real Shell capture and its private FIFO/group-deadline oracles."""
+    with _FixtureShellCapture(root, mode="clean", group_deadline=True) as fixture:
+        result = fixture.capture(script)
+        if (fixture.group_checks != 1 or fixture.cleanup_calls != ["clean", "clean"]
+                or fixture.holder is not None):
+            raise AssertionError("shell did not run the original post-wait and two cleanup boundaries")
+        return result, fixture.group_result
+
+
+def _probe_private_capture_group(root: Path, *, shared: bool) -> dict:
+    """Prove group custody in a fresh session with only fixed test children."""
+    supervisor = '''
+from contextlib import ExitStack
+import json, os, signal, socket, subprocess, sys, time
+
+member_code = """
+import json, os, signal, socket, sys
+endpoint, requested_group, challenge = sys.argv[1:]
+with socket.socket(fileno=int(endpoint)) as channel:
+    channel.settimeout(8.0)
+    os.setpgid(0, int(requested_group))
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    channel.send(json.dumps([challenge, os.getpid(), os.getsid(0), os.getpgrp()]).encode("ascii"))
+    raise SystemExit(0 if channel.recv(1) == b"x" else 2)
+"""
+
+mode = sys.argv[1]
+if mode not in ("shared", "mismatch"):
+    raise SystemExit(2)
+own = os.getpid()
+if not own > 1 or os.getsid(0) != own or os.getpgrp() != own:
+    raise RuntimeError("refuse group operations outside this supervisor's fresh private session")
+challenge = os.urandom(16).hex()
+children = []
+with ExitStack() as scope:
+    def start(requested_group):
+        control, endpoint = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+        scope.enter_context(control)
+        scope.enter_context(endpoint)
+        control.settimeout(1.0)
+        child = subprocess.Popen(
+            [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", member_code,
+             str(endpoint.fileno()), str(requested_group), challenge],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, pass_fds=(endpoint.fileno(),),
+        )
+        children.append((child, control))
+        endpoint.close()
+        wanted_group = requested_group or child.pid
+        expected = [challenge, child.pid, own, wanted_group]
+        if json.loads(control.recv(256)) != expected or child.poll() is not None:
+            raise RuntimeError("did not receive private readiness from the original child")
+        return child
+
+    def stop(child, control):
+        if child.poll() is None:
+            try:
+                control.send(b"x")
+            except OSError:
+                pass
+            try:
+                return child.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                return child.wait(timeout=2.0)
+        return child.returncode
+
+    try:
+        leader = start(0)
+        follower = start(leader.pid if mode == "shared" else 0)
+        outside = start(0)
+        started = time.monotonic()
+        limit = started + 0.70
+        if mode == "shared":
+            while time.monotonic() < limit:
+                time.sleep(max(0.0, limit - time.monotonic()))
+        # All numeric observations are strictly those of original, live,
+        # unreaped children. No process table use or adoption by identifier.
+        if not all(child.poll() is None for child, _ in children):
+            raise RuntimeError("refuse group operation on an exited fixture member")
+        sessions = tuple(os.getsid(child.pid) for child, _ in children)
+        groups = tuple(os.getpgid(child.pid) for child, _ in children)
+        if sessions != (own, own, own) or groups[0] != leader.pid or groups[2] != outside.pid:
+            raise RuntimeError("actual kernel session/group does not match launch receipts")
+        same = groups[0] == groups[1]
+        if groups[0] in (0, own, groups[2]) or same != (mode == "shared"):
+            raise RuntimeError("refuse unexpectedly joined or mismatched group")
+        group_calls = 0
+        if same:
+            # The only members admitted to this group are our two original
+            # children. Other sessions cannot join it. The supervisor can
+            # reap both after signaling, and the outside control stays live.
+            if leader.poll() is not None or follower.poll() is not None:
+                raise RuntimeError("refuse a dead or stale group leader/member")
+            os.killpg(leader.pid, signal.SIGKILL)
+            group_calls = 1
+            members = [leader.wait(timeout=1.5), follower.wait(timeout=1.5)]
+        else:
+            members = [stop(child, control) for child, control in children[:2]]
+        elapsed = time.monotonic() - started
+        if outside.poll() is not None:
+            raise RuntimeError("out-of-group negative control did not stay alive")
+        outside_rc = stop(*children[2])
+        report = {"retained_two": True, "private_session": True, "same_group": same,
+                  "group_calls": group_calls, "members": members, "outside": outside_rc, "elapsed": elapsed}
+    finally:
+        rescue_errors = []
+        for child, control in reversed(children):
+            try:
+                if child.poll() is None:
+                    stop(child, control)
+            except BaseException as exc:
+                rescue_errors.append(exc)
+        if rescue_errors:
+            raise RuntimeError("one or more original fixture children did not reap") from rescue_errors[0]
+print(json.dumps(report, sort_keys=True))
+'''
+    result = subprocess.run(
+        [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", supervisor,
+         "shared" if shared else "mismatch"],
+        cwd=root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+        timeout=20.0, check=False,
+    )
+    if result.returncode or result.stderr:
+        raise AssertionError(f"private group supervisor failed: rc={result.returncode} stderr={result.stderr!r}")
+    return json.loads(result.stdout)
+
+
+def _probe_python_capture_deadline_group(root: Path) -> dict:
+    """Route the unchanged capture deadline to a rigorously owned live group."""
+    supervisor = '''
+from contextlib import ExitStack
+import json, os, runpy, signal, socket, stat, subprocess, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+
+member_code = """
+import json, os, signal, socket, sys
+endpoint, requested_group, marker, challenge = sys.argv[1:]
+with socket.socket(fileno=int(endpoint)) as channel:
+    channel.settimeout(6.0)
+    os.setpgid(0, int(requested_group))
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    refs = [os.fstat(int(fd)) for fd in (marker, 1, 2)]
+    identities = [[info.st_dev, info.st_ino] for info in refs]
+    channel.send(json.dumps([challenge, os.getpid(), os.getsid(0), os.getpgrp(), identities]).encode("ascii"))
+    raise SystemExit(0 if channel.recv(1) == b"x" else 2)
+"""
+
+own = os.getpid()
+if own <= 1 or os.getsid(0) != own or os.getpgrp() != own:
+    raise RuntimeError("not the fresh fixture session")
+module = runpy.run_path(sys.argv[1], run_name="_private_c4_group_capture")
+infra = module["INFRA_SETUP"]
+root = Path.cwd()
+helper = root / "c4-owned-group"
+bank = module["_FixturePythonCapture"](root, mode="clean")
+native_signal = infra.kill_process_group
+requests, children, marker_checks, native_signals, reaped = [], [], [], [], []
+challenge = os.urandom(16).hex()
+state = {}
+
+def start(requested, marker, out, err, expected):
+    control, endpoint = bank._socket_pair(bank._owned)
+    control.settimeout(0.50)
+    child = subprocess.Popen(
+        [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", member_code,
+         str(endpoint.fileno()), str(requested), str(marker), challenge],
+        stdin=subprocess.DEVNULL, stdout=out, stderr=err, close_fds=True,
+        pass_fds=(endpoint.fileno(), marker),
+    )
+    children.append((child, control))
+    endpoint.close()
+    wanted = requested or child.pid
+    received = json.loads(control.recv(1024))
+    if received != [challenge, child.pid, own, wanted, [list(pair) for pair in expected]]:
+        raise AssertionError("unbound child marker or pipe receipt")
+    if child.poll() is not None or os.getsid(child.pid) != own or os.getpgid(child.pid) != wanted:
+        raise AssertionError("unbound live kernel membership")
+    return child
+
+def launch(args, *, stdin, stdout, stderr, pass_fds, start_new_session):
+    if (args != [os.fspath(helper), "private-group-deadline"] or children
+            or stdin != subprocess.DEVNULL or stdout != subprocess.PIPE or stderr != subprocess.PIPE
+            or len(pass_fds) != 1 or not start_new_session):
+        raise AssertionError("unexpected native capture arguments")
+    (marker,) = pass_fds
+    (directory,) = root.glob("http-ztp-monitor-decision.*")
+    marker_path = directory / "holder"
+    marker_stat = marker_path.lstat()
+    marker_id = (marker_stat.st_dev, marker_stat.st_ino)
+    if not stat.S_ISREG(marker_stat.st_mode) or bank._identity(marker) != marker_id:
+        raise AssertionError("real capture marker did not bind")
+    with ExitStack() as writers:
+        reader_out, writer_out = bank._pipe(writers)
+        reader_err, writer_err = bank._pipe(writers)
+        expected = (marker_id, bank._identity(writer_out.fileno()), bank._identity(writer_err.fileno()))
+        leader = start(0, marker, writer_out, writer_err, expected)
+        start(leader.pid, marker, writer_out, writer_err, expected)
+        leader.stdout, leader.stderr = reader_out, reader_err
+        state["marker"] = marker_path
+        state["marker_id"] = marker_id
+        state["readers"] = {
+            marker_id, bank._identity(reader_out.fileno()), bank._identity(reader_err.fileno()),
+        }
+    return leader
+
+def group_boundary(group):
+    if len(children) != 2 or group != children[0][0].pid or group in (0, own):
+        raise AssertionError("native capture asked for unowned group")
+    leader, follower = (child for child, _ in children)
+    if not requests:
+        if any(child.poll() is not None for child in (leader, follower)):
+            raise AssertionError("group not live at the first native cleanup")
+        if any(os.getsid(child.pid) != own or os.getpgid(child.pid) != group for child in (leader, follower)):
+            raise AssertionError("group membership changed before native cleanup")
+        requests.append("live-deadline")
+        if not native_signal(group):
+            raise AssertionError("the live private group was not signaled")
+        native_signals.append(True)
+        return True
+    if requests != ["live-deadline"] or leader.returncode is None:
+        raise AssertionError("unexpected extra group request")
+    requests.append("after-wait")
+    reaped.extend([leader.returncode, follower.wait(timeout=1.5)])
+    if reaped != [-signal.SIGKILL, -signal.SIGKILL]:
+        raise AssertionError("native group signal did not reap both original handles")
+    return False  # no numeric action on the old group after original wait
+
+def holder_boundary(path, identities):
+    marker = Path(path).lstat()
+    if (Path(path) != state["marker"] or identities != state["readers"]
+            or (marker.st_dev, marker.st_ino) != state["marker_id"] or len(reaped) != 2):
+        raise AssertionError("native capture cleanup did not use the bound streams and marker")
+    marker_checks.append(True)
+    return True  # both fixed descendants retained; neither has forked or escaped
+
+try:
+    local = SimpleNamespace(Popen=launch, TimeoutExpired=subprocess.TimeoutExpired,
+                            DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE)
+    with mock.patch.object(infra, "subprocess", local), \
+            mock.patch.object(infra, "kill_process_group", group_boundary), \
+            mock.patch.object(infra, "terminate_descriptor_holders", holder_boundary), \
+            mock.patch.object(infra, "MONITOR_DECISION_TIMEOUT", 1.5):
+        started = time.monotonic()
+        decision = infra.capture_decision(helper, "private-group-deadline", root)
+        elapsed = time.monotonic() - started
+    data = dict(capture_invoked=True, decision=decision, bound_members=len(children),
+                group_requests=requests, native_group_signals=len(native_signals),
+                actual_marker_checks=len(marker_checks), reaped=reaped, elapsed=elapsed)
+finally:
+    errors = []
+    try:
+        for child, control in reversed(children):
+            try:
+                if child.poll() is not None:
+                    continue
+                try:
+                    control.send(b"x")
+                except OSError:
+                    pass
+                bank._rescue(child, 0.30)
+            except BaseException as exc:
+                errors.append(exc)
+    finally:
+        bank._owned.close()
+    if errors:
+        raise RuntimeError("one or more original capture child handles did not reap") from errors[0]
+print(json.dumps(data, sort_keys=True))
+'''
+    result = subprocess.run(
+        [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", supervisor, os.fspath(Path(__file__).resolve())],
+        cwd=root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+        timeout=18.0, check=False,
+    )
+    if result.returncode or result.stderr:
+        raise AssertionError(f"private native capture supervisor failed: rc={result.returncode} stderr={result.stderr!r}")
+    return json.loads(result.stdout)
+
+
+def darwin_python_holder_terminator(holder_path: str, identities: set) -> bool:
+    """Refuse unbound observations. A path and inode set are not child custody."""
+    return False
 
 
 @contextmanager
@@ -413,7 +1699,7 @@ def warm_up_fresh_helper(helper: Path) -> None:
     )
 
 
-def cleanup_recorded_test_processes(pid_file: Path) -> None:
+def _linux_cleanup_recorded_test_processes(pid_file: Path) -> None:
     """Kill every fixed-fixture PID and prove disappearance by two seconds."""
 
     try:
@@ -461,6 +1747,48 @@ def cleanup_recorded_test_processes(pid_file: Path) -> None:
             time.sleep(0.01)
     if remaining:
         raise AssertionError(f"test holder PIDs survived cleanup: {remaining!r}")
+
+
+def cleanup_recorded_test_processes(pid_file: Path) -> None:
+    if sys.platform.startswith("linux"):
+        _linux_cleanup_recorded_test_processes(pid_file)
+        return
+    _cleanup_owned_test_processes(pid_file)
+
+
+def _cleanup_owned_test_processes(
+    pid_file: Path, *, child: subprocess.Popen | None = None,
+) -> None:
+    """A private receipt corroborates the fixture's original child handle only.
+
+    Do not adopt a detached child from its receipt or signal a numeric PID.
+    The owning caller must retain this handle exclusively through its reap.
+    """
+
+    try:
+        raw = pid_file.read_bytes()
+    except FileNotFoundError:
+        return
+    finally:
+        pid_file.unlink(missing_ok=True)
+    if not raw or len(raw) > 256:
+        raise AssertionError("test holder PID evidence is invalid")
+    try:
+        process_ids = tuple(int(value) for value in raw.decode("ascii").split())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AssertionError("test holder PID evidence is invalid") from exc
+    if (
+        not process_ids
+        or len(process_ids) > 8
+        or len(set(process_ids)) != len(process_ids)
+        or any(process_id <= 1 or process_id == os.getpid() for process_id in process_ids)
+    ):
+        raise AssertionError("test holder PID set is invalid")
+    if not isinstance(child, subprocess.Popen) or process_ids != (child.pid,):
+        raise AssertionError("test holder receipt has no matching owned child handle")
+    if child.poll() is None:
+        child.kill()
+    child.wait(timeout=2.0)
 
 
 BAD_PAYLOADS = {
@@ -597,6 +1925,378 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_fixture_descriptor_handoff_requires_the_actual_passed_marker(self) -> None:
+        generation = b"fixture-case-001"
+        with tempfile.TemporaryFile(dir=self.sandbox) as target, \
+                tempfile.TemporaryFile(dir=self.sandbox) as different, \
+                ExitStack() as stack:
+            identity = os.fstat(target.fileno())
+            expected = (identity.st_dev, identity.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            lease = _FixtureDescriptorHandoff(generation, expected, deadline=time.monotonic() + 2.0)
+            stack.callback(lease.close)
+            sender.send(generation)
+            self.assertFalse(lease.receive(receiver))
+            sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                            array("i", [different.fileno()]))])
+            self.assertFalse(lease.receive(receiver))
+            self.assertFalse(lease.claim(generation, expected))
+            sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                            array("i", [target.fileno(), different.fileno()]))])
+            self.assertFalse(lease.receive(receiver))
+            self.assertFalse(lease.claim(generation, expected))
+            sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                            array("i", [target.fileno()]))])
+            self.assertTrue(lease.receive(receiver), "the real passed marker must bind")
+            self.assertTrue(lease.claim(generation, expected))
+            self.assertFalse(lease.claim(generation, expected), "a receipt is single use")
+
+    def test_fixture_descriptor_handoff_refuses_wrong_generation_expiry_and_replay(self) -> None:
+        generation = b"fixture-case-002"
+        different = b"fixture-case-003"
+        with tempfile.TemporaryFile(dir=self.sandbox) as target, ExitStack() as stack:
+            info = os.fstat(target.fileno())
+            expected = (info.st_dev, info.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            clock = mock.Mock(return_value=10.0)
+            lease = _FixtureDescriptorHandoff(generation, expected, deadline=11.0, clock=clock)
+            stack.callback(lease.close)
+            rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [target.fileno()]))]
+            sender.sendmsg([different], rights)
+            self.assertFalse(lease.receive(receiver))
+            sender.sendmsg([generation], rights)
+            self.assertTrue(lease.receive(receiver))
+            self.assertFalse(lease.claim(different, expected))
+            self.assertFalse(lease.claim(generation, (expected[0], expected[1] + 1)))
+            clock.return_value = 11.0
+            self.assertFalse(lease.claim(generation, expected), "expired custody cannot authorize")
+            sender.sendmsg([generation], rights)
+            self.assertFalse(lease.receive(receiver), "expired custody cannot be renewed by replay")
+            lease.close()
+            self.assertFalse(lease.claim(generation, expected))
+
+    def test_fixture_descriptor_handoff_rejects_duplicate_marker_and_active_replay(self) -> None:
+        generation = b"fixture-case-004"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            info = os.fstat(marker.fileno())
+            identity = (info.st_dev, info.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            lease = _FixtureDescriptorHandoff(generation, identity, deadline=2.0, clock=lambda: 1.0)
+            stack.callback(lease.close)
+            rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [marker.fileno()]))]
+            sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                            array("i", [marker.fileno(), marker.fileno()]))])
+            self.assertFalse(lease.receive(receiver))
+            sender.sendmsg([generation], rights)
+            self.assertTrue(lease.receive(receiver))
+            self.assertTrue(lease.claim(generation, identity))
+            sender.sendmsg([generation], rights)
+            self.assertFalse(lease.receive(receiver))
+            self.assertFalse(lease.claim(generation, identity))
+
+    def test_fixture_descriptor_handoff_bounds_receive_and_close_cannot_rearm(self) -> None:
+        generation = b"fixture-case-005"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            info = os.fstat(marker.fileno())
+            identity = (info.st_dev, info.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            clock = mock.Mock(return_value=1.0)
+            lease = _FixtureDescriptorHandoff(generation, identity, deadline=2.0, clock=clock)
+            stack.callback(lease.close)
+            receiver.settimeout(0.02)
+            started = time.monotonic()
+            self.assertFalse(lease.receive(receiver))
+            self.assertLess(time.monotonic() - started, 1.0)
+            self.assertEqual(0.02, receiver.gettimeout())
+            rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [marker.fileno()]))]
+            sender.sendmsg([generation], rights)
+            self.assertTrue(lease.receive(receiver))
+            lease.close()
+            lease.close()
+            sender.sendmsg([generation], rights)
+            self.assertFalse(lease.receive(receiver))
+            self.assertFalse(lease.claim(generation, identity))
+
+    def test_fixture_owned_marker_cleanup_requires_both_live_custody_and_actual_marker(self) -> None:
+        generation = b"fixture-case-006"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            info = os.fstat(marker.fileno())
+            identity = (info.st_dev, info.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            receipt = _FixtureDescriptorHandoff(generation, identity, deadline=2.0, clock=lambda: 1.0)
+            stack.callback(receipt.close)
+            child = mock.Mock(spec=subprocess.Popen)
+            child.poll.return_value = None
+            child.wait.return_value = -signal.SIGKILL
+            authority = _FixtureOwnedMarkerCleanup(child, receipt)
+            with mock.patch.object(os, "kill") as raw_signal, \
+                    mock.patch.object(os, "waitpid") as raw_wait:
+                self.assertFalse(authority.terminate(generation, identity))
+                sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                array("i", [marker.fileno()]))])
+                self.assertTrue(receipt.receive(receiver))
+                self.assertFalse(authority.terminate(b"fixture-case-007", identity))
+                self.assertFalse(authority.terminate(generation, (identity[0], identity[1] + 1)))
+                child.kill.assert_not_called()
+                child.wait.assert_not_called()
+                self.assertTrue(authority.terminate(generation, identity),
+                                "a bound receipt and the original live child must work together")
+                self.assertFalse(authority.terminate(generation, identity))
+            raw_signal.assert_not_called()
+            raw_wait.assert_not_called()
+            child.kill.assert_called_once_with()
+            child.wait.assert_called_once_with(timeout=2.0)
+
+    def test_fixture_owned_marker_cleanup_refuses_reaped_child_and_never_retries_failed_reap(self) -> None:
+        generation = b"fixture-case-008"
+        for reaped in (True, False):
+            with self.subTest(reaped=reaped), tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+                info = os.fstat(marker.fileno())
+                identity = (info.st_dev, info.st_ino)
+                sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+                stack.enter_context(sender)
+                stack.enter_context(receiver)
+                receipt = _FixtureDescriptorHandoff(generation, identity, deadline=2.0, clock=lambda: 1.0)
+                stack.callback(receipt.close)
+                sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                array("i", [marker.fileno()]))])
+                self.assertTrue(receipt.receive(receiver))
+                child = mock.Mock(spec=subprocess.Popen)
+                child.poll.return_value = 0 if reaped else None
+                child.wait.side_effect = subprocess.TimeoutExpired("fixture child", 2.0)
+                authority = _FixtureOwnedMarkerCleanup(child, receipt)
+                with mock.patch.object(os, "kill") as raw_signal, \
+                        mock.patch.object(os, "waitpid") as raw_wait:
+                    self.assertFalse(authority.terminate(generation, identity))
+                    self.assertFalse(authority.terminate(generation, identity))
+                raw_signal.assert_not_called()
+                raw_wait.assert_not_called()
+                if reaped:
+                    child.kill.assert_not_called()
+                    child.wait.assert_not_called()
+                else:
+                    child.kill.assert_called_once_with()
+                    child.wait.assert_called_once_with(timeout=2.0)
+
+    def test_fixture_marker_deadline_bounds_a_blocking_channel(self) -> None:
+        generation = b"fixture-case-009"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            info = os.fstat(marker.fileno())
+            identity = (info.st_dev, info.st_ino)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            started = time.monotonic()
+            deadline = started + 0.035
+            receipt = _FixtureDescriptorHandoff(generation, identity, deadline=deadline)
+            stack.callback(receipt.close)
+            self.assertIsNone(receiver.gettimeout())
+            self.assertFalse(receipt.receive(receiver))
+            elapsed = time.monotonic() - started
+            self.assertGreaterEqual(elapsed, 0.030)
+            self.assertLess(elapsed, 1.0)
+            self.assertIsNone(receiver.gettimeout())
+            self.assertFalse(receipt.claim(generation, identity))
+
+    def test_fixture_direct_child_echoes_transferred_marker_before_owned_reap(self) -> None:
+        # This fixed, isolated program has no paths, process IDs or network inputs.
+        # It starts with socket endpoints only, not the marker itself.
+        echo = """
+from array import array
+import os, socket, stat, sys
+
+generation = bytes.fromhex(sys.argv[3])
+expected = (int(sys.argv[4]), int(sys.argv[5]))
+fds = array("i")
+with socket.socket(fileno=int(sys.argv[1])) as delivery, socket.socket(fileno=int(sys.argv[2])) as ack:
+    try:
+        delivery.settimeout(4.0)
+        ack.settimeout(4.0)
+        data, ancillary, flags, _ = delivery.recvmsg(17, socket.CMSG_SPACE(2 * fds.itemsize))
+        valid = data == generation and len(ancillary) == 1
+        for level, kind, payload in ancillary:
+            if (level, kind) != (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                valid = False
+                continue
+            remainder = len(payload) % fds.itemsize
+            fds.frombytes(payload[:len(payload) - remainder])
+            valid = valid and not remainder
+        if not valid or len(fds) != 1 or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC):
+            raise SystemExit(2)
+        descriptor = fds[0]
+        os.set_inheritable(descriptor, False)
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or (info.st_dev, info.st_ino) != expected:
+            raise SystemExit(3)
+        if os.pread(descriptor, 16, 0) != generation or os.pwrite(descriptor, generation[::-1], 16) != 16:
+            raise SystemExit(4)
+        ack.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+        try:
+            ack.recv(1)
+        except TimeoutError:
+            pass
+    finally:
+        for descriptor in fds:
+            os.close(descriptor)
+"""
+        generation = b"fixture-case-010"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            info = os.fstat(marker.fileno())
+            identity = (info.st_dev, info.st_ino)
+            self.assertEqual(16, os.pwrite(marker.fileno(), generation, 0))
+            delivery, child_delivery = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(delivery)
+            stack.enter_context(child_delivery)
+            ack, child_ack = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(ack)
+            stack.enter_context(child_ack)
+            receipt = _FixtureDescriptorHandoff(generation, identity, deadline=time.monotonic() + 5.0)
+            stack.callback(receipt.close)
+            child_fds = (child_delivery.fileno(), child_ack.fileno())
+            self.assertNotIn(marker.fileno(), child_fds)
+            child = subprocess.Popen(
+                [os.path.realpath(sys.executable), "-I", "-S", "-B", "-c", echo,
+                 str(child_fds[0]), str(child_fds[1]), generation.hex(),
+                 str(identity[0]), str(identity[1])],
+                cwd=self.sandbox, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"},
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, pass_fds=child_fds, start_new_session=True,
+            )
+            try:
+                child_delivery.close()
+                child_ack.close()
+                authority = _FixtureOwnedMarkerCleanup(child, receipt)
+                self.assertFalse(authority.terminate(generation, identity), "no child receipt yet")
+                self.assertIsNone(child.poll())
+                delivery.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                                  array("i", [marker.fileno()]))])
+                self.assertTrue(receipt.receive(ack), "the child must echo its received marker FD")
+                self.assertEqual(generation[::-1], os.pread(marker.fileno(), 16, 16))
+                self.assertFalse(authority.terminate(b"fixture-case-011", identity))
+                self.assertFalse(authority.terminate(generation, (identity[0], identity[1] + 1)))
+                self.assertIsNone(child.poll())
+                self.assertTrue(authority.terminate(generation, identity))
+                self.assertEqual(-signal.SIGKILL, child.poll())
+                self.assertFalse(authority.terminate(generation, identity))
+            finally:
+                # Rescue cannot make the assertions above pass. It applies
+                # only to this still-owned, directly created child.
+                if child.poll() is None:
+                    try:
+                        ack.send(b"x")
+                    except OSError:
+                        pass
+                    try:
+                        child.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait(timeout=2.0)
+
+    def _fixture_fifo_ends(self, stack: ExitStack, name: str) -> tuple[int, int]:
+        path = self.sandbox / name
+        os.mkfifo(path, mode=0o600)
+        read = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        stack.callback(os.close, read)
+        write = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+        stack.callback(os.close, write)
+        return read, write
+
+    def test_fixture_capture_triad_rejects_swapped_or_read_end_at_same_inode(self) -> None:
+        generation = b"fixture-case-012"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            stdout_read, stdout_write = self._fixture_fifo_ends(stack, "fixture-stdout")
+            _stderr_read, stderr_write = self._fixture_fifo_ends(stack, "fixture-stderr")
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            sender.settimeout(0.5)
+            fds = (marker.fileno(), stdout_write, stderr_write)
+            expected = tuple((info.st_dev, info.st_ino) for info in map(os.fstat, fds))
+            same_stdout = os.fstat(stdout_read)
+            self.assertEqual(expected[1], (same_stdout.st_dev, same_stdout.st_ino))
+            self.assertNotEqual(expected[1], expected[2])
+            self.assertEqual(os.O_RDONLY, fcntl.fcntl(stdout_read, fcntl.F_GETFL) & os.O_ACCMODE)
+            self.assertEqual(os.O_WRONLY, fcntl.fcntl(stdout_write, fcntl.F_GETFL) & os.O_ACCMODE)
+            rejected_counts = []
+            for sent, label in (
+                ((fds[0], fds[2], fds[1]), "roles swapped"),
+                ((fds[0], stdout_read, fds[2]), "same inode, wrong direction"),
+                ((fds[0], fds[1], fds[1]), "same write end twice"),
+                ((fds[0], fds[1]), "missing stderr"),
+            ):
+                with self.subTest(label=label):
+                    sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", sent))])
+                    with mock.patch.object(os, "set_inheritable", wraps=os.set_inheritable) as set_inherit:
+                        denied = _accept_capture_fixture_descriptors(
+                            receiver, generation, expected, deadline=time.monotonic() + 1.0,
+                        )
+                    if denied is not None:
+                        for fd in denied:
+                            os.close(fd)
+                    self.assertIsNone(denied)
+                    rejected_counts.append(set_inherit.call_count)
+                    for received, inherit in (call.args for call in set_inherit.call_args_list):
+                        self.assertFalse(inherit)
+                        with self.assertRaises(OSError):
+                            os.fstat(received)
+            sender.sendmsg([generation], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", fds))])
+            accepted = _accept_capture_fixture_descriptors(
+                receiver, generation, expected, deadline=time.monotonic() + 1.0,
+            )
+            self.assertIsNotNone(accepted, "accept the actual marker and both correctly ordered write ends")
+            for fd in accepted:
+                stack.callback(os.close, fd)
+            self.assertEqual([3, 3, 3, 2], rejected_counts, "observe every rejected duplicate being closed")
+            self.assertEqual(expected, tuple((info.st_dev, info.st_ino) for info in map(os.fstat, accepted)))
+            self.assertTrue(all(not os.get_inheritable(fd) for fd in accepted))
+            self.assertEqual(3, len(set(accepted)))
+            os.write(accepted[1], b"out")
+            os.write(accepted[2], b"err")
+            self.assertEqual(b"out", os.read(stdout_read, 3))
+            self.assertEqual(b"err", os.read(_stderr_read, 3))
+
+    def test_fixture_capture_triad_cannot_accept_wrong_generation_or_expired_message(self) -> None:
+        generation = b"fixture-case-013"
+        with tempfile.TemporaryFile(dir=self.sandbox) as marker, ExitStack() as stack:
+            stdout_read, stdout_write = os.pipe()
+            stderr_read, stderr_write = os.pipe()
+            for fd in (stdout_read, stdout_write, stderr_read, stderr_write):
+                stack.callback(os.close, fd)
+            sender, receiver = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+            stack.enter_context(sender)
+            stack.enter_context(receiver)
+            sender.settimeout(0.5)
+            receiver.settimeout(0.10)
+            fds = (marker.fileno(), stdout_write, stderr_write)
+            expected = tuple((info.st_dev, info.st_ino) for info in map(os.fstat, fds))
+            rights = [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", fds))]
+            sender.sendmsg([b"fixture-case-014"], rights)
+            self.assertIsNone(_accept_capture_fixture_descriptors(
+                receiver, generation, expected, deadline=time.monotonic() + 1.0,
+            ))
+            sender.sendmsg([generation], rights)
+            self.assertIsNone(_accept_capture_fixture_descriptors(
+                receiver, generation, expected, deadline=time.monotonic() - 1.0,
+            ))
+            self.assertEqual(0.10, receiver.gettimeout())
+            accepted = _accept_capture_fixture_descriptors(
+                receiver, generation, expected, deadline=time.monotonic() + 1.0,
+            )
+            self.assertIsNotNone(accepted, "expired call did not consume or authorize the pending packet")
+            for fd in accepted:
+                stack.callback(os.close, fd)
+            self.assertEqual(0.10, receiver.gettimeout())
 
     def test_test_harness_shells_have_local_deadlines_and_group_cleanup(self) -> None:
         process = mock.MagicMock()
@@ -1074,6 +2774,65 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
                 direct_bash_runs.append(node.lineno)
         self.assertEqual([], direct_bash_runs)
 
+    def test_numeric_receipt_without_live_child_custody_cannot_authorize_signal(self) -> None:
+        receipt = self.sandbox / "unowned-holder.pid"
+        candidate = 420041
+        receipt.write_text(str(candidate), encoding="ascii")
+        refusal = None
+        with mock.patch.object(os, "kill", side_effect=ProcessLookupError) as signal_child, \
+                mock.patch.object(os, "waitpid", return_value=(candidate, 0)) as wait_child:
+            try:
+                _cleanup_owned_test_processes(receipt)
+            except AssertionError as error:
+                refusal = error
+        signal_child.assert_not_called()
+        wait_child.assert_not_called()
+        self.assertIsNotNone(refusal, "a bare numeric receipt must be refused")
+
+    def test_darwin_descriptor_path_match_without_custody_does_not_signal(self) -> None:
+        holder = self.sandbox / "descriptor-holder"
+        holder.touch(mode=0o600)
+        meta = holder.stat()
+        matching_path_rows = SimpleNamespace(stdout="420042\n", returncode=0)
+        with mock.patch.object(subprocess, "run", return_value=matching_path_rows), \
+                mock.patch.object(os, "kill", side_effect=ProcessLookupError) as signal_child:
+            clean = darwin_python_holder_terminator(str(holder), {(meta.st_dev, meta.st_ino)})
+        signal_child.assert_not_called()
+        self.assertIs(clean, False, "without custody the cleanup cannot assert clean")
+
+    def test_holder_cleanup_uses_only_the_original_child_handle(self) -> None:
+        receipt = self.sandbox / "original-child.pid"
+        receipt.write_text("420043", encoding="ascii")
+        child = mock.Mock(spec=subprocess.Popen)
+        child.pid = 420043
+        child.poll.return_value = None
+        with mock.patch.object(os, "kill") as raw_signal, \
+                mock.patch.object(os, "waitpid") as raw_wait:
+            _cleanup_owned_test_processes(receipt, child=child)
+        raw_signal.assert_not_called()
+        raw_wait.assert_not_called()
+        self.assertEqual([mock.call.poll(), mock.call.kill(), mock.call.wait(timeout=2.0)],
+                         child.method_calls)
+        self.assertFalse(receipt.exists())
+
+    def test_mismatched_or_reaped_child_never_receives_holder_signal(self) -> None:
+        child = mock.Mock(spec=subprocess.Popen)
+        child.pid = 420044
+        child.poll.return_value = 0
+        receipt = self.sandbox / "observed-child.pid"
+        with mock.patch.object(os, "kill") as raw_signal, \
+                mock.patch.object(os, "waitpid") as raw_wait:
+            receipt.write_text("420045", encoding="ascii")
+            with self.assertRaises(AssertionError):
+                _cleanup_owned_test_processes(receipt, child=child)
+            self.assertEqual([], child.method_calls)
+            receipt.write_text("420044", encoding="ascii")
+            _cleanup_owned_test_processes(receipt, child=child)
+        raw_signal.assert_not_called()
+        raw_wait.assert_not_called()
+        child.kill.assert_not_called()
+        self.assertEqual([mock.call.poll(), mock.call.wait(timeout=2.0)], child.method_calls)
+
     def test_recorded_test_holders_are_killed_and_reaped_by_a_local_deadline(
         self,
     ) -> None:
@@ -1085,11 +2844,19 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        pid_file.write_text(str(holder.pid), encoding="ascii")
+        linux_native = sys.platform.startswith("linux")
+        if linux_native:
+            pid_file.write_text(str(holder.pid), encoding="ascii")
         try:
-            cleanup_recorded_test_processes(pid_file)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(holder.pid, 0)
+            if linux_native:
+                cleanup_recorded_test_processes(pid_file)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(holder.pid, 0)
+            else:
+                pid_file.write_text(str(holder.pid), encoding="ascii")
+                _cleanup_owned_test_processes(pid_file, child=holder)
+                self.assertEqual(-signal.SIGKILL, holder.returncode)
+                self.assertEqual(-signal.SIGKILL, holder.wait(timeout=2.0))
             self.assertFalse(pid_file.exists())
         finally:
             if holder.poll() is None:
@@ -2785,6 +4552,21 @@ class MonitorAuthoritySemanticWorkflowTests(unittest.TestCase):
         self.assertIn("--recover-monitor-authority", option_strings)
         self.assertIn("--recover-monitor-authority-decision", option_strings)
 
+    def test_ordinary_darwin_capture_fixture_no_stale_group_signal_or_discovery(self) -> None:
+        for path in ("infra/infra-setup.sh", "infra/infra-teardown.sh", "infra/docker/deploy.sh"):
+            with self.subTest(path=path):
+                original = decision_capture_shell(ROOT / path, portable=False)
+                fixture = _ordinary_darwin_capture_fixture(original)
+                self.assertNotIn('kill -KILL -- "-$command_pid"', fixture,
+                                 "after-wait capture must never signal a recycled group")
+                self.assertNotIn("/proc/[0-9]*/fd/[0-9]*", fixture)
+                self.assertNotIn("/usr/sbin/lsof", fixture)
+                self.assertIn('wait "$command_pid"', fixture)
+                self.assertIn("head -c 4097", fixture)
+                self.assertIn('cmp -s "$stdout_file"', fixture)
+                self.assertIn("fixture_capture_terminal_receipt", fixture)
+                self.assertIn('then "$@"; else exec "$@"; fi', fixture)
+
     def test_native_recovery_executes_stop_attest_start_and_never_repairs_a_live_writer(
         self,
     ) -> None:
@@ -2973,14 +4755,18 @@ recover_monitor_authority_action
                 elif systemd_dir.exists():
                     systemd_dir.rmdir()
                 environment = {
-                    "PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}",
+                    "PATH": (
+                        f"{fake_bin}{os.pathsep}/usr/bin:/bin" if sys.platform == "darwin"
+                        else f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+                    ),
                     "EVENT_LOG": os.fspath(event_log),
                     **variables,
                 }
                 setup = python_native_setup(root, *argv)
                 setup.control_auth_source = source
                 stderr = io.StringIO()
-                with mock.patch.dict(os.environ, environment, clear=False), \
+                with _darwin_owned_python_adapter_capture(root, installed), \
+                        mock.patch.dict(os.environ, environment, clear=(sys.platform == "darwin")), \
                         mock.patch.object(INFRA_SETUP, "HOST_ROOT", root), \
                         mock.patch.object(INFRA_SETUP, "CONTROL_AUTH_SOURCE_SHA256", digest), \
                         redirect_stderr(stderr):
@@ -3046,8 +4832,9 @@ recover_monitor_authority_action
                     self.assertNotIn("helper:monitor-authority-attest-decision", events)
                     self.assertNotIn("systemctl:start apache2", events)
 
+        python_boot = ["-I", "-S", "-B"] if sys.platform == "darwin" else ["-B"]
         exact_cli = subprocess.run(
-            [sys.executable, "-B", os.fspath(INFRA_SETUP_PATH), "--recover-monitor-authority", "--client"],
+            [sys.executable, *python_boot, os.fspath(INFRA_SETUP_PATH), "--recover-monitor-authority", "--client"],
             cwd=ROOT, text=True, capture_output=True, check=False, timeout=10,
         )
         self.assertEqual(2, exact_cli.returncode)
@@ -3204,7 +4991,8 @@ run_native_monitor_authority_routine {shlex.quote(operation)}
                     helper.chmod(0o755)
                     setup = python_native_setup(root)
                     stderr = io.StringIO()
-                    with mock.patch.object(INFRA_SETUP, "HOST_ROOT", root), redirect_stderr(stderr):
+                    with _darwin_owned_python_adapter_capture(root, helper), \
+                            mock.patch.object(INFRA_SETUP, "HOST_ROOT", root), redirect_stderr(stderr):
                         self.assertFalse(setup.run_native_monitor_authority_routine(operation))
                     self.assertIn(phrase, stderr.getvalue())
                     self.assertIn(NATIVE_RECOVERY_COMMAND, stderr.getvalue())
@@ -3324,7 +5112,11 @@ printf '%s\n' "${events[*]}"
                         encoding="utf-8",
                     )
                     producer_path.chmod(0o755)
-                    result = run_shell(capture + f'''
+                    if sys.platform == "darwin":
+                        result = _fixture_darwin_shell_binary_capture(script, producer_path, Path(temporary))
+                        self.assertIsNotNone(result, "original byte matrix must have a real owned capture result")
+                    else:
+                        result = run_shell(capture + f'''
 monitor_authority_result_directory() {{ printf '%s\\n' {shlex.quote(temporary)}; }}
 if capture_monitor_authority_decision {shlex.quote(os.fspath(producer_path))}; then
   printf 'accepted:%s\\n' "$monitor_authority_decision"
@@ -3336,9 +5128,85 @@ exit 9
                     if expected:
                         self.assertEqual(f"accepted:{token}\n", result.stdout)
 
+    def test_shell_capture_owned_relay_accepts_clean(self) -> None:
+        self._assert_shell_capture_owned_relay(("clean",))
+
+    def _assert_shell_capture_owned_relay(self, modes: tuple[str, ...]) -> None:
+        paths = ("infra/infra-setup.sh", "infra/infra-teardown.sh", "infra/docker/deploy.sh")
+        accepted = "capture=accepted rc=0 token=<restart-allowed:complete;reset-invalid-cache=false>\n"
+        rejected = "capture=rejected rc=1 token=<>\n"
+        for path in paths:
+            for mode in modes:
+                with self.subTest(path=path, mode=mode), tempfile.TemporaryDirectory(dir=self.sandbox) as tmp:
+                    root = Path(tmp)
+                    with _FixtureShellCapture(root, mode=mode) as fixture:
+                        started = time.monotonic()
+                        result = fixture.capture(ROOT / path)
+                        elapsed = time.monotonic() - started
+                        self.assertIsNotNone(result, "must execute the exact real shell capture")
+                        self.assertEqual(0, result.returncode, result.stderr)
+                        self.assertEqual(accepted if mode == "clean" else rejected, result.stdout)
+                        self.assertEqual("", result.stderr)
+                        self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+                        self.assertLess(elapsed, 4.0)
+                        self.assertEqual(1, fixture.group_checks)
+                        if mode == "clean":
+                            self.assertFalse(fixture.forwarded)
+                            self.assertIsNone(fixture.holder)
+                            self.assertEqual(["clean", "clean"], fixture.cleanup_calls)
+                        else:
+                            self.assertTrue(fixture.forwarded)
+                            self.assertEqual(-signal.SIGKILL, fixture.holder.returncode)
+                            self.assertEqual(["residual-reaped", "clean-after-reap"], fixture.cleanup_calls)
+                    self.assertIsNone(fixture.rescue_rc)
+
+    def _assert_shell_capture_owned_reader_deadline(self) -> None:
+        paths = ("infra/infra-setup.sh", "infra/infra-teardown.sh", "infra/docker/deploy.sh")
+        for path in paths:
+            with self.subTest(path=path), tempfile.TemporaryDirectory(dir=self.sandbox) as tmp:
+                root = Path(tmp)
+                with _FixtureShellCapture(root, mode="deny-cleanup") as fixture:
+                    started = time.monotonic()
+                    result = fixture.capture(ROOT / path)
+                    elapsed = time.monotonic() - started
+                    self.assertIsNotNone(result, "must execute the exact real shell capture")
+                    self.assertEqual(0, result.returncode, result.stderr)
+                    self.assertEqual("capture=rejected rc=1 token=<>\n", result.stdout)
+                    self.assertEqual("", result.stderr)
+                    self.assertTrue(fixture.forwarded)
+                    self.assertEqual(1, fixture.group_checks)
+                    self.assertEqual(["residual-held", "residual-held"], fixture.cleanup_calls)
+                    self.assertIsNone(fixture.holder.poll(), "holder really keeps both writer FDs before rescue")
+                    self.assertGreaterEqual(elapsed, 0.20)
+                    self.assertLess(elapsed, 2.0)
+                    self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+                self.assertEqual(0, fixture.rescue_rc)
+
+    def test_shell_capture_owned_relay_joins_readers_when_no_writer_opens(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.sandbox) as tmp:
+            root = Path(tmp)
+            with _FixtureShellCapture(root, mode="clean", omit_writer=True) as fixture:
+                started = time.monotonic()
+                result = fixture.capture(ROOT / "infra/infra-setup.sh")
+                elapsed = time.monotonic() - started
+                self.assertEqual(0, result.returncode, result.stderr)
+                self.assertEqual("capture=rejected rc=1 token=<>\n", result.stdout)
+                self.assertEqual("", result.stderr)
+                self.assertEqual(["clean", "clean"], fixture.cleanup_calls)
+                self.assertEqual(1, fixture.group_checks)
+                self.assertIsNone(fixture.holder)
+                self.assertGreaterEqual(elapsed, 0.15, "original shell must actually wait for blocked readers")
+                self.assertLess(elapsed, 2.0)
+                self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+
     def test_shell_decision_capture_rejects_and_cleans_detached_fifo_holders(
         self,
     ) -> None:
+        if sys.platform == "darwin":
+            # Owner 2026-11-23: retain the original residual oracle with a
+            # real out-of-group holder owned by this test, not lsof/PID adoption.
+            self._assert_shell_capture_owned_relay(("residual",))
+            return
         scripts = (
             ROOT / "infra/infra-setup.sh",
             ROOT / "infra/infra-teardown.sh",
@@ -3425,6 +5293,27 @@ printf 'capture=%s rc=%s token=<%s> holder=%s\\n' \
     def test_shell_decision_capture_deadline_kills_and_reaps_process_group(
         self,
     ) -> None:
+        if sys.platform == "darwin":
+            paths = ("infra/infra-setup.sh", "infra/infra-teardown.sh", "infra/docker/deploy.sh")
+            for path in paths:
+                with self.subTest(path=path), tempfile.TemporaryDirectory(dir=self.sandbox) as tmp:
+                    root = Path(tmp)
+                    started = time.monotonic()
+                    evidence = _probe_shell_capture_deadline_group(root, ROOT / path)
+                    elapsed = time.monotonic() - started
+                    self.assertIsNotNone(evidence, "original shell capture must run with two owned group members")
+                    shell, group = evidence
+                    self.assertEqual(2, group["member_count"])
+                    self.assertTrue(group["distinct"])
+                    self.assertEqual(1, group["native_group_calls"])
+                    self.assertEqual([-signal.SIGKILL, -signal.SIGKILL], group["reaped"])
+                    self.assertGreaterEqual(elapsed, 0.65)
+                    self.assertLess(elapsed, 12.0)
+                    self.assertEqual(0, shell.returncode, shell.stderr)
+                    self.assertEqual("capture=rejected rc=1 token=<>\n", shell.stdout)
+                    self.assertEqual("", shell.stderr)
+                    self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+            return
         scripts = (
             ROOT / "infra/infra-setup.sh",
             ROOT / "infra/infra-teardown.sh",
@@ -3542,9 +5431,32 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
                     [], list(result_root.glob("http-ztp-monitor-decision.*")),
                 )
 
+    def test_fixture_private_group_deadline_reaps_both_owned_members_only(self) -> None:
+        outcome = _probe_private_capture_group(self.sandbox, shared=True)
+        self.assertTrue(outcome.get("retained_two"), "the supervisor must retain both original member handles")
+        self.assertTrue(outcome["private_session"])
+        self.assertTrue(outcome["same_group"])
+        self.assertEqual(1, outcome["group_calls"])
+        self.assertEqual([-signal.SIGKILL, -signal.SIGKILL], outcome["members"])
+        self.assertEqual(0, outcome["outside"])
+        self.assertGreaterEqual(outcome["elapsed"], 0.65)
+        self.assertLess(outcome["elapsed"], 4.0)
+
+    def test_fixture_private_group_refuses_wrong_membership_without_signaling(self) -> None:
+        outcome = _probe_private_capture_group(self.sandbox, shared=False)
+        self.assertTrue(outcome.get("retained_two"), "the supervisor must retain both original member handles")
+        self.assertTrue(outcome["private_session"])
+        self.assertFalse(outcome["same_group"])
+        self.assertEqual(0, outcome["group_calls"])
+        self.assertEqual([0, 0], outcome["members"])
+        self.assertEqual(0, outcome["outside"])
+
     def test_shell_capture_reader_deadline_survives_holder_kill_failure(
         self,
     ) -> None:
+        if sys.platform == "darwin":
+            self._assert_shell_capture_owned_reader_deadline()
+            return
         scripts = (
             ROOT / "infra/infra-setup.sh",
             ROOT / "infra/infra-teardown.sh",
@@ -3644,9 +5556,10 @@ printf 'capture=%s rc=%s token=<%s>\\n' \
         # FIFO case's .75 reader / 2 total / 3 outer bounds unchanged.
         with tempfile.TemporaryDirectory() as directory:
             ready = Path(directory) / 'never-ready'
+            child_boot = " -I -S -B" if sys.platform == "darwin" else " -B"
             command = (shlex.quote(os.path.realpath(sys.executable))
-                       + " -B -c 'import time; time.sleep(10)'")
-            harness = test_timeout_shell() + f'''
+                       + child_boot + " -c 'import time; time.sleep(10)'")
+            harness = _darwin_runtime_timeout_shell() + f'''
 export HTTP_ZTP_TEST_TIMEOUT_READY_FILE={shlex.quote(os.fspath(ready))}
 timeout --signal=KILL 0.75 {command}
 printf 'timeout=%s\\n' "$?"
@@ -3676,6 +5589,8 @@ printf 'timeout=%s\\n' "$?"
         helper.chmod(0o700)
         command = private_python_fixture_command(helper)
         self.assertEqual(shlex.quote(os.path.realpath(sys.executable)) + " -B " + shlex.quote(str(helper)), command)
+        if sys.platform == "darwin":
+            command = command.replace(" -B ", " -I -S -B ", 1)
         result = run_shell(command + "\n", timeout_seconds=3)
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual("private-body\n", result.stdout)
@@ -3695,8 +5610,34 @@ printf 'timeout=%s\\n' "$?"
         for stream in (process.stdin, process.stdout, process.stderr):
             stream.close.assert_called_once()
 
+    def _assert_darwin_portable_timeout_custody(self, *, fault: bool) -> None:
+        with tempfile.TemporaryDirectory(dir=self.sandbox) as temporary:
+            root = Path(temporary)
+            pid_file = root / "command-start"
+            terminal_file = root / "command-terminal"
+            ready = pid_file if fault else root / "never-ready"
+            result = _run_darwin_portable_timeout_receipts(pid_file, terminal_file, ready, fault=fault)
+            self.assertIsNotNone(result, "portable supervisor must prove the acquired child was actually reaped")
+            self.assertTrue(pid_file.exists(), result.stderr)
+            created = int(pid_file.read_text(encoding="ascii"))
+            self.assertGreater(created, 1)
+            self.assertTrue(terminal_file.exists(), "terminal evidence must come from the original supervisor")
+            terminal = json.loads(terminal_file.read_text(encoding="ascii"))
+            self.assertEqual(
+                {"pid": created, "wait_returncode": -signal.SIGKILL, "reaped": True},
+                terminal,
+            )
+            if not fault:
+                self.assertFalse(ready.exists())
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(f"timeout rc={125 if fault else 124}\n", result.stdout)
+            self.assertEqual("", result.stderr)
+
     def test_portable_timeout_missing_readiness_kills_and_reaps_command(self) -> None:
         """A failed readiness barrier must not abandon a live command."""
+        if sys.platform == "darwin":
+            self._assert_darwin_portable_timeout_custody(fault=False)
+            return
         pid_file = self.sandbox / "readiness-command.pid"
         absent_ready = self.sandbox / "never-ready"
         command = "import time; time.sleep(60)"
@@ -3742,6 +5683,9 @@ printf 'timeout rc=%s\\n' "$timeout_rc"
 
     def test_portable_timeout_supervisor_fault_reaps_started_command(self) -> None:
         """Even a timer/supervisor fault cannot orphan its private command."""
+        if sys.platform == "darwin":
+            self._assert_darwin_portable_timeout_custody(fault=True)
+            return
         pid_file = self.sandbox / "supervisor-fault-command.pid"
         command = "import time; time.sleep(60)"
         timeout = timeout_with_owned_pid_receipt(pid_file)
@@ -3784,7 +5728,7 @@ printf 'timeout rc=%s\\n' "$timeout_rc"
 
     def test_portable_timeout_preserves_shell_function_io_and_status(self) -> None:
         """Real shell adapters keep their argument, pipe, diagnostic and status contract."""
-        harness = test_timeout_shell() + r'''
+        harness = _darwin_runtime_timeout_shell() + r'''
 fixture_command() {
   local input
   IFS= read -r input
@@ -3839,11 +5783,63 @@ printf 'timeout rc=%s\n' "$timeout_rc"
                     "#!/bin/bash\n" + producer + f"\nexit {producer_rc}\n", encoding="utf-8",
                 )
                 producer_path.chmod(0o755)
-                decision = INFRA_SETUP.capture_decision(producer_path, "decision", Path(temporary))
+                if sys.platform == "darwin":
+                    decision = _fixture_darwin_python_binary_capture(producer_path, Path(temporary))
+                    self.assertIsNotNone(decision, "original byte matrix must have a real owned capture result")
+                else:
+                    decision = INFRA_SETUP.capture_decision(producer_path, "decision", Path(temporary))
                 self.assertEqual(token if expected else "", decision)
                 self.assertEqual([], list(Path(temporary).glob("http-ztp-monitor-decision.*")))
 
+    def test_python_setup_capture_owned_relay_accepts_clean(self) -> None:
+        self._assert_python_capture_owned_relay(("clean",))
+
+    def _assert_python_capture_owned_relay(self, modes: tuple[str, ...]) -> None:
+        token = "restart-allowed:complete;reset-invalid-cache=false"
+        for mode in modes:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory(dir=self.sandbox) as temporary:
+                root = Path(temporary)
+                with _FixturePythonCapture(root, mode=mode) as fixture:
+                    start = time.monotonic()
+                    decision = fixture.capture()
+                    duration = time.monotonic() - start
+                    self.assertIsNotNone(fixture.producer, "capture must execute the exact real producer")
+                    self.assertEqual(0, fixture.producer.returncode)
+                    self.assertEqual(token if mode == "clean" else "", decision)
+                    self.assertLess(duration, 5.0)
+                    self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+                    if mode == "clean":
+                        self.assertIsNone(fixture.holder)
+                        self.assertFalse(fixture.forwarded)
+                        self.assertEqual(["clean"], fixture.cleanup_calls)
+                    else:
+                        self.assertTrue(fixture.forwarded, "real marker and both writer FDs must have been held")
+                        self.assertEqual(["residual-reaped"], fixture.cleanup_calls)
+                        self.assertEqual(-signal.SIGKILL, fixture.holder.returncode)
+                self.assertIsNone(fixture.rescue_rc, "successful adjudication cannot rely on backup rescue")
+
+    def _assert_python_capture_owned_reader_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.sandbox) as temporary:
+            root = Path(temporary)
+            with _FixturePythonCapture(root, mode="deny-cleanup") as fixture:
+                start = time.monotonic()
+                decision = fixture.capture()
+                duration = time.monotonic() - start
+                self.assertIsNotNone(fixture.producer, "capture must execute the exact real producer")
+                self.assertEqual(0, fixture.producer.returncode)
+                self.assertEqual("", decision)
+                self.assertTrue(fixture.forwarded)
+                self.assertEqual(["residual-held", "residual-held"], fixture.cleanup_calls)
+                self.assertIsNone(fixture.holder.poll(), "holder really still has the pipes before rescue")
+                self.assertGreaterEqual(duration, 0.20)
+                self.assertLess(duration, 2.0)
+                self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+            self.assertEqual(0, fixture.rescue_rc, "rescue must stop and reap the original holder")
+
     def test_python_setup_decision_capture_rejects_and_cleans_detached_holders(self) -> None:
+        if sys.platform == "darwin":
+            self._assert_python_capture_owned_relay(("residual",))
+            return
         token = "restart-allowed:complete;reset-invalid-cache=false"
         with tempfile.TemporaryDirectory() as temporary:
             result_root = Path(temporary)
@@ -3898,7 +5894,28 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             self.assertLess(elapsed, 5.0)
             self.assertEqual([], list(result_root.glob("http-ztp-monitor-decision.*")))
 
+    def _assert_python_setup_capture_private_group_deadline(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.sandbox) as temp:
+            root = Path(temp)
+            outcome = _probe_python_capture_deadline_group(root)
+            self.assertTrue(outcome.get("capture_invoked"), "must run the original Python capture with owned group")
+            self.assertEqual("", outcome["decision"])
+            self.assertEqual(2, outcome["bound_members"])
+            self.assertEqual(["live-deadline", "after-wait"], outcome["group_requests"])
+            self.assertEqual(1, outcome["native_group_signals"])
+            # Both write ends are held until the original deadline. There
+            # is no budget left to observe EOF after reap, so the original
+            # capture must recheck those same identities without more I/O.
+            self.assertEqual(2, outcome["actual_marker_checks"])
+            self.assertEqual([-signal.SIGKILL, -signal.SIGKILL], outcome["reaped"])
+            self.assertGreaterEqual(outcome["elapsed"], 1.4)
+            self.assertLess(outcome["elapsed"], 12.0)
+            self.assertEqual([], list(root.glob("http-ztp-monitor-decision.*")))
+
     def test_python_setup_decision_deadline_kills_and_reaps_process_group(self) -> None:
+        if sys.platform == "darwin":
+            self._assert_python_setup_capture_private_group_deadline()
+            return
         with tempfile.TemporaryDirectory() as temporary:
             result_root = Path(temporary)
             helper = result_root / "stalled-group.py"
@@ -3956,6 +5973,9 @@ printf 'timeout rc=%s\n' "$timeout_rc"
             self.assertEqual([], list(result_root.glob("http-ztp-monitor-decision.*")))
 
     def test_python_setup_reader_deadline_survives_holder_kill_failure(self) -> None:
+        if sys.platform == "darwin":
+            self._assert_python_capture_owned_reader_deadline()
+            return
         with tempfile.TemporaryDirectory() as temporary:
             result_root = Path(temporary)
             helper = result_root / "unkillable-holder.py"

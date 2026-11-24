@@ -2706,19 +2706,33 @@ def full_shard_skip_problems(
 
 
 def _full_shard_kill_group(process: subprocess.Popen) -> None:
+    """Escalate while the original, privately launched group leader is unreaped."""
+    if process.returncode is not None:
+        return
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        raise ImpactError("shard group cleanup requires exclusive child reaping")
+    # The coordinator is the sole waiter for this original start_new_session
+    # child. Keep its PID reserved even if TERM already ended the leader;
+    # poll() and wait() can both release it before the final group signal.
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-    try:
-        process.wait(timeout=FULL_SHARD_TERMINATE_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
-    process.wait()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        time.sleep(FULL_SHARD_TERMINATE_GRACE_SECONDS)
+    finally:
+        if process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                process.wait()
+            except PermissionError:
+                # Darwin can report EPERM for a zombie-only group. Reap the
+                # original child if it exited, but do not wait indefinitely
+                # after an unconfirmed force signal.
+                process.wait(timeout=FULL_SHARD_TERMINATE_GRACE_SECONDS)
+            else:
+                process.wait()
 
 
 def _full_shard_wait_lanes(
@@ -2976,8 +2990,17 @@ def _full_shard_residue(markers: Sequence[str], pgids: Iterable[int]) -> list[di
     return sorted(found.values(), key=lambda item: item["pid"])
 
 
-def _full_shard_residue_gate(markers: Sequence[str], pgids: Iterable[int]) -> tuple[list[dict], float]:
-    """Wait a bounded grace for stragglers (never signalling), then terminate what remains."""
+def _full_shard_residue_gate(
+    markers: Sequence[str], pgids: Iterable[int], *,
+    owned: Mapping[int, socket.socket] | None = None,
+) -> tuple[list[dict], float]:
+    """Detect leftovers; only existing launch-owned peers can receive a stop.
+
+    A scan row, matching path, or old process group is never cleanup
+    authority. The caller must already hold the private cooperative socket
+    from launch, with the peer's identity received on that socket. There is
+    no CLI, environment or audit input which registers cleanup authority.
+    """
     started = time.monotonic()
     groups = list(pgids)
     while True:
@@ -2986,31 +3009,29 @@ def _full_shard_residue_gate(markers: Sequence[str], pgids: Iterable[int]) -> tu
         if not residue or waited >= FULL_SHARD_RESIDUE_GRACE_SECONDS:
             break
         time.sleep(2.0)
-    if residue:
-        for item in residue:
-            try:
-                os.kill(item["pid"], signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                pass
-        deadline = time.monotonic() + 5.0
-        remaining = [item["pid"] for item in residue]
-        while remaining and time.monotonic() < deadline:
-            alive = []
-            for pid in remaining:
-                try:
-                    os.kill(pid, 0)
-                    alive.append(pid)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            remaining = alive
-            if remaining:
-                time.sleep(0.2)
-        for pid in remaining:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
-    return residue, round(time.monotonic() - started, 1)
+    recorded = []
+    deadline = time.monotonic() + 5.0
+    for item in residue:
+        row = dict(item, cleanup="unowned-not-signalled")
+        recorded.append(row)
+        peer = owned.get(row["pid"]) if owned else None
+        if peer is None:
+            continue
+        row["cleanup"] = "owned-stop-unconfirmed"
+        try:
+            if time.monotonic() >= deadline:
+                continue
+            peer.settimeout(max(0.0, deadline - time.monotonic()))
+            peer.sendall(b"X")
+            peer.settimeout(max(0.0, deadline - time.monotonic()))
+            if peer.recv(1) != b"!":
+                continue
+            peer.settimeout(max(0.0, deadline - time.monotonic()))
+            if peer.recv(1) == b"":
+                row["cleanup"] = "owned-peer-stopped"
+        except OSError:
+            pass  # Still a residue failure, and never a numeric-signal fallback.
+    return recorded, round(time.monotonic() - started, 1)
 
 
 def _full_shard_read_records(path: Path) -> list[dict] | None:
@@ -3276,7 +3297,7 @@ def _full_shard_run_phase(
         audit["residue"].extend(residue)
         message = (
             f"phase {label}: {len(residue)} residual processes outlived their lane "
-            "(recorded, then terminated)"
+            "(recorded; cleanup only with launch-owned handles)"
         )
         audit["problems"].append(message)
         gate.append(message)
@@ -3343,7 +3364,7 @@ def _full_shard_execute(
         audit["residue"].extend(residue)
         audit["problems"].append(
             f"enumeration: {len(residue)} residual processes outlived discovery "
-            "(recorded, then terminated)"
+            "(recorded; cleanup only with launch-owned handles)"
         )
     records = _full_shard_read_records(enumeration.result) or []
     starts = [record for record in records if record.get("event") == "start"]

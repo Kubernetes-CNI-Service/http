@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -135,11 +136,21 @@ class AlphaTests(unittest.TestCase):
                 with open("README.txt", "a", encoding="utf-8") as handle:
                     handle.write("changed by a test\\n")
             if mode == "residue":
-                subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(120)"],
-                    start_new_session=True, stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                fd = int(os.environ["SHARD_FIXTURE_RESIDUE_FD"])
+                child_code = (
+                    "import os, socket, sys\\n"
+                    "with socket.socket(fileno=int(sys.argv[1])) as peer:\\n"
+                    "    peer.settimeout(120)\\n"
+                    "    peer.sendall(str(os.getpid()).encode('ascii') + bytes((10,)))\\n"
+                    "    if peer.recv(1) == b'X':\\n"
+                    "        peer.sendall(b'!')\\n"
                 )
+                subprocess.Popen(
+                    [sys.executable, "-I", "-S", "-B", "-c", child_code, str(fd)],
+                    start_new_session=True, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, pass_fds=(fd,),
+                )
+                os.close(fd)
 
     @unittest.skipIf(probe.mode() == "skip", "fixture decorator skip")
     def test_a2(self):
@@ -318,8 +329,6 @@ class ShardFixture(unittest.TestCase):
         self.counter = 0
         self.git_env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
         self.git_env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
-        self.addCleanup(self.reap_recorded_residue)
-        self.audits = []
 
     def write(self, relative, value):
         path = self.root / relative
@@ -400,7 +409,6 @@ class ShardFixture(unittest.TestCase):
                 self.root, RUNNER.Selection(full_suite=True), False, evidence,
             )
         audit = json.loads((evidence / "audit.json").read_text(encoding="utf-8"))
-        self.audits.append(audit)
         return code, evidence, self.markers(markers), audit, out.getvalue() + err.getvalue()
 
     def cli(self, *args, markers=None, mode=""):
@@ -420,14 +428,6 @@ class ShardFixture(unittest.TestCase):
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-
-    def reap_recorded_residue(self):
-        for audit in self.audits:
-            for item in audit.get("residue", []):
-                try:
-                    os.kill(int(item["pid"]), 9)
-                except (ProcessLookupError, KeyError, ValueError, PermissionError):
-                    pass
 
     def assert_platform_refusal(self):
         evidence, _markers = self.next_paths()
@@ -808,23 +808,70 @@ class FullShardWorkflowTests(ShardFixture):
         if not SHARDED_PLATFORM:
             self.assert_platform_refusal()
             return
-        result = self.run_in_process("residue")
-        self.assert_failed(result, "residual")
-        audit = result[3]
-        self.assertTrue(audit["residue"])
-        deadline = time.monotonic() + 15
-        alive = [int(item["pid"]) for item in audit["residue"]]
-        while alive and time.monotonic() < deadline:
-            still = []
-            for pid in alive:
-                try:
-                    os.kill(pid, 0)
-                    still.append(pid)
-                except ProcessLookupError:
-                    pass
-            alive = still
-            time.sleep(0.1)
-        self.assertEqual([], alive)
+        coordinator, inherited = socket.socketpair()
+        with coordinator, inherited:  # EOF rescue even when the old assertions fail.
+            raw_popen = subprocess.Popen
+            real_residue_gate = RUNNER._full_shard_residue_gate
+            owned_pid = None
+
+            def launch(argv, *args, **kwargs):
+                prefix = [sys.executable, "-B", "-c", RUNNER.FULL_SHARD_LANE_SOURCE]
+                cwd = kwargs.get("cwd")
+                if (isinstance(argv, list) and len(argv) == 7 and argv[:4] == prefix and
+                        argv[4] in ("enumerate", "run") and isinstance(cwd, Path) and
+                        self.base in cwd.parents):
+                    # These are W2's stdlib-only synthetic lanes, not a change
+                    # to how the real suite's lane interpreters discover deps.
+                    isolated = [argv[0], "-I", "-S", *argv[1:]]
+                    if argv[4] == "run" and cwd.name == "w0":
+                        fd = inherited.fileno()
+                        self.assertGreaterEqual(fd, 0, "only one original lane receives the private end")
+                        self.assertTrue(kwargs["start_new_session"])
+                        kwargs["pass_fds"] = (fd,)
+                        kwargs["env"] = dict(kwargs["env"], SHARD_FIXTURE_RESIDUE_FD=str(fd))
+                        handle = raw_popen(isolated, *args, **kwargs)
+                        inherited.close()
+                        return handle
+                    return raw_popen(isolated, *args, **kwargs)
+                return raw_popen(argv, *args, **kwargs)
+
+            def observe(markers, groups):
+                nonlocal owned_pid
+                if inherited.fileno() >= 0:
+                    return real_residue_gate(markers, groups)  # Enumeration is before the launch.
+                if owned_pid is None:
+                    coordinator.settimeout(5)
+                    with coordinator.makefile("rb", buffering=0) as receipt:
+                        line = receipt.readline(32)
+                    self.assertRegex(line, rb"^[1-9][0-9]*\n$")
+                    owned_pid = int(line)
+                return real_residue_gate(markers, groups, owned={owned_pid: coordinator})
+
+            with mock.patch.object(RUNNER.subprocess, "Popen", side_effect=launch), \
+                    mock.patch.object(RUNNER, "_full_shard_residue_gate", side_effect=observe):
+                result = self.run_in_process("residue")
+            self.assert_failed(result, "residual")
+            audit = result[3]
+            self.assertTrue(audit["residue"])
+            self.assertEqual({owned_pid}, {row["pid"] for row in audit["residue"]},
+                             "never probe an incidental process from the scan")
+            held = [row for row in audit["residue"] if row["pid"] == owned_pid]
+            self.assertEqual(1, len(held))
+            self.assertEqual("owned-peer-stopped", held[0]["cleanup"])
+            self.assertIn("working directory inside a lane path", held[0]["reasons"])
+            deadline = time.monotonic() + 15
+            alive = [owned_pid]
+            while alive and time.monotonic() < deadline:
+                still = []
+                for pid in alive:
+                    try:
+                        os.kill(pid, 0)
+                        still.append(pid)
+                    except ProcessLookupError:
+                        pass
+                alive = still
+                time.sleep(0.1)
+            self.assertEqual([], alive)
 
     def test_w2_dirty_main_checkout_refuses_before_any_lane_runs(self):
         self.build()

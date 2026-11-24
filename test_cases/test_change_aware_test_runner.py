@@ -3233,50 +3233,150 @@ class FullShardDirectTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertNotEqual([], RUNNER.full_shard_coverage_problems(4, merged))
 
+    def test_lane_cleanup_escalates_before_reaping_its_leader(self):
+        events = mock.Mock()
+        process = events.process
+        process.pid = 420001
+        process.returncode = None
+        with mock.patch.object(RUNNER.os, "killpg", events.send_group), \
+                mock.patch.object(RUNNER.time, "sleep", events.grace):
+            RUNNER._full_shard_kill_group(process)
+
+        self.assertEqual([
+            mock.call.send_group(420001, RUNNER.signal.SIGTERM),
+            mock.call.grace(10.0),
+            mock.call.send_group(420001, RUNNER.signal.SIGKILL),
+            mock.call.process.wait(),
+        ], events.mock_calls)
+
+    def test_residue_discovery_never_authorizes_numeric_signals(self):
+        finding = {"pid": 420011, "pgid": 420012, "command": "fixture marker",
+                   "reasons": ["lane process group", "argv names a lane path",
+                               "working directory inside a lane path"]}
+        with mock.patch.object(RUNNER, "FULL_SHARD_RESIDUE_GRACE_SECONDS", 0), \
+                mock.patch.object(RUNNER, "_full_shard_residue", return_value=[finding]), \
+                mock.patch.object(RUNNER.os, "kill", side_effect=ProcessLookupError) as send:
+            findings, _ = RUNNER._full_shard_residue_gate(("/owned/lane",), (420012,))
+        self.assertEqual([420011], [row["pid"] for row in findings], "residue must still block proof")
+        send.assert_not_called()
+        self.assertEqual("unowned-not-signalled", findings[0]["cleanup"])
+
+    def test_residue_stop_uses_matching_preexisting_handle_without_numeric_fallback(self):
+        matched, stale, missing = 420014, 420015, 420016
+        rows = [{"pid": pid, "reasons": ["argv names a lane path"]} for pid in (matched, stale)]
+        held, wrong = mock.Mock(), mock.Mock()
+        held.recv.side_effect = [b"!", b""]
+        with mock.patch.object(RUNNER, "FULL_SHARD_RESIDUE_GRACE_SECONDS", 0), \
+                mock.patch.object(RUNNER, "_full_shard_residue", return_value=rows), \
+                mock.patch.object(RUNNER.os, "kill") as signal_process:
+            findings, _ = RUNNER._full_shard_residue_gate(
+                ("/owned/lane",), (), owned={matched: held, missing: wrong},
+            )
+        self.assertEqual(["owned-peer-stopped", "unowned-not-signalled"],
+                         [row["cleanup"] for row in findings])
+        self.assertEqual([matched, stale], [row["pid"] for row in findings])
+        held.sendall.assert_called_once_with(b"X")
+        self.assertEqual([mock.call(1), mock.call(1)], held.recv.call_args_list)
+        self.assertEqual([], wrong.mock_calls)
+        signal_process.assert_not_called()
+
+    def test_lane_cleanup_never_signals_an_already_reaped_group(self):
+        process = mock.Mock(pid=420002, returncode=-15)
+        with mock.patch.object(RUNNER.os, "killpg") as send_group, \
+                mock.patch.object(RUNNER.time, "sleep") as grace:
+            RUNNER._full_shard_kill_group(process)
+        send_group.assert_not_called()
+        grace.assert_not_called()
+        self.assertEqual([], process.mock_calls)
+
+    def test_lane_cleanup_escalates_before_reaping_even_if_grace_is_interrupted(self):
+        events = mock.Mock()
+        process = events.process
+        process.pid = 420003
+        process.returncode = None
+        events.grace.side_effect = KeyboardInterrupt
+        with mock.patch.object(RUNNER.os, "killpg", events.send_group), \
+                mock.patch.object(RUNNER.time, "sleep", events.grace):
+            with self.assertRaises(KeyboardInterrupt):
+                RUNNER._full_shard_kill_group(process)
+        self.assertEqual([
+            mock.call.send_group(420003, RUNNER.signal.SIGTERM),
+            mock.call.grace(10.0),
+            mock.call.send_group(420003, RUNNER.signal.SIGKILL),
+            mock.call.process.wait(),
+        ], events.mock_calls)
+
     def test_lane_deadline_terminates_the_whole_process_group(self):
+        import select
+        import signal
         import time as time_module
-        with tempfile.TemporaryDirectory(prefix="shard-deadline-") as directory:
-            marker = Path(directory) / "grandchild"
+        self.assertEqual(signal.SIG_DFL, signal.getsignal(signal.SIGCHLD))
+        ready_read, ready_write = os.pipe()
+        rescue_read, rescue_write = os.pipe()
+        with os.fdopen(ready_read, "rb", buffering=0) as ready, \
+                os.fdopen(ready_write, "wb", buffering=0) as announce, \
+                os.fdopen(rescue_read, "rb", buffering=0) as rescue_child, \
+                os.fdopen(rescue_write, "wb", buffering=0) as rescue_parent:
+            grandchild_program = (
+                "import os, signal\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                f"os.write({ready_write}, (str(os.getpid()) + '\\n').encode('ascii'))\n"
+                f"os.read({rescue_read}, 1)\n"
+            )
+            # The session leader uses TERM's default disposition. Only the
+            # actual grandchild holds the readiness/lifetime writer and ignores
+            # TERM, forcing the real runner to send its escalated group signal.
             program = (
-                "import pathlib, subprocess, sys, time\n"
-                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-                f"pathlib.Path({str(marker)!r}).write_text(str(child.pid))\n"
+                "import os, signal, subprocess, sys, time\n"
+                "signal.signal(signal.SIGTERM, signal.SIG_DFL)\n"
+                f"child = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c', {grandchild_program!r}], "
+                f"pass_fds=({ready_write}, {rescue_read}))\n"
+                f"os.close({ready_write}); os.close({rescue_read})\n"
                 "time.sleep(60)\n"
             )
             process = subprocess.Popen(
-                [sys.executable, "-B", "-c", program], start_new_session=True,
+                [sys.executable, "-I", "-S", "-B", "-c", program],
+                pass_fds=(ready_write, rescue_read), start_new_session=True,
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-
-            def reap_group():
-                try:
-                    os.killpg(process.pid, 9)
-                except (ProcessLookupError, PermissionError):
-                    pass
-                process.wait(timeout=10)
-
-            self.addCleanup(reap_group)
-            log = open(os.devnull, "wb")
-            self.addCleanup(log.close)
-            started = time_module.monotonic()
-            while not marker.exists() and time_module.monotonic() - started < 10:
-                time_module.sleep(0.05)
-            finished = RUNNER._full_shard_wait_lanes(
-                {"w0": (process, log, time_module.monotonic(), time_module.time())},
-                deadline_seconds=0.5, poll=0.05,
-            )
-            self.assertTrue(finished["w0"]["deadline_exceeded"])
-            self.assertNotEqual(0, finished["w0"]["exit"])
-            grandchild = int(marker.read_text())
-            deadline = time_module.monotonic() + 10
-            while time_module.monotonic() < deadline:
-                try:
+            try:
+                announce.close()
+                rescue_child.close()
+                self.assertEqual([ready], select.select([ready], [], [], 10)[0])
+                receipt = ready.read(64)
+                self.assertRegex(receipt, rb"^[1-9][0-9]*\n$")
+                grandchild = int(receipt)
+                self.assertEqual(process.pid, os.getpgid(grandchild))
+                self.assertIsNone(process.returncode)
+                with open(os.devnull, "wb") as log:
+                    finished = RUNNER._full_shard_wait_lanes(
+                        {"w0": (process, log, time_module.monotonic(), time_module.time())},
+                        deadline_seconds=0.5, poll=0.05,
+                    )
+                self.assertTrue(finished["w0"]["deadline_exceeded"])
+                self.assertNotEqual(0, finished["w0"]["exit"])
+                self.assertEqual(-signal.SIGTERM, process.returncode)
+                self.assertEqual(process.returncode, finished["w0"]["exit"])
+                # The emergency control writer remains open during all checks.
+                # EOF proves the original TERM-resistant child's writer is
+                # gone. Preserve the original non-signaling PID disappearance
+                # assertion separately; never give that number cleanup power.
+                self.assertEqual([ready], select.select([ready], [], [], 10)[0])
+                self.assertEqual(b"", ready.read(1))
+                deadline = time_module.monotonic() + 10
+                while time_module.monotonic() < deadline:
+                    try:
+                        os.kill(grandchild, 0)
+                    except ProcessLookupError:
+                        break
+                    time_module.sleep(0.05)
+                with self.assertRaises(ProcessLookupError):
                     os.kill(grandchild, 0)
-                except ProcessLookupError:
-                    break
-                time_module.sleep(0.05)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(grandchild, 0)
+            finally:
+                rescue_parent.close()  # Private EOF, even if the leader was reaped.
+                if process.poll() is None:
+                    process.kill()     # Original direct child only, never its old PGID.
+                process.wait(timeout=10)
 
     def test_lane_temporary_roots_must_carry_the_user_primary_gid(self):
         with tempfile.TemporaryDirectory(prefix="shard-gid-") as directory:
@@ -4005,7 +4105,7 @@ class FullShardS0FixTests(unittest.TestCase):
     def test_lane_wait_records_epochs_and_wall_seconds(self):
         import time as time_module
         process = subprocess.Popen(
-            [sys.executable, "-B", "-c", "pass"], start_new_session=True,
+            [sys.executable, "-I", "-S", "-B", "-c", "pass"], start_new_session=True,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         self.addCleanup(process.wait)

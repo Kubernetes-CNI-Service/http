@@ -11,6 +11,8 @@ fail (never skip) with the deps.py install command when that venv cannot prove t
 
 from __future__ import annotations
 
+import ast
+
 import html
 import importlib
 import json
@@ -20,6 +22,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -171,15 +174,44 @@ ROUTED_F01_TESTS = {
 }
 
 
-# Marker in the argv of every real process these tests start, so a harness can find and kill leftovers.
+# Diagnostic marker only. Cleanup authority is the inherited private socket.
 TEST_PROCESS_MARKER = "f01-sdk-venv-test-grandchild"
 
+F01_FIXTURE_DESCENDANT = (
+    "import os, socket, sys\n"
+    "with socket.socket(fileno=int(sys.argv[1])) as lease:\n"
+    "    lease.settimeout(int(sys.argv[2]))\n"
+    "    lease.sendall((str(os.getpid()) + '\\n').encode('ascii'))\n"
+    "    if lease.recv(1) == b'X':\n"
+    "        lease.sendall(b'!')\n"
+)
 
-def kill_quietly(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+
+def f01_fixture_launcher(pidfile, fd, *, escaped):
+    seconds = 60 if escaped else 120
+    launch = (
+        "import os, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, '-I', '-S', '-B', '-c', "
+        f"{F01_FIXTURE_DESCENDANT!r}, {str(fd)!r}, {str(seconds)!r}, sys.argv[2]], "
+        f"pass_fds=({fd},), start_new_session={escaped!r})\n"
+        f"os.close({fd})\n"
+        "open(sys.argv[1], 'w').write(str(child.pid))\n"
+    )
+    output = ("print('started', flush=True)\n" if escaped else
+              "sys.stdout.buffer.write(b'\\xff\\xfe before timeout\\n'); sys.stdout.flush()\n")
+    return [sys.executable, "-I", "-S", "-B", "-c", launch + output + f"time.sleep({seconds})\n",
+            str(pidfile), TEST_PROCESS_MARKER]
+
+
+def _read_f01_fixture_pid(channel, deadline):
+    receipt = bytearray()
+    while len(receipt) < 32 and not receipt.endswith(b"\n"):
+        channel.settimeout(max(0.0, deadline - time.monotonic()))
+        byte = channel.recv(1)
+        if not byte:
+            break
+        receipt.extend(byte)
+    return bytes(receipt)
 
 
 class FakeChild:
@@ -416,23 +448,23 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
 
     def test_timeout_kills_grandchildren_and_output_is_decoded_with_replacement(self):
         """Real processes: the child's own child dies with it; undecodable bytes do not raise."""
-        with tempfile.TemporaryDirectory() as directory:
+        own, inherited = socket.socketpair()
+        with own, inherited, tempfile.TemporaryDirectory() as directory:
             pidfile = Path(directory) / "grandchild.pid"
-            program = ("import subprocess, sys, time\n"
-                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', sys.argv[2]])\n"
-                       "open(sys.argv[1], 'w').write(str(child.pid))\n"
-                       "sys.stdout.buffer.write(b'\\xff\\xfe before timeout\\n'); sys.stdout.flush()\n"
-                       "time.sleep(120)\n")
+            fd = inherited.fileno()
             code, stdout, stderr = f01_sdk_venv._run(
-                [sys.executable, "-I", "-c", program, str(pidfile), TEST_PROCESS_MARKER], 15)
+                f01_fixture_launcher(pidfile, fd, escaped=False), 15, pass_fds=(fd,))
+            inherited.close()
             self.assertTrue(pidfile.is_file(), f"the child never wrote its grandchild pid:\n{stdout}\n{stderr}")
             grandchild = int(pidfile.read_text())
-            self.addCleanup(kill_quietly, grandchild)
             self.assertIsNone(code)
             self.assertIn("timed out after 15 s", stderr or "")
             self.assertIn("\ufffd", stdout or "")
             self.assertIn("before timeout", stdout or "")
             deadline = time.monotonic() + 15
+            self.assertEqual(f"{grandchild}\n".encode("ascii"), _read_f01_fixture_pid(own, deadline))
+            own.settimeout(max(0.0, deadline - time.monotonic()))
+            self.assertEqual(b"", own.recv(1), "grandchild must be gone before the rescue socket closes")
             while time.monotonic() < deadline:
                 try:
                     os.kill(grandchild, 0)
@@ -442,27 +474,55 @@ class F01SdkVenvRoutingWorkflowTests(unittest.TestCase):
             else:
                 self.fail(f"grandchild {grandchild} survived the child's timeout")
 
+    def test_fixture_does_not_turn_recorded_pid_into_cleanup_signal(self):
+        tree = ast.parse(Path(__file__).read_bytes())
+        destructive_numeric_calls = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if not isinstance(node.func.value, ast.Name) or node.func.value.id != "os":
+                continue
+            if node.func.attr == "killpg" or (node.func.attr == "kill" and not (
+                len(node.args) == 2 and isinstance(node.args[1], ast.Constant) and node.args[1].value == 0
+            )):
+                destructive_numeric_calls.append(node.lineno)
+        self.assertEqual([], destructive_numeric_calls, "fixture teardown must not signal a recorded PID")
+
+    def test_f01_reaped_launcher_never_signals_former_group(self):
+        child = mock.Mock(pid=420013, returncode=1)
+        with mock.patch.object(f01_sdk_venv.os, "killpg") as send:
+            f01_sdk_venv._kill_group(child)
+        send.assert_not_called()
+        child.kill.assert_not_called()
+
     def test_a_descendant_that_left_the_group_cannot_hold_the_timeout_open(self):
         """A grandchild that called setsid survives the group kill and keeps the pipes open; _run stops
         waiting for it after KILL_GRACE instead of hanging."""
-        with tempfile.TemporaryDirectory() as directory:
+        own, inherited = socket.socketpair()
+        with own, inherited, tempfile.TemporaryDirectory() as directory:
             pidfile = Path(directory) / "escaped.pid"
-            program = ("import subprocess, sys, time\n"
-                       "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', sys.argv[2]],"
-                       " start_new_session=True)\n"
-                       "open(sys.argv[1], 'w').write(str(child.pid))\n"
-                       "print('started', flush=True)\n"
-                       "time.sleep(60)\n")
+            fd = inherited.fileno()
             started = time.monotonic()
             with mock.patch.object(f01_sdk_venv, "KILL_GRACE", 1):
                 code, stdout, stderr = f01_sdk_venv._run(
-                    [sys.executable, "-I", "-c", program, str(pidfile), TEST_PROCESS_MARKER], 3)
+                    f01_fixture_launcher(pidfile, fd, escaped=True), 3, pass_fds=(fd,))
+            inherited.close()
             elapsed = time.monotonic() - started
             self.assertTrue(pidfile.is_file(), f"the child never wrote its grandchild pid:\n{stdout}\n{stderr}")
-            self.addCleanup(kill_quietly, int(pidfile.read_text()))
+            grandchild = int(pidfile.read_text())
             self.assertIsNone(code)
             self.assertIn("timed out after 3 s", stderr or "")
             self.assertLess(elapsed, 20, "an escaped grandchild must not hold _run open")
+            deadline = started + 20
+            self.assertEqual(f"{grandchild}\n".encode("ascii"), _read_f01_fixture_pid(own, deadline))
+            # Only this private inherited peer can acknowledge the stop. If an
+            # assertion above fails, closing our peer still supplies rescue EOF.
+            own.settimeout(max(0.0, deadline - time.monotonic()))
+            own.sendall(b"X")
+            own.settimeout(max(0.0, deadline - time.monotonic()))
+            self.assertEqual(b"!", own.recv(1))
+            own.settimeout(max(0.0, deadline - time.monotonic()))
+            self.assertEqual(b"", own.recv(1))
 
     def test_a_child_marker_outside_the_target_venv_fails_instead_of_recursing(self):
         self.make_venv()

@@ -129,6 +129,10 @@ def _same_directory(left: object, right: Path) -> bool:
 
 
 def _kill_group(process) -> None:
+    # communicate() may already have reaped this child while propagating an
+    # interruption. Never let its old numeric group retain cleanup authority.
+    if process.returncode is not None or signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
@@ -138,15 +142,17 @@ def _kill_group(process) -> None:
             pass
 
 
-def _run(command: list, timeout: int, env: dict = None) -> tuple:
+def _run(command: list, timeout: int, env: dict = None, *, pass_fds=()) -> tuple:
     """(returncode or None, stdout, stderr) of one child in its own session; on timeout the group is killed.
 
     Output is decoded as UTF-8 with replacement, so undecodable bytes cannot turn a FAIL into an ERROR.
     """
+    if signal.getsignal(signal.SIGCHLD) != signal.SIG_DFL:
+        return None, "", "[F01 child requires exclusive reaping (default SIGCHLD)]"
     try:
         process = subprocess.Popen(command, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8",
-                                   errors="replace", start_new_session=True)
+                                   errors="replace", start_new_session=True, pass_fds=pass_fds)
     except OSError as exc:
         return None, "", f"[cannot run {command[0]}: {exc.__class__.__name__}: {exc}]"
     try:

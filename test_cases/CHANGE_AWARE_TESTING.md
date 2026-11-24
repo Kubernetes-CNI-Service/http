@@ -429,7 +429,8 @@ clone、私有 TMPDIR 与私有 0700 pyc 前缀的 gid 等于用户主 gid；车
 未通过串行运行后的复核（与 `_one_cycle` 运行后相同：对该 clone 重新执行 `load_and_validate_manifest`
 ——源码清单、测试清单、部署选择器、support——再复读 `make_snapshot` 并与运行前的主 checkout 比较；
 两者都能看到生产路径上被忽略的文件）；以 lane 进程组、argv 中的 lane 路径、工作目录
-位于 lane 路径三种口径查到的残留进程（先在 20 秒内只观察不发信号，仍残留则记录后终止并判失败）；
+位于 lane 路径三种口径查到的残留进程（先在 20 秒内只观察不发信号，仍残留则记录并判失败；
+仅可通过启动时持有且核实归属的私有通道清理，审计 PID／路径／旧组号不是信号授权，归属未知时不发送信号）；
 车道私有 TMPDIR 或 `--sharded` 目录的 work 位于机器共享的 `/tmp`、`/var/tmp` 之下（按 realpath 与
 各级祖先的 dev/inode 判定）；车道 clone 的被忽略文件出现计划 `leftover_allowlist` 未审阅的变化（新增
 或原有的消失，只排除 `__pycache__/*.pyc`）。被审阅形态的被忽略文件变化与私有 TMPDIR 内容只逐车道记入
