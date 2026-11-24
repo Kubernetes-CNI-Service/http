@@ -10,6 +10,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import struct
 import subprocess
 import sys
@@ -47,17 +48,29 @@ def _send_fds(channel, tag, fds):
         raise RuntimeError("incomplete fixture descriptor transfer")
 
 
-def _receive_fds(channel, count):
-    tag, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(count * _FD_SIZE))
+def _receive_fds(channel):
+    """Receive a single local admission with an exact, tag-specific rights count."""
+    # Leave headroom to enumerate and release invalid excess rights too.
+    # On Darwin a narrowly tailored buffer truncated the synthetic
+    # seven-right negative control before all of its pipe ends were observable.
+    # The larger bounded receive space does not change which packets are valid.
+    tag, ancillary, flags, _ = channel.recvmsg(1, socket.CMSG_SPACE(64 * 1024))
+    expected = {b"R": 5, b"X": 1}.get(tag)
     received = []
+    malformed = False
     try:
         for level, kind, data in ancillary:
-            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS or len(data) % _FD_SIZE:
-                raise RuntimeError("invalid fixture descriptor transfer")
+            if level != socket.SOL_SOCKET or kind != socket.SCM_RIGHTS:
+                malformed = True
+                continue
+            remainder = len(data) % _FD_SIZE
+            malformed |= bool(remainder)
             values = array("i")
-            values.frombytes(data)
+            # Even a rejected message may contain a prefix of complete
+            # rights that the kernel installed in this process.
+            values.frombytes(data[:len(data) - remainder])
             received.extend(values)
-        if flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(received) != count:
+        if malformed or flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC) or len(received) != expected:
             raise RuntimeError("truncated or incomplete fixture descriptor transfer")
         for fd in received:
             os.set_inheritable(fd, False)
@@ -156,19 +169,39 @@ class _RemoteSessionCustodian:
     def _serve(self):
         try:
             while True:
-                tag, fds = _receive_fds(self.server, 1)
-                with socket.socket(fileno=fds[0]) as request:
+                tag, fds = _receive_fds(self.server)
+                try:
                     if tag == b"X":
                         return
-                    if tag != b"R":
-                        raise RuntimeError("invalid synthetic UFM custody request")
-                    if self.closing.is_set():
-                        continue
-                    remaining = self.deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TimeoutError("UFM custody request exceeded the original cron deadline")
-                    request.settimeout(remaining)
-                    self._launch(request)
+                    request = socket.socket(fileno=fds[0])
+                    # Only the request socket now owns the reply endpoint.
+                    fds = fds[1:]
+                    with request:
+                        if (request.family != socket.AF_UNIX
+                                or request.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM):
+                            raise RuntimeError("invalid synthetic UFM reply stream")
+                        if self.closing.is_set():
+                            continue
+                        remaining = self.deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise TimeoutError("UFM custody request exceeded the original cron deadline")
+                        request.settimeout(remaining)
+                        # Do not read the frame until the sender knows the broker
+                        # owns the originally transferred reply endpoint. The ACK
+                        # uses its own pipe: rejection must still be visible as EOF
+                        # while the sender holds both sides of the reply socket.
+                        ack = fds[-1]
+                        if not stat.S_ISFIFO(os.fstat(ack).st_mode):
+                            raise RuntimeError("invalid UFM fixture confirmation pipe")
+                        os.set_blocking(ack, False)
+                        if os.write(ack, b"A") != 1:
+                            raise RuntimeError("incomplete UFM fixture admission confirmation")
+                        fds = fds[:-1]
+                        os.close(ack)
+                        self._launch(request, fds)
+                finally:
+                    for fd in fds:
+                        os.close(fd)
         except BaseException as exc:
             self.error = exc
         finally:
@@ -177,12 +210,9 @@ class _RemoteSessionCustodian:
             # observe EOF instead of waiting for the whole cron deadline.
             self.server.close()
 
-    def _launch(self, request):
-        tag, stream_fds = _receive_fds(request, 3)
+    def _launch(self, request, stream_fds):
         release_reader = release_writer = writer_reader = writer = None
         try:
-            if tag != b"S":
-                raise RuntimeError("missing synthetic UFM standard streams")
             size, = struct.unpack("!I", _receive_exact(request, 4))
             if not 0 < size <= os.sysconf("SC_ARG_MAX"):
                 raise RuntimeError("invalid synthetic UFM request size")
@@ -209,7 +239,7 @@ class _RemoteSessionCustodian:
             with (self.root / "remote-sessions").open("a", encoding="ascii") as record:
                 record.write(f"{process.pid}\n")
         finally:
-            for fd in (*stream_fds, release_reader, release_writer, writer_reader, writer):
+            for fd in (release_reader, release_writer, writer_reader, writer):
                 if fd is not None:
                     os.close(fd)
 
@@ -324,10 +354,21 @@ if tool == "ssh":
         recv, reply = socket.socketpair()
         with recv, socket.socket(fileno=os.dup(int(custody))) as intake:
             with reply:
-                if intake.sendmsg([b"R"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [reply.fileno()]))]) != 1:
-                    raise RuntimeError("incomplete UFM custody request")
-            if recv.sendmsg([b"S"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array("i", [0, 1, 2]))]) != 1:
-                raise RuntimeError("incomplete UFM stream transfer")
+                ack_reader, ack_writer = os.pipe()
+                try:
+                    try:
+                        # Keep the original reply endpoint until the broker
+                        # explicitly accepts custody. Only it owns the equivalent
+                        # ACK write end after this send and local close.
+                        rights = array("i", [reply.fileno(), 0, 1, 2, ack_writer])
+                        if intake.sendmsg([b"R"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, rights)]) != 1:
+                            raise RuntimeError("incomplete UFM custody request")
+                    finally:
+                        os.close(ack_writer)
+                    if os.read(ack_reader, 1) != b"A":
+                        raise RuntimeError("UFM custody admission was not confirmed")
+                finally:
+                    os.close(ack_reader)
             payload = json.dumps({"command": command, "cwd": home(ip) + "/root", "env": env}).encode("utf-8")
             recv.sendall(struct.pack("!I", len(payload)) + payload)
             status = bytearray()
@@ -1202,7 +1243,259 @@ class UfmSharedReportCleanupTest(UfmCronCase):
 
 
 class UfmCronCleanupCustodyContractTests(unittest.TestCase):
+    def _confirmation(self, stack):
+        reader, writer = os.pipe()
+        return (stack.enter_context(os.fdopen(reader, "rb", buffering=0)),
+                stack.enter_context(os.fdopen(writer, "wb", buffering=0)))
+
+    def _send_confirmed_admission(self, custody, reply, stdio, confirmation_writer):
+        _send_fds(custody.client, b"R", [reply.fileno(), *stdio, confirmation_writer.fileno()])
+        confirmation_writer.close()
+
+    def _expect_confirmation(self, confirmation_reader, expected=b"A"):
+        self.assertTrue(select.select([confirmation_reader], [], [], 2)[0],
+                        "fixture confirmation channel still open")
+        self.assertEqual(expected, confirmation_reader.read(1))
+
+    def test_fake_sender_waits_for_independent_admission_ack_or_fails_on_its_eof(self):
+        from contextlib import ExitStack
+
+        fixture = UfmCronCase()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+        host = UFMS["ufm01.example.test"][0]
+        for accepted in (True, False):
+            with self.subTest(accepted=accepted), ExitStack() as stack:
+                broker, intake = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
+                stack.enter_context(broker)
+                stack.enter_context(intake)
+                sender = stack.enter_context(subprocess.Popen(
+                    [str(fixture.bin / "ssh"), f"root@{host}", "exit 37"],
+                    cwd=fixture.root, env=fixture._fixture_environment(**{_CUSTODY_FD: str(intake.fileno())}),
+                    pass_fds=(intake.fileno(),), stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                ))
+                # On timeout or failed adoption, close the receiving end (and
+                # queued ACK writers) before Popen.__exit__ waits for our sender.
+                stack.callback(broker.close)
+                broker.settimeout(2)
+                tag, messages, flags, _ = broker.recvmsg(1, socket.CMSG_SPACE(64 * 1024))
+                rights = array("i")
+                for level, kind, payload in messages:
+                    if (level, kind) == (socket.SOL_SOCKET, socket.SCM_RIGHTS):
+                        rights.frombytes(payload)
+                # Adopt every test-owned right before asserting the wire contract.
+                descriptors = [stack.enter_context(os.fdopen(fd, "wb", buffering=0)) for fd in rights]
+                self.assertEqual(b"R", tag)
+                self.assertFalse(flags & (socket.MSG_TRUNC | socket.MSG_CTRUNC))
+                self.assertEqual(5, len(descriptors), "admission needs a separate one-way confirmation pipe")
+                request = stack.enter_context(socket.socket(fileno=os.dup(descriptors[0].fileno())))
+                request.settimeout(2)
+                confirmation = descriptors[-1]
+                self.assertFalse(select.select([request], [], [], 0.1)[0],
+                                 "the fake sender must not write any frame before confirmation")
+                if accepted:
+                    self.assertEqual(1, confirmation.write(b"A"))
+                    confirmation.close()
+                    size, = struct.unpack("!I", _receive_exact(request, 4))
+                    self.assertEqual("exit 37", json.loads(_receive_exact(request, size))["command"])
+                    request.sendall(struct.pack("!i", 37))
+                    # Duplicate stdout/stderr pipe writers belong to this receiver.
+                    for fd in descriptors:
+                        fd.close()
+                    stdout, stderr = sender.communicate(timeout=2)
+                    self.assertEqual((37, b"", b""), (sender.returncode, stdout, stderr))
+                else:
+                    confirmation.close()
+                    # ACK EOF must end the sender even while the test broker still holds the reply stream.
+                    self.assertEqual(b"", request.recv(1), "a declined admission sent request bytes")
+                    for fd in descriptors:
+                        fd.close()
+                    stdout, stderr = sender.communicate(timeout=2)
+                    self.assertNotEqual(0, sender.returncode)
+                    self.assertEqual(b"", stdout)
+                    self.assertIn(b"UFM custody admission was not confirmed", stderr)
+
+    def test_unconfirmed_admission_releases_ack_and_three_stdio_without_launching(self):
+        from contextlib import ExitStack
+        from unittest import mock
+
+        custody = _RemoteSessionCustodian(Path("."), [])
+        custody.closing.set()
+        recv, original_reply = socket.socketpair()
+        with ExitStack() as stack:
+            stack.enter_context(recv)
+            stack.enter_context(original_reply)
+            readers, writers = [], []
+            for _ in range(4):  # three stdio writes, then the independent ACK write
+                reader, writer = os.pipe()
+                stack.callback(os.close, reader)
+                readers.append(reader)
+                writers.append(stack.enter_context(os.fdopen(writer, "wb", buffering=0)))
+            launch = stack.enter_context(mock.patch.object(custody, "_launch"))
+            with custody:
+                _send_fds(custody.client, b"R", [original_reply.fileno(), *(p.fileno() for p in writers)])
+                for writer in writers:
+                    writer.close()
+                for reader in readers:
+                    self.assertTrue(select.select([reader], [], [], 2)[0],
+                                    "refusal must release every writer while sender retains its original reply")
+                    self.assertEqual(b"", os.read(reader, 1), "unconfirmed request saw an acknowledgement")
+                self.assertGreaterEqual(original_reply.fileno(), 0)
+                self.assertIsNone(custody.error)
+                launch.assert_not_called()
+
+    def test_atomic_remote_admission_owns_reply_and_three_streams_before_reading_payload(self):
+        from contextlib import ExitStack
+        from unittest import mock
+
+        custody = _RemoteSessionCustodian(Path("."), [])
+        values = (b"synthetic stdin", b"synthetic stdout", b"synthetic stderr")
+        payload = b"local protocol control"
+        seen = []
+
+        def observe(request, standard_streams):
+            seen.append(tuple(os.read(fd, 64) for fd in standard_streams))
+            size, = struct.unpack("!I", _receive_exact(request, 4))
+            seen.append(_receive_exact(request, size))
+            request.sendall(b"OK")
+
+        recv, reply = socket.socketpair()
+        with ExitStack() as stack:
+            stack.enter_context(recv)
+            stack.enter_context(reply)
+            stdio = []
+            for value in values:
+                reader, writer = os.pipe()
+                stack.callback(os.close, reader)
+                try:
+                    self.assertEqual(len(value), os.write(writer, value))
+                finally:
+                    os.close(writer)
+                stdio.append(reader)
+            stack.enter_context(mock.patch.object(custody, "_launch", side_effect=observe))
+            stack.enter_context(custody)
+            ack_reader, ack_writer = self._confirmation(stack)
+            self._send_confirmed_admission(custody, reply, stdio, ack_writer)
+            self._expect_confirmation(ack_reader)
+            reply.close()
+            # The request stream carries only the existing length/payload/status framing.
+            recv.settimeout(2)
+            try:
+                recv.sendall(struct.pack("!I", len(payload)) + payload)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            self.assertEqual(b"OK", _receive_exact(recv, 2))
+        self.assertEqual([values, payload], seen)
+
+    def test_closing_admission_releases_all_transferred_streams_without_launching(self):
+        from contextlib import ExitStack
+        from unittest import mock
+
+        custody = _RemoteSessionCustodian(Path("."), [])
+        custody.closing.set()
+        recv, reply = socket.socketpair()
+        with ExitStack() as stack:
+            stack.enter_context(recv)
+            stack.enter_context(reply)
+            held, readers, writers = [], [], []
+            for _ in range(3):
+                reader, writer = os.pipe()
+                stack.callback(os.close, reader)
+                writers.append(stack.enter_context(os.fdopen(writer, "wb", buffering=0)))
+                readers.append(reader)
+                held.append(writer)
+            mocked = stack.enter_context(mock.patch.object(custody, "_launch"))
+            stack.enter_context(custody)
+            ack_reader, ack_writer = self._confirmation(stack)
+            self._send_confirmed_admission(custody, reply, held, ack_writer)
+            self._expect_confirmation(ack_reader, b"")
+            reply.close()
+            for writer in writers:
+                writer.close()
+            recv.settimeout(2)
+            self.assertEqual(b"", recv.recv(1))
+            for reader in readers:
+                self.assertTrue(select.select([reader], [], [], 2)[0], "rejected stdio retained by broker")
+                self.assertEqual(b"", os.read(reader, 1))
+            self.assertIsNone(custody.error)
+            mocked.assert_not_called()
+
+    def test_admission_rejects_wrong_tag_or_count_and_releases_received_rights(self):
+        from contextlib import ExitStack
+        from unittest import mock
+
+        for tag, count in ((b"R", 1), (b"R", 4), (b"R", 7), (b"X", 4), (b"?", 4)):
+            with self.subTest(tag=tag, count=count), ExitStack() as stack:
+                custody = _RemoteSessionCustodian(Path("."), [])
+                recv, reply = socket.socketpair()
+                stack.enter_context(recv)
+                stack.enter_context(reply)
+                reads, writes = [], []
+                for _ in range(count - 1):
+                    reader, writer = os.pipe()
+                    stack.callback(os.close, reader)
+                    reads.append(reader)
+                    writes.append(stack.enter_context(os.fdopen(writer, "wb", buffering=0)))
+                launch = stack.enter_context(mock.patch.object(custody, "_launch"))
+                with self.assertRaises(RuntimeError) as raised:
+                    with custody:
+                        _send_fds(custody.client, tag, [reply.fileno(), *(p.fileno() for p in writes)])
+                        reply.close()
+                        for writer in writes:
+                            writer.close()
+                        recv.settimeout(2)
+                        self.assertEqual(b"", recv.recv(1), "rejected reply must close")
+                        for reader in reads:
+                            self.assertTrue(select.select([reader], [], [], 2)[0], "malformed bundle retained stdio")
+                            self.assertEqual(b"", os.read(reader, 1))
+                        custody.thread.join(timeout=2)
+                        launch.assert_not_called()
+                        self.assertIsInstance(custody.error, RuntimeError)
+                self.assertIs(custody.error, raised.exception)
+
+    def test_invalid_reply_or_incomplete_length_cannot_launch_or_keep_owned_stdio(self):
+        from contextlib import ExitStack
+        from unittest import mock
+
+        for socket_type, error_type in ((socket.SOCK_DGRAM, RuntimeError),
+                                        (socket.SOCK_STREAM, EOFError)):
+            with self.subTest(socket_type=socket_type), ExitStack() as stack:
+                custody = _RemoteSessionCustodian(Path("."), [])
+                recv, reply = socket.socketpair(socket.AF_UNIX, socket_type)
+                stack.enter_context(recv)
+                stack.enter_context(reply)
+                readers, writers = [], []
+                for _ in range(3):
+                    reader, writer = os.pipe()
+                    stack.callback(os.close, reader)
+                    readers.append(reader)
+                    writers.append(stack.enter_context(os.fdopen(writer, "wb", buffering=0)))
+                launch = stack.enter_context(mock.patch.object(subprocess, "Popen"))
+                ack_reader, ack_writer = self._confirmation(stack)
+                with self.assertRaises(error_type) as caught:
+                    with custody:
+                        self._send_confirmed_admission(
+                            custody, reply, [p.fileno() for p in writers], ack_writer,
+                        )
+                        self._expect_confirmation(ack_reader, b"A" if socket_type == socket.SOCK_STREAM else b"")
+                        reply.close()
+                        for writer in writers:
+                            writer.close()
+                        if socket_type == socket.SOCK_STREAM:
+                            recv.sendall(b"\x00\x00")
+                            recv.shutdown(socket.SHUT_WR)
+                        for reader in readers:
+                            self.assertTrue(select.select([reader], [], [], 2)[0], "refusal retained stdio")
+                            self.assertEqual(b"", os.read(reader, 1))
+                        custody.thread.join(timeout=2)
+                        self.assertFalse(custody.thread.is_alive())
+                        launch.assert_not_called()
+                self.assertIs(custody.error, caught.exception)
+                self.assertEqual([], custody.owned)
+
     def test_broker_launch_failure_closes_both_active_and_queued_request_streams(self):
+        from contextlib import ExitStack
         from unittest import mock
 
         active = threading.Event()
@@ -1210,7 +1503,7 @@ class UfmCronCleanupCustodyContractTests(unittest.TestCase):
         first_cause = RuntimeError("synthetic UFM fixture launch failure")
         custody = _RemoteSessionCustodian(Path("."), [])
 
-        def fail_launch(request):
+        def fail_launch(request, standard_streams):
             active.set()
             if not release.wait(2):
                 raise AssertionError("control did not queue the second request")
@@ -1218,21 +1511,25 @@ class UfmCronCleanupCustodyContractTests(unittest.TestCase):
 
         first_reader, first_reply = socket.socketpair()
         queued_reader, queued_reply = socket.socketpair()
-        with first_reader, first_reply, queued_reader, queued_reply, \
-                mock.patch.object(custody, "_launch", side_effect=fail_launch):
+        with first_reader, first_reply, queued_reader, queued_reply, open(os.devnull, "rb") as inert, \
+                mock.patch.object(custody, "_launch", side_effect=fail_launch), ExitStack() as stack:
+            first_ack, first_ack_writer = self._confirmation(stack)
+            queued_ack, queued_ack_writer = self._confirmation(stack)
             with self.assertRaisesRegex(RuntimeError, str(first_cause)) as stopped:
                 with custody:
                     try:
-                        _send_fds(custody.client, b"R", [first_reply.fileno()])
+                        self._send_confirmed_admission(custody, first_reply, [inert.fileno()] * 3, first_ack_writer)
+                        self._expect_confirmation(first_ack)
                         first_reply.close()
                         self.assertTrue(active.wait(2), "the first request must reach the injected failure")
-                        _send_fds(custody.client, b"R", [queued_reply.fileno()])
-                        queued_reply.close()
+                        self._send_confirmed_admission(custody, queued_reply, [inert.fileno()] * 3, queued_ack_writer)
                     finally:
                         release.set()
                     custody.thread.join(timeout=2)
                     self.assertFalse(custody.thread.is_alive())
                     self.assertIs(first_cause, custody.error)
+                    self._expect_confirmation(queued_ack, b"")
+                    queued_reply.close()
                     for label, reader in (("active", first_reader), ("queued", queued_reader)):
                         self.assertTrue(select.select([reader], [], [], 2)[0],
                                         f"{label} request still waits after the first broker failure")
@@ -1240,6 +1537,7 @@ class UfmCronCleanupCustodyContractTests(unittest.TestCase):
             self.assertIs(first_cause, stopped.exception)
 
     def test_cron_wait_timeout_keeps_the_prior_fixture_broker_failure_as_cause(self):
+        from contextlib import ExitStack
         from unittest import mock
 
         custody = _RemoteSessionCustodian(Path("."), [])
@@ -1247,10 +1545,13 @@ class UfmCronCleanupCustodyContractTests(unittest.TestCase):
         expired = subprocess.TimeoutExpired(["synthetic-ufm-control"], _CRON_SECONDS)
         returned, transferred = socket.socketpair()
         reported = None
-        with returned, transferred, mock.patch.object(custody, "_launch", side_effect=first_cause):
+        with returned, transferred, open(os.devnull, "rb") as inert, \
+                mock.patch.object(custody, "_launch", side_effect=first_cause), ExitStack() as stack:
+            ack_reader, ack_writer = self._confirmation(stack)
             try:
                 with custody:
-                    _send_fds(custody.client, b"R", [transferred.fileno()])
+                    self._send_confirmed_admission(custody, transferred, [inert.fileno()] * 3, ack_writer)
+                    self._expect_confirmation(ack_reader)
                     transferred.close()
                     custody.thread.join(timeout=2)
                     self.assertFalse(custody.thread.is_alive())
