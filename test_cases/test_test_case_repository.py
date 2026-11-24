@@ -631,8 +631,34 @@ class Version314RegistrationTests(unittest.TestCase):
         for path, canonical in original["scripts"].items():
             with self.subTest(original_script=path):
                 self.assertEqual(canonical, self.manifest["scripts"].get(path))
-        for name in ("path_rules", "tracked_support"):
-            self.assertEqual(original[name], self.manifest[name])
+        # v3.1.5 P050 (r757 §5.1, WP9-SUPPORT-01): keep the original ordered
+        # lists exactly, with only this approved helper and its literal rule.
+        # The fourteen original consumers plus the approved WP6/WP8 workflows
+        # are independent of the manifest being checked.
+        support = "test_cases/initial_setup_jump_fixture.py"
+        p050_consumers = [
+            "test_cases.test_ibsw225_managed_outer_guard_workflow",
+            "test_cases.test_initial_setup_bringup_results_workflow",
+            "test_cases.test_initial_setup_credentials_fd_workflow",
+            "test_cases.test_initial_setup_host_key_refresh_workflow",
+            "test_cases.test_initial_setup_jump_sessions",
+            "test_cases.test_initial_setup_offline_main",
+            "test_cases.test_initial_setup_oob_spine_main",
+            "test_cases.test_initial_setup_operator_reexec",
+            "test_cases.test_initial_setup_operator_reexec_workflow",
+            "test_cases.test_initial_setup_project_names_workflow",
+            "test_cases.test_initial_setup_replace_workflow",
+            "test_cases.test_initial_setup_strict_stage_skeleton",
+            "test_cases.test_initial_setup_summary_output",
+            "test_cases.test_initial_setup_target_credentials_workflow",
+            "test_cases.test_initial_setup_worker_queue",
+            "test_cases.test_req10b_services_keys_workflow",
+        ]
+        self.assertEqual(original["tracked_support"] + [support], self.manifest["tracked_support"])
+        self.assertEqual(
+            original["path_rules"] + [{"paths": [support], "tests": p050_consumers}],
+            self.manifest["path_rules"],
+        )
         for name in ("test_rules", "workflows", "test_suites"):
             current = self.table(name)
             for before in original[name]:

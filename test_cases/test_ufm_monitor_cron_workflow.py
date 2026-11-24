@@ -171,6 +171,11 @@ class _RemoteSessionCustodian:
                     self._launch(request)
         except BaseException as exc:
             self.error = exc
+        finally:
+            # Closing the receiving endpoint also releases any undelivered
+            # SCM_RIGHTS in the queue. Their private reply streams can then
+            # observe EOF instead of waiting for the whole cron deadline.
+            self.server.close()
 
     def _launch(self, request):
         tag, stream_fds = _receive_fds(request, 3)
@@ -224,7 +229,14 @@ class _RemoteSessionCustodian:
         try:
             # The cron has already returned; only the actual parent sends the
             # sentinel on its private endpoint. Ancillary remains exactly one fd.
-            _send_fds(self.client, b"X", [self.client.fileno()])
+            transport_error = None
+            if self.thread.is_alive():
+                try:
+                    _send_fds(self.client, b"X", [self.client.fileno()])
+                except OSError as rejected:
+                    # The broker may have just failed and closed its endpoint.
+                    # Join before deciding which error is the first cause.
+                    transport_error = rejected
             self.thread.join(timeout=max(0, self.deadline - time.monotonic()))
             if self.thread.is_alive():
                 # An expired cron leaves no read deadline. Share this wait with
@@ -233,11 +245,10 @@ class _RemoteSessionCustodian:
                 self.thread.join(timeout=max(0, self.cleanup_deadline - time.monotonic()))
             if self.thread.is_alive() and exc is None:
                 raise RuntimeError("UFM custody admissions have not closed")
-            if self.error is not None and exc is None:
-                raise self.error
-        except OSError:
-            if exc is None:
-                raise
+            if self.error is not None and (exc is None or isinstance(exc, subprocess.TimeoutExpired)):
+                raise self.error from exc
+            if transport_error is not None and exc is None:
+                raise transport_error
         finally:
             self.server.close()
             self.client.close()
@@ -1191,6 +1202,65 @@ class UfmSharedReportCleanupTest(UfmCronCase):
 
 
 class UfmCronCleanupCustodyContractTests(unittest.TestCase):
+    def test_broker_launch_failure_closes_both_active_and_queued_request_streams(self):
+        from unittest import mock
+
+        active = threading.Event()
+        release = threading.Event()
+        first_cause = RuntimeError("synthetic UFM fixture launch failure")
+        custody = _RemoteSessionCustodian(Path("."), [])
+
+        def fail_launch(request):
+            active.set()
+            if not release.wait(2):
+                raise AssertionError("control did not queue the second request")
+            raise first_cause
+
+        first_reader, first_reply = socket.socketpair()
+        queued_reader, queued_reply = socket.socketpair()
+        with first_reader, first_reply, queued_reader, queued_reply, \
+                mock.patch.object(custody, "_launch", side_effect=fail_launch):
+            with self.assertRaisesRegex(RuntimeError, str(first_cause)) as stopped:
+                with custody:
+                    try:
+                        _send_fds(custody.client, b"R", [first_reply.fileno()])
+                        first_reply.close()
+                        self.assertTrue(active.wait(2), "the first request must reach the injected failure")
+                        _send_fds(custody.client, b"R", [queued_reply.fileno()])
+                        queued_reply.close()
+                    finally:
+                        release.set()
+                    custody.thread.join(timeout=2)
+                    self.assertFalse(custody.thread.is_alive())
+                    self.assertIs(first_cause, custody.error)
+                    for label, reader in (("active", first_reader), ("queued", queued_reader)):
+                        self.assertTrue(select.select([reader], [], [], 2)[0],
+                                        f"{label} request still waits after the first broker failure")
+                        self.assertEqual(b"", reader.recv(1), f"{label} request cannot receive a success reply")
+            self.assertIs(first_cause, stopped.exception)
+
+    def test_cron_wait_timeout_keeps_the_prior_fixture_broker_failure_as_cause(self):
+        from unittest import mock
+
+        custody = _RemoteSessionCustodian(Path("."), [])
+        first_cause = RuntimeError("synthetic UFM broker failure before cron wait expires")
+        expired = subprocess.TimeoutExpired(["synthetic-ufm-control"], _CRON_SECONDS)
+        returned, transferred = socket.socketpair()
+        reported = None
+        with returned, transferred, mock.patch.object(custody, "_launch", side_effect=first_cause):
+            try:
+                with custody:
+                    _send_fds(custody.client, b"R", [transferred.fileno()])
+                    transferred.close()
+                    custody.thread.join(timeout=2)
+                    self.assertFalse(custody.thread.is_alive())
+                    self.assertIs(first_cause, custody.error)
+                    raise expired
+            except (RuntimeError, subprocess.TimeoutExpired) as exc:
+                reported = exc
+        self.assertIs(first_cause, reported)
+        self.assertIs(expired, reported.__cause__)
+
     def test_unsettled_admissions_do_not_skip_cleanup_of_already_held_children(self):
         from unittest import mock
 
