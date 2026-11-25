@@ -19,7 +19,7 @@ from ibsw_v2_switch_sim import LocalSwitch, SimFleet, HEALTH_OK
 from test_ibsw_v2_device import policy_for, SENTINEL
 
 FAST = fleet_probe.Timings(upgrading_ping=.03, reboot_wait=.05, ladder_ping=.03, ladder_retry=.03,
-                           ssh_check=.3, dwell=3, ladder_budget=2, deadline=8)
+                           ssh_check=.3, dwell=3, ladder_budget=2, deadline=8, post_ready_settle=.03)
 
 
 class UpgradeCanaryRoutesWorkflowTests(unittest.TestCase):

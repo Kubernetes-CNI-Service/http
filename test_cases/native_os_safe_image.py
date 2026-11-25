@@ -2690,6 +2690,216 @@ def _restore_project_pointer_layer(payload):
     return original
 
 
+
+# U6 READY display pre-layer above the operator re-exec layer (v3.1.6 A4b, R-032; 指导 8.20): the reviewed
+# [READY] block diff from the frozen previous entry (the operator re-exec candidate), not a new whole-hash
+# allowance; PRODUCTION_PINS and every older layer are unchanged. It is the outermost entry layer, so the
+# operator re-exec, usability, wording2 and display2 layers then see exactly the bytes they were generated
+# against. Literals between the markers are generated from that diff by a script that refuses unless
+# one-pass replacement restores the previous entry exactly; never edit them by hand.
+# BEGIN GENERATED NATIVE READY DISPLAY LAYER
+# Generated from the diff 5f00fd2d3e0bee63afe290bde28aa3f25ed412a1:infiniband/bringup/xdr-upgrade/upgrade.py
+# -> 7aa17d35af9235c01d5ecce55c4484dc73487ce5:infiniband/bringup/xdr-upgrade/upgrade.py;
+# context=3 lines, 1 hunks. Never edit by hand.
+# previous sha256 c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88
+# candidate sha256 6e612e62c9a5d9c2c487677909a31fe3023eb71106c926a256ceff1e80c33ddf
+# (previous offset, candidate offset, old complete hunk literal, new complete literal)
+_NATIVE_READY_DISPLAY_BEFORE_SHA256 = 'c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88'
+_NATIVE_READY_DISPLAY_REGIONS = (
+    # ready_display1: old663B/c693dcbeb8a37df75c274493a705610b899db2883c78af302adf95eaaf0aba0b; new1265B/832bef2a201c56cdebb6daf99342e32e05089039be2889e386b63303312afd4a; retained-old0.
+    (49871, 49871,
+     (
+        b'\n'
+        b'\n'
+        b'def _print_ready_device(index, total, hostname, rows):\n'
+        b'    """One device block after all readiness checks; display never grants IO."""\n'
+        b"    sys.stderr.write(f'[READY {index}/{total}] {hostname}\\n')\n"
+        b"    for component in ('os','bios','cpld'):\n"
+        b'        for row in rows:\n'
+        b"            if row['component']!=component:\n"
+        b'                continue\n'
+        b'            sys.stderr.write(f"  {component.upper()} current={row[\'current\']} "\n'
+        b'                             f"target={row[\'target\']} action={row[\'action\']}\\n")\n'
+        b"            if row.get('path'):\n"
+        b"                sys.stderr.write('    OS path: '+' -> '.join(row['path'])+'\\n')\n"
+        b'\n'
+        b'\n'
+        b'def _print_component_plans(version_plan, selected):\n'
+     ),
+     (
+        b'\n'
+        b'\n'
+        b'def _print_ready_device(index, total, hostname, rows):\n'
+        b'    """One device block after all readiness checks; display never grants IO.\n'
+        b'\n'
+        b'    R-032: two lines per component. The marker follows the existing action, never a\n'
+        b'    current/target text comparison (CPLD current is per slot, its target a set).\n'
+        b'    """\n'
+        b"    sys.stderr.write(f'[READY {index}/{total}] {hostname}\\n')\n"
+        b"    for component in ('os','bios','cpld'):\n"
+        b'        for row in rows:\n'
+        b"            if row['component']!=component:\n"
+        b'                continue\n'
+        b"            action, path = row['action'], row.get('path')\n"
+        b"            if action in ('AT_TARGET_NO_FLASH','PREREQUISITE_VERIFIED'):\n"
+        b"                marker = '= target'\n"
+        b"            elif action=='UPGRADE_REQUIRED':\n"
+        b'                marker = f"!= target={row[\'target\']}"\n'
+        b'            else:\n'
+        b'                marker = f"? target={row[\'target\']}"\n'
+        b"            if action=='AT_TARGET_NO_FLASH' and path and list(path)==[row['current']]:\n"
+        b'                path = None  # the single current is already on the first line\n'
+        b'            sys.stderr.write(f"  {component.upper():<4} current={row[\'current\']} {marker}\\n"\n'
+        b'                             f"    action={action}"+(\', OS path: \'+\' -> \'.join(path) if path else \'\')+\'\\n\')\n'
+        b'\n'
+        b'\n'
+        b'def _print_component_plans(version_plan, selected):\n'
+     )),
+)
+# END GENERATED NATIVE READY DISPLAY LAYER
+
+
+def _restore_native_ready_display_layer(payload):
+    """Reverse every reviewed U6 READY display hunk to the previous entry; else refuse."""
+    if type(payload) is not bytes:
+        raise AssertionError('original entry source bytes required')
+    if not _NATIVE_READY_DISPLAY_REGIONS:
+        raise AssertionError('reviewed READY display layer missing')
+    spans, previous_new_end, previous_old_end, difference = [], 0, 0, 0
+    for old_offset, new_offset, old, new in _NATIVE_READY_DISPLAY_REGIONS:
+        if (payload.count(new) != 1 or payload.find(new) != new_offset
+                or payload.count(old) != 0 or new_offset < previous_new_end
+                or old_offset < previous_old_end or new_offset + difference != old_offset):
+            raise AssertionError('missing/duplicate/old/reordered READY display literal region')
+        spans.append((new_offset, new, old))
+        previous_new_end, previous_old_end = new_offset + len(new), old_offset + len(old)
+        difference += len(old) - len(new)
+    # One pass over the candidate; inserted old bytes are never re-scanned.
+    pieces, cursor = [], 0
+    for offset, new, old in spans:
+        pieces.extend((payload[cursor:offset], old))
+        cursor = offset + len(new)
+    pieces.append(payload[cursor:])
+    original = b''.join(pieces)
+    if _sha(original) != _NATIVE_READY_DISPLAY_BEFORE_SHA256:
+        raise AssertionError('whole previous entry SHA differs after READY display inverse')
+    return original
+
+
+# U2 post-ready settle pre-layer for tools/ibsw_upgrade_pipeline.py (v3.1.6 A4b, R-024; 指导 8.12): the
+# reviewed diff from the unchanged PRODUCTION_PINS bytes, not a re-pin or a new whole-hash allowance.
+# Bound separately from the U6 entry layer. Literals between the markers are generated from that diff by a
+# script that refuses unless one-pass replacement restores the pinned bytes exactly; never edit by hand.
+_POST_READY_SETTLE_PIPELINE = 'tools/ibsw_upgrade_pipeline.py'
+# BEGIN GENERATED POST READY SETTLE PIPELINE LAYER
+# Generated from the diff 5f00fd2d3e0bee63afe290bde28aa3f25ed412a1:tools/ibsw_upgrade_pipeline.py
+# -> 7aa17d35af9235c01d5ecce55c4484dc73487ce5:tools/ibsw_upgrade_pipeline.py;
+# context=3 lines, 3 hunks. Never edit by hand.
+# previous sha256 38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb
+# candidate sha256 6be94a65ddd3369407cb00417b381a6a1fa315e4d9d33d88a5c4146e534ba4b0
+# (previous offset, candidate offset, old complete hunk literal, new complete literal)
+_POST_READY_SETTLE_PIPELINE_BEFORE_SHA256 = '38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb'
+_POST_READY_SETTLE_PIPELINE_REGIONS = (
+    # settle1: old211B/2b7925e6f336979a9183440e4262650fa65b66f1cc2de156111db8ccb691838f; new304B/8b8b56388809268dd3a7e09f792af8dbe4057e606c2be6a2a23ebb3af670a605; retained-old0.
+    (632, 632,
+     (
+        b'\n'
+        b'_NVUED_CHECK_SECONDS = 60.0\n'
+        b'_NVUED_MAX_CHECKS = 5\n'
+        b'_PROGRESS_HEARTBEAT_SECONDS = 30.0\n'
+        b"_NVUED_COMMAND = 'systemctl show nvued.service --property=ActiveState --property=SubState --no-pager'\n"
+        b'_RECHECK_SECONDS = 3.0\n'
+     ),
+     (
+        b'\n'
+        b'_NVUED_CHECK_SECONDS = 60.0\n'
+        b'_NVUED_MAX_CHECKS = 5\n'
+        b'_POST_READY_SETTLE_SECONDS = 30.0  # R-024: fixed wait after NVUE readiness on each new boot\n'
+        b'_PROGRESS_HEARTBEAT_SECONDS = 30.0\n'
+        b"_NVUED_COMMAND = 'systemctl show nvued.service --property=ActiveState --property=SubState --no-pager'\n"
+        b'_RECHECK_SECONDS = 3.0\n'
+     )),
+    # settle2: old155B/eb06a53b0812b82bcf876a129276b40ae3a250d5df5a8d586a5691765ae5c503; new218B/a3d120fe4623d82b4d1e4b2e18b26512a951c3d31f4c9605a856490e86bddc77; retained-old0.
+    (11379, 11472,
+     (
+        b'        self.hops=0\n'
+        b'        self.closed=False\n'
+        b'        self.boot=None\n'
+        b'        self.terminal=None\n'
+        b'        self.started=None\n'
+        b'        self.reported_epoch=None\n'
+     ),
+     (
+        b'        self.hops=0\n'
+        b'        self.closed=False\n'
+        b'        self.boot=None\n'
+        b'        self.settled_epoch=None\n'
+        b'        self.settle_until=None\n'
+        b'        self.terminal=None\n'
+        b'        self.started=None\n'
+        b'        self.reported_epoch=None\n'
+     )),
+    # settle3: old400B/f82b3159c081f0621c23373d3c2791191ca5ef711e2caea04b3aac58540773d3; new1142B/c1e29343d3a01c8542ab307d068282532c0ff644d02de492c839026021360698; retained-old0.
+    (29170, 29326,
+     (
+        b"                self.bus.emit(job.name,job.component,'NVUE_READY')\n"
+        b'                job.remote_may_be_active=False\n'
+        b'                job.phase="VERIFY"\n'
+        b'            if job.phase=="VERIFY":\n'
+        b"                if job.dispatch.state=='DISPATCHED_UNKNOWN':\n"
+        b'                    job.leaf._verification_boot_epoch=job.boot.epoch\n'
+        b"                    self.bus.emit(job.name,job.component,'POST_REBOOT_VERIFICATION')\n"
+     ),
+     (
+        b"                self.bus.emit(job.name,job.component,'NVUE_READY')\n"
+        b'                job.remote_may_be_active=False\n'
+        b'                job.phase="VERIFY"\n'
+        b'                if job.boot.epoch!=job.settled_epoch:\n'
+        b'                    # R-024: wait once per new boot before verification, inside the original deadline.\n'
+        b'                    job.settled_epoch=job.boot.epoch\n'
+        b'                    job.settle_until=_now()+_POST_READY_SETTLE_SECONDS\n'
+        b"                    self.record_time(job,'POST_READY_SETTLE_STARTED',boot_id=job.boot.epoch,\n"
+        b'                        settle_seconds=_POST_READY_SETTLE_SECONDS)\n'
+        b'            if job.phase=="VERIFY":\n'
+        b'                if job.settle_until is not None:\n'
+        b'                    if _now()<job.settle_until:\n'
+        b"                        return Event('WAIT',job.settle_until,'VERIFY')\n"
+        b'                    job.settle_until=None\n'
+        b"                    self.record_time(job,'POST_READY_SETTLE_ENDED',boot_id=job.boot.epoch)\n"
+        b"                if job.dispatch.state=='DISPATCHED_UNKNOWN':\n"
+        b'                    job.leaf._verification_boot_epoch=job.boot.epoch\n'
+        b"                    self.bus.emit(job.name,job.component,'POST_REBOOT_VERIFICATION')\n"
+     )),
+)
+# END GENERATED POST READY SETTLE PIPELINE LAYER
+
+
+def _restore_post_ready_settle_pipeline_layer(payload):
+    """Reverse every reviewed U2 pipeline hunk to the unchanged pin; else refuse."""
+    if type(payload) is not bytes:
+        raise AssertionError('original pipeline source bytes required')
+    if not _POST_READY_SETTLE_PIPELINE_REGIONS:
+        raise AssertionError('reviewed post-ready settle layer missing')
+    spans, previous_new_end, previous_old_end, difference = [], 0, 0, 0
+    for old_offset, new_offset, old, new in _POST_READY_SETTLE_PIPELINE_REGIONS:
+        if (payload.count(new) != 1 or payload.find(new) != new_offset
+                or payload.count(old) != 0 or new_offset < previous_new_end
+                or old_offset < previous_old_end or new_offset + difference != old_offset):
+            raise AssertionError('missing/duplicate/old/reordered post-ready settle literal region')
+        spans.append((new_offset, new, old))
+        previous_new_end, previous_old_end = new_offset + len(new), old_offset + len(old)
+        difference += len(old) - len(new)
+    pieces, cursor = [], 0
+    for offset, new, old in spans:
+        pieces.extend((payload[cursor:offset], old))
+        cursor = offset + len(new)
+    pieces.append(payload[cursor:])
+    original = b''.join(pieces)
+    if _sha(original) != PRODUCTION_PINS[_POST_READY_SETTLE_PIPELINE]:
+        raise AssertionError('whole pinned pipeline SHA differs after post-ready settle inverse')
+    return original
+
+
 def _native_os_reviewed_source_bytes(files):
     """Preserve baseline19 pins; accept only whole baseline OR exact new layer."""
     if type(files) is not dict or any(path not in files for path in PRODUCTION_PINS):
@@ -2704,7 +2914,15 @@ def _native_os_reviewed_source_bytes(files):
         if type(raw) is bytes and b'_shared_script_layout' in raw:
             original[path] = _restore_upgrade_layout_layer(path, raw)
     original.update(_strip_bios_source_layer({p: original[p] for p in _BIOS_TARGETS}))
+    # U2 (v3.1.6 A4b): the pipeline's own exact layer back to its unchanged pin.
+    raw = original[_POST_READY_SETTLE_PIPELINE]
+    if type(raw) is bytes and any(new in raw for _, _, _, new in _POST_READY_SETTLE_PIPELINE_REGIONS):
+        original[_POST_READY_SETTLE_PIPELINE] = _restore_post_ready_settle_pipeline_layer(raw)
     if _sha(original[_NATIVE_DISPLAY_ENTRY]) != PRODUCTION_PINS[_NATIVE_DISPLAY_ENTRY]:
+        # U6 (v3.1.6 A4b) is the outermost entry layer.
+        if any(new in original[_NATIVE_DISPLAY_ENTRY]
+               for _, _, _, new in _NATIVE_READY_DISPLAY_REGIONS):
+            original[_NATIVE_DISPLAY_ENTRY] = _restore_native_ready_display_layer(original[_NATIVE_DISPLAY_ENTRY])
         if any(new in original[_NATIVE_DISPLAY_ENTRY]
                for _, _, _, new in _NATIVE_OPERATOR_REEXEC_REGIONS):
             original[_NATIVE_DISPLAY_ENTRY] = _restore_native_operator_reexec_layer(original[_NATIVE_DISPLAY_ENTRY])

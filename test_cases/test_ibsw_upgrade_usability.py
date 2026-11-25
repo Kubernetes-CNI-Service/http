@@ -533,5 +533,104 @@ class UpgradeOfferTests(unittest.TestCase):
         self.assertIn('INSPECTION_HANDOFF', str(raised.exception))
 
 
+
+# R-032 / U6 (owner sample 2026-11-17, 问题文件 §21.2; 需求 R-032; 指导 8.20): the existing per-device
+# [READY i/n] block shows each component on two lines -- name padded to four columns, current, the
+# marker from the tool's existing action (never a text comparison) and the target; then the original
+# action and, on that same line, a non-redundant OS path. Rows are never edited by the printer.
+OWNER_SAMPLE_CPLD = ('CPLD1=CPLD000232_REV0900;CPLD2=CPLD000383_REV1001;CPLD3=CPLD000389_REV0600;'
+                     'CPLD4=CPLD000368_REV0300;CPLD5=CPLD000389_REV0600;CPLD6=CPLD000368_REV0300')
+OWNER_SAMPLE_CPLD_TARGET = 'CPLD000232_REV0900+CPLD000368_REV0300+CPLD000383_REV1001+CPLD000389_REV0600'
+
+
+class ReadyDeviceDisplayTests(unittest.TestCase):
+    def render(self, rows, *, index=70, total=104, hostname='ib-leaf01.example'):
+        import copy
+        before = copy.deepcopy(rows)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            app._print_ready_device(index, total, hostname, rows)
+        self.assertEqual(before, rows, 'the printer never edits rows, actions, paths or order')
+        return err.getvalue()
+
+    def test_owner_sample_upgrade_and_two_at_target_components(self):
+        rows = [dict(component='os', current='25.02.8008', target='25.03.1014', action='UPGRADE_REQUIRED',
+                     path=['25.02.8008', '25.03.1014']),
+                dict(component='bios', current='0ACQF_06.01.009', target='0ACQF_06.01.009',
+                     action='AT_TARGET_NO_FLASH'),
+                dict(component='cpld', current=OWNER_SAMPLE_CPLD, target=OWNER_SAMPLE_CPLD_TARGET,
+                     action='AT_TARGET_NO_FLASH')]
+        self.assertEqual(self.render(rows),
+            '[READY 70/104] ib-leaf01.example\n'
+            '  OS   current=25.02.8008 != target=25.03.1014\n'
+            '    action=UPGRADE_REQUIRED, OS path: 25.02.8008 -> 25.03.1014\n'
+            '  BIOS current=0ACQF_06.01.009 = target\n'
+            '    action=AT_TARGET_NO_FLASH\n'
+            '  CPLD current=' + OWNER_SAMPLE_CPLD + ' = target\n'
+            '    action=AT_TARGET_NO_FLASH\n')
+
+    def test_review_required_and_unknown_actions_show_question_mark_and_keep_the_action(self):
+        rows = [dict(component='bios', current='UNVERIFIED', target='0ACQF_06.01.009', action='REVIEW_REQUIRED'),
+                dict(component='cpld', current=OWNER_SAMPLE_CPLD, target=OWNER_SAMPLE_CPLD_TARGET,
+                     action='FUTURE_ACTION_X')]
+        self.assertEqual(self.render(rows, index=1, total=2),
+            '[READY 1/2] ib-leaf01.example\n'
+            '  BIOS current=UNVERIFIED ? target=0ACQF_06.01.009\n'
+            '    action=REVIEW_REQUIRED\n'
+            '  CPLD current=' + OWNER_SAMPLE_CPLD + ' ? target=' + OWNER_SAMPLE_CPLD_TARGET + '\n'
+            '    action=FUTURE_ACTION_X\n')
+
+    def test_marker_follows_the_action_not_the_text(self):
+        rows = [dict(component='os', current='25-03-1010', target='25.03.1010', action='PREREQUISITE_VERIFIED',
+                     path=[]),
+                dict(component='bios', current='0ACQF_06.01.009', target='0ACQF_06.01.009',
+                     action='UPGRADE_REQUIRED'),
+                dict(component='cpld', current=OWNER_SAMPLE_CPLD, target=OWNER_SAMPLE_CPLD,
+                     action='REVIEW_REQUIRED')]
+        self.assertEqual(self.render(rows, index=3, total=3),
+            '[READY 3/3] ib-leaf01.example\n'
+            '  OS   current=25-03-1010 = target\n'
+            '    action=PREREQUISITE_VERIFIED\n'
+            '  BIOS current=0ACQF_06.01.009 != target=0ACQF_06.01.009\n'
+            '    action=UPGRADE_REQUIRED\n'
+            '  CPLD current=' + OWNER_SAMPLE_CPLD + ' ? target=' + OWNER_SAMPLE_CPLD + '\n'
+            '    action=REVIEW_REQUIRED\n')
+
+    def test_complete_multi_hop_path_on_the_action_line_and_no_redundant_at_target_path(self):
+        rows = [dict(component='os', current='25.02.8008', target='25.03.1010', action='UPGRADE_REQUIRED',
+                     path=['25.02.8008', '25.02.9000', '25.03.1005', '25.03.1010'])]
+        self.assertEqual(self.render(rows, index=2, total=9),
+            '[READY 2/9] ib-leaf01.example\n'
+            '  OS   current=25.02.8008 != target=25.03.1010\n'
+            '    action=UPGRADE_REQUIRED, OS path: 25.02.8008 -> 25.02.9000 -> 25.03.1005 -> 25.03.1010\n')
+        at_target = [dict(component='os', current='25.03.1010', target='25.03.1010', action='AT_TARGET_NO_FLASH',
+                          path=['25.03.1010'])]
+        self.assertEqual(self.render(at_target, index=4, total=9),
+            '[READY 4/9] ib-leaf01.example\n'
+            '  OS   current=25.03.1010 = target\n'
+            '    action=AT_TARGET_NO_FLASH\n')
+        review = [dict(component='os', current='25.02.8008', target='25.03.1010', action='REVIEW_REQUIRED',
+                       path=['25.02.8008', '25.03.1010'])]
+        self.assertEqual(self.render(review, index=5, total=9),
+            '[READY 5/9] ib-leaf01.example\n'
+            '  OS   current=25.02.8008 ? target=25.03.1010\n'
+            '    action=REVIEW_REQUIRED, OS path: 25.02.8008 -> 25.03.1010\n')
+
+    def test_component_order_is_os_bios_cpld_and_paths_never_cross_components(self):
+        rows = [dict(component='cpld', current=OWNER_SAMPLE_CPLD, target=OWNER_SAMPLE_CPLD_TARGET,
+                     action='UPGRADE_REQUIRED'),
+                dict(component='bios', current='0ACQF_06.01.008', target='0ACQF_06.01.009',
+                     action='UPGRADE_REQUIRED'),
+                dict(component='os', current='25.02.8008', target='25.03.1010', action='UPGRADE_REQUIRED',
+                     path=['25.02.8008', '25.03.1010'])]
+        self.assertEqual(self.render(rows, index=6, total=6),
+            '[READY 6/6] ib-leaf01.example\n'
+            '  OS   current=25.02.8008 != target=25.03.1010\n'
+            '    action=UPGRADE_REQUIRED, OS path: 25.02.8008 -> 25.03.1010\n'
+            '  BIOS current=0ACQF_06.01.008 != target=0ACQF_06.01.009\n'
+            '    action=UPGRADE_REQUIRED\n'
+            '  CPLD current=' + OWNER_SAMPLE_CPLD + ' != target=' + OWNER_SAMPLE_CPLD_TARGET + '\n'
+            '    action=UPGRADE_REQUIRED\n')
+
+
 if __name__ == '__main__':
     unittest.main()

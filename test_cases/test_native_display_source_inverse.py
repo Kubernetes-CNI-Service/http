@@ -133,13 +133,40 @@ OPERATOR_REEXEC_REGIONS = [
 # END GENERATED OPERATOR REEXEC REVIEW TABLE
 
 
+# U6 (v3.1.6 A4b, R-032; 指导 8.20): outermost display-only exact DATA pre-layer of the [READY] block
+# change, back to the frozen previous entry (the WP-10 operator re-exec candidate, c5d64b... in the table
+# above); the operator -> usability -> wording2 -> display2 -> 19 pins chain then runs unchanged.
+# Independent review table generated from git (not from SUBJECT tables).
+# BEGIN GENERATED READY DISPLAY REVIEW TABLE
+# Generated from the diff 5f00fd2d3e0bee63afe290bde28aa3f25ed412a1:infiniband/bringup/xdr-upgrade/upgrade.py
+# -> 7aa17d35af9235c01d5ecce55c4484dc73487ce5:infiniband/bringup/xdr-upgrade/upgrade.py;
+# context=3 lines, 1 hunks. Never edit by hand.
+# [previous offset, previous length, candidate offset, candidate length,
+#  previous sha256, candidate sha256]
+READY_DISPLAY_BEFORE_SHA = 'c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88'
+READY_DISPLAY_CANDIDATE_SHA = '6e612e62c9a5d9c2c487677909a31fe3023eb71106c926a256ceff1e80c33ddf'
+READY_DISPLAY_REGIONS = [
+    [49871, 663, 49871, 1265, 'c693dcbeb8a37df75c274493a705610b899db2883c78af302adf95eaaf0aba0b', '832bef2a201c56cdebb6daf99342e32e05089039be2889e386b63303312afd4a'],
+]
+# END GENERATED READY DISPLAY REVIEW TABLE
+# Frozen previous entry: the candidate named in the operator re-exec table header above.
+OPERATOR_REEXEC_CANDIDATE_SHA = 'c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88'
+
+
+def _operator_reexec_candidate(case):
+    """The live entry under exactly the reviewed U6 READY display pre-layer (outermost)."""
+    entry = SUBJECT._restore_native_ready_display_layer(_live_entry())
+    case.assertEqual(OPERATOR_REEXEC_CANDIDATE_SHA, hashlib.sha256(entry).hexdigest())
+    return entry
+
+
 def _live_entry():
     return (Path(__file__).resolve().parents[1] / ENTRY).read_bytes()
 
 
 def _usability_candidate(case):
     """The live entry under exactly the reviewed WP-10 operator re-exec pre-layer."""
-    entry = SUBJECT._restore_native_operator_reexec_layer(_live_entry())
+    entry = SUBJECT._restore_native_operator_reexec_layer(_operator_reexec_candidate(case))
     case.assertEqual(OPERATOR_REEXEC_BEFORE_SHA, hashlib.sha256(entry).hexdigest())
     return entry
 
@@ -278,7 +305,7 @@ class NativeOperatorReexecInverseTests(unittest.TestCase):
         return function
 
     def inputs(self):
-        new = _live_entry()
+        new = _operator_reexec_candidate(self)
         old = self.inverse()(new)
         self.assertEqual(OPERATOR_REEXEC_BEFORE_SHA, hashlib.sha256(old).hexdigest())
         return old, new
@@ -338,3 +365,90 @@ class NativeOperatorReexecInverseTests(unittest.TestCase):
             reordered = new[:a] + new[b:b + blen] + new[a + alen:b] + new[a:a + alen] + new[b + blen:]
             with self.subTest(mutation='reordered'), self.assertRaises(AssertionError):
                 inverse(reordered)
+
+
+class NativeReadyDisplayInverseTests(unittest.TestCase):
+    """The live entry is the frozen previous entry plus exactly the reviewed U6 [READY] display hunks."""
+
+    def inverse(self):
+        function = getattr(SUBJECT, '_restore_native_ready_display_layer', None)
+        self.assertTrue(callable(function), 'strict outermost U6 READY display pre-inverse is required')
+        return function
+
+    def inputs(self):
+        new = _live_entry()
+        old = self.inverse()(new)
+        self.assertEqual(OPERATOR_REEXEC_CANDIDATE_SHA, hashlib.sha256(old).hexdigest())
+        return old, new
+
+    def test_exact_ready_display_hunks_restore_the_frozen_previous_entry(self):
+        old, new = self.inputs()
+        self.assertEqual(OPERATOR_REEXEC_CANDIDATE_SHA, READY_DISPLAY_BEFORE_SHA)
+        self.assertTrue(READY_DISPLAY_REGIONS, 'reviewed U6 table required')
+        self.assertEqual(len(READY_DISPLAY_REGIONS), len(SUBJECT._NATIVE_READY_DISPLAY_REGIONS))
+        self.assertEqual(READY_DISPLAY_BEFORE_SHA, SUBJECT._NATIVE_READY_DISPLAY_BEFORE_SHA256)
+        rebuilt, cursor = [], 0
+        for oldoff, oldlen, newoff, newlen, oldhash, newhash in READY_DISPLAY_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            self.assertEqual(oldhash, hashlib.sha256(oldpart).hexdigest())
+            self.assertEqual(newhash, hashlib.sha256(newpart).hexdigest())
+            self.assertEqual(1, new.count(newpart))
+            self.assertEqual(0, new.count(oldpart))
+            rebuilt.extend((old[cursor:oldoff], newpart))
+            cursor = oldoff + oldlen
+        rebuilt.append(old[cursor:])
+        # Forward: outside the reviewed hunks the live entry is byte-identical.
+        self.assertEqual(new, b''.join(rebuilt))
+        # The restored entry is exactly the operator re-exec candidate, so every older layer and the
+        # unchanged U pin still apply underneath; the 19 pins are not re-pinned.
+        self.assertEqual(ORIGINAL_SHA, SUBJECT.PRODUCTION_PINS[ENTRY])
+        self.assertEqual(ORIGINAL_SHA, hashlib.sha256(SUBJECT._restore_native_display_layer(
+            SUBJECT._restore_native_transfer_wording_layer(SUBJECT._restore_native_usability_layer(
+                SUBJECT._restore_native_operator_reexec_layer(old))))).hexdigest())
+
+    def test_previous_partial_duplicate_reordered_and_external_changes_refuse(self):
+        inverse = self.inverse()
+        old, new = self.inputs()
+        with self.assertRaises(AssertionError):
+            inverse(old)
+        for oldoff, oldlen, newoff, newlen, _oldhash, _newhash in READY_DISPLAY_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            for label, raw in (
+                ('missing', new[:newoff] + new[newoff + newlen:]),
+                ('truncated', new[:newoff + newlen - 1] + new[newoff + newlen:]),
+                ('partial_old', new[:newoff] + oldpart + new[newoff + newlen:]),
+                ('duplicate', new + newpart), ('extra_old', new + oldpart),
+            ):
+                with self.subTest(offset=newoff, mutation=label), self.assertRaises(AssertionError):
+                    inverse(raw)
+        outside = 1000
+        self.assertTrue(all(not row[2] <= outside < row[2] + row[3] for row in READY_DISPLAY_REGIONS))
+        for label, raw in (
+            ('prefix', b'OUTSIDE PREFIX' + new),
+            ('middle', new[:outside] + bytes([new[outside] ^ 1]) + new[outside + 1:]),
+            ('suffix', new + b'OUTSIDE SUFFIX'),
+            ('not_bytes', bytearray(new)),
+        ):
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                inverse(raw)
+        if len(READY_DISPLAY_REGIONS) > 1:
+            first, second = READY_DISPLAY_REGIONS[0], READY_DISPLAY_REGIONS[1]
+            a, alen, b, blen = first[2], first[3], second[2], second[3]
+            reordered = new[:a] + new[b:b + blen] + new[a + alen:b] + new[a:a + alen] + new[b + blen:]
+            with self.subTest(mutation='reordered'), self.assertRaises(AssertionError):
+                inverse(reordered)
+
+    def test_live_u2_and_u6_head_restores_every_unchanged_pin(self):
+        """The actual serial U2+U6 head: each layer is bound separately, the 19 pins stay as they are."""
+        root = Path(__file__).resolve().parents[1]
+        files = {path: (root / path).read_bytes() for path in SUBJECT.PRODUCTION_PINS}
+        files['tools/project_pointer.py'] = (root / 'tools/project_pointer.py').read_bytes()
+        restored = SUBJECT._native_os_reviewed_source_bytes(files)
+        for path, pin in SUBJECT.PRODUCTION_PINS.items():
+            with self.subTest(path=path):
+                self.assertEqual(pin, hashlib.sha256(restored[path]).hexdigest())
+        # The display layer never absorbs a non-display change of the entry.
+        swallowed = dict(files)
+        swallowed[ENTRY] = files[ENTRY].replace(b'_POST_READY', b'_POST_READX') + b'# U2 elsewhere\n'
+        with self.assertRaises(AssertionError):
+            SUBJECT._native_os_reviewed_source_bytes(swallowed)

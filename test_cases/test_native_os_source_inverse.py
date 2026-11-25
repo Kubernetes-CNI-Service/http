@@ -330,3 +330,102 @@ class NativeOsSourceInverseTests(unittest.TestCase):
         foreign = dict(candidate); foreign['tools/foreign.py'] = b''
         with self.assertRaises(AssertionError):
             inverse(foreign)
+
+
+# U2 (v3.1.6 A4b, R-024; 指导 8.12): tools/ibsw_upgrade_pipeline.py is one of the 19 whole-byte
+# PRODUCTION_PINS. Its post-ready settle change gets one exact DATA pre-layer back to the unchanged pin;
+# the pin itself is never re-pinned. Independent review table generated from git (not from SUBJECT).
+# BEGIN GENERATED POST READY SETTLE PIPELINE REVIEW TABLE
+# Generated from the diff 5f00fd2d3e0bee63afe290bde28aa3f25ed412a1:tools/ibsw_upgrade_pipeline.py
+# -> 7aa17d35af9235c01d5ecce55c4484dc73487ce5:tools/ibsw_upgrade_pipeline.py;
+# context=3 lines, 3 hunks. Never edit by hand.
+# [previous offset, previous length, candidate offset, candidate length,
+#  previous sha256, candidate sha256]
+SETTLE_PIPELINE_BEFORE_SHA = '38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb'
+SETTLE_PIPELINE_CANDIDATE_SHA = '6be94a65ddd3369407cb00417b381a6a1fa315e4d9d33d88a5c4146e534ba4b0'
+SETTLE_PIPELINE_REGIONS = [
+    [632, 211, 632, 304, '2b7925e6f336979a9183440e4262650fa65b66f1cc2de156111db8ccb691838f', '8b8b56388809268dd3a7e09f792af8dbe4057e606c2be6a2a23ebb3af670a605'],
+    [11379, 155, 11472, 218, 'eb06a53b0812b82bcf876a129276b40ae3a250d5df5a8d586a5691765ae5c503', 'a3d120fe4623d82b4d1e4b2e18b26512a951c3d31f4c9605a856490e86bddc77'],
+    [29170, 400, 29326, 1142, 'f82b3159c081f0621c23373d3c2791191ca5ef711e2caea04b3aac58540773d3', 'c1e29343d3a01c8542ab307d068282532c0ff644d02de492c839026021360698'],
+]
+# END GENERATED POST READY SETTLE PIPELINE REVIEW TABLE
+SETTLE_PIPELINE = 'tools/ibsw_upgrade_pipeline.py'
+# Unchanged baseline pin of the 19 (native_os_safe_image.PRODUCTION_PINS at 26ae34b and 5f00fd2).
+SETTLE_PIPELINE_PIN = '38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb'
+
+
+class NativePostReadySettlePipelineInverseTests(unittest.TestCase):
+    """SOURCE ONLY: the live pipeline is the pinned bytes plus exactly the reviewed U2 hunks."""
+
+    def inverse(self):
+        function = getattr(SUBJECT, '_restore_post_ready_settle_pipeline_layer', None)
+        self.assertTrue(callable(function), 'strict U2 pipeline pre-inverse is required')
+        return function
+
+    def inputs(self):
+        new = (Path(__file__).resolve().parents[1] / SETTLE_PIPELINE).read_bytes()
+        old = self.inverse()(new)
+        return old, new
+
+    def test_pin_is_unchanged_and_exact_u2_hunks_restore_it(self):
+        self.assertEqual(SETTLE_PIPELINE_PIN, SUBJECT.PRODUCTION_PINS[SETTLE_PIPELINE], 'never re-pinned')
+        self.assertEqual(SETTLE_PIPELINE_PIN, SETTLE_PIPELINE_BEFORE_SHA)
+        old, new = self.inputs()
+        self.assertEqual(SETTLE_PIPELINE_PIN, hashlib.sha256(old).hexdigest())
+        self.assertTrue(SETTLE_PIPELINE_REGIONS, 'reviewed U2 table required')
+        self.assertEqual(len(SETTLE_PIPELINE_REGIONS), len(SUBJECT._POST_READY_SETTLE_PIPELINE_REGIONS))
+        rebuilt, cursor = [], 0
+        for oldoff, oldlen, newoff, newlen, oldhash, newhash in SETTLE_PIPELINE_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            self.assertEqual(oldhash, hashlib.sha256(oldpart).hexdigest())
+            self.assertEqual(newhash, hashlib.sha256(newpart).hexdigest())
+            self.assertEqual(1, new.count(newpart))
+            self.assertEqual(0, new.count(oldpart))
+            rebuilt.extend((old[cursor:oldoff], newpart))
+            cursor = oldoff + oldlen
+        rebuilt.append(old[cursor:])
+        # Forward: outside the reviewed hunks the live pipeline is byte-identical to the pin.
+        self.assertEqual(new, b''.join(rebuilt))
+
+    def test_pinned_partial_duplicate_reordered_and_external_changes_refuse(self):
+        inverse = self.inverse()
+        old, new = self.inputs()
+        with self.assertRaises(AssertionError):
+            inverse(old)
+        for oldoff, oldlen, newoff, newlen, _oldhash, _newhash in SETTLE_PIPELINE_REGIONS:
+            oldpart, newpart = old[oldoff:oldoff + oldlen], new[newoff:newoff + newlen]
+            for label, raw in (
+                ('missing', new[:newoff] + new[newoff + newlen:]),
+                ('truncated', new[:newoff + newlen - 1] + new[newoff + newlen:]),
+                ('partial_old', new[:newoff] + oldpart + new[newoff + newlen:]),
+                ('duplicate', new + newpart), ('extra_old', new + oldpart),
+            ):
+                with self.subTest(offset=newoff, mutation=label), self.assertRaises(AssertionError):
+                    inverse(raw)
+        outside = 1000
+        self.assertTrue(all(not row[2] <= outside < row[2] + row[3] for row in SETTLE_PIPELINE_REGIONS))
+        for label, raw in (
+            ('prefix', b'OUTSIDE PREFIX' + new),
+            ('middle', new[:outside] + bytes([new[outside] ^ 1]) + new[outside + 1:]),
+            ('suffix', new + b'OUTSIDE SUFFIX'),
+            ('not_bytes', bytearray(new)),
+        ):
+            with self.subTest(mutation=label), self.assertRaises(AssertionError):
+                inverse(raw)
+        if len(SETTLE_PIPELINE_REGIONS) > 1:
+            first, second = SETTLE_PIPELINE_REGIONS[0], SETTLE_PIPELINE_REGIONS[1]
+            a, alen, b, blen = first[2], first[3], second[2], second[3]
+            reordered = new[:a] + new[b:b + blen] + new[a + alen:b] + new[a:a + alen] + new[b + blen:]
+            with self.subTest(mutation='reordered'), self.assertRaises(AssertionError):
+                inverse(reordered)
+
+    def test_whole_vector_gate_restores_the_live_pipeline_to_its_pin(self):
+        root = Path(__file__).resolve().parents[1]
+        files = {path: (root / path).read_bytes() for path in SUBJECT.PRODUCTION_PINS}
+        files['tools/project_pointer.py'] = (root / 'tools/project_pointer.py').read_bytes()
+        restored = SUBJECT._native_os_reviewed_source_bytes(files)
+        self.assertEqual(SETTLE_PIPELINE_PIN, hashlib.sha256(restored[SETTLE_PIPELINE]).hexdigest())
+        drifted = dict(files)
+        drifted[SETTLE_PIPELINE] = files[SETTLE_PIPELINE] + b'# unreviewed\n'
+        with self.assertRaises(AssertionError):
+            SUBJECT._native_os_reviewed_source_bytes(drifted)

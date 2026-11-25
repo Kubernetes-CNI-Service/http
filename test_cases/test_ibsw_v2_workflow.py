@@ -29,7 +29,7 @@ from ibsw_v2_switch_sim import LocalSwitch, SimFleet  # noqa: E402
 from test_ibsw_v2_device import SENTINEL, policy_for  # noqa: E402
 
 FAST = probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05, ssh_check=0.3,
-                     dwell=8.0, ladder_budget=4.0, deadline=15.0)
+                     dwell=8.0, ladder_budget=4.0, deadline=15.0, post_ready_settle=0.05)
 
 
 class WorkflowTest(unittest.TestCase):
@@ -94,6 +94,57 @@ class WorkflowTest(unittest.TestCase):
         report_file = json.loads((base / "run" / "run-report.json").read_text())
         self.assertEqual(report_file["counts"], {"UPGRADED": 4, "AT_TARGET": 1, "SKIPPED": 1})
         self.assertEqual(fleet_engine.exit_code(report), 3)
+
+
+    def test_real_ladder_ready_waits_before_the_real_verification(self):
+        """R-024 / U2 (需求 R-024; 指导 8.12): the real probe ladder hands back READY, the engine waits the
+        post-ready settle as a main-loop timer, and only then calls the real LiveOps.verify; shortened real
+        time like every FAST timing (the 30 s production default is the engine direct test's subject)."""
+        settle = 0.6
+        timings = probe.Timings(**dict(FAST.__dict__, post_ready_settle=settle))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        policy = policy_for(base / "http")
+        key = ssh._sdk().ECDSAKey.generate()
+        switch = LocalSwitch(base / "switches", "sw01", "192.0.2.21", "02:00:00:00:00:21", "25.02.7002",
+                             password=SENTINEL)
+        device = InventoryDevice("sw01", "192.0.2.21", "02:00:00:00:00:21")
+        host_key = ssh._sdk().ECDSAKey.generate()
+        pins = f"192.0.2.21 {host_key.get_name()} {host_key.get_base64()}\n".encode()
+        fleet = SimFleet([switch], base / "http", key.get_base64())
+        p2p = base / "p2p.csv"
+        p2p.write_text("a-node,a-port,z-node,z-port\nsw01,eth0,oob-leaf01,swp1\n")
+        groups, _warnings = dist.oob_groups(p2p, ["sw01"])
+        creds = ssh.Credentials("admin", key, ssh.fingerprint(key.asbytes()), SENTINEL)
+        ops = ib.LiveOps(pins=ssh.HostPins(pins), credentials=creds, policy=policy, selected=("os",), run_id="r1",
+                         management_line=f"{key.get_name()} {key.get_base64()} mgmt\n".encode(),
+                         connector=fleet.connector, ping_run=fleet.ping_run, tcp_probe=fleet.tcp,
+                         dir_for=fleet.dir_for)
+        options = fleet_engine.Options(run_id="r1", selected=("os",), upgrade=True,
+                                       link=fleet_link.decide(1000, source="override"), groups=groups,
+                                       timings=timings, progress_seconds=0.5, later_hop_batch_seconds=0.05)
+        out = io.StringIO()
+        engine = fleet_engine.Engine([device], ib.IbFamily(policy), ops, options,
+                                     fleet_engine.Evidence(base / "run"), out=out)
+        verify_calls, original_verify = [], ops.verify
+
+        def verify(*args, **kwargs):
+            verify_calls.append(round(engine.clock() - engine.started, 3))
+            return original_verify(*args, **kwargs)
+        ops.verify = verify
+        report = engine.run()
+        results = {row["hostname"]: (row["category"], row["reason"]) for row in report["devices"]}
+        self.assertEqual(results, {"sw01": ("UPGRADED", None)}, out.getvalue())
+        timeline = [json.loads(line) for line in
+                    (engine.evidence.directory("sw01") / "timeline.jsonl").read_text().splitlines()]
+        ready = [record["t"] for record in timeline if record.get("state") == "VERIFYING" and record.get("boot_id")]
+        self.assertEqual(len(ready), len(verify_calls), (timeline, verify_calls))
+        self.assertTrue(verify_calls)
+        for ready_at, verified_at in zip(ready, verify_calls):
+            self.assertGreaterEqual(verified_at - ready_at, settle - 0.01,
+                                    "the real verification started before the post-ready wait ended")
+        self.assertEqual((switch.state / "version").read_text(), "25.02.8008")
 
 
 if __name__ == "__main__":

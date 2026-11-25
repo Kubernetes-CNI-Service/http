@@ -438,6 +438,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
              patch.object(pipeline,'_now',(lambda:virtual.now) if controlled_grace else pipeline._now), \
              patch.object(pipeline,'_idle',(lambda seconds:setattr(virtual,'now',virtual.now+seconds)) if controlled_grace else pipeline._idle), \
              patch.object(pipeline,'_OS_DOWNLOAD_OBSERVATION_SECONDS',0 if no_reboot or completion_seconds is not None else 2715), \
+             patch.object(pipeline,'_POST_READY_SETTLE_SECONDS',
+                          pipeline._POST_READY_SETTLE_SECONDS if controlled_grace else 0.0), \
              patch.object(executor.time,'sleep',return_value=None), \
              patch.object(observer,'_read_channel',side_effect=query),patch.object(executor,'_read_channel',side_effect=query), \
              contextlib.redirect_stdout(io.StringIO()) as out,contextlib.redirect_stderr(io.StringIO()) as err:
@@ -602,6 +604,83 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
             complete=[r for r in report['verification_timeline'] if r['phase']=='NVUE_READY']
             self.assertEqual(len(complete),4)
             self.assertTrue(all(r['attempt']==1 for r in complete))
+
+    def test_every_real_reboot_waits_thirty_seconds_after_nvue_ready_before_verification(self):
+        """R-024 / U2 (owner 2026-11-14, 问题文件 10.1; 需求 R-024; 指导 8.12): both OS hops, BIOS and CPLD
+        each wait a fixed 30 s after nvued+CLI readiness on the new boot, inside the original component
+        deadline, before the first post-reboot version/configuration/health query. Virtual clock."""
+        with tempfile.TemporaryDirectory() as folder:
+            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,os_chain=True)
+            self.assertEqual(code,0,err+repr(report))
+            self.assertEqual([c for n,c,v in installs],['os','os','bios','cpld'])
+            self.assertNotIn('STABILIZING',err)
+            stages={}
+            for row in report['verification_timeline']:
+                stages.setdefault((row['hostname'],row['component'],row['stage']),[]).append(row)
+            settled=sorted(key for key,rows in stages.items()
+                           if any(r['phase']=='POST_READY_SETTLE_STARTED' for r in rows))
+            self.assertEqual(len(settled),4,stages.keys())
+            for key in settled:
+                with self.subTest(stage=key):
+                    rows=stages[key]
+                    phases=[r['phase'] for r in rows]
+                    start=phases.index('POST_READY_SETTLE_STARTED')
+                    end=phases.index('POST_READY_SETTLE_ENDED')
+                    first=phases.index('VERIFY_COLLECTION_STARTED')
+                    ready=max(i for i,p in enumerate(phases[:start]) if p=='NVUE_READY')
+                    self.assertEqual(phases.count('POST_READY_SETTLE_STARTED'),1)
+                    self.assertTrue(ready<start<end<first,phases)
+                    self.assertGreaterEqual(rows[end]['since_dispatch_seconds']-rows[start]['since_dispatch_seconds'],30)
+                    self.assertGreaterEqual(rows[first]['since_dispatch_seconds']-rows[ready]['since_dispatch_seconds'],30)
+                    self.assertLessEqual(rows[end]['deadline_remaining_seconds'],
+                                         rows[start]['deadline_remaining_seconds']-30,
+                                         'the wait counts against the original deadline; nothing is reset')
+            business=[(key,cmd,ready,now) for key,cmd,ready,now in self._grace_guarded_queries
+                      if cmd!='nv show system version']
+            self.assertEqual({key[1] for key,cmd,ready,now in business},{1,2,3,4})
+            self.assertTrue(all(now-ready>=30 for key,cmd,ready,now in business),
+                            'a real post-reboot query ran less than 30 s after NVUE CLI readiness')
+
+    def test_wait_crossing_the_original_deadline_is_the_original_failure_without_verification(self):
+        """R-024: the wait never extends the original component deadline; crossing it is the original
+        COMPONENT_DEADLINE_EXCEEDED (UNKNOWN) with no post-reboot verification query. Virtual clock."""
+        with tempfile.TemporaryDirectory() as folder:
+            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,
+                                                      selection=('--os-only',),completion_seconds=20)
+            self.assertEqual(code,3,err+repr(report))
+            self.assertEqual(len(installs),1)
+            self.assertEqual(report['targets'][0]['state'],'UNKNOWN')
+            self.assertIn('COMPONENT_DEADLINE_EXCEEDED',repr(report['component_results']))
+            phases=[r['phase'] for r in report['verification_timeline']]
+            self.assertIn('NVUE_READY',phases)
+            self.assertNotIn('VERIFY_COLLECTION_STARTED',phases)
+            self.assertEqual([q for q in self._grace_guarded_queries if q[1]!='nv show system version'],[])
+
+    def test_the_wait_promises_no_health_and_the_pre_install_health_gate_still_applies(self):
+        """R-024 (需求 R-024 「仍N/A则UNAVAILABLE/UNKNOWN ... 不能把固定30秒承诺成所有现场都健康」; 指导 8.12):
+        after the 30 s wait an N/A post-reboot health is still not a verified success, and a NOT OK health
+        before install still blocks with no wait at all. Virtual clock; NVOS tables as in the health gate tests."""
+        na=(b'        operational  applied\n------  -----------  -------\nstatus  N/A\n'
+            b'Health Issues\n============\nNo Data\n')
+        not_ok=(b'            operational  applied\n----------  -----------  -------\n'
+                b'status      Not OK\nstatus-led  amber\nHealth Issues\n============\n'
+                b'Component  Status information\n---------  ------------------\nPSU1       not working\n')
+        with tempfile.TemporaryDirectory() as folder:
+            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,
+                selection=('--os-only',),health_payloads={(HOST,'after_install'):na})
+            self.assertEqual(code,3,err+repr(report))
+            self.assertEqual(len(installs),1)
+            self.assertNotEqual(report['targets'][0]['state'],'COMPLETE')
+            self.assertEqual(report['component_results'][0]['state'],'UNKNOWN')
+            self.assertIn('HEALTH_STATUS_UNAVAILABLE',report['component_results'][0]['reason'])
+            self.assertIn('POST_READY_SETTLE_ENDED',[r['phase'] for r in report['verification_timeline']])
+        with tempfile.TemporaryDirectory() as folder:
+            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,
+                selection=('--os-only',),health_payloads={(HOST,'before_install'):not_ok})
+            self.assertEqual(code,3,err+repr(report))
+            self.assertEqual(installs,[])
+            self.assertIn('HEALTH_PRECHECK_NOT_OK',err)
+            self.assertNotIn('POST_READY_SETTLE_STARTED',[r['phase'] for r in report.get('verification_timeline',[])])
 
     def test_no_reboot_is_bounded_unknown_without_guessing_the_installer_exit(self):
         with tempfile.TemporaryDirectory() as folder:

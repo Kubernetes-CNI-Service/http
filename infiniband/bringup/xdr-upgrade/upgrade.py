@@ -884,16 +884,27 @@ def _raise_descriptor_soft_limit(required):
 
 
 def _print_ready_device(index, total, hostname, rows):
-    """One device block after all readiness checks; display never grants IO."""
+    """One device block after all readiness checks; display never grants IO.
+
+    R-032: two lines per component. The marker follows the existing action, never a
+    current/target text comparison (CPLD current is per slot, its target a set).
+    """
     sys.stderr.write(f'[READY {index}/{total}] {hostname}\n')
     for component in ('os','bios','cpld'):
         for row in rows:
             if row['component']!=component:
                 continue
-            sys.stderr.write(f"  {component.upper()} current={row['current']} "
-                             f"target={row['target']} action={row['action']}\n")
-            if row.get('path'):
-                sys.stderr.write('    OS path: '+' -> '.join(row['path'])+'\n')
+            action, path = row['action'], row.get('path')
+            if action in ('AT_TARGET_NO_FLASH','PREREQUISITE_VERIFIED'):
+                marker = '= target'
+            elif action=='UPGRADE_REQUIRED':
+                marker = f"!= target={row['target']}"
+            else:
+                marker = f"? target={row['target']}"
+            if action=='AT_TARGET_NO_FLASH' and path and list(path)==[row['current']]:
+                path = None  # the single current is already on the first line
+            sys.stderr.write(f"  {component.upper():<4} current={row['current']} {marker}\n"
+                             f"    action={action}"+(', OS path: '+' -> '.join(path) if path else '')+'\n')
 
 
 def _print_component_plans(version_plan, selected):

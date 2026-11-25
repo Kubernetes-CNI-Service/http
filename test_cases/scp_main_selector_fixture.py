@@ -481,6 +481,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
              patch.object(pipeline,'_now',(lambda:virtual.now) if controlled_grace else pipeline._now), \
              patch.object(pipeline,'_idle',(lambda seconds:setattr(virtual,'now',virtual.now+seconds)) if controlled_grace else pipeline._idle), \
              patch.object(pipeline,'_OS_DOWNLOAD_OBSERVATION_SECONDS',0 if no_reboot or completion_seconds is not None else 2715), \
+             patch.object(pipeline,'_POST_READY_SETTLE_SECONDS',
+                          pipeline._POST_READY_SETTLE_SECONDS if controlled_grace else 0.0), \
              patch.object(executor.time,'sleep',return_value=None), \
              patch.object(observer,'_read_channel',side_effect=query),patch.object(executor,'_read_channel',side_effect=query), \
              contextlib.redirect_stdout(io.StringIO()) as out,contextlib.redirect_stderr(io.StringIO()) as err:

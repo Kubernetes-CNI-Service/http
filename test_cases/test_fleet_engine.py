@@ -30,7 +30,8 @@ import fleet_probe as probe  # noqa: E402
 from fleet_ssh import SshError  # noqa: E402
 
 FAST = probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05, ssh_check=0.3,
-                     dwell=5.0, ladder_budget=3.0, deadline=10.0, config_check=0.05)
+                     dwell=5.0, ladder_budget=3.0, deadline=10.0, config_check=0.05,
+                     post_ready_settle=0.05)
 
 
 @dataclass(frozen=True)
@@ -679,6 +680,129 @@ class VerifyRetryTest(unittest.TestCase):
                 self.assertIn("ladder", [record.get("probe") for record in timeline[requeued[0]:]],
                               "the rebooting queue's SSH step ran again before the second verification")
                 self.assertEqual([record for record in timeline if "verify_retry" in record], [])
+
+
+
+class PostReadySettleTest(unittest.TestCase):
+    """R-024 / U2 (owner 2026-11-14, 问题文件 10.1; 需求 R-024; 指导 8.12): after a real reboot's READY
+    hand-back the engine waits a fixed 30 s as a main-loop timer and only then submits verification; the
+    original device deadline (dispatched_at + Timings.deadline, never reset) is checked before the wait and
+    when it ends, with the original DEVICE_DEADLINE_EXCEEDED / UNKNOWN. A job that finished without a reboot
+    and the single verification retry on the same boot do not wait. Engine-injected clock with the production
+    default timings; nothing sleeps."""
+
+    SETTLE = 30.0      # R-024 「固定等待 30 秒」
+    DEADLINE = 3600.0  # original Timings().deadline, unchanged by R-024
+
+    def setUp(self):
+        self.now = 1000.0
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        devices = [Device("s0", "198.51.100.1"), Device("s1", "198.51.100.2")]
+        options = engine.Options(run_id="r1", selected=("os",), upgrade=True,
+                                 link=link.decide(1000, source="override"), groups={}, verify_retry_seconds=5.0)
+        self.engine = engine.Engine(devices, FakeFamily({}), FakeOps(devices), options,
+                                    engine.Evidence(Path(tmp.name) / "run"), out=io.StringIO(),
+                                    clock=lambda: self.now)
+        self.submitted = []
+        self.engine._submit = lambda pool, dev, kind, function, **info: self.submitted.append((dev.host, kind, self.now))
+        for dev in self.engine.devs.values():
+            dev.state, dev.step = "PROBING", Step("os", "os-0", "2.0")
+            dev.dispatch = dict(dispatched_at=1000.0, before_commands=b"", health_record=None, boot_before="b0")
+
+    def ready(self, host="s0", reason="READY", boot="b1"):
+        self.engine._on_handback(self.engine.devs[host],
+                                 probe.Handback(host, probe.READY, reason, boot_id=boot, version="2.0"))
+
+    def tick(self, now):
+        self.now = now
+        self.engine._run_timers(now)
+
+    def verifies(self, host="s0"):
+        return [t for name, kind, t in self.submitted if kind == "verify" and name == host]
+
+    def test_ready_waits_thirty_seconds_then_verifies_once(self):
+        self.now = 1100.0
+        self.ready()
+        self.assertEqual(self.verifies(), [], "no verification right at READY")
+        self.assertEqual(self.engine.devs["s0"].state, "VERIFYING", "the switch keeps its in-flight slot")
+        self.tick(1100.0 + self.SETTLE - 0.001)
+        self.assertEqual(self.verifies(), [])
+        self.tick(1100.0 + self.SETTLE)
+        self.assertEqual(self.verifies(), [1100.0 + self.SETTLE])
+        self.tick(1300.0)
+        self.assertEqual(self.verifies(), [1100.0 + self.SETTLE], "one verification per READY")
+        self.assertEqual(self.engine.devs["s0"].dispatch["dispatched_at"], 1000.0, "dispatch start never reset")
+
+    def test_the_wait_ending_after_the_original_deadline_is_unknown_without_verification(self):
+        self.now = 1000.0 + self.DEADLINE - 10.0
+        self.ready()
+        self.tick(self.now + self.SETTLE)
+        dev = self.engine.devs["s0"]
+        self.assertEqual((dev.category, dev.reason), ("UNKNOWN", "DEVICE_DEADLINE_EXCEEDED"))
+        self.assertEqual(self.verifies(), [])
+
+    def test_ready_after_the_original_deadline_is_unknown_at_once(self):
+        self.now = 1000.0 + self.DEADLINE + 1.0
+        self.ready()
+        dev = self.engine.devs["s0"]
+        self.assertEqual((dev.category, dev.reason), ("UNKNOWN", "DEVICE_DEADLINE_EXCEEDED"))
+        self.tick(self.now + 2 * self.SETTLE)
+        self.assertEqual(self.verifies(), [])
+
+    def test_a_wait_ending_exactly_at_the_deadline_still_verifies(self):
+        # The original tracker fails a switch only when now - dispatched_at > deadline.
+        self.now = 1000.0 + self.DEADLINE - self.SETTLE
+        self.ready()
+        self.tick(1000.0 + self.DEADLINE)
+        self.assertEqual(self.verifies(), [1000.0 + self.DEADLINE])
+        self.assertIsNone(self.engine.devs["s0"].category)
+
+    def test_a_job_that_finished_without_a_reboot_verifies_at_once(self):
+        self.now = 1100.0
+        self.ready(reason="COMPLETED_WITHOUT_REBOOT", boot="b0")
+        self.assertEqual(self.verifies(), [1100.0])
+
+    def test_the_verification_retry_on_the_same_boot_does_not_wait_again(self):
+        self.now = 1100.0
+        self.ready()
+        self.tick(1130.0)
+        self.now = 1131.0
+        self.engine._retry_verify(self.engine.devs["s0"], "COMMAND_TIMEOUT")
+        self.tick(1136.0)
+        self.assertEqual(self.verifies(), [1130.0, 1136.0], "the retry uses only its own 5 s pause")
+
+    def test_a_new_boot_after_a_requeue_waits_again(self):
+        self.now = 1100.0
+        self.ready()
+        self.tick(1130.0)
+        self.now = 1140.0
+        self.engine._requeue(self.engine.devs["s0"], "BOOT_CHANGED_DURING_VERIFY")
+        self.engine.tracker.drop("s0")
+        self.now = 1150.0
+        self.ready(boot="b2")
+        self.tick(1179.0)
+        self.assertEqual(self.verifies(), [1130.0])
+        self.tick(1180.0)
+        self.assertEqual(self.verifies(), [1130.0, 1180.0])
+
+    def test_a_switch_already_settled_is_not_verified_when_its_wait_ends(self):
+        self.now = 1100.0
+        self.ready()
+        dev = self.engine.devs["s0"]
+        dev.category, dev.reason = "UNKNOWN", "ABORTED_WHILE_UPGRADING"
+        self.tick(1130.0)
+        self.assertEqual(self.verifies(), [])
+
+    def test_switches_wait_independently(self):
+        self.now = 1100.0
+        self.ready("s0")
+        self.now = 1110.0
+        self.ready("s1")
+        self.tick(1130.0)
+        self.assertEqual((self.verifies("s0"), self.verifies("s1")), ([1130.0], []))
+        self.tick(1140.0)
+        self.assertEqual(self.verifies("s1"), [1140.0])
 
 
 if __name__ == "__main__":

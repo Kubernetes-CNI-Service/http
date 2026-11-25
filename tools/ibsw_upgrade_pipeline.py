@@ -24,6 +24,7 @@ from ibsw_upgrade_contract import SharedUpgradeHold
 
 _NVUED_CHECK_SECONDS = 60.0
 _NVUED_MAX_CHECKS = 5
+_POST_READY_SETTLE_SECONDS = 30.0  # R-024: fixed wait after NVUE readiness on each new boot
 _PROGRESS_HEARTBEAT_SECONDS = 30.0
 _NVUED_COMMAND = 'systemctl show nvued.service --property=ActiveState --property=SubState --no-pager'
 _RECHECK_SECONDS = 3.0
@@ -296,6 +297,8 @@ class NativeStep:
         self.hops=0
         self.closed=False
         self.boot=None
+        self.settled_epoch=None
+        self.settle_until=None
         self.terminal=None
         self.started=None
         self.reported_epoch=None
@@ -610,7 +613,18 @@ class NativeAdapter:
                 self.bus.emit(job.name,job.component,'NVUE_READY')
                 job.remote_may_be_active=False
                 job.phase="VERIFY"
+                if job.boot.epoch!=job.settled_epoch:
+                    # R-024: wait once per new boot before verification, inside the original deadline.
+                    job.settled_epoch=job.boot.epoch
+                    job.settle_until=_now()+_POST_READY_SETTLE_SECONDS
+                    self.record_time(job,'POST_READY_SETTLE_STARTED',boot_id=job.boot.epoch,
+                        settle_seconds=_POST_READY_SETTLE_SECONDS)
             if job.phase=="VERIFY":
+                if job.settle_until is not None:
+                    if _now()<job.settle_until:
+                        return Event('WAIT',job.settle_until,'VERIFY')
+                    job.settle_until=None
+                    self.record_time(job,'POST_READY_SETTLE_ENDED',boot_id=job.boot.epoch)
                 if job.dispatch.state=='DISPATCHED_UNKNOWN':
                     job.leaf._verification_boot_epoch=job.boot.epoch
                     self.bus.emit(job.name,job.component,'POST_REBOOT_VERIFICATION')

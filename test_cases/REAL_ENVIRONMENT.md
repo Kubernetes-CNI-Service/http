@@ -37,6 +37,16 @@
   本地 direct 与真实 driver→signed-session→SFTP 所有者流程仅替换底层设备 IO，不证明真实
   SDK/设备 FD 回收、断电或现场恢复。原期限、失败记录、重试及上述全部场景不变；没有省略
   场景、新增风险接受确认人或现场操作授权。
+- v3.1.6 A4b/U2 扩展（R-024，**NOT RUN / REAL_ENV REQUIRED**）：每次真实重启（OS 每一跳、BIOS、CPLD 各一次）
+  在新 boot 上 nvued 运行且 `nv show system version` 可用（`NVUE_READY`）之后，固定再等 30 秒才开始
+  版本/配置/健康核对（预期出处：需求 R-024、指导 8.12；控制路径
+  `tools/ibsw_upgrade_pipeline.py::NativeAdapter.advance` 先发 `NVUE_READY` 并记
+  `POST_READY_SETTLE_STARTED`，到点记 `POST_READY_SETTLE_ENDED` 后才记 `VERIFY_COLLECTION_STARTED`）。
+  这 30 秒计入该组件原期限、不重置不延长，跨期限按原 `COMPONENT_DEADLINE_EXCEEDED`；同一 boot 的再次
+  就绪不再等，不重启的 NO_WRITE、只读检查和 `--verify-only` 不等。前置同本卡；执行人 owner 或其授权的
+  现场人员，验证 AI 只读。证据：`run-report.json` 的 `verification_timeline`（每个 stage 的 boot_id、
+  NVUE_READY、等待开始/结束、首个核对时刻与 deadline_remaining_seconds）及原始 health 输出。清理/回滚
+  同本卡。风险：30 秒不保证现场健康都可用，N/A 仍按原 UNAVAILABLE/UNKNOWN 报告，不把等待当作健康通过。
 
 ## TC-REAL-IBSW-UPGRADE-USABILITY-001 — 固定 venv 切换、进程内 FD 软限制与检查后升级
 
@@ -72,6 +82,15 @@
   逐文件审计。
 - 清理/回滚：删除临时 `HOME` 与测试副本；不删除原 run 证据；设备回滚按 TC-REAL-IBSW225-INTEGRATION-001
   的已授权方案执行。
+- v3.1.6 A4b/U6 扩展（R-032，**NOT RUN / REAL_ENV REQUIRED**）：默认检查或 `--inspect-only` 的逐台
+  `[READY i/n]` 块每个组件两行：组件名补齐 4 列，第一行 `current=<原值>` 后按工具已有 action 标
+  `= target`（AT_TARGET_NO_FLASH、PREREQUISITE_VERIFIED）、`!= target=<原 target>`（UPGRADE_REQUIRED）或
+  `? target=<原 target>`（REVIEW_REQUIRED 及其它 action），第二行原 `action=…`，OS 有非冗余路径时同行接
+  `, OS path: …`（预期出处：问题文件 §21.2 owner 样例、需求 R-032、指导 8.20；控制路径
+  `upgrade.py::_collect_readiness` → `_print_ready_device`）。CPLD 逐槽 current 全量显示、不截断；
+  `[OS PLAN]` 等汇总与 `run-report.json` 的 `version_plan` 不变。只读检查，无设备写入；执行人 owner 或授权
+  人员，验证 AI 只读终端输出。证据：脱敏终端输出与同一 run 的 `version_plan` 逐台比对。清理：无设备变更。
+  风险：只是显示改动，不作为升级判断依据。
 
 ## TC-REAL-BACKUP-BOUNDED-ANCHOR-001 — 固定辅助脚本与原进程组监督
 
@@ -2902,6 +2921,15 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 在授权AIR维护窗口、仅操作员自有可丢弃 known_hosts 中新增/替换测试记录时，当前快照继续使用、每路径恰好一条英文 KNOWN_HOSTS 提示，不HOLD/重载。私钥/管理公钥/venv被改的HOLD反例只在隔离本机workflow做，不在现场升级中制造凭据故障。
 - 并行初始化或升级已占共用锁时，v2以75/ALREADY_RUNNING拒绝，不删除或变更锁；不安全锁错误为2只在本机受控模型证明。prod的plan也写本地项目证据，须由现场人员获准执行，验证AI只读已有结果。
 - 证据：完整命令/END/退出码、源码/输入/测试/manifest/SDK/平台身份、时间线、前后版本/健康/配置与证据路径；凭据只留布尔核验结论，不留原值。canary跨轮另见 TC-REAL-IBSW-UPGRADE-CANARY-ROUTES-001。
+
+### v3.1.6 A4b/U2 扩展（R-024，仍 OPEN / NOT RUN）
+
+- 步骤/预期：每次真实重启后 rebooting Q 交回 READY，主进程固定再等 30 秒（主循环定时器，设备仍占在途名额）
+  才提交验证；等待前和到点都按下发起的原设备期限判定，超期按原 `DEVICE_DEADLINE_EXCEEDED`（UNKNOWN），不重置
+  下发时刻、不加预算（预期出处：需求 R-024、指导 8.12；控制路径 `tools/fleet_engine.py::Engine._on_handback`）。
+  不重启的作业（`COMPLETED_WITHOUT_REBOOT`）和同一次开机内的验证重试不再等；`--plan` 只读不等。
+- 执行人 owner 或授权现场人员，验证 AI 只读。证据：每台 `timeline.jsonl` 的 VERIFYING（boot_id）时刻与
+  `verify-*.json` 写入时刻、`events.jsonl`、原始 health 输出。清理与风险同本卡；30 秒不保证健康可用。
 
 ## TC-REAL-DEPS-ENGINE-IMAGE-001 — 重建镜像，在容器和原生 venv 里验证 CableTracker 引擎依赖
 

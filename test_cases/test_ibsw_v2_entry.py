@@ -37,7 +37,7 @@ from ibsw_v2_switch_sim import LocalSwitch, SimFleet  # noqa: E402
 from test_ibsw_v2_device import SENTINEL, TYPO  # noqa: E402
 
 FAST = probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05, ssh_check=0.3,
-                     dwell=8.0, ladder_budget=4.0, deadline=15.0)
+                     dwell=8.0, ladder_budget=4.0, deadline=15.0, post_ready_settle=0.05)
 class FakeIp:
     """This host's `ip` for the entry: a route per switch (device, src) and the addresses on each device."""
 

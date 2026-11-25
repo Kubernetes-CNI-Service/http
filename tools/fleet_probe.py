@@ -44,6 +44,7 @@ class Timings:
     ladder_budget: float = 900.0
     deadline: float = 3600.0
     config_check: float = 15.0
+    post_ready_settle: float = 30.0   # R-024: engine wait after a reboot's READY, inside the deadline
 
 
 @dataclass(frozen=True)

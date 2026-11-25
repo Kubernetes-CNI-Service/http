@@ -13,6 +13,7 @@ import unittest
 
 from test_cases.module_loader import load_script
 from test_cases.native_os_safe_image import _restore_upgrade_layout_layer
+from test_cases.native_os_safe_image import _restore_post_ready_settle_pipeline_layer
 
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = "infiniband/bringup/xdr-upgrade/upgrade.py"
@@ -6449,6 +6450,10 @@ class CanonicalRuntimeManifestContractTests(unittest.TestCase):
                            else (ROOT / relative).read_bytes())
                 if relative == 'tools/ibsw_upgrade_contract.py' and b'_shared_script_layout' in payload:
                     payload = _restore_upgrade_layout_layer(relative, payload)
+                # v3.1.6 A4b U2 (指导 :2194; http dev 2026-11-25 20:3x): outermost exact pipeline layer
+                # back to the unchanged 19-pin bytes; the FROZEN13 pin below is not re-pinned.
+                if relative == 'tools/ibsw_upgrade_pipeline.py' and b'_POST_READY_SETTLE_SECONDS' in payload:
+                    payload = _restore_post_ready_settle_pipeline_layer(payload)
                 if relative in NATIVE_SCP_APPROVED_COMPOSITION:
                     payload = _native_upstream_bytes_from_exact_composition(relative, payload)
                 if relative == "tools/ibsw_upgrade_access.py":

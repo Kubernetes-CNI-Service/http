@@ -1087,10 +1087,27 @@ class Engine:
 
     def _on_handback(self, dev, handback):
         dev.warnings += [warning for warning in handback.warnings if warning not in dev.warnings]
+        rebooted = handback.outcome == probe.READY and handback.reason != "COMPLETED_WITHOUT_REBOOT"
+        if rebooted and self.clock() - dev.dispatch["dispatched_at"] > self.options.timings.deadline:
+            handback = probe.Handback(dev.host, probe.UNKNOWN, "DEVICE_DEADLINE_EXCEEDED")
         if handback.outcome == probe.READY:
             dev.boot_after = handback.boot_id
             self._set(dev, "VERIFYING", boot_id=handback.boot_id, version=handback.version)
-            return self._submit_verify(dev)
+            if not rebooted:
+                return self._submit_verify(dev)
+            # R-024: a fixed wait after a real reboot's READY, as a main-loop timer inside the original
+            # device deadline (dispatched_at + Timings.deadline); the switch keeps its slot meanwhile.
+            step, boot = dev.step, handback.boot_id
+
+            def settled():
+                if dev.category is not None or dev.state != "VERIFYING" or dev.step is not step \
+                        or dev.boot_after != boot:
+                    return
+                if self.clock() - dev.dispatch["dispatched_at"] > self.options.timings.deadline:
+                    return self._on_handback(dev, probe.Handback(dev.host, probe.UNKNOWN,
+                                                                 "DEVICE_DEADLINE_EXCEEDED"))
+                self._submit_verify(dev)
+            return self._later(self.options.timings.post_ready_settle, settled)
         if handback.outcome == probe.FAILED:
             self._final(dev, "FAILED", handback.reason)
         elif handback.outcome == probe.REVIEW:

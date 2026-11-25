@@ -67,7 +67,8 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
   探测。探测分两个队列：
   - upgrading Q：每 30 秒 ping，每 2 分钟 SSH 读 boot_id 和脚本状态；ping 不通 1 分钟后进入 rebooting Q；
   - rebooting Q：每 15 秒 ping → TCP/22 → SSH 读 boot_id → nvued → `nv show system version`；
-  - 第 5 步成功后交回主进程，安排验证。
+  - 第 5 步成功后交回主进程；真实重启的设备先固定等 30 秒（主循环定时器，计入下发起的设备期限，
+    不重置；R-024），再安排验证。不重启的作业和同一次开机内的验证重试不再等。
 - **超时只算设备时间**：下发到就绪 60 分钟、upgrading Q 停留 30 分钟、就绪检查 15 分钟，都从下发起累计；
   在本机排队的时间只记录，不计入。就绪检查按 2026-10-24 的 v1 日志放宽（最慢 718 秒，见 V2-DESIGN 第 11 节）。
 - **密码输错保护**：问到密码时（`--upgrade` 或 `--password`），先在第一台 TCP/22 有响应的设备上只用密码登录一次、
@@ -122,6 +123,15 @@ HTTPS 和 local 仍拒绝，失败不自动切换方式。
 
 初始化和升级共用本机内核运行锁，忙时退出 75。不要删除锁文件、重放 UNKNOWN 请求，
 也不要把状态 JSON 当成授权。OS/BIOS/CPLD 各自保留组件状态和金丝雀结果。
+
+每次真实重启后（OS 每一跳、BIOS、CPLD 各一次），nvued 运行且 `nv show system version` 可用之后，
+固定再等 30 秒才开始版本、配置、健康核对；这 30 秒计入该组件原期限，不延长。同一次开机内的复核、
+不重启的步骤、只读检查和 `--verify-only` 不等（R-024）。`run-report.json` 的 `verification_timeline`
+记录 `POST_READY_SETTLE_STARTED`/`POST_READY_SETTLE_ENDED`。
+
+逐台 `[READY i/n]` 块每个组件两行（R-032）：第一行按工具已有的 action 标记，`= target`
+（已在目标或 OS 先决已核）、`!= target=…`（需要升级）、`? target=…`（需复核或其它）；第二行是原
+`action=…`，OS 有升级路径时同一行接 `, OS path: …`。CPLD 按槽全量显示。
 
 完整 flat bundle 可放在任意目录名下，包括 `tools`；模板必须来自同一选定布局。
 若固定 canonical 入口和其 `tools/upgrade.py` 同时存在，按布局歧义停止，不猜测来源。

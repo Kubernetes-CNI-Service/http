@@ -240,9 +240,12 @@ class AccessWorkflowTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             code,report,err,calls,installs=self.invoke(Path(folder).resolve(),os_chain=True)
             self.assertEqual(code,0,err+repr(report))
-            self.assertIn('OS current=25.02.8008 target=25.03.1010 action=UPGRADE_REQUIRED',err)
+            # R-032 / U6 (owner sample 2026-11-17, guide 8.20): two lines per component.
+            self.assertIn('  OS   current=25.02.8008 != target=25.03.1010\n'
+                          '    action=UPGRADE_REQUIRED, OS path: ',err)
             self.assertIn('OS path: 25.02.8008 -> 25.02.9000 -> 25.03.1010',err)
-            self.assertIn('BIOS current=0ACQF_06.01.008 target=0ACQF_06.01.009',err)
+            self.assertIn('  BIOS current=0ACQF_06.01.008 != target=0ACQF_06.01.009\n'
+                          '    action=UPGRADE_REQUIRED\n',err)
             self.assertIn('[OS PLAN]\n  UPGRADE_REQUIRED (1):\n    - '+workflow.HOST,err)
             self.assertIn('[BIOS PLAN]\n  UPGRADE_REQUIRED (1):\n    - '+workflow.HOST,err)
             self.assertEqual(len(report['version_plan']),3)

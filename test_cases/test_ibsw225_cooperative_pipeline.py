@@ -206,5 +206,171 @@ class CooperativeQueueTests(unittest.TestCase):
         self.assertEqual(peak.peak,8)
 
 
+
+# R-024 / U2 (owner 2026-11-14, 问题文件 10.1; 需求 R-024; 指导 8.12): after a real new boot with
+# nvued running and a usable NVUE CLI, wait a fixed 30 seconds inside the original component deadline
+# before any post-reboot version/configuration/health verification. Expected values come from that
+# contract (30 s, the original COMPONENT_DEADLINE_EXCEEDED, no wait without a reboot), never from the
+# implementation. Fake clock only; nothing sleeps.
+SETTLE_SECONDS = 30.0  # R-024 「固定等待 30 秒」
+
+
+class PostReadySettleTests(unittest.TestCase):
+    BOOT_BEFORE = '00000000-0000-0000-0000-020000000001'
+    BOOT_NEW = '00000000-0000-0000-0000-020000000002'
+    BOOT_AGAIN = '00000000-0000-0000-0000-020000000003'
+
+    def setUp(self):
+        import ibsw_upgrade_observer as observer
+        self.observer = observer
+        self.clock = SimpleNamespace(now=1000.0)
+        self.calls = []
+        self.boots = {}
+        self.verify_results = {}
+        self.failures = []
+        bus = SimpleNamespace(emit=lambda name, component, stage: self.calls.append(('emit', name, stage, self.clock.now)),
+                              latest={})
+        parsed = SimpleNamespace(known_hosts=None, identity=None, management_public_key=None, user='admin')
+        self.adapter = pipeline.NativeAdapter(SimpleNamespace(_version_plan=[]), parsed, 'SYNTHETIC',
+                                              None, None, None, None, bus)
+        self.adapter._login_boot_once = self.login
+        patcher = patch.object(pipeline, '_now', lambda: self.clock.now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        patcher = patch.object(observer, '_observe_component_completion_once', self.verify)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def login(self, job):
+        self.calls.append(('login', job.name, self.clock.now))
+        return self.boots[job.name], True
+
+    def verify(self, leaf, dispatch, **kwargs):
+        name = leaf.hostname
+        self.calls.append(('verify', name, self.clock.now))
+        outcome = self.verify_results[name].pop(0)
+        raise outcome
+
+    def job(self, name='ib0', *, deadline=1800.0, state='DISPATCHED_UNKNOWN'):
+        from pathlib import Path
+        scope = SimpleNamespace(devices={name: SimpleNamespace(address='192.0.2.10')},
+            component_attempt_may_have_started=lambda *a: True,
+            _record_native_component_failure=lambda *a: self.failures.append(a),
+            run_directory=Path('/nonexistent-ib-run'), _health_checks=[], _health_overrides=[])
+        job = pipeline.NativeStep(name, 'os', scope, contextlib.ExitStack(), {})
+        job.leaf = SimpleNamespace(hostname=name)
+        job.dispatch = SimpleNamespace(state=state, stage='os-0001')
+        job.deadline = self.clock.now + deadline
+        job.started = self.clock.now
+        if state == 'NO_WRITE':
+            job.phase = 'VERIFY'
+        else:
+            job.wrote = job.remote_may_be_active = True
+            job.boot = pipeline.BootStability(self.BOOT_BEFORE)
+            job.phase = 'AUTH'
+        self.boots[name] = self.BOOT_NEW
+        self.verify_results[name] = []
+        return job
+
+    def verifications(self, name='ib0'):
+        return [t for kind, host, *rest in self.calls if kind == 'verify' and host == name for t in rest]
+
+    def phases(self, name='ib0'):
+        return [(r['phase'], r['since_dispatch_seconds']) for r in self.adapter.timeline if r['hostname'] == name]
+
+    def test_ready_waits_thirty_seconds_before_the_first_post_reboot_verification(self):
+        job = self.job()
+        self.verify_results['ib0'] = [self.observer._CompletionDeferred()]
+        event = self.adapter.advance(job)
+        self.assertEqual((event.kind, event.at), ('WAIT', 1000.0 + SETTLE_SECONDS))
+        self.assertEqual(self.verifications(), [], 'no version/config/health verification before the wait ends')
+        self.assertIn(('emit', 'ib0', 'NVUE_READY', 1000.0), self.calls, 'original readiness event kept')
+        self.assertEqual(job.deadline, 2800.0, 'the original component deadline is neither reset nor extended')
+        self.clock.now = 1000.0 + SETTLE_SECONDS - 1     # 29 s: still waiting
+        job.phase = event.phase
+        early = self.adapter.advance(job)
+        self.assertEqual((early.kind, early.at), ('WAIT', 1000.0 + SETTLE_SECONDS))
+        self.assertEqual(self.verifications(), [])
+        self.clock.now = 1000.0 + SETTLE_SECONDS
+        job.phase = early.phase
+        self.adapter.advance(job)
+        self.assertEqual(self.verifications(), [1000.0 + SETTLE_SECONDS])
+        self.assertEqual(job.deadline, 2800.0)
+        self.assertEqual(self.phases(), [('POST_READY_SETTLE_STARTED', 0.0), ('POST_READY_SETTLE_ENDED', 30.0),
+                                         ('VERIFY_COLLECTION_STARTED', 30.0)])
+
+    def test_deadline_inside_the_wait_is_the_original_component_deadline_failure(self):
+        job = self.job(deadline=20.0)
+        event = self.adapter.advance(job)
+        self.assertEqual(event.kind, 'WAIT')
+        self.assertEqual(job.deadline, 1020.0)
+        self.clock.now = 1020.0
+        job.phase = event.phase
+        terminal = self.adapter.advance(job)
+        self.assertEqual(terminal.kind, 'FINISHED')
+        self.assertEqual(terminal.row['state'], 'UNKNOWN')
+        self.assertTrue(terminal.row['reason'].startswith('COMPONENT_DEADLINE_EXCEEDED'), terminal.row)
+        self.assertEqual(self.verifications(), [], 'a wait never ends with a verification after the deadline')
+
+    def test_readiness_again_on_the_same_boot_does_not_wait_again(self):
+        job = self.job()
+        self.verify_results['ib0'] = [self.observer._CompletionDeferred(), self.observer._CompletionDeferred()]
+        event = self.adapter.advance(job)
+        self.assertEqual((event.kind, event.at, event.phase), ('WAIT', 1000.0 + SETTLE_SECONDS, 'VERIFY'))
+        self.clock.now = event.at
+        job.phase = event.phase
+        again = self.adapter.advance(job)               # verification deferred: back to TCP/AUTH
+        self.assertEqual(again.phase, 'TCP')
+        self.clock.now += 3.0
+        job.phase = 'AUTH'
+        self.adapter.advance(job)
+        self.assertEqual(self.verifications(), [1030.0, 1033.0], 'same boot: verification retried at once')
+        self.assertEqual([p for p, _ in self.phases()].count('POST_READY_SETTLE_STARTED'), 1)
+
+    def test_a_new_boot_during_verification_waits_again_on_that_boot(self):
+        job = self.job()
+        self.verify_results['ib0'] = [self.observer._CompletionBootChanged(self.BOOT_AGAIN),
+                                      self.observer._CompletionDeferred()]
+        event = self.adapter.advance(job)
+        self.assertEqual((event.kind, event.at, event.phase), ('WAIT', 1000.0 + SETTLE_SECONDS, 'VERIFY'))
+        self.clock.now = event.at
+        job.phase = event.phase
+        changed = self.adapter.advance(job)
+        self.assertEqual(changed.phase, 'AUTH')
+        self.boots['ib0'] = self.BOOT_AGAIN
+        self.clock.now = 1040.0
+        job.phase = changed.phase
+        second = self.adapter.advance(job)
+        self.assertEqual((second.kind, second.at), ('WAIT', 1040.0 + SETTLE_SECONDS))
+        self.assertEqual(self.verifications(), [1030.0])
+        self.clock.now = second.at
+        job.phase = second.phase
+        self.adapter.advance(job)
+        self.assertEqual(self.verifications(), [1030.0, 1070.0])
+        self.assertEqual(job.deadline, 2800.0, 'the requeued boot keeps the same original deadline')
+        self.assertEqual([p for p, _ in self.phases()].count('POST_READY_SETTLE_STARTED'), 2)
+
+    def test_no_write_step_without_a_reboot_verifies_at_once(self):
+        job = self.job(state='NO_WRITE')
+        self.verify_results['ib0'] = [self.observer._CompletionDeferred()]
+        self.adapter.advance(job)
+        self.assertEqual(self.verifications(), [1000.0])
+        self.assertNotIn('POST_READY_SETTLE_STARTED', [p for p, _ in self.phases()])
+
+    def test_devices_wait_independently(self):
+        first, second = self.job('ib0'), self.job('ib1')
+        self.verify_results['ib0'] = [self.observer._CompletionDeferred()]
+        self.verify_results['ib1'] = [self.observer._CompletionDeferred()]
+        wait_first = self.adapter.advance(first)
+        self.clock.now = 1010.0
+        wait_second = self.adapter.advance(second)
+        self.assertEqual((wait_first.at, wait_second.at), (1030.0, 1040.0))
+        self.clock.now = 1030.0
+        first.phase, second.phase = wait_first.phase, wait_second.phase
+        self.adapter.advance(first)
+        self.adapter.advance(second)
+        self.assertEqual((self.verifications('ib0'), self.verifications('ib1')), ([1030.0], []))
+
+
 if __name__=='__main__':
     unittest.main()

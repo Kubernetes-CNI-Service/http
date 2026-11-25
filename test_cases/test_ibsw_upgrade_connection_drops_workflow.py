@@ -26,7 +26,8 @@ import test_ibsw_upgrade_connection_drops as direct
 from ibsw_upgrade_contract import load_global_text, normalize_upgrade
 
 FAST = fleet_probe.Timings(upgrading_ping=0.05, reboot_wait=0.1, ladder_ping=0.05, ladder_retry=0.05,
-                           ssh_check=0.3, dwell=8.0, ladder_budget=4.0, deadline=15.0)
+                           ssh_check=0.3, dwell=8.0, ladder_budget=4.0, deadline=15.0,
+                           post_ready_settle=0.05)
 
 
 class UpgradeConnectionDropWorkflowTests(unittest.TestCase):
