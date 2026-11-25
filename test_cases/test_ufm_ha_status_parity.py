@@ -8,8 +8,9 @@ holds the two readings equal on every recorded layout.
 import unittest
 
 from test_cases.module_loader import load_script
-from test_cases.test_ufm_setup_upgrade import (HA_STATUS_AFTER_FAILOVER, HA_STATUS_NONE, HA_STATUS_NOT_STARTED,
-                                               HA_STATUS_PACEMAKER_1, HA_STATUS_STARTED, ROOT, ufm)
+from test_cases.test_ufm_setup_upgrade import (HA_STATUS_AFTER_FAILOVER, HA_STATUS_DEFAULT_CLUSTER, HA_STATUS_NONE,
+                                               HA_STATUS_NOT_STARTED, HA_STATUS_PACEMAKER_1, HA_STATUS_STARTED,
+                                               ROOT, ufm)
 
 FIELDS = ("online", "offline", "masters", "slaves", "nodes", "dc", "quorum", "resources", "daemons", "drbd")
 
@@ -30,7 +31,8 @@ class UfmHaStatusParityTest(unittest.TestCase):
     def test_both_scripts_read_every_recorded_layout_alike(self):
         for label, text in (("started", HA_STATUS_STARTED), ("failover", HA_STATUS_AFTER_FAILOVER),
                             ("not-started", HA_STATUS_NOT_STARTED), ("none", HA_STATUS_NONE),
-                            ("pacemaker-1", HA_STATUS_PACEMAKER_1)):
+                            ("pacemaker-1", HA_STATUS_PACEMAKER_1),
+                            ("default-cluster", HA_STATUS_DEFAULT_CLUSTER)):   # I-009, 问题文档 :648-655
             with self.subTest(label):
                 tool = ufm.parse_ha_status(text)
                 page = self.monitor.parse_ufm_ha_status(monitor_snapshot(text))

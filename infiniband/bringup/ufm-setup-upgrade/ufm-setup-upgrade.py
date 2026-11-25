@@ -1623,7 +1623,7 @@ def address_owner(facts: dict) -> str:
 
 def ha_check_script(mgmt_device: str, peer_mgmt: str, ha_device: str, peer_ha: str, vip: str) -> str:
     """Read-only HA preconditions from the owner: service stopped, eth0/eth1 peers reachable,
-    VIP unused, at least one IB port physically up (ibstat)."""
+    VIP unused, at least one IB port physically up (ibstat); UFM_APPLIANCE for the version (owner 11-03)."""
     for device in (mgmt_device, ha_device):
         if not host.IFNAME_RE.fullmatch(device):
             raise UfmError(f"接口名无效: {device!r}")
@@ -1650,15 +1650,18 @@ def ha_check_script(mgmt_device: str, peer_mgmt: str, ha_device: str, peer_ha: s
             "| grep -v FAILED | grep -o 'lladdr [0-9a-fA-F:]*' | head -n 1)\"\n"
             "if command -v ibstat >/dev/null 2>&1; then\n"
             "  printf 'ib_linkup=%s\\n' \"$(ibstat 2>/dev/null | grep -c 'Physical state: LinkUp' || true)\"\n"
-            "else echo ib_linkup=missing; fi\n")
+            "else echo ib_linkup=missing; fi\n"
+            "printf 'appliance=%s\\n' \"$(grep -E '^UFM_APPLIANCE=' /etc/ufm-release 2>/dev/null "
+            "| head -n 1 | cut -d= -f2)\"\n")
 
 
 RUNNING_STATES = {"active", "activating", "reloading"}
 
 
-def ha_problems(facts: dict, peer: str, vip: str, *, ignore_service: bool = False) -> list:
+def ha_problems(facts: dict, peer: str, vip: str, version: str, *, ignore_service: bool = False) -> list:
     """HA preconditions that fail. ignore_service=True leaves out a running ufm-enterprise, which
-    ha-setup may stop itself once the operator agrees."""
+    ha-setup may stop itself once the operator agrees. Owner 11-03: both UFM_APPLIANCE equal the target
+    version of global; one that cannot be read fails too."""
     problems = []
     if not ignore_service and facts.get("ufm_enterprise") in RUNNING_STATES:
         problems.append(f"ufm-enterprise 正在运行（{facts.get('ufm_enterprise')}）")
@@ -1680,6 +1683,9 @@ def ha_problems(facts: dict, peer: str, vip: str, *, ignore_service: bool = Fals
         problems.append("设备上没有 ibstat，无法判断 IB 口状态")
     elif not linkup.isdigit() or int(linkup) < 1:
         problems.append("ibstat 中没有 Physical state: LinkUp 的 IB 口")
+    if facts.get("appliance") != version:
+        problems.append(f"UFM_APPLIANCE 为 {facts.get('appliance') or '未读到'}，应为 {version}"
+                        "（先运行 config-upgrade --apply）")
     return problems
 
 
@@ -1690,6 +1696,11 @@ HA_TAIL_MARK = "----- log tail -----"
 HA_CONFIG_DONE = "[*] Configuring HA cluster done."
 HA_DAEMONS = ("corosync", "pacemaker", "pcsd")
 HA_LOG_RE = re.compile(r"^/root/\.setup/[A-Za-z0-9._-]+/[A-Za-z0-9._-]+\.log$")
+
+
+HA_NO_VERSION = "global 未声明 servers.ufm.version，不做 HA"   # owner 11-03 (R-012 设计 :240)
+# I-009: without --force pcs refuses, since a single-node cluster loses its quorum; `pcs cluster start` undoes it.
+PCS_CLUSTER_STOP_SCRIPT = "set -u\nLC_ALL=C pcs cluster stop --force </dev/null\n"
 
 
 def ha_status_script() -> str:
@@ -1732,7 +1743,14 @@ def parse_ha_status(text: str) -> dict:
 
     status = {"online": names("Online"), "offline": names("OFFLINE"),
               "masters": names("Masters", "Promoted"), "slaves": names("Slaves", "Unpromoted"),
-              "nodes": 0, "dc": "", "quorum": None, "resources": [], "daemons": {}, "drbd": {}}
+              "nodes": 0, "dc": "", "quorum": None, "resources": [], "daemons": {}, "drbd": {},
+              # I-009: ufm_ha_cluster's own "HA is not configured" line (not the "HA Cluster is not configured!"
+              # printed once pacemaker is stopped) and the configured resource count (None when not printed)
+              "ha_not_configured": bool(re.search(r"^Error: HA is not configured", text, re.MULTILINE)),
+              "resource_count": None}
+    count = re.search(r"^[\s*]*(\d+) (?:resource instances?|resources?) configured", text, re.MULTILINE)
+    if count:
+        status["resource_count"] = int(count.group(1))
     configured = re.search(r"^[\s*]*(\d+) nodes? configured", text, re.MULTILINE)
     status["nodes"] = max(int(configured.group(1)) if configured else 0,
                           len(status["online"]) + len(status["offline"]))
@@ -1773,6 +1791,16 @@ def ha_cluster_kind(status: dict, nodes: list, vip: str) -> tuple:
     if current and current != vip:
         problems.append(f"集群的 VIRTUAL_IP 为 {current}，global 为 {vip}")
     return ("foreign", "; ".join(problems)) if problems else ("ours", "")
+
+
+def ha_default_cluster(status: dict, node: UfmNode) -> bool:
+    """I-009: pacemaker's own single-node default cluster on a freshly upgraded UFM is not an HA configuration
+    when all hold: ufm_ha_cluster says HA is not configured, the only node is the one it was read on, 0 resources,
+    no DRBD and no VIRTUAL_IP. Anything else is judged by ha_cluster_kind as before (问题文档 I-009 期望 1)."""
+    members = status["online"] + status["offline"]
+    return (status["ha_not_configured"] and status["nodes"] == 1 and len(members) == 1
+            and ha_member(members[0], [node]) is node
+            and status["resource_count"] == 0 and not status["resources"] and not status["drbd"])
 
 
 def ha_status_problems(status: dict, nodes: list, vip: str, master: Optional[UfmNode] = None) -> list:
@@ -3147,10 +3175,14 @@ class Session:
         preconditions (only a running ufm-enterprise may be stopped), one confirmation for the whole plan,
         mutual trust, the preconditions again, standby config, master config with the VIP, the DRBD wait,
         `ufm_ha_cluster start` and the status verdict. A failed ufm_enterprise_sanity.sh is only a note at the
-        end. (check is the read-only view.)"""
+        end. (check is the read-only view.) Owner 11-03: without servers.ufm.version in global there is no HA,
+        decided before any input check or login. I-009: pacemaker's own default single-node cluster is not
+        an existing HA; stopping it is part of the confirmed plan."""
         if not self.apply:
             raise UfmError("内部错误：ha-setup 只在 --apply 下运行")
         results = {node.hostname: NodeResult(node.hostname, self.plan.role_of(node)) for node in nodes}
+        if not self.plan.version:
+            return [self.stop(result, "HA_SKIPPED_NO_VERSION", HA_NO_VERSION) for result in results.values()]
         if len(nodes) != 2:
             return [self.stop(result, "INPUT_ERROR", "HA 需要两台 UFM") for result in results.values()]
         if not self.plan.vip or not self.plan.logical.get("eth1"):
@@ -3165,27 +3197,31 @@ class Session:
         if self.ha_blocked(results, "HA_NOT_READY", "对端无法登录，本端不做改动"):
             return list(results.values())
         try:
-            found = self.ha_clusters([master, standby], results)
+            found, defaults = self.ha_clusters([master, standby], results)
         except (UfmError, host.HostConfigError) as exc:
             return [self.stop(result, "HA_NOT_READY", str(exc)) for result in results.values()]
         if found:
             return self.ha_exists(found, master, nodes, results)
-        if not self.ha_prepare(master, standby, results) or not self.ha_configure(master, standby, results):
+        if (not self.ha_prepare(master, standby, results, defaults)
+                or not self.ha_configure(master, standby, results)):
             return list(results.values())
         return self.ha_finish(master, standby, results)
 
-    def ha_clusters(self, nodes: list, results: dict) -> list:
-        """[(node, status)] for every node whose `ufm_ha_cluster status` shows a cluster."""
-        found = []
+    def ha_clusters(self, nodes: list, results: dict) -> tuple:
+        """([(node, status)] for every node whose `ufm_ha_cluster status` shows a cluster, [node] for every node
+        that only has pacemaker's own default single-node cluster (I-009), kept out of the first list)."""
+        found, defaults = [], []
         for node in nodes:
             self.say(f"  {node.hostname}: 读取 ufm_ha_cluster status（判断是否已有 HA 配置）")
             try:
                 status = self.ha_read_status(node, results[node.hostname], "ha-status")
             except (UfmError, host.HostConfigError) as exc:
                 raise UfmError(f"{node.hostname} 无法读取 ufm_ha_cluster status: {exc}") from exc
-            if ha_cluster_kind(status, nodes, self.plan.vip)[0] != "absent":
+            if ha_default_cluster(status, node):
+                defaults.append(node)
+            elif ha_cluster_kind(status, nodes, self.plan.vip)[0] != "absent":
                 found.append((node, status))
-        return found
+        return found, defaults
 
     def ha_exists(self, found: list, master: UfmNode, nodes: list, results: dict) -> list:
         """Owner 2026-10-22: an existing HA configuration is never set up again; the user clears it first."""
@@ -3209,8 +3245,10 @@ class Session:
                 self.stop(result, "WAITING_PEER", detail)
         return True
 
-    def ha_plan_text(self, master: UfmNode, standby: UfmNode, running: list) -> str:
-        lines = [f"停止 {', '.join(node.hostname for node in running)} 上正在运行的 ufm-enterprise"] if running else []
+    def ha_plan_text(self, master: UfmNode, standby: UfmNode, running: list, defaults: list) -> str:
+        lines = [f"停止 {node.hostname} 上 pacemaker 自带的默认单节点集群（pcs cluster stop --force；"
+                 "可用 pcs cluster start 恢复）" for node in defaults]
+        lines += [f"停止 {', '.join(node.hostname for node in running)} 上正在运行的 ufm-enterprise"] if running else []
         lines += ["两台 root 互信（已具备的不改动）",
                   f"{standby.hostname}: {shlex.join(self.ha_node_argv(standby, master, 'standby'))}",
                   f"{master.hostname}: {shlex.join(self.ha_node_argv(master, standby, 'master'))}",
@@ -3220,8 +3258,9 @@ class Session:
                   "之后自动做 ha-post-config：" + POST_CONFIG_PLAN]
         return "HA 部署：\n      " + "\n      ".join(lines)
 
-    def ha_prepare(self, master: UfmNode, standby: UfmNode, results: dict) -> bool:
-        """No cluster yet: the preconditions, one confirmation, stop the service, trust, the preconditions again."""
+    def ha_prepare(self, master: UfmNode, standby: UfmNode, results: dict, defaults: list) -> bool:
+        """No cluster yet: the preconditions, one confirmation, stop pacemaker's default single-node clusters
+        (I-009), stop the service, trust, the preconditions again."""
         pairs = ((master, standby), (standby, master))
         facts = {}
         for node, peer in pairs:
@@ -3232,7 +3271,8 @@ class Session:
             except (UfmError, host.HostConfigError, KeyError) as exc:
                 self.stop(result, "HA_NOT_READY", f"无法完成检查: {exc}")
                 continue
-            blockers = ha_problems(facts[node.hostname], peer.hostname, self.plan.vip, ignore_service=True)
+            blockers = ha_problems(facts[node.hostname], peer.hostname, self.plan.vip, self.plan.version,
+                                   ignore_service=True)
             if blockers:
                 self.stop(result, "HA_NOT_READY", "; ".join(blockers))
         if self.ha_blocked(results, "HA_NOT_READY", "对端 HA 前提未满足，本端不做改动"):
@@ -3240,7 +3280,16 @@ class Session:
         running = [node for node in (master, standby)
                    if facts[node.hostname].get("ufm_enterprise") in RUNNING_STATES]
         try:
-            self.authorize(master, self.ha_plan_text(master, standby, running))
+            self.authorize(master, self.ha_plan_text(master, standby, running, defaults))
+            for node in defaults:   # I-009: confirmed with the plan; nothing of HA has been changed yet
+                result = results[node.hostname]
+                self.say(f"  {node.hostname}: 停止 pacemaker 自带的默认单节点集群")
+                self.run_script(node, result, "pcs-cluster-stop", PCS_CLUSTER_STOP_SCRIPT)
+                status = self.ha_read_status(node, result, "ha-status-after-stop")
+                if ha_cluster_kind(status, [master, standby], self.plan.vip)[0] != "absent":
+                    raise UfmError(f"{node.hostname} 停止默认单节点集群后 ufm_ha_cluster status 仍显示集群")
+                result.steps.append({"step": "ha_default_cluster", "outcome": "STOPPED"})
+                self.say(f"    {node.hostname} [ha_default_cluster] STOPPED")
             if running:
                 self.stop_ufm_enterprise(running, results)
             for item in self.trust([master, standby]):
@@ -3260,7 +3309,8 @@ class Session:
             return False
         for node, peer in pairs:   # every precondition again, now including the stopped service
             result = results[node.hostname]
-            problems = ha_problems(self.ha_probe(node, peer, result, "ha-recheck"), peer.hostname, self.plan.vip)
+            problems = ha_problems(self.ha_probe(node, peer, result, "ha-recheck"), peer.hostname, self.plan.vip,
+                                   self.plan.version)
             if problems:
                 self.stop(result, "HA_NOT_READY", "; ".join(problems))
             else:
@@ -3955,7 +4005,13 @@ class Session:
         results = [self.checked(node, cabling) for node in nodes]
         for result in results:
             self.add_occupancy(result, findings[result.hostname])
-        if (len(nodes) == 2 and all(item.status in {"COMPLIANT", "NEEDS_CONFIGURATION"} for item in results)
+        if len(nodes) == 2 and not self.plan.version:
+            # Owner 11-03: no target version, no HA; neither trust nor the HA preconditions are checked.
+            for item in results:
+                if item.status in {"COMPLIANT", "NEEDS_CONFIGURATION"}:
+                    item.steps.append({"step": "ha_config", "outcome": "SKIPPED", "detail": HA_NO_VERSION})
+                    self.say(f"    {item.hostname} [ha_config] SKIPPED: {HA_NO_VERSION}")
+        elif (len(nodes) == 2 and all(item.status in {"COMPLIANT", "NEEDS_CONFIGURATION"} for item in results)
                 and self.plan.vip and self.plan.logical.get("eth1")):
             self.check_ha(nodes, {item.hostname: item for item in results})
         return [self.settle_deferred(item) for item in results]
@@ -3969,9 +4025,11 @@ class Session:
     def ha_config_view(self, nodes: list, results: dict) -> tuple:
         """Read-only (check): what ha-setup --apply would find, from `ufm_ha_cluster status` on both nodes."""
         try:
-            found = self.ha_clusters(nodes, results)
+            found, defaults = self.ha_clusters(nodes, results)
         except (UfmError, host.HostConfigError) as exc:
             return "UNKNOWN", str(exc)
+        if not found and defaults:
+            return "WOULD_CHANGE", "只有 pacemaker 自带的默认单节点集群，ha-setup 会先停掉它再配置"
         if not found:
             return "WOULD_CHANGE", "未配置 HA：ha-setup --apply 会配置并启动"
         status = found[0][1]
@@ -4000,7 +4058,7 @@ class Session:
             else:
                 try:
                     problems = ha_problems(self.ha_probe(node, peer, result, "ha-check"), peer.hostname,
-                                           self.plan.vip)
+                                           self.plan.vip, self.plan.version)
                 except (UfmError, host.HostConfigError) as exc:
                     problems = [f"无法完成检查: {exc}"]
                 result.facts["ha_problems"] = problems
@@ -4193,7 +4251,8 @@ WRITE_COMMANDS = ("config-upgrade", "ha-setup", "ha-post-config")
 # HA configuration is HA_EXISTS: nothing is set up and the user clears it first. HA_READY (only the
 # preconditions met) is no longer an end state.
 DONE_STATUSES = {"check": {"COMPLIANT"}, "config-upgrade": {"UPGRADED", "UP_TO_DATE", "CONFIGURED"},
-                 "ha-setup": {"HA_CONFIGURED"},
+                 # owner 11-03: without a target version there is no HA, which is not a failure (R-012 设计 :253)
+                 "ha-setup": {"HA_CONFIGURED", "HA_SKIPPED_NO_VERSION"},
                  # ha-post-config (owner 2026-10-22): changed and failed over, or already as wanted
                  "ha-post-config": {"HA_POST_CONFIGURED", "HA_POST_UP_TO_DATE"}}
 # Owner 2026-10-20: IPMI is out-of-band management; when its steps fail the run records the failure,

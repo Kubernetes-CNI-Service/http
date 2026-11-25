@@ -1108,6 +1108,7 @@ def ufm_ha_cluster(state, item, name, args):
         item.setdefault("ha_config_calls", []).append(args[1:])
         item["ha_config_stdout_tty"] = os.isatty(1)
         item["ha_saw_ufm_enterprise"] = item.get("services", {}).get("ufm-enterprise", "active")
+        item["ha_saw_default_cluster"] = bool(item.get("default_cluster"))
         state.setdefault("ha_order", []).append(f"{name}:{role}")
         save(state)
         print(f"Assigning CLI IPs to nodes (role: {role})")
@@ -1167,12 +1168,39 @@ def ufm_ha_cluster(state, item, name, args):
         return 0
     if args == ["status"]:
         if not ha.get("master") or name not in (ha["master"], ha["standby"]):
+            if item.get("default_cluster"):
+                # I-009 (问题文档 :648-655, an excerpt): pacemaker's own single-node cluster on a freshly
+                # upgraded UFM; the exit code was not recorded (inferred: not 0 after the Error line).
+                print("Error: HA is not configured or is configured with old settings, please configure / "
+                      "reconfigure it before running HA cluster commands.\nCluster name: debian\n"
+                      "  * 1 node configured\n  * 0 resource instances configured\nNode List:\n"
+                      f"  * Online: [ {item['hostname']} ]\nFull List of Resources:\n  * No resources")
+                return 1
+            if item.get("pcs_calls"):
+                print("Error: HA Cluster is not configured!")   # after `pcs cluster stop --force` (问题文档 :668)
+                return 1
             # inferred: on a node without a cluster pcs cannot read the cluster information base
             print("Error: error running crm_mon, is pacemaker running?")
             return 1
         print(ha_status_text(state, ha))
         return 0
     return 2
+
+
+def pcs(state, item, args):
+    """`pcs cluster stop --force` as the owner ran it on the default cluster (问题文档 I-009 :665-669): without
+    --force pcs refuses, since a single-node cluster loses its quorum (refusal wording inferred)."""
+    item.setdefault("pcs_calls", []).append(args)
+    save(state)
+    if args[:2] != ["cluster", "stop"]:
+        print(f"fake pcs: unsupported {args}", file=sys.stderr)
+        return 2
+    if "--force" not in args:
+        print("Error: Stopping the node(s) will cause a loss of the quorum, use --force to override")
+        return 1
+    item["default_cluster"] = False
+    save(state)
+    return 0
 
 
 def load_shared_configuration(state, ha):
@@ -1256,6 +1284,8 @@ def main():
     item, base = state["ufms"][name], base_dir(name)
     if tool == "ufm_ha_cluster":
         return ufm_ha_cluster(state, item, name, args)
+    if tool == "pcs":
+        return pcs(state, item, args)
     if tool == "drbdadm" and args == ["status"]:
         return drbdadm(state, name)
     if tool == "docker":
@@ -1451,7 +1481,7 @@ if __name__ == "__main__":
 FAKE_TOOL_NAMES = ("hostname", "hostnamectl", "ip", "netplan", "ipmitool", "sha256sum", "setsid", "bash",
                    "systemctl", "timedatectl", "getent", "ssh-keygen", "ssh", "ping", "wget", "tar",
                    "systemd-run", "ufm-fake-os-upgrade", "ibstat", "arping",
-                   "ufm_ha_cluster", "drbdadm", "ufm_enterprise_sanity.sh", "nohup", "timeout", "docker")
+                   "ufm_ha_cluster", "drbdadm", "ufm_enterprise_sanity.sh", "nohup", "timeout", "docker", "pcs")
 TEST_KEY_BLOB = "AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYmgmtserver"
 UBUNTU_RESOLVED = "[Resolve]\n#DNS=\n#FallbackDNS=\n#Domains=\n#DNSSEC=no\n"
 UBUNTU_TIMESYNCD = "[Time]\n#NTP=\n#FallbackNTP=ntp.ubuntu.com\n#RootDistanceMaxSec=5\n"
@@ -2288,6 +2318,18 @@ class InspectModeTest(PhasesCase):
             self.assert_untouched(name)
 
 
+# A complete /var/log/ufm_os_upgrade_<UFM_OS>_status.log of one upgrade: steps, brackets and timestamps as
+# ufm-manual.log 662-677 records them (the reboot falls between UFM-OS-UPGRADE and UFMCLI-UPGRADE).
+UPGRADE_STATUS_LOG_COMPLETE = "".join(f"{stamp}: {step:<36}[{result:<10}]\n" for stamp, step, result in (
+    ("20261019-12_55_39", "UFM_OS_UPGRADE", "STARTED"), ("20261019-12_56_00", "CERTIFICATE-VALIDATION", "PASSED"),
+    ("20261019-12_57_59", "APPLIANCE-UPGRADE", "PASSED"), ("20261019-12_59_46", "FW-UPGRADE", "PASSED"),
+    ("20261019-13_00_13", "KERNEL-UPGRADE", "PASSED"), ("20261019-13_00_44", "HA-PACKAGES-UPGRADE", "SKIPPED"),
+    ("20261019-13_00_46", "TELEMETRY-REQUIREMENTS-UPGRADE", "PASSED"),
+    ("20261019-13_04_13", "PACKAGES-UPGRADE", "PASSED"), ("20261019-13_04_15", "NEW-PACKAGES", "PASSED"),
+    ("20261019-13_04_15", "DISABLE-SLEEP", "PASSED"), ("20261019-13_04_19", "FIREWALL-PORTS", "PASSED"),
+    ("20261019-13_04_20", "UFMCLI-PREPERATION", "PASSED"), ("20261019-13_06_46", "UFM-OS-BIOS-UPGRADE", "PASSED"),
+    ("20261019-13_06_46", "UFM-OS-UPGRADE", "PASSED"), ("20261019-13_18_58", "UFMCLI-UPGRADE", "PASSED"),
+    ("20261019-13_18_58", "UFM-OS-FIRSTBOOT", "PASSED")))
 COMPLIANT_RESOLVED = UBUNTU_RESOLVED.replace("#DNS=\n", "DNS=160.250.70.5 160.250.71.202\n").replace(
     "#Domains=\n", "Domains=site01.example.test\n")
 
@@ -2330,6 +2372,24 @@ class ConfiguredPairCase(PhasesCase):
                     ("ipmi_power", "SKIPPED"),
                     ("dns", "UNCHANGED"), ("dns_domains", "UNCHANGED"), ("ntp", "UNCHANGED"),
                     ("timezone", "UNCHANGED"), ("hosts", "UNCHANGED"))
+
+    def make_upgraded(self):
+        """Both nodes already upgraded to the target version of global (v3.1.6 WP-1, shared with B2):
+        UFM_APPLIANCE in /etc/ufm-release and one complete status log, steps and layout as ufm-manual.log
+        662-677 records them (STARTED ... UFM-OS-UPGRADE PASSED, the reboot, ... UFM-OS-FIRSTBOOT PASSED)."""
+        state = (json.loads(self.state_path.read_text()) if self.state_path.exists()
+                 else dict(self.state, image_url=IMAGE_URL))
+        files = {"etc/ufm-release": UFM_RELEASE_SHIPPED.replace("UFM_APPLIANCE=2.3.1-8", "UFM_APPLIANCE=2.6.1-8"),
+                 "var/log/ufm_os_upgrade_26.07.24-9_status.log": UPGRADE_STATUS_LOG_COMPLETE}
+        for name in ("ufm01", "ufm02"):
+            item = state["ufms"][name]
+            item["files"].update(files)
+            if item.get("seeded"):   # the fake writes item["files"] into the sandbox only once
+                for relative, text in files.items():
+                    path = self.sandbox / name / relative
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+        self.state_path.write_text(json.dumps(state))
 
 
 
@@ -2606,8 +2666,8 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
         self.assertFalse(Path(str(self.state_path) + ".calls").exists(), "neither case may log in")
 
     def make_ha_ready(self):
-        state = (json.loads(self.state_path.read_text()) if self.state_path.exists()
-                 else dict(self.state, image_url=IMAGE_URL))
+        self.make_upgraded()   # HA needs both UFMs at the target version (owner 11-03, 需求文档 :737)
+        state = json.loads(self.state_path.read_text())
         for name in ("ufm01", "ufm02"):
             state["ufms"][name]["services"]["ufm-enterprise"] = "inactive"
             state["ufms"][name]["ib_ports"] = ["Polling", "LinkUp"]
@@ -2831,6 +2891,86 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
             self.assertEqual({dict(self.outcomes(item))["ha_preconditions"] for item in results.values()}, {"OK"},
                              (with_arping, [item.facts.get("ha_problems") for item in results.values()]))
             self.assertEqual(state["ufms"]["ufm01"]["stale_neigh"], {}, "the cached entry is flushed first")
+
+    def make_default_clusters(self):
+        """I-009: both freshly upgraded UFMs carry pacemaker's own single-node default cluster."""
+        self.make_ha_ready()
+        state = json.loads(self.state_path.read_text())
+        for name in ("ufm01", "ufm02"):
+            state["ufms"][name]["default_cluster"] = True
+        self.state_path.write_text(json.dumps(state))
+
+    def test_default_clusters_are_stopped_after_the_one_confirmation_then_ha_is_configured(self):
+        # I-009 acceptance (问题文档 :686): listed in the plan, then after the confirmation stopped one by one,
+        # the preconditions checked and HA configured.
+        self.make_default_clusters()
+        asked = []
+        results, state, _calls, _logs = self.run_login(
+            action="ha_setup", confirm=lambda host, action: asked.append(action) or True)
+        self.assertEqual(len(asked), 1, "one confirmation covers the whole HA plan")
+        for host in (self.U1, self.U2):
+            # I-009 expectation 2 (问题文档 :678) with the way back (:669)
+            self.assertIn(f"停止 {host} 上 pacemaker 自带的默认单节点集群（pcs cluster stop --force；"
+                          "可用 pcs cluster start 恢复）", asked[0])
+        for name in ("ufm01", "ufm02"):
+            item = state["ufms"][name]
+            self.assertEqual(results[name].status, "HA_CONFIGURED", results[name].detail)
+            self.assertEqual(item["pcs_calls"], [["cluster", "stop", "--force"]])
+            self.assertIs(item["ha_saw_default_cluster"], False, "stopped before ufm_ha_cluster config")
+            outcomes = self.outcomes(results[name])
+            self.assertLess(outcomes.index(("ha_default_cluster", "STOPPED")),
+                            outcomes.index(("ha_config", "CONFIGURED")))
+
+    def test_declining_leaves_the_default_clusters_running(self):
+        self.make_default_clusters()   # I-009 acceptance (问题文档 :687): no confirmation, no change
+        results, state, _calls, _logs = self.run_login(action="ha_setup", confirm=lambda host, action: False)
+        self.assertEqual({item.status for item in results.values()}, {"NOT_AUTHORIZED"})
+        for name in ("ufm01", "ufm02"):
+            self.assertNotIn("pcs_calls", state["ufms"][name])
+            self.assertIs(state["ufms"][name]["default_cluster"], True)
+            self.assertNotIn("ha_config_calls", state["ufms"][name])
+
+    def test_check_reports_a_default_cluster_as_would_change(self):
+        self.make_default_clusters()   # I-009 expectation 3 (问题文档 :679)
+        results, state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            step = next(step for step in results[name].steps if step["step"] == "ha_config")
+            self.assertEqual(step["outcome"], "WOULD_CHANGE", step)
+            self.assertIn("默认单节点集群", step["detail"])
+            self.assertEqual(dict(self.outcomes(results[name]))["ha_preconditions"], "OK",
+                             results[name].facts.get("ha_problems"))
+            self.assertNotIn("pcs_calls", state["ufms"][name])
+
+    def test_one_node_below_the_target_version_blocks_ha_without_changes(self):
+        # Owner 11-03 (需求文档 :737; R-012 设计 :621): both UFM_APPLIANCE equal the target version of global.
+        self.make_ha_ready()
+        state = json.loads(self.state_path.read_text())
+        state["ufms"]["ufm02"]["files"]["etc/ufm-release"] = UFM_RELEASE_SHIPPED
+        self.state_path.write_text(json.dumps(state))
+        results, state, _calls, _logs = self.run_login(action="ha_setup")
+        self.assertEqual(results["ufm02"].status, "HA_NOT_READY", results["ufm02"].detail)
+        self.assertIn("UFM_APPLIANCE", results["ufm02"].detail)
+        self.assertEqual(results["ufm01"].status, "WAITING_PEER", results["ufm01"].detail)
+        for name in ("ufm01", "ufm02"):
+            for key in ("systemctl", "pcs_calls", "ha_config_calls"):
+                self.assertNotIn(key, state["ufms"][name])
+        self.assertFalse((self.sandbox / "ufm01/root/.ssh/id_ed25519").exists(), "no trust either")
+
+    def test_without_a_target_version_ha_setup_ends_before_any_device_contact(self):
+        # Owner 11-03 (需求文档 :753, :757; R-012 设计 :240, :244): no servers.ufm.version in global, no HA.
+        (self.inputs / "01-global.yaml").write_text(GLOBAL.replace('      version: "2.6.1-8"\n', ""), encoding="utf-8")
+        self.assertIsNone(ufm.build_plan(self.inputs).version)
+        results, _state, _calls, _logs = self.run_login(action="ha_setup", confirm=lambda host, action: self.fail(action))
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(results[name].status, "HA_SKIPPED_NO_VERSION", results[name].detail)
+            self.assertIn("global 未声明 servers.ufm.version，不做 HA", results[name].detail)
+        self.assertFalse(Path(str(self.state_path) + ".calls").exists(), "no device is contacted")
+        checked, _state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            steps = dict(self.outcomes(checked[name]))
+            self.assertEqual(steps["ha_config"], "SKIPPED", checked[name].steps)
+            for absent in ("ha_preconditions", "root_keypair"):
+                self.assertNotIn(absent, steps)
 
 
 class HaPostConfigTest(ConfiguredPairCase):
@@ -3218,11 +3358,12 @@ class CablingCheckTest(AddressOccupancyCase):
 
 
 class HaProblemsTest(unittest.TestCase):
+    # appliance: owner 11-03 (需求文档 :737; R-012 设计 :621), both UFMs at the target version of global
     READY = {"ufm_enterprise": "inactive", "mgmt_peer": "yes", "ha_peer": "yes", "vip_local": "",
-             "vip_ping": "no", "vip_neigh": "", "ib_linkup": "2"}
+             "vip_ping": "no", "vip_neigh": "", "ib_linkup": "2", "appliance": "2.6.1-8"}
 
     def problems(self, **changes):
-        return ufm.ha_problems(dict(self.READY, **changes), "ufm02", "198.51.101.133")
+        return ufm.ha_problems(dict(self.READY, **changes), "ufm02", "198.51.101.133", "2.6.1-8")
 
     def test_each_owner_condition_is_checked(self):
         self.assertEqual(self.problems(), [])
@@ -3237,7 +3378,10 @@ class HaProblemsTest(unittest.TestCase):
                                 (dict(vip_local="eno8303"), "已配置在本机 eno8303"),
                                 (dict(ib_linkup="0"), "LinkUp"),
                                 (dict(ib_linkup="missing"), "没有 ibstat"),
-                                (dict(ib_linkup=""), "LinkUp")):
+                                (dict(ib_linkup=""), "LinkUp"),
+                                # an older version and one that cannot be read both fail (R-012 设计 :621)
+                                (dict(appliance="2.3.1-8"), "UFM_APPLIANCE"),
+                                (dict(appliance=""), "UFM_APPLIANCE")):
             found = self.problems(**changes)
             self.assertEqual(len(found), 1, (changes, found))
             self.assertIn(needle, found[0], changes)
@@ -3251,6 +3395,8 @@ class HaProblemsTest(unittest.TestCase):
         self.assertIn("ping -c 3 -W 2 -I eno8403 192.0.2.2", script)
         self.assertIn("ip neigh show 198.51.101.133 dev eno8303", script)
         self.assertIn("Physical state: LinkUp", script)
+        self.assertIn("/etc/ufm-release", script, "the version precondition (需求文档 :737)")
+        self.assertIn("UFM_APPLIANCE", script)
         for verb in ("systemctl stop", "systemctl start", "systemctl restart", "ip addr add", "> /etc"):
             self.assertNotIn(verb, script)
         self.assertEqual(subprocess.run(["bash", "-n"], input=script, text=True).returncode, 0)
@@ -3315,6 +3461,19 @@ HA_STATUS_NOT_STARTED = (HA_STATUS_STARTED
                          .replace("Started ufm01", "Stopped (disabled)"))
 # Inferred, not observed: a node without a cluster.
 HA_STATUS_NONE = "Error: error running crm_mon, is pacemaker running?"
+# I-009 (问题文档 :648-655): pacemaker's own single-node default cluster on a freshly upgraded UFM, host name
+# replaced by this fixture's. An excerpt: the full output and the exit code were not recorded (inferred: the
+# excerpt leaves out a Daemon Status block; the judgement does not read the daemons).
+HA_STATUS_DEFAULT_CLUSTER = """Error: HA is not configured or is configured with old settings, please configure / reconfigure it before running HA cluster commands.
+Cluster name: debian
+  * 1 node configured
+  * 0 resource instances configured
+Node List:
+  * Online: [ ufm01.site01.example.test ]
+Full List of Resources:
+  * No resources"""
+# I-009 (问题文档 :668): the whole output after `pcs cluster stop --force`.
+HA_STATUS_STOPPED = "Error: HA Cluster is not configured!"
 # The older layout from the owner's 2026-10-21 example (Pacemaker 1).
 HA_STATUS_PACEMAKER_1 = """Cluster name: ufmcluster
 Stack: corosync
@@ -3419,6 +3578,37 @@ class HaStatusTest(unittest.TestCase):
         self.assertIn("ufm09", stranger[1])
         self.assertIn(self.U2, stranger[1])
 
+    def test_a_default_single_node_cluster_is_not_an_existing_ha(self):
+        # I-009 expectation 1 (问题文档 :671-675): HA not configured, only this node, 0 resources, no DRBD/VIP.
+        status = ufm.parse_ha_status(HA_STATUS_DEFAULT_CLUSTER)
+        self.assertTrue(ufm.ha_default_cluster(status, self.master))
+        self.assertFalse(ufm.ha_default_cluster(status, self.standby), "read on the peer it is not that node")
+
+    def test_a_resource_another_node_or_a_vip_makes_it_an_existing_ha(self):
+        # I-009 expectation 1 last sentence (问题文档 :677) and acceptance :683: any one missing → existing HA.
+        changed = {
+            "resource": HA_STATUS_DEFAULT_CLUSTER.replace(
+                "  * No resources", f"  * ufm-enterprise    (systemd:ufm-enterprise):        Started {self.U1}"),
+            "node": HA_STATUS_DEFAULT_CLUSTER.replace(f"Online: [ {self.U1} ]", f"Online: [ {self.U1} {self.U2} ]"),
+            "vip": HA_STATUS_DEFAULT_CLUSTER + f"\nVIRTUAL_IP:                   [{self.VIP}]",
+            # the other two of the four conditions (问题文档 :672, :674): HA reported as configured, a resource count
+            "configured": HA_STATUS_DEFAULT_CLUSTER.split("\n", 1)[1],
+            "resource-count": HA_STATUS_DEFAULT_CLUSTER.replace("0 resource instances", "1 resource instances")}
+        for label, text in changed.items():
+            with self.subTest(label):
+                self.assertNotEqual(text, HA_STATUS_DEFAULT_CLUSTER)
+                status = ufm.parse_ha_status(text)
+                self.assertFalse(ufm.ha_default_cluster(status, self.master))
+                self.assertNotEqual(ufm.ha_cluster_kind(status, self.nodes, self.VIP)[0], "absent")
+        for text in (HA_STATUS_STARTED, HA_STATUS_NOT_STARTED, HA_STATUS_PACEMAKER_1, HA_STATUS_NONE,
+                     HA_STATUS_STOPPED):
+            self.assertFalse(ufm.ha_default_cluster(ufm.parse_ha_status(text), self.master), text[:40])
+
+    def test_the_status_after_pcs_cluster_stop_is_no_cluster(self):
+        # I-009 acceptance (问题文档 :684)
+        self.assertEqual(ufm.ha_cluster_kind(ufm.parse_ha_status(HA_STATUS_STOPPED), self.nodes, self.VIP),
+                         ("absent", ""))
+
     def test_a_configured_but_not_started_cluster_is_an_existing_configuration(self):
         # Owner 2026-10-22: any HA configuration counts, whatever its state.
         status = ufm.parse_ha_status(HA_STATUS_NOT_STARTED)
@@ -3491,7 +3681,8 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(ufm.DONE_STATUSES["config-upgrade"], {"UPGRADED", "UP_TO_DATE", "CONFIGURED"})
         # Owner 2026-10-22: ha-setup configures and starts HA; an existing configuration (HA_EXISTS) and
         # HA_READY (preconditions only) are not done.
-        self.assertEqual(ufm.DONE_STATUSES["ha-setup"], {"HA_CONFIGURED"})
+        # Owner 11-03 (需求文档 :753, :757; R-012 设计 :253): no target version means no HA, which is not a failure.
+        self.assertEqual(ufm.DONE_STATUSES["ha-setup"], {"HA_CONFIGURED", "HA_SKIPPED_NO_VERSION"})
         self.assertIsNone(ufm.parse_args(["ha-setup", "--apply"]).node)
         for removed in ("login", "access", "base", "base-config", "trust", "upgrade", "ha-check"):
             self.parse_fails([removed])
@@ -3639,6 +3830,7 @@ class CommandLineTest(unittest.TestCase):
         self.assertEqual(code("ha-post-config", ["HA_POST_UP_TO_DATE", "HA_POST_CONFIGURED"]), 0)
         self.assertEqual(code("ha-post-config", ["HA_POST_CONFIG_FAILED", "HA_POST_CONFIG_FAILED"]), 1)
         self.assertEqual(code("ha-setup", ["HA_READY", "HA_READY"]), 1, "preconditions alone are not HA")
+        self.assertEqual(code("ha-setup", ["HA_SKIPPED_NO_VERSION"] * 2), 0, "R-012 设计 :253: not needed")
 
     def test_notes_come_last_and_change_no_exit_code(self):
         # Owner 2026-10-22: a failed ufm_enterprise_sanity.sh is only pointed out at the end.

@@ -163,7 +163,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 |---|---|---|
 | `check` | 输入合法性 + 设备状态 | 输入检查 → 地址占用检查 → 每台只读登录核验；新设备到此为止，已改过密码的设备做全部只读检查 |
 | `config-upgrade --apply` | 阶段一 + 步骤 1 + 步骤 3 | 先做与 check 相同的检查，列出改动计划，确认一次；新设备先改密；每一步只改不符合或缺少的项；最后升级 UFM |
-| `ha-setup --apply` | 步骤 2 + 步骤 4 | 先读两台的 `ufm_ha_cluster status`：已有 HA 配置就不做任何事并提示（清除后重跑，或直接 ha-post-config）；没有集群时检查 HA 五项前提，确认一次后做互信、配置 standby 和 master、等 DRBD 同步、启动，以 status 判定，再自动做 ha-post-config |
+| `ha-setup --apply` | 步骤 2 + 步骤 4 | 先读两台的 `ufm_ha_cluster status`：已有 HA 配置就不做任何事并提示（清除后重跑，或直接 ha-post-config）；没有集群时检查 HA 六项前提，确认一次后做互信、配置 standby 和 master、等 DRBD 同步、启动，以 status 判定，再自动做 ha-post-config |
 | `ha-post-config --apply` | HA 之后的配置 | 只在已有且正常的 HA 上运行：经 VIP 安装 license、改 gv.cfg 的 [Server] 三项、按 ibswitches 写 root_guid.conf；任何一项有改动就 failover 一次，再核对 |
 
 ### check（默认，只读）
@@ -203,9 +203,10 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
      - 版本是否已是 global 的目标版本；
      - 两台都能检查时，再查互信，并在 master 上读 `ufm_ha_cluster status`（结果记在 `ha_config`）：
        - `OK`：已是这两台、这个 VIP，状态正常；此时不再检查 HA 前提（`ha_preconditions` 为 `SKIPPED`，因为 HA 运行时 ufm-enterprise 在运行、VIP 已被占用）。
-       - `WOULD_CHANGE`：两台都没有集群（同时检查 HA 五项前提）。
+       - `WOULD_CHANGE`：两台都没有集群（同时检查 HA 六项前提，含两台的 `UFM_APPLIANCE` 都等于 global 的目标版本）；只有 pacemaker 自带的默认单节点集群时同样是 `WOULD_CHANGE`，说明「只有 pacemaker 自带的默认单节点集群，ha-setup 会先停掉它再配置」（I-009）。
        - `UNHEALTHY`：是这两台，但状态不正常（含已配置未启动）；`MISMATCH`：集群节点或 VIP 与输入不符。这两种都需要人工处理，`ha-setup` 不处理已有的 HA 配置。
        - `UNKNOWN`：读不到 status（例如设备上没有 `ufm_ha_cluster`）。
+       - `SKIPPED`：global 没有声明 `servers.ufm.version`，不做 HA（owner 2026-11-03）：不读 status，也不查互信和 HA 前提，不计入需要改动。
        - 已有 HA（`OK`、`UNHEALTHY`、`MISMATCH`）时，互信只作提示：`ha-setup` 不改动已有 HA，也就不会建互信，
          所以缺少的 root 密钥对、对端公钥记为 `NOT_NEEDED`，不计入需要改动（owner 2026-10-23；实验环境手工部署的 HA 即如此）。
 5. 结果：
@@ -233,25 +234,29 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 
 ### ha-setup --apply
 
+global 没有声明 `servers.ufm.version` 时不做 HA（owner 2026-11-03）：在任何输入检查和登录之前直接结束，两台的结果都是 `HA_SKIPPED_NO_VERSION`（退出码 0），说明「global 未声明 servers.ufm.version，不做 HA」。
+
 两台都要能登录，否则停止。以下「master」指安装期的 primary（hostname 以 ufm01 结尾的那台），「standby」指另一台。
 
 1. **先判断是否已有 HA 配置**（owner 2026-10-22）：在两台上各读一次 `ufm_ha_cluster status`。
    - 任何一台读到 HA 集群（有节点列表或节点数），不论状态正常与否、节点和 VIP 是否与输入相同：**不做任何 HA 配置**，结果 `HA_EXISTS`（退出码 1）。
    - 本次运行的最后一行之后提示：「当前 UFM 已有 HA 配置（在哪台上读到、节点、VIRTUAL_IP、status 是否正常或前几项问题）。本次没有做任何 HA 配置。要重新部署 HA，请先清除现有的 HA 配置，再运行 ha-setup --apply；如果确认当前 HA 正常，可直接运行 ha-post-config --apply 完成 HA 之后的配置」。
    - 清除 HA 配置的命令不在提示里给出：情况各不相同，由用户自己操作（owner 2026-10-22）。
-   - 两台都读不到集群：继续第 2 步。读 status 本身失败（例如没有 `ufm_ha_cluster`）：`HA_NOT_READY`。
-2. 查 HA 五项前提：
+   - pacemaker 自带的默认单节点集群不算已有 HA 配置（I-009）：status 同时满足报「HA is not configured」、节点只有读的这一台、资源数为 0、没有 DRBD 和 VIRTUAL_IP。新升级的 UFM 上常见。它会列进第 3 步的确认，确认后在第 4 步停掉；任何一条不满足（例如有资源、有其他节点、有 VIP）仍按已有 HA 配置处理。一台是默认集群、另一台是真集群时按已有 HA 配置处理。
+   - 两台都读不到集群（或只有默认单节点集群）：继续第 2 步。读 status 本身失败（例如没有 `ufm_ha_cluster`）：`HA_NOT_READY`。
+2. 查 HA 六项前提：
    - ① ufm-enterprise 未运行
    - ② eth0（eno8303）互通
    - ③ eth1（eno8403）互通
    - ④ VIP 未被占用
    - ⑤ 每台至少一个 IB 口 LinkUp
+   - ⑥ 每台 `/etc/ufm-release` 的 `UFM_APPLIANCE` 等于 global 的 `servers.ufm.version`（owner 2026-11-03；读不到也算不满足；不满足时先运行 `config-upgrade --apply`）。确认后的复查同样查这一项。
 
    除 ①（ufm-enterprise 在运行）以外的任何一项不满足时停止（`HA_NOT_READY`），不做改动。
-3. **确认一次**：列出全部要做的事，包括要停止 ufm-enterprise 的设备、互信、standby 和 master 的完整 `ufm_ha_cluster config` 命令。
+3. **确认一次**：列出全部要做的事，包括要停止默认单节点集群的设备（`pcs cluster stop --force`；可用 `pcs cluster start` 恢复）、要停止 ufm-enterprise 的设备、互信、standby 和 master 的完整 `ufm_ha_cluster config` 命令。
    - 确认内容里写明代价：两台的 `/opt/ha_data` 备份到 `/ha_backup/<时间>/` 后清空并交给 DRBD，在 master 上格式化 `/dev/drbd0`，并销毁两台上原有的集群配置。
    - 这一次确认覆盖本次运行的全部改动；回答 N 则什么都不改（`NOT_AUTHORIZED`）。
-4. 停止 ufm-enterprise（如在运行），做互信，再查一次全部前提。
+4. 先在有默认单节点集群的设备上执行 `pcs cluster stop --force`，再读一次 `ufm_ha_cluster status`，必须已没有集群（步骤记 `ha_default_cluster: STOPPED`）；停失败或复读仍有集群时两台 `HA_NOT_READY`，这时还没有任何 HA 改动。然后停止 ufm-enterprise（如在运行），做互信，再查一次全部前提。
    - 互信：两端各自确保有 ed25519 密钥对，交换公钥，再从两端按 IP 登录对端，核对对端接口上确实有这个地址。
 5. **配置**：先 standby，再 master（带 `--virtual-ip`），命令见下一节。
    - 两条命令的全部输出都写进设备上的日志 `/root/.setup/<运行目录名>/ha-config-standby.log`、`ha-config-master.log`，只把退出码、是否出现 `[*] Configuring HA cluster done.` 和日志末尾 15 行（去掉含 password 的行）带回来。
@@ -273,7 +278,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 
 8'. **接着自动做 ha-post-config**（owner 2026-10-22：确实新做了 HA 之后自动调用），见下一节。失败为 `HA_POST_CONFIG_FAILED`。sanity 在 ha-post-config 之后、在当时 Promoted 的那台上执行（failover 后就是另一台）。
 
-完成状态（退出码 0）只有 `HA_CONFIGURED`（本次配置并启动，ha-post-config 也已完成）。`HA_EXISTS`（已有 HA 配置，未做任何改动）和 `HA_READY`（只满足了前提）都不是完成状态。
+完成状态（退出码 0）是 `HA_CONFIGURED`（本次配置并启动，ha-post-config 也已完成）和 `HA_SKIPPED_NO_VERSION`（global 没有声明目标版本，不做 HA）。`HA_EXISTS`（已有 HA 配置，未做任何改动）和 `HA_READY`（只满足了前提）都不是完成状态。
 
 ### ha-post-config --apply（owner 2026-10-22，ufm-manual.log 第 1143–2088 行）
 
@@ -387,7 +392,7 @@ owner 在对话中给出了实测命令和输出，下面用文档地址段示�
 
 master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `ha-setup` 先读两台的 `ufm_ha_cluster status`，已有 HA 配置就什么都不做（见上面第 1 步）；需要配置时只在确认后执行。
 
-`ufm_ha_cluster status` 在没有集群的设备上输出什么，目前没有实测；工具按「读不到节点列表和节点数」判为没有集群。这样判断是安全的：集群在运行时 VIP 在线，第 2 步的 VIP 检查会拦下来。未启动状态下 status 的样子同样是推断（资源为 Stopped (disabled)），它同样算已有 HA 配置。
+`ufm_ha_cluster status` 在没有集群的设备上的输出已有实测（I-009，2026-11-01）：新升级的 UFM 上是 pacemaker 自带的默认单节点集群（第一行 `Error: HA is not configured ...`，集群名 `debian`，只有本机一个节点，资源为 0），工具按上面第 1 步认出它；`pcs cluster stop --force` 停掉以后只输出 `Error: HA Cluster is not configured!`。工具按「读不到节点列表和节点数」判为没有集群。这样判断是安全的：集群在运行时 VIP 在线，第 2 步的 VIP 检查会拦下来。未启动状态下 status 的样子同样是推断（资源为 Stopped (disabled)），它同样算已有 HA 配置。
 
 ### 连通测试与验证只用地址
 

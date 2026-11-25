@@ -2800,6 +2800,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 依据：owner 2026-10-22 在 `ufm-manual.log` 第 698–2088 行手工完成同一流程（standby、master config，`drbdadm status`，`ufm_ha_cluster start`、`status`，license，gv.cfg，root_guid.conf，failover）。这是手工证据，不是工具运行。
 - 前置条件：
   - 两台 UFM 已通过 `config-upgrade --apply`；
+  - 两台都是 global 的目标版本（`/etc/ufm-release` 的 `UFM_APPLIANCE` 等于 `servers.ufm.version`），否则 ha-setup 报 `HA_NOT_READY`（v3.1.6 WP-1）；
   - owner 书面授权维护窗口：master config 会备份并清空 `/opt/ha_data`、格式化 DRBD、销毁两台原有集群；failover 会短暂中断 UFM 服务；
   - 记录两台的 `ufm_ha_cluster status`、`/opt/ufm/files/conf/gv.cfg`、`root_guid.conf`、`licenses/`；
   - 工具目录下有 setup 建的 `image` 链接，`ib.csv` 含 spine（或 core）。
@@ -2816,6 +2817,28 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 清理与风险：
   - 部署本身不回滚；中途失败时按 owner 的方式清除 HA 后重跑；gv.cfg 和 root_guid.conf 可从备份恢复。
   - `ufmlicense` 的实际输出格式待 owner 提供样本后核对：判据是新主机 eno8303 MAC 那一行为 Valid。
+  - 未执行前保持 NOT RUN，不得写 PASS。
+
+## TC-REAL-UFM-HA-DEFAULT-CLUSTER-001 — ha-setup 处理新 UFM 上 pacemaker 自带的默认单节点集群（I-009）
+
+- Case ID：`TC-REAL-UFM-HA-DEFAULT-CLUSTER-001`；类型：real-environment / destructive / HA；状态：**OPEN / NOT RUN**。
+- 本机先决：`test_cases.test_ufm_setup_upgrade` 中 `HaStatusTest`、`HaProblemsTest`、`SimulatedUpgradeAndHaTest` 全部通过，以及 `test_cases.test_ufm_ha_status_parity` 通过。假设备 GREEN 不等于现场验收。
+- 依据：问题文档 I-009（owner 2026-11-01 现场发现并手工处理）；v3.1.6 指导 WP-1、5.3。
+- 前置条件：
+  - 两台刚升级完、还没做过 HA 的新 UFM（推断：每台新升级的 UFM 都会有默认集群）；
+  - 两台都是 global 的目标版本，`config-upgrade` 结果 `UP_TO_DATE`；
+  - 维护窗口和授权同 `TC-REAL-UFM-HA-SETUP-001`；执行人 owner 或现场人员，验证 AI 只读核验（分栏写执行人、核验人，没人执行的步骤标「未执行」、不算通过）。
+- 步骤与预期：
+  0. 两台各记一份完整的 `ufm_ha_cluster status` 输出（脱敏后交 http dev，把夹具从节选换成全文）和退出码，再记 `pcs status` 的前几行。
+  1. `check`：`ha_config` 为 `WOULD_CHANGE`，说明只有默认单节点集群；`ha_preconditions` 不含版本问题。
+  2. `ha-setup --apply` 第一次回答 N：`NOT_AUTHORIZED`，两台的默认集群仍在。
+  3. 再跑、回答 y：确认文字列出两台的 `pcs cluster stop --force`；停后 status 是 `Error: HA Cluster is not configured!`；之后照 `TC-REAL-UFM-HA-SETUP-001` 第 2 步完成，结果 `HA_CONFIGURED`。
+  4. （不碰设备）把 global 的 `servers.ufm.version` 注释掉，放到 `--input-dir` 指向的副本目录里跑 `ha-setup --apply`：两台 `HA_SKIPPED_NO_VERSION`、退出 0、report 里没有任何设备登录；`check` 的 `ha_config` 是 `SKIPPED`。
+- 不允许的副作用：回答 N 时设备上有任何改动。
+- 证据：第 0 步两份 status 全文（脱敏）；部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 的 `report.log`、`result.json`；设备上 `/root/.setup/<运行目录>/` 的脚本。
+- 清理与风险：
+  - 第 3 步停掉默认集群后中止时用 `pcs cluster start` 恢复；第 4 步只改副本目录，删掉即可。
+  - 风险同 `TC-REAL-UFM-HA-SETUP-001`（master 的 config 会清空 `/opt/ha_data`、格式化 DRBD）；现有两台已做好 HA，这张卡要等下一对新 UFM。
   - 未执行前保持 NOT RUN，不得写 PASS。
 
 ## TC-REAL-UFM-MONITOR-001 — UFM 监控采集、降级、failover 期间的取回、保留期与日志轮转
