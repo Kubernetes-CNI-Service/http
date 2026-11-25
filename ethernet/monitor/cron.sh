@@ -2482,7 +2482,9 @@ ufm_ibdiag_fetch() {
     UFM_IBDIAG_ARCHIVE=$local_path
     UFM_IBDIAG_OUTCOME=ok
     UFM_RUN_STATUS=ok
-    UFM_RUN_REASON=""
+    # I-065: every check above passed; the collector's own reason (empty, or the timeout notice of a
+    # usable partial run) goes into the run record. It is no error and no failure.
+    UFM_RUN_REASON=$reason
     log "[UFM-IBDIAG] done → ${local_path}（${UFM_IBDIAG_KIND}，执行节点 ${node}）"
 }
 

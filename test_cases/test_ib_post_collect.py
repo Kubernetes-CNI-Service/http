@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -25,6 +26,10 @@ from test_cases.test_project_contracts import load_module
 ROOT = Path(__file__).resolve().parents[1]
 POST_COLLECT = ROOT / "infiniband/monitor/post-collect.py"
 RUN_ID = "20261021-0300-prod-0123456789abcdef"
+# I-065 fixed expectations (Q-056, http dev material section 6 C1 :296-297): the collector's reason for a
+# timed-out run with usable output, and the page's suffix after the original collection text.
+PARTIAL_NOTICE = "ibdiagnet timed out after 900s; partial output"
+PAGE_SUFFIX = "（超时，部分结果）"
 
 # Records its argv and writes the --output workbook with the provenance beside it, like the real
 # analyzer on success (ztp/config/ib_topology_provenance.py::write_report_provenance).
@@ -136,6 +141,19 @@ class IbPostCollectDirectTest(unittest.TestCase):
             self.assertEqual(receipt[key], {"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()},
                              key)
 
+    def test_a_timed_out_collectors_notice_is_carried_into_the_receipt(self):
+        # I-065 8.2 item 3: the receipt keeps the collector's rc and reason and names the exact .done bytes.
+        done = (f"result=ok\nkind=ibdiagnet\nrun_id={RUN_ID}\nrc=124\nhostname=ufm01.example.test\n"
+                f"reason={PARTIAL_NOTICE}\n")
+        archive = self.archive(done=done)
+        self.assertEqual(0, self.module.main(["--archive", str(archive)]))
+        receipt = self.receipt(f"{RUN_ID}_ufm01", "ibdiagnet")
+        self.assertEqual(receipt["collector"], {"rc": "124", "reason": PARTIAL_NOTICE,
+                                                "hostname": "ufm01.example.test"})
+        done_path = archive.with_name(archive.name.rsplit(".", 1)[0] + ".done")
+        self.assertEqual(receipt["done"], {"name": done_path.name,
+                                           "sha256": hashlib.sha256(done_path.read_bytes()).hexdigest()})
+
     def test_an_iblinkinfo_log_is_analysed_as_it_is_and_marked_degraded(self):
         log = self.archive(f"{RUN_ID}_ufm02_iblinkinfo.log")
         self.assertEqual(0, self.module.main(["--archive", str(log)]))
@@ -201,6 +219,59 @@ class IbPostCollectDirectTest(unittest.TestCase):
     def test_without_the_setup_output_link_nothing_runs(self):
         (self.root / "tool-link").unlink()
         self.assertEqual(2, self.module.main(["--archive", str(self.archive())]))
+
+
+class IbPagePartialNoticeTest(unittest.TestCase):
+    """I-065 8.2 item 4: the IB Link Validation page reads the collector metadata only from a receipt that
+    names this report's bytes, adds the fixed suffix after the original collection text in the existing
+    warning colour (orange), and never renders the reason as markup."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.output = Path(self.tmp.name).resolve()
+        self.page = load_module("ib_partial_notice_page", ROOT / "monitor/generate-monitor-html.py")
+        self.report = self.output / f"{RUN_ID}_ufm01-ibdiagnet-topology-validation.xlsx"
+        book = xlsxwriter.Workbook(str(self.report))
+        book.add_worksheet("Summary").write(0, 0, "Item")
+        book.close()
+
+    def publish(self, rc, reason, report_sha256=None):
+        receipt = {"schema": "ufm-ib-report-receipt-v1", "run_id": RUN_ID, "node": "ufm01", "kind": "ibdiagnet",
+                   "degraded": False,
+                   "collector": {"rc": rc, "reason": reason, "hostname": "ufm01.example.test"},
+                   "report": {"name": self.report.name,
+                              "sha256": report_sha256 or hashlib.sha256(self.report.read_bytes()).hexdigest()}}
+        self.report.with_name(self.report.name[:-len(".xlsx")] + ".receipt.json").write_text(
+            json.dumps(receipt), encoding="utf-8")
+        tab = self.page.load_topology_validation(self.output, "infiniband", "prod")
+        return tab, self.page.render_topology_panel(tab, "itop", "InfiniBand")
+
+    def test_a_timed_out_run_shows_the_suffix_after_the_original_text_in_orange(self):
+        for rc in ("124", "137"):
+            with self.subTest(rc=rc):
+                tab, html = self.publish(rc, PARTIAL_NOTICE)
+                self.assertEqual(f"UFM ufm01 · ibdiagnet · run-id {RUN_ID}{PAGE_SUFFIX}", tab["collection"])
+                self.assertRegex(html, re.escape(f"采集：<strong>UFM ufm01 · ibdiagnet · run-id {RUN_ID}")
+                                 + r"(?:</strong>)?\s*<span class=\"i-warn\">" + re.escape(PAGE_SUFFIX) + "</span>")
+        # the existing warning colour: .i-warn is orange (#e67e22)
+        self.assertRegex((ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8"),
+                         r"\.i-warn \{\{ color: #e67e22;")
+
+    def test_other_runs_and_receipts_without_a_reason_keep_the_original_text(self):
+        # rc 1 is the original plain success; a receipt without the reason is not turned into a timeout.
+        for rc, reason in (("0", ""), ("1", ""), ("124", ""), ("137", "")):
+            with self.subTest(rc=rc, reason=reason):
+                tab, html = self.publish(rc, reason)
+                self.assertEqual(f"UFM ufm01 · ibdiagnet · run-id {RUN_ID}", tab["collection"])
+                self.assertNotIn(PAGE_SUFFIX, html)
+
+    def test_the_reason_is_not_markup_and_a_receipt_for_other_bytes_shows_nothing(self):
+        tab, html = self.publish("124", "<script>alert(1)</script>")
+        self.assertNotIn("<script>", html)
+        tab, html = self.publish("124", PARTIAL_NOTICE, report_sha256="0" * 64)
+        self.assertEqual("", tab["collection"])
+        self.assertNotIn(PAGE_SUFFIX, html)
 
 
 class IbPostCollectRealAnalyzerWorkflowTest(unittest.TestCase):

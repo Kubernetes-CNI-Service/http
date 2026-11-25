@@ -4242,3 +4242,32 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - 本机 direct／workflow 只覆盖 macOS 的 BWK awk 与替身 ssh/scp；mawk 和真实 OpenSSH 的行为由本卡核实，仍为 **NOT RUN / REAL_ENV REQUIRED**（指导 :1976）。
+
+## TC-REAL-UFM-PARTIAL-NOTICE-001 — ibdiagnet 超时但输出可用：仍为成功，提醒贯穿证据链
+
+- 基本信息：real-environment / collection；I-065（v3.1.6 C1，指导 8.2、8.5 第 4 条）；状态 **OPEN / NOT RUN**，不能用本机替身关闭。本卡只是验收条件，不授权连接设备、制造故障或写线上 Tracker。
+- 风险与目标：ibdiagnet 在 900 秒上限内没跑完（rc 124/137）但本轮 `ibdiagnet2.net_dump` 已写出时，采集仍算成功并带固定提醒；`--routing` 去掉后参数其余不变。要防止的是：把可用的部分结果当失败计数、把失败或旧产物说成部分成功、提醒串到别的轮次或节点。
+- 本机先决：同版本的 `test_cases.test_ufm_monitor_scripts`、`test_cases.test_ufm_collection_contract`、`test_cases.test_ib_post_collect`、`test_cases.test_ufm_monitor_cron_workflow`、`test_cases.test_issue_tracker_sync` 和 `test_cases.test_ufm_partial_notice_workflow` 通过，且是精确的发布版本。
+- 前置条件：执行人是 owner 或明确授权的现场人员；核验人只读证据。记录 `sha256sum infiniband/monitor/ufm-ibdiagnet.sh ethernet/monitor/cron.sh`。不在普通 prod 上主动制造超时；只在现场自然出现超时、或在授权的隔离环境里观察。
+
+### 步骤
+
+1. 记录 UFM 上实际执行的命令行（`infiniband/monitor/ufm-ibdiagnet.sh` 的 `IBDIAGNET_ARGV`）：没有 `--routing`，其余参数的内容和顺序与 owner 2026-10-21 命令相同；限时仍是 `timeout -k 30 900`，`cron.sh` 外层等待仍是 1020 秒（指导 8.2 第 6 条）。
+2. 出现一轮 ibdiagnet 超时（rc 124 或 137）但写出了本轮 `ibdiagnet2.net_dump` 的采集后，分别记录：UFM 上的 `ibdiagnet2_<run-id>.done`（`result`、`rc`、`reason`）、归档 sha256、部署服务器 `ufm-ibdiagnet/<run-id>_<节点>_ibdiagnet2.{tgz,done}`、`99-output-p2p` 的 `.receipt.json`、`ufm-ibdiagnet/<run-id>.ufm-run.json`、IB Link Validation 的「采集：」一行、`99-output-monitor/issue-tracker-sync.log` 中的对应行（在线同步已启用的项目；未启用时由核验人用 `--convert-only` 只读核对）。
+3. 记录 `ufm-ibdiagnet/.ibdiagnet-state` 在这轮前后的 `failures`。
+
+### 预期结果
+
+- `.done`：`result=ok`、`rc` 为原值（124 或 137）、`reason=ibdiagnet timed out after 900s; partial output`；收据 `collector` 的 `rc`、`reason` 相同，收据的 `done.sha256` 是这份 `.done` 的；运行记录 `outcome=ok`、`reason` 相同、`ibdiagnet_failures_in_a_row=0`；页面「采集：」原文后有橙色「（超时，部分结果）」；同步日志有一行 `[IB] ibdiagnet timed out after 900s; partial output (run-id <run-id>)`（指导 8.2 第 1 条固定预期）。
+- 失败计数清零，不出现 `cron finish with UFM warnings`（这轮没有别的 UFM 问题时）。
+- 证据中区分 ok 与提醒：提醒不是失败，也不说明所有诊断阶段都已完成。
+- 不允许的副作用：串用旧产物或别台节点的 `.done`/收据、增加失败计数、放宽身份或哈希核对、向线上 Tracker 写测试项。
+
+### 清理与风险
+
+- 清理：只读核对，不删现场产物；若在授权隔离环境里观察，按原采集卡恢复，原件保留。
+- 风险：ibdiagnet 的设备负载和现场超时；去掉 `--routing` 不能保证不再超时。
+
+### 自动化状态
+
+- 本机 direct／workflow 只用替身 docker、ssh/scp 和离线分析器验证逻辑；真实 UFM 上的超时与部分输出仍为 **OPEN / NOT RUN**。

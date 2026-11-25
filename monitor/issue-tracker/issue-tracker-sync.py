@@ -29,6 +29,11 @@ this script's log is <project>/99-output-monitor/issue-tracker-sync.log.
 A domain whose newest input is unchanged since its last successful sync is skipped (use --force to
 send it again); a domain without any input is skipped with a note.
 
+I-065: when the selected IB input comes from an ibdiagnet run that timed out (rc 124/137) but left
+usable output, its .done (same run-id and sha256) says so and this log gets one line
+`[IB] ibdiagnet timed out after 900s; partial output (run-id <run-id>)`, also when the input is
+unchanged or with --convert-only / --precheck-only. The notice itself is never sent online.
+
     python3 monitor/issue-tracker/issue-tracker-sync.py [--project-dir DIR] [--only ib|eth]
                                                          [--convert-only | --precheck-only] [--force]
 
@@ -573,6 +578,16 @@ def handle_domain(domain: Domain, *, project: Path, output: Path, config: Config
         if source_input is None:
             log(f"IB: no {domain.environment} ibdiagnet2.tgz in 99-output-monitor/infiniband/ufm-ibdiagnet")
             return "no-input"
+        # I-065: a timed-out ibdiagnet run (124/137) with usable output stays ok; the UFM's .done beside
+        # this exact input (same run-id and sha256) says so. Logged before every early return below.
+        named = IB_INPUT.fullmatch(source_input.name)
+        done = source_input.with_name(source_input.name[:-len(".tgz")] + ".done")
+        fields = (dict(line.split("=", 1) for line in done.read_text(encoding="utf-8").splitlines() if "=" in line)
+                  if done.is_file() else {})
+        if (fields.get("result") == "ok" and fields.get("kind") == "ibdiagnet"
+                and fields.get("rc") in ("124", "137") and fields.get("reason")
+                and fields.get("run_id") == named.group("run_id") and fields.get("sha256") == sha256(source_input)):
+            log(f"[IB] {fields['reason']} (run-id {named.group('run_id')})")
         try:
             planned = _load_module(IB_POST_COLLECT, "ib_post_collect").select_cvt(p2p)
         except ValueError as exc:

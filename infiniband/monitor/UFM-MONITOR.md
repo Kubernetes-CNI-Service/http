@@ -145,8 +145,8 @@ docker exec ufm /opt/ufm/opensm/sbin/iblinkinfo > /root/monitor/iblinkinfo/iblin
 | 1 | 部署服务器 | `cron.sh` 从 `01-global.yaml` 读取 VIP，生成 run-id `YYYYMMDD-HHMM-prod-<16 位随机>`（含分钟级时间戳）。VIP 无人应答时记 SKIPPED，注明「HA 未就绪」。 |
 | 2 | 部署服务器 | 按失败计数决定本轮采什么：默认 ibdiagnet；ibdiagnet 连续失败 3 次后改采 iblinkinfo，此后每 6 轮再试一次 ibdiagnet，成功即清零切回。计数在 `ufm-ibdiagnet/.ibdiagnet-state`（`failures`、`since_probe`）。SKIPPED 不改计数；登录 VIP 之后的任何错误都按失败计。 |
 | 3 | UFM（VIP 所在） | `cron.sh` 把脚本传到 `/root/monitor/`，后台执行 `bash monitor/ufm-ibdiagnet.sh <run-id> [--iblinkinfo]`。同一个会话里读 `ip -br link`，按管理口 MAC 认出执行节点；之后的轮询和取回都走这台自己的地址（兼容 failover）。 |
-| 4 | 容器内 | ibdiagnet：`docker exec ufm sh -c '<限时包装>' sh /opt/ufm/opensm/bin/ibdiagnet <固定参数>`，限时 `timeout -k 30 900`（15 分钟；容器里有 `/usr/bin/timeout`），输出记到 `/root/monitor/ibdiagnet/ibdiagnet2_<run-id>.log`。 |
-| 5 | 容器内 → 主机 | 本轮写出 `ibdiagnet2.net_dump` 才算成功（看它的修改时间）。在容器里 `tar -zcf /opt/ufm/files/ibdiagnet2_<run-id>.tgz.part -C /var/tmp ibdiagnet2`，打包完改名；再在主机上 `mv /opt/ufm/files/ibdiagnet2_<run-id>.tgz /root/monitor/ibdiagnet/…tgz.part`（跨文件系统，先 `.part`），确认归档里有 `ibdiagnet2/ibdiagnet2.net_dump` 后改名。 |
+| 4 | 容器内 | ibdiagnet：`docker exec ufm sh -c '<限时包装>' sh /opt/ufm/opensm/bin/ibdiagnet <固定参数>`，限时 `timeout -k 30 900`（15 分钟；容器里有 `/usr/bin/timeout`），输出记到 `/root/monitor/ibdiagnet/ibdiagnet2_<run-id>.log`。周期采集的固定参数是上面 owner 命令去掉 `--routing`，其余参数的内容和顺序不变，900 秒、`-k 30` 和外层 1020 秒也不变（Q-057，I-065，v3.1.6；上面两段手工命令是历史原文，不改）；去掉 `--routing` 不保证不再超时。 |
+| 5 | 容器内 → 主机 | 本轮写出 `ibdiagnet2.net_dump` 才算成功（看它的修改时间）。在容器里 `tar -zcf /opt/ufm/files/ibdiagnet2_<run-id>.tgz.part -C /var/tmp ibdiagnet2`，打包完改名；再在主机上 `mv /opt/ufm/files/ibdiagnet2_<run-id>.tgz /root/monitor/ibdiagnet/…tgz.part`（跨文件系统，先 `.part`），确认归档里有 `ibdiagnet2/ibdiagnet2.net_dump` 后改名。超时（rc 124/137）但本轮写出了 net_dump 且归档成功时，仍是 `result=ok`，`rc` 保留原值，`reason=ibdiagnet timed out after 900s; partial output`（I-065，Q-056）；其它成功的 `reason` 为空，rc 1 等非超时的非零照旧是普通成功，不标超时或部分结果。没有本轮 net_dump、只有旧的、归档失败或中断，仍按原规则失败或不写完成标记。 |
 | 4' | 容器内 | iblinkinfo（降级时）：同样限时，只取 stdout 写到 `/root/monitor/iblinkinfo/iblinkinfo_<run-id>.log`，stderr 另存 `.stderr`；超过 64 MiB、没有 `Switch` 行或超时都算失败。 |
 | 6 | UFM 主机 | 执行节点身份（hostname、`ip -br link`）写到 `<前缀>_<run-id>.node`；最后写完成标记 `<前缀>_<run-id>.done`：`result`、`kind`、`run_id`、`artifact`、`sha256`、`size`、`rc`、`hostname`、`reason`。 |
 | 7 | 部署服务器 | 启动后 5 分钟第一次探测，之后每 30 秒一次，最长 17 分钟（15 分钟加 2 分钟打包）。按确切文件名从执行节点取回，核对 sha256（ibdiagnet 还要有 net_dump），存为 `ufm-ibdiagnet/<run-id>_<节点短名>_ibdiagnet2.tgz` 或 `…_iblinkinfo.log`，UFM 的完成标记一并存为同名 `.done`。 |
@@ -408,7 +408,7 @@ run-id 是部署服务器为**每一次** ibdiagnet 采集生成的唯一编号�
 - iblinkinfo 的 `.log` 直接交给分析器（`--iblinkinfo`），不再解包。
 - 分析器非零退出、报告没生成，都算失败。
 - **报告是否属于本轮看 provenance，不看修改时间**（owner 2026-10-22）：分析器写的 `<报告>.provenance.json` 里，报告、实际输入和 CVT 三者的 `sha256` 与 `resolved_path` 都必须对得上本轮的文件，否则失败，不写收据。
-- **收据** `<报告名去掉 .xlsx>.receipt.json`（schema `ufm-ib-report-receipt-v1`）：`run_id`、`node`、`kind`、`degraded`（iblinkinfo 即降级）、`collector`（取自 `.done` 的 `rc`、`reason`、`hostname`）、输入、CVT、报告、provenance 各自的文件名和 sha256、`created_at`。收据只由 post-collect 写，其它脚本不依赖它（owner：不要耦合）。
+- **收据** `<报告名去掉 .xlsx>.receipt.json`（schema `ufm-ib-report-receipt-v1`）：`run_id`、`node`、`kind`、`degraded`（iblinkinfo 即降级）、`collector`（取自 `.done` 的 `rc`、`reason`、`hostname`）、输入、CVT、报告、provenance 各自的文件名和 sha256、`created_at`。收据只由 post-collect 写，其它脚本不依赖它（owner：不要耦合）。I-065：`cron.sh` 在类型、run-id、执行节点、sha256、大小和 net_dump 全部核对通过后，把该轮 `.done` 的 `reason` 原样写进运行记录（`outcome` 仍为 `ok`，不计入失败次数，不算 UFM 告警）；IB Link Validation 只在收据对上报告字节、`collector` 的 `rc` 为 124/137 且 `reason` 非空时，在「采集：」原文后加橙色（现有 `.i-warn`）的「（超时，部分结果）」。
 - 不刷新页面。
 
 **清单对齐**（IB、NVL、UFM 与 Ethernet 相同，`generate-monitor-html.py::align_with_inventory`）：
@@ -770,7 +770,7 @@ owner 2026-10-22：「把落地代码合入 http，然后开始和 REQ7 对接�
 
 ## 16. 旧 REQ7/D-70 退役（2026-10-24）
 
-REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-sync.py` 调用 CableTracker 引擎实现（owner 2026-10-23），IB 数据直接读本线的 `99-output-monitor/infiniband/ufm-ibdiagnet`。旧 codex REQ7 链和 D-70 分三批删除，第 4 批只改文档。前面各节中注明日期的段落是当时的记录，保持原样；仍按现状描述旧链的句子已加「2026-10-24 补注」。
+REQ7（在线 Issue Tracker）现在由 `monitor/issue-tracker/issue-tracker-sync.py` 调用 CableTracker 引擎实现（owner 2026-10-23），IB 数据直接读本线的 `99-output-monitor/infiniband/ufm-ibdiagnet`。旧 codex REQ7 链和 D-70 分三批删除，第 4 批只改文档。前面各节中注明日期的段落是当时的记录，保持原样；仍按现状描述旧链的句子已加「2026-10-24 补注」。 I-065：所选 IB 输入旁的 `.done`（同 run-id、同 sha256）说明超时但输出可用时，`issue-tracker-sync.py` 在 `<项目>/99-output-monitor/issue-tracker-sync.log` 写一行 `[IB] ibdiagnet timed out after 900s; partial output (run-id <run-id>)`，输入未变化而跳过、`--convert-only`、`--precheck-only` 时也写；这条提醒不主动创建或修改线上 Tracker 项，不新增字段。项目没有启用在线同步、又没带 `--convert-only` 时，脚本不处理任何输入，也就不写这一行。
 
 | 批次 | 提交 | 删除的内容 |
 |---|---|---|

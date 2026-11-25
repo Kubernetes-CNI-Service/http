@@ -1114,6 +1114,37 @@ class UfmCronFabricModeAndRetentionTest(UfmCronCase):
         self.assertIn("result=failed", done.read_text(), "the UFM's failed .done is kept as evidence")
         self.assertEqual(self.ibdiag_archives(), [])
 
+    def test_a_timed_out_run_with_fresh_output_is_recorded_ok_with_its_notice(self):
+        # I-065 8.2 items 1-4: rc 124 with this run's net_dump stays ok; the exact reason goes done ->
+        # receipt -> run record; it is no UFM warning and the failure count is cleared, not raised.
+        self.state["vip"] = {VIP: UFMS["ufm02.example.test"][0]}   # ufm02 holds the VIP
+        result = self.run_cron(FAKE_IBDIAGNET_RC="124")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = self.run_record()
+        self.assertEqual((record["outcome"], record["reason"]),
+                         ("ok", "ibdiagnet timed out after 900s; partial output"))
+        self.assertEqual((record["analysis"], record["ibdiagnet_failures_in_a_row"]), ("ok", 0))
+        self.assertEqual(self.counts(), (0, 0))
+        done = (self.ibdiag_output / record["done"]["name"]).read_text()
+        self.assertIn("result=ok", done)
+        self.assertIn("rc=124", done)
+        receipt = json.loads((self.p2p_output / record["receipt"]["name"]).read_text())
+        self.assertEqual((receipt["collector"]["rc"], receipt["collector"]["reason"]),
+                         ("124", "ibdiagnet timed out after 900s; partial output"))
+        self.assertNotIn("UFM warnings", result.stdout)
+        self.assertIn("cron finish ==========", result.stdout)
+
+    def test_rc1_with_fresh_output_stays_a_plain_ok_record(self):
+        # I-065 8.2 item 1: rc 1 keeps the original success without a timeout or partial label.
+        self.state["vip"] = {VIP: UFMS["ufm02.example.test"][0]}   # ufm02 holds the VIP
+        result = self.run_cron(FAKE_IBDIAGNET_RC="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        record = self.run_record()
+        self.assertEqual((record["outcome"], record["reason"], record["ibdiagnet_failures_in_a_row"]),
+                         ("ok", "", 0))
+        receipt = json.loads((self.p2p_output / record["receipt"]["name"]).read_text())
+        self.assertEqual((receipt["collector"]["rc"], receipt["collector"]["reason"]), ("1", ""))
+
     def test_a_skipped_run_is_recorded_as_skipped(self):
         result = self.run_cron()   # no device holds the VIP
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

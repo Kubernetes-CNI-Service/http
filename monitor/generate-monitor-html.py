@@ -2014,6 +2014,11 @@ def topology_report_environments(report: dict) -> set[str]:
     return {"production"}
 
 
+# I-065: shown after the collection text when the UFM run timed out but its output was usable.
+UFM_PARTIAL_SUFFIX = "（超时，部分结果）"
+UFM_PARTIAL_HTML = f'<span class="i-warn">{UFM_PARTIAL_SUFFIX}</span>'   # the existing warning colour
+
+
 def ufm_report_collection(report_path: Path) -> str:
     """The UFM run behind an IB report, from the receipt infiniband/monitor/post-collect.py writes beside
     it (owner 2026-10-22: which run, which UFM, whether iblinkinfo stood in). Only a receipt naming this
@@ -2027,7 +2032,11 @@ def ufm_report_collection(report_path: Path) -> str:
             return ""
         kind = ("iblinkinfo（降级：ibdiagnet 连续失败）" if receipt.get("degraded")
                 else str(receipt.get("kind", "")))
-        return f"UFM {receipt['node']} · {kind} · run-id {receipt['run_id']}"
+        # I-065: the collector's .done (kept in the receipt) names a timed-out run with usable output
+        collector = receipt.get("collector") or {}
+        partial = collector.get("rc") in ("124", "137") and bool(collector.get("reason"))
+        return (f"UFM {receipt['node']} · {kind} · run-id {receipt['run_id']}"
+                + (UFM_PARTIAL_SUFFIX if partial else ""))
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return ""
 
@@ -2307,7 +2316,7 @@ def render_topology_panel(
       <strong>{escape(title)}</strong>
       &nbsp;·&nbsp; 最新报告：<strong>{escape(topology.get('source', '（无数据）'))}</strong>
       &nbsp;·&nbsp; 生成时间：<strong>{escape(topology.get('generated', '—'))}</strong>
-      {f"&nbsp;·&nbsp; 采集：<strong>{escape(topology['collection'])}</strong>" if topology.get('collection') else ""}
+      {f"&nbsp;·&nbsp; 采集：<strong>{escape(topology['collection']).replace(UFM_PARTIAL_SUFFIX, UFM_PARTIAL_HTML)}</strong>" if topology.get('collection') else ""}
     </span>
     <span class="topo-result {result_cls}">{escape(result)}</span>
     <span class="topo-count topo-matching">Matching {counts.get('Matching', 0)}</span>

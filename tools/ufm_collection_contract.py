@@ -21,9 +21,9 @@ _RUN_ID_RE = re.compile(r"^([0-9]{8}-[0-9]{4})-(prod|air)-([0-9a-f]{16})$")
 _IBDIAGNET_ARGV = (
     "/opt/ufm/opensm/bin/ibdiagnet", "--sc", "--extended_speeds", "all",
     "-P", "all=1", "--pm_per_lane", "--get_cable_info",
-    "--cable_info_disconnected", "--get_phy_info", "--routing",
+    "--cable_info_disconnected", "--get_phy_info",
     "--sharp", "--phy_cable_disconnected", "--rail_validation",
-)
+)   # Q-057 (I-065): no --routing
 
 
 @dataclass(frozen=True)

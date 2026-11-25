@@ -39,8 +39,9 @@ fi
 [[ "$RUN_ID" =~ ^[0-9]{8}-[0-9]{4}-(prod|air)-[0-9a-f]{16}$ ]] || usage
 
 CONTAINER=ufm
+# Q-057 (I-065, v3.1.6): the periodic collection drops ibdiagnet's routing flag; the rest as the owner gave it.
 IBDIAGNET_ARGV=(/opt/ufm/opensm/bin/ibdiagnet --sc --extended_speeds all -P all=1 --pm_per_lane
-                --get_cable_info --cable_info_disconnected --get_phy_info --routing --sharp
+                --get_cable_info --cable_info_disconnected --get_phy_info --sharp
                 --phy_cable_disconnected --rail_validation)
 IBLINKINFO=/opt/ufm/opensm/sbin/iblinkinfo
 RUN_TIMEOUT=900                             # owner 2026-10-22: at most 15 minutes inside the container
@@ -158,7 +159,10 @@ if docker exec "$CONTAINER" sh -c "tar -zcf ${SHARED_FILES}/${artifact}.part -C 
     && mv "${HOST_FILES}/${artifact}" "$OUTDIR/${artifact}.part" \
     && tar -tzf "$OUTDIR/${artifact}.part" | grep -q '/ibdiagnet2\.net_dump$' \
     && mv "$OUTDIR/${artifact}.part" "$OUTDIR/${artifact}"; then
-    finish ok "$artifact" ""
+    # I-065 (Q-056): timed out (124/137) but this run's net_dump is archived: still ok with the vendor
+    # rc, and the reason says the output is partial; every other ok keeps an empty reason.
+    notice=$(timeout_reason)
+    finish ok "$artifact" "${notice:+${notice}partial output}"
     exit 0
 fi
 rm -f "$OUTDIR/${artifact}.part" "${HOST_FILES}/${artifact}" "${HOST_FILES}/${artifact}.part"

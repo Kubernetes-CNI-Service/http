@@ -797,5 +797,86 @@ class MainFlowTests(unittest.TestCase):
                 self.sync.project_directory(None)
 
 
+IB_RUN_ID = "20261023-0905-prod-" + "f" * 16
+# I-065 fixed expectation (Q-056, http dev material section 6 C1 :296-297): the local sync log line.
+PARTIAL_NOTICE = "ibdiagnet timed out after 900s; partial output"
+PARTIAL_LINE = f"[IB] {PARTIAL_NOTICE} (run-id {IB_RUN_ID})"
+
+
+class IbPartialNoticeSyncTests(unittest.TestCase):
+    """I-065 8.2 item 5: the selected IB input's own completion record (run-id and sha256 bound) puts the
+    timeout notice into the local sync log before the unchanged, convert-only and precheck-only returns;
+    nothing new is written online for it."""
+
+    setUp_main = MainFlowTests.setUp
+    run_main = MainFlowTests.run_main
+    engine_calls = MainFlowTests.engine_calls
+
+    def setUp(self):
+        self.setUp_main()
+        (self.project / "99-output-p2p/plan-cvt.xlsx").write_bytes(b"cvt")
+        data = self.project / "99-output-monitor/infiniband/ufm-ibdiagnet"
+        data.mkdir(parents=True)
+        self.tgz = data / f"{IB_RUN_ID}_ufm01_ibdiagnet2.tgz"
+        self.tgz.write_bytes(b"\x1f\x8b fixture ibdiagnet archive")
+        self.done_path = data / f"{IB_RUN_ID}_ufm01_ibdiagnet2.done"
+        # the offline converter is a stand-in: an empty CVT circuit list in the engine's source format
+        converter = Path(self.directory.name) / "fake_generate_report.py"
+        converter.write_text(
+            "import json, sys\n"
+            "argv = sys.argv\n"
+            "open(argv[argv.index('--output') + 1], 'w').write(json.dumps({'row_count': 0, 'rows': []}))\n"
+            "open(argv[argv.index('--summary-output') + 1], 'w').write(json.dumps({'records': 0}))\n",
+            encoding="utf-8")
+        patcher = mock.patch.object(self.sync, "GENERATE_REPORT", converter)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.sync_log = self.project / "99-output-monitor/issue-tracker-sync.log"
+
+    def write_done(self, **override):
+        fields = {"result": "ok", "kind": "ibdiagnet", "run_id": IB_RUN_ID,
+                  "artifact": f"ibdiagnet2_{IB_RUN_ID}.tgz",
+                  "sha256": hashlib.sha256(self.tgz.read_bytes()).hexdigest(),
+                  "size": str(self.tgz.stat().st_size), "rc": "124", "hostname": "ufm01.example.test",
+                  "reason": PARTIAL_NOTICE}
+        fields.update(override)
+        self.done_path.write_text("".join(f"{key}={value}\n" for key, value in fields.items()), encoding="utf-8")
+
+    def test_the_notice_is_logged_on_sync_unchanged_convert_only_and_precheck_only(self):
+        self.write_done()
+        runs = (("sync", ()), ("unchanged", ()), ("convert-only", ("--convert-only",)),
+                ("precheck-only", ("--precheck-only",)))
+        for count, (label, extra) in enumerate(runs, start=1):
+            with self.subTest(label=label):
+                code, text = self.run_main(*extra)
+                self.assertEqual(0, code, text)
+                self.assertIn(PARTIAL_LINE, text)
+                self.assertEqual(count, self.sync_log.read_text(encoding="utf-8").count(PARTIAL_LINE))
+        self.assertIn(f"IB: {self.tgz.name} already synced", self.sync_log.read_text(encoding="utf-8"))
+        # the notice adds no online write: the engine ran only in the first, real sync (ETH and IB)
+        self.assertEqual(2, len(self.engine_calls()))
+
+    def test_no_notice_without_a_bound_timed_out_completion(self):
+        variants = {
+            "rc 0": {"rc": "0", "reason": ""},
+            "rc 1 stays a plain success": {"rc": "1", "reason": ""},
+            "rc 124 without a reason": {"reason": ""},
+            "another run's record": {"run_id": "20261023-0904-prod-" + "e" * 16},
+            "another archive's bytes": {"sha256": "0" * 64},
+            "another kind": {"kind": "iblinkinfo"},
+        }
+        for label, override in variants.items():
+            with self.subTest(label=label):
+                self.write_done(**override)
+                code, text = self.run_main("--convert-only")
+                self.assertEqual(0, code, text)
+                self.assertNotIn("partial output", text)
+        with self.subTest(label="no completion record"):
+            self.done_path.unlink()
+            code, text = self.run_main("--convert-only")
+            self.assertEqual(0, code, text)
+            self.assertNotIn("partial output", text)
+
+
 if __name__ == "__main__":
     unittest.main()

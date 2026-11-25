@@ -48,10 +48,11 @@ class UfmCollectionContractTests(unittest.TestCase):
         self.assertEqual("/opt/ufm/files", diag.ufm_staging_path)
         self.assertEqual("/root/monitor/ibdiagnet", diag.ufm_final_directory)
         self.assertEqual("/root/monitor/iblinkinfo", link.ufm_final_directory)
+        # Q-057 (I-065): the periodic argv drops only --routing; the rest keeps its content and order.
         self.assertEqual((
             "/opt/ufm/opensm/bin/ibdiagnet", "--sc", "--extended_speeds", "all",
             "-P", "all=1", "--pm_per_lane", "--get_cable_info",
-            "--cable_info_disconnected", "--get_phy_info", "--routing",
+            "--cable_info_disconnected", "--get_phy_info",
             "--sharp", "--phy_cable_disconnected", "--rail_validation",
         ), diag.vendor_argv)
         self.assertEqual(("/opt/ufm/opensm/sbin/iblinkinfo",), link.vendor_argv)

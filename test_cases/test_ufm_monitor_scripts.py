@@ -241,10 +241,14 @@ class UfmInfoTest(unittest.TestCase):
         self.assertEqual(subprocess.run(["bash", "-n", str(UFM_INFO)]).returncode, 0)
 
 
-# D-70 fixed arguments, run inside the UFM container exactly as the owner does by hand (2026-10-21).
+# D-70 fixed arguments, run inside the UFM container exactly as the owner does by hand (2026-10-21);
+# Q-057 (I-065): the periodic collection drops only --routing, the rest keeps its content and order.
 IBDIAGNET_ARGV = ["/opt/ufm/opensm/bin/ibdiagnet", "--sc", "--extended_speeds", "all", "-P", "all=1",
                   "--pm_per_lane", "--get_cable_info", "--cable_info_disconnected", "--get_phy_info",
-                  "--routing", "--sharp", "--phy_cable_disconnected", "--rail_validation"]
+                  "--sharp", "--phy_cable_disconnected", "--rail_validation"]
+# I-065 fixed expectation (Q-056, http dev material section 6 C1 :296-297): a run that timed out (124/137)
+# but left this run's net_dump, archived, stays ok with its rc and carries this reason.
+PARTIAL_NOTICE = "ibdiagnet timed out after 900s; partial output"
 RUN_ID = "20261021-0322-prod-3f9c0a1b2c3d4e5f"
 
 # A stand-in for `docker exec ufm ...`: the container's /var/tmp and /opt/ufm/files live under
@@ -398,6 +402,90 @@ class UfmIbdiagnetTest(unittest.TestCase):
         result = self.run_ibdiagnet(RUN_ID, FAKE_IBDIAGNET_RC="1")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual((self.done()["result"], self.done()["rc"]), ("ok", "1"))
+
+    def test_the_periodic_argv_has_no_routing_and_keeps_the_rest(self):
+        # Q-057 (I-065): only --routing goes; content and order of the rest, 900 s, kill-after 30 stay.
+        self.assertEqual(self.run_ibdiagnet(RUN_ID).returncode, 0)
+        [run] = [call for call in self.docker_calls() if "/opt/ufm/opensm/bin/ibdiagnet" in call]
+        self.assertEqual(run[6:], IBDIAGNET_ARGV)   # exec ufm sh -c <wrapper> sh <argv>
+        self.assertEqual(len(IBDIAGNET_ARGV), 13)
+        self.assertNotIn("--routing", run)
+        self.assertIn('exec timeout -k 30 900 "$@"', run[4])
+
+    def test_a_timed_out_run_with_fresh_output_is_ok_with_the_partial_notice(self):
+        # I-065 8.2 item 1: 124/137 with this run's net_dump, archived: result=ok, the vendor rc, the notice.
+        for rc in ("124", "137"):
+            with self.subTest(rc=rc):
+                shutil.rmtree(self.out, ignore_errors=True)
+                result = self.run_ibdiagnet(RUN_ID, FAKE_IBDIAGNET_RC=rc)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                done = self.done()
+                self.assertEqual((done["result"], done["rc"], done["reason"]), ("ok", rc, PARTIAL_NOTICE))
+                archive = self.out / f"ibdiagnet2_{RUN_ID}.tgz"
+                self.assertEqual((done["artifact"], done["sha256"]),
+                                 (archive.name, hashlib.sha256(archive.read_bytes()).hexdigest()))
+
+    def test_rc_and_output_matrix_keeps_the_original_classification(self):
+        # I-065 8.4 C1 direct: rc 0/1/124/137 x fresh / only old / no net_dump, plus a failed archive.
+        # Only 124/137 with usable output gains the notice; rc 1 stays the original plain success.
+        for rc in ("0", "1", "124", "137"):
+            for state in ("fresh", "old only", "none", "archive fails"):
+                with self.subTest(rc=rc, state=state):
+                    shutil.rmtree(self.out, ignore_errors=True)
+                    shutil.rmtree(self.container / "var/tmp/ibdiagnet2", ignore_errors=True)
+                    env = {"FAKE_IBDIAGNET_RC": rc}
+                    if state in ("old only", "none"):
+                        env["FAKE_IBDIAGNET_NO_NET_DUMP"] = "1"
+                    if state == "old only":
+                        stale = self.container / "var/tmp/ibdiagnet2"
+                        stale.mkdir()
+                        (stale / "ibdiagnet2.net_dump").write_text("old\n")
+                        os.utime(stale / "ibdiagnet2.net_dump", (1, 1))
+                    shared = self.container / "opt/ufm/files"
+                    if state == "archive fails":   # packing inside the container cannot write its archive
+                        shared.chmod(0o500)
+                    try:
+                        result = self.run_ibdiagnet(RUN_ID, **env)
+                    finally:
+                        shared.chmod(0o700)
+                    done = self.done()
+                    archive = self.out / f"ibdiagnet2_{RUN_ID}.tgz"
+                    self.assertEqual(done["rc"], rc, "the vendor rc is kept as it was")
+                    if state == "fresh":
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertEqual((done["result"], done["artifact"]), ("ok", archive.name))
+                        self.assertEqual(done["reason"], PARTIAL_NOTICE if rc in ("124", "137") else "")
+                    else:
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+                        self.assertFalse(archive.exists())
+                        self.assertNotIn("partial output", done["reason"], "a failure is never a partial success")
+                        if rc in ("124", "137") and state != "archive fails":
+                            self.assertIn("timed out after 900s", done["reason"], "the timeout is still named")
+
+    def test_an_interrupted_timed_out_run_writes_no_done_marker(self):
+        # I-065 8.2 item 2: an interrupted run publishes no completion, whatever its rc would have been.
+        environment = dict(os.environ, PATH=f"{self.bin}{os.pathsep}{os.environ['PATH']}",
+                           TMPDIR=str(self.lock_tmp), FAKE_CONTAINER=str(self.container),
+                           UFM_HOST_FILES=str(self.container / "opt/ufm/files"),
+                           FAKE_DOCKER_LOG=str(self.docker_log), COPYFILE_DISABLE="1",
+                           FAKE_IBDIAGNET_SLEEP="3", FAKE_IBDIAGNET_RC="124")
+        process = subprocess.Popen(["bash", str(UFM_IBDIAGNET), RUN_ID], cwd=self.work, env=environment,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.time() + 20
+            while not (self.container / "var/tmp/ibdiagnet2/ibdiagnet2.log").exists():
+                self.assertLess(time.time(), deadline, "ibdiagnet never started")
+                time.sleep(0.1)
+            process.send_signal(signal.SIGTERM)
+            process.communicate(timeout=20)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate()
+        self.assertNotEqual(process.returncode, 0)
+        self.assertFalse((self.out / f"ibdiagnet2_{RUN_ID}.done").exists())
+        self.assertFalse((self.out / f"ibdiagnet2_{RUN_ID}.tgz").exists())
 
     def test_output_left_by_an_earlier_run_is_never_collected(self):
         stale = self.container / "var/tmp/ibdiagnet2"
