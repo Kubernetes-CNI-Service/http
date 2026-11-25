@@ -295,6 +295,7 @@ if [[ -n "$WORKER_CONTEXT_FD" ]]; then
     fi
 fi
 SWSH=${BASE}/sw-info.sh          # unified info script for ETH and IB switches
+# Deploying it and SWLSH: "scp ... 2>&1 >/dev/null" keeps scp's errors and drops its progress bar (I-018).
 SWLSH=${BASE}/sw-link.sh         # unified link script for SPX and IB switches
 POST_COLLECT=${BASE}/post-collect.py  # exact-archive validation + HTML refresh
 HTML_GENERATOR=${BASE}/../../monitor/generate-monitor-html.py
@@ -1066,7 +1067,11 @@ retrieve_when_ready() {
 }
 
 # load_inventory_macs <csv>: hostname|eth0_mac for every row that has a MAC (owner 2026-10-21:
-# every device is checked by its management MAC at key preparation).
+# every device is checked by its management MAC at key preparation). The MAC rule is P3b 2.1 (I-018), the
+# one of tools/device_identity.py normalize_mac, pinned for both by test_cases/fixtures/mac_spellings.tsv:
+# blanks around the value dropped, an NA word or nothing is no MAC (no row), every ".", ":" and "-" removed,
+# then exactly 12 hex digits give the lowercase colon form and anything else "hostname|invalid", which key
+# preparation rejects. No regex interval {n}: older mawk may not support it (TC-REAL-CRON-MAC-SPELLING-001).
 load_inventory_macs() {
     awk -F',' '
         NR == 1 {
@@ -1082,7 +1087,14 @@ load_inventory_macs() {
             h = $hc; m = tolower($mc)
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", h)
             gsub(/^[[:space:]]+|[[:space:]]+$/, "", m)
-            if (h != "" && h !~ /^#/ && m ~ /^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/) print h "|" m
+            if (h == "" || h ~ /^#/) next
+            if (m == "" || m == "na" || m == "n/a" || m == "none" || m == "null" || m == "tbd" || m == "-") next
+            d = m
+            gsub(/[.:-]/, "", d)
+            if (length(d) != 12 || d ~ /[^0-9a-f]/) { print h "|invalid"; next }
+            mac = substr(d, 1, 2)
+            for (i = 3; i < 12; i += 2) mac = mac ":" substr(d, i, 2)
+            print h "|" mac
         }
     ' "$1" > "$INVENTORY_MACS"
 }
@@ -1410,21 +1422,25 @@ deploy_ssh_keys_legacy() {
 
 # Classify one SSH preparation attempt. Return 10 only when credentials were
 # rejected; every transport/connectivity/remote-command failure returns 11.
+# PREPARE_FAILURE names the reason of a failure (I-018), read like PREPARED_ENTRY in the caller's subshell.
 prepare_ssh_host_resilient() {
     local entry="$1" user="$2" remote_dir="$3" ssh_options="$4"
     local name host fallback candidate output rc remote_command auth_failed=0
     local identity_record expected_mac expected_mac_plain identity_source mac_probe
     local candidates=()
     PREPARED_ENTRY=""
+    PREPARE_FAILURE=""
     IFS='|' read -r name host fallback <<< "$entry"
     [[ -n "$name" ]] || name="$host"
     [[ -n "$host" ]] || host="$name"
     if ! valid_host_entry "$name" "$host"; then
-        echo "[KEY][UNREACHABLE] ${name} (${host}): unsafe hostname/IP entry" >&2
+        PREPARE_FAILURE="unsafe hostname/IP entry"
+        echo "[KEY][UNREACHABLE] ${name} (${host}): ${PREPARE_FAILURE}" >&2
         return 11
     fi
     if [[ -n "$fallback" ]] && ! valid_host_entry "$name" "$fallback"; then
-        echo "[KEY][UNREACHABLE] ${name} (${fallback}): unsafe fallback IP entry" >&2
+        PREPARE_FAILURE="unsafe fallback IP entry"
+        echo "[KEY][UNREACHABLE] ${name} (${fallback}): ${PREPARE_FAILURE}" >&2
         return 11
     fi
     identity_record=$(awk -F'|' -v expected="$name" '
@@ -1434,12 +1450,19 @@ prepare_ssh_host_resilient() {
     if [[ -z "$identity_record" ]]; then
         # Owner 2026-10-21: every inventory device is identified by its management MAC when the CSV has one.
         expected_mac=$(inventory_mac "$name")
+        if [[ "$expected_mac" == invalid ]]; then
+            # I-018: a MAC cell whose value cannot be read never falls back to the hostname check.
+            PREPARE_FAILURE="eth0_mac not recognised"
+            echo "[KEY][ETH0-MAC-INVALID] ${name} (${host}): ${PREPARE_FAILURE}" >&2
+            return 11
+        fi
         [[ -n "$expected_mac" ]] && identity_source="inventory eth0_mac"
     fi
     expected_mac_plain=$(printf '%s' "$expected_mac" \
         | tr -cd '[:xdigit:]' | tr '[:upper:]' '[:lower:]')
     if [[ -n "$identity_record" && ! "$expected_mac_plain" =~ ^[0-9a-f]{12}$ ]]; then
-        echo "[KEY][UNREACHABLE] ${name} (${host}): invalid authoritative runtime eth0 MAC" >&2
+        PREPARE_FAILURE="invalid authoritative runtime eth0 MAC"
+        echo "[KEY][UNREACHABLE] ${name} (${host}): ${PREPARE_FAILURE}" >&2
         return 11
     fi
     [[ "$expected_mac_plain" =~ ^[0-9a-f]{12}$ ]] || expected_mac_plain=""
@@ -1491,12 +1514,15 @@ mkdir -p '${remote_dir}'"
         fi
         # A reachable address returning the wrong hostname must never be
         # bypassed by trying another endpoint: identity protection wins.
+        # I-018: the device answered, so an identity mismatch is not tagged UNREACHABLE.
         if (( rc == 42 )) || [[ "$output" == *"[HOSTNAME-MISMATCH][ERROR]"* ]]; then
-            echo "[KEY][UNREACHABLE] ${name} (${candidate}): hostname identity mismatch" >&2
+            PREPARE_FAILURE="hostname identity mismatch"
+            echo "[KEY][IDENTITY-MISMATCH] ${name} (${candidate}): ${PREPARE_FAILURE}" >&2
             return 11
         fi
         if (( rc == 43 )) || [[ "$output" == *"[ETH0-MAC-MISMATCH][ERROR]"* ]]; then
-            echo "[KEY][UNREACHABLE] ${name} (${candidate}): management MAC identity mismatch" >&2
+            PREPARE_FAILURE="management MAC identity mismatch"
+            echo "[KEY][IDENTITY-MISMATCH] ${name} (${candidate}): ${PREPARE_FAILURE}" >&2
             return 11
         fi
         if [[ "$output" == *"Permission denied"* \
@@ -1506,10 +1532,12 @@ mkdir -p '${remote_dir}'"
         fi
     done
     if (( auth_failed )); then
-        echo "[KEY][AUTH-FAILED] ${name} (${host}${fallback:+ / ${fallback}}): authentication rejected" >&2
+        PREPARE_FAILURE="authentication rejected"
+        echo "[KEY][AUTH-FAILED] ${name} (${host}${fallback:+ / ${fallback}}): ${PREPARE_FAILURE}" >&2
         return 10
     fi
-    echo "[KEY][UNREACHABLE] ${name} (${host}${fallback:+ / ${fallback}}): SSH transport or remote preparation failed" >&2
+    PREPARE_FAILURE="SSH transport or remote preparation failed"
+    echo "[KEY][UNREACHABLE] ${name} (${host}${fallback:+ / ${fallback}}): ${PREPARE_FAILURE}" >&2
     return 11
 }
 
@@ -1520,10 +1548,11 @@ prepare_ssh_batch_resilient() {
         [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
         (
             prepare_ssh_host_resilient "$entry" "$user" "$remote_dir" "$ssh_options"
+            # unavailable: "entry<TAB>reason" (I-018); auth_failed keeps bare entries for the password retry
             case $? in
                 0)  printf '%s\n' "$PREPARED_ENTRY" >> "$ready" ;;
                 10) printf '%s\n' "$entry" >> "$auth_failed" ;;
-                *)  printf '%s\n' "$entry" >> "$unavailable" ;;
+                *)  printf '%s\t%s\n' "$entry" "$PREPARE_FAILURE" >> "$unavailable" ;;
             esac
         ) &
         pids+=("$!")
@@ -1563,7 +1592,7 @@ key_device_kind() {
 deploy_ssh_keys() {
     local hosts_file="$1" label="$2" user="$3" remote_dir="$4" extra_opts="${5:-}"
     local ready auth_failed unavailable next_auth attempt read_status
-    local prepared_count unavailable_count
+    local prepared_count unavailable_count reason
     log "[KEY] ── ${label}: validating key login and deploying shared key ──"
     ready=$(mktemp) || return 1
     auth_failed=$(mktemp) || { rm -f "$ready"; return 1; }
@@ -1579,7 +1608,7 @@ deploy_ssh_keys() {
 
     if hosts_file_has_entries "$auth_failed" && [[ ! -t 0 && ! -t 1 && ! -t 2 ]]; then
         log "[KEY] WARN: no interactive terminal for password authentication; affected hosts marked unavailable"
-        cat "$auth_failed" >> "$unavailable"
+        awk '{ print $0 "\tauthentication rejected" }' "$auth_failed" >> "$unavailable"
         : > "$auth_failed"
     fi
 
@@ -1623,16 +1652,19 @@ deploy_ssh_keys() {
     unset MONITOR_SSH_PASSWORD SSH_ASKPASS SSH_ASKPASS_REQUIRE
     [[ -n "$ASKPASS_FILE" ]] && rm -f "$ASKPASS_FILE"
     ASKPASS_FILE=""
-    hosts_file_has_entries "$auth_failed" && cat "$auth_failed" >> "$unavailable"
+    hosts_file_has_entries "$auth_failed" && awk '{ print $0 "\tauthentication rejected" }' "$auth_failed" >> "$unavailable"
     mv "$ready" "$hosts_file"
     prepared_count=$(hosts_file_entry_count "$hosts_file")
     unavailable_count=$(hosts_file_entry_count "$unavailable")
-    while IFS= read -r entry; do
+    # KEY_FAILURE_REASONS: "name: reason; ..." of this call, for the UFM run record (C1-O8)
+    KEY_FAILURE_REASONS=""
+    while IFS=$'\t' read -r entry reason; do
         [[ -z "$entry" || "$entry" =~ ^[[:space:]]*# ]] && continue
+        KEY_FAILURE_REASONS+="${KEY_FAILURE_REASONS:+; }${entry%%|*}: ${reason}"
         if [[ "${KEY_FAILURE_SINK:-result}" == "log" ]]; then
-            log "[KEY] ERROR: ${label} ${entry%%|*}: SSH authentication or transport unavailable"
+            log "[KEY] ERROR: ${label} ${entry%%|*}: ${reason}"
         else
-            record_device_failure "ssh_prepare" "$entry" "SSH authentication or transport unavailable"
+            record_device_failure "ssh_prepare" "$entry" "$reason"
         fi
     done < "$unavailable"
     rm -f "$auth_failed" "$unavailable"
@@ -1659,7 +1691,7 @@ collect_eth_info() {
 
     log "[ETH] deploying sw-info.sh"
     if ! run_parallel "$ETH" \
-        "scp $SSH_OPTS $SWSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[ETH] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$ETH"; then
@@ -1711,7 +1743,7 @@ collect_spx_link() {
 
     log "[SPX] deploying sw-link.sh"
     if ! run_parallel "$SPX" \
-        "scp $SSH_OPTS $SWLSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWLSH ${ETH_SSH_USER}@__HOST__:${ETH_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[SPX] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$SPX"; then
@@ -1769,7 +1801,7 @@ collect_ib_info() {
 
     log "[IB]  deploying sw-info.sh"
     if ! run_parallel "$IB" \
-        "scp $SSH_OPTS $SWSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[IB]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
@@ -1818,7 +1850,7 @@ collect_ib_link() {
 
     log "[IBL] deploying sw-link.sh"
     if ! run_parallel "$IB" \
-        "scp $SSH_OPTS $SWLSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWLSH ${IB_SSH_USER}@__HOST__:${IB_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[IBL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$IB"; then
@@ -1876,7 +1908,7 @@ collect_nv_info() {
 
     log "[NV]  deploying sw-info.sh"
     if ! run_parallel "$NV" \
-        "scp $SSH_OPTS $SWSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[NV]  ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
@@ -1925,7 +1957,7 @@ collect_nv_link() {
 
     log "[NVL] deploying sw-link.sh"
     if ! run_parallel "$NV" \
-        "scp $SSH_OPTS $SWLSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1" \
+        "scp $SSH_OPTS $SWLSH ${NV_SSH_USER}@__HOST__:${NV_REMOTE_DIR}/ 2>&1 >/dev/null" \
         "collection" \
     ; then log "[NVL] ERROR: one or more deploys failed; skipping this phase"; return 1; fi
     if ! hosts_file_has_entries "$NV"; then
@@ -2698,6 +2730,7 @@ record_planned_devices
 # sw-info.sh, ufm-ibdiagnet.sh with sw-link.sh. Their problems never touch the switch result.
 ufm_failed=0
 ufm_active=0
+ufm_keys_rejected=0   # every UFM rejected at key preparation: the run record is still written (C1-O8)
 UFM_COLLECTED=0
 if hosts_file_has_entries "$UFM"; then
     if [[ ! -d "${BASE}/ufm-info" && ! -d "${BASE}/ufm-ibdiagnet" ]]; then
@@ -2738,7 +2771,12 @@ if (( ufm_active )); then
     if [[ "$(wc -l < "$UFM" | tr -d ' ')" -lt "$UFM_PLANNED" ]]; then
         ufm_failed=1
     fi
-    hosts_file_has_entries "$UFM" || ufm_active=0
+    if ! hosts_file_has_entries "$UFM"; then
+        ufm_active=0
+        ufm_keys_rejected=1
+        UFM_RUN_STATUS=skipped
+        UFM_RUN_REASON="公钥准备时全部 UFM 被拒：${KEY_FAILURE_REASONS}"
+    fi
 fi
 
 # AIR Cumulus VX nodes still participate in ETH information collection, but
@@ -2925,7 +2963,7 @@ if [[ "${COLLECTION_ENV:-prod}" == prod ]]; then
     [[ -n "$UFM_IBDIAG_ARCHIVE" ]] && issue_tracker_sync ib
 fi
 
-(( ufm_active )) && { ufm_run_record_write || ufm_failed=1; }
+(( ufm_active || ufm_keys_rejected )) && { ufm_run_record_write || ufm_failed=1; }
 
 cleanup_data_dirs \
     "${BASE}/eth-info"  \
@@ -2942,9 +2980,12 @@ rotate_log "${BASE}/cronjob.log"   # only the log cron.sh writes; the others rot
 MONITOR_DIR=${BASE}/../../monitor
 cleanup_shared_reports "${MONITOR_DIR}/99-output-p2p"
 
+# I-018 (C1-O7): every ending below names the UFM warnings when there are some; the exit codes stay.
+ufm_note=""
+(( ufm_failed )) && ufm_note=" and UFM warnings"
 if (( collection_failed )); then
     emit_failed_collection_result
-    log "========== cron finish with errors =========="
+    log "========== cron finish with errors${ufm_note} =========="
     exit 1
 fi
 RESULT_FILE=$(mktemp) || exit 1
@@ -2955,7 +2996,7 @@ else
 fi
 if (( result_rc != 0 )); then
     cat "$RESULT_FILE"
-    log "========== cron finish: every selected device failed =========="
+    log "========== cron finish: every selected device failed${ufm_note} =========="
     exit 1
 fi
 if [[ -n "$CONTEXT_FILE" ]]; then
@@ -2996,7 +3037,7 @@ else
     cat "$RESULT_FILE"
 fi
 if [[ -s "$DEVICE_FAILURES" ]]; then
-    log "========== cron finish with device warnings =========="
+    log "========== cron finish with device warnings${ufm_note} =========="
     exit 0
 fi
 if (( ufm_failed )); then

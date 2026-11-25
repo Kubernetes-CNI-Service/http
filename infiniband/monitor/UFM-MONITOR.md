@@ -89,7 +89,7 @@ UFM ibdiagnet 启动 → IB link（sw-link，等 180 秒）→ UFM ibdiagnet 取
 **与交换机结果合同隔离**（实现约束，读代码后确定）：`cron.sh` 给 worker 和 12-ztp-monitor 的机器结果，由 `PLANNED_DEVICES`、`DEVICE_FAILURES`、`collection_failed` 三者决定（`cron.sh:737-817、1944-2065`）。`collection_failed` 一旦置位，就会输出一份「失败」结果（页面生成现在不受它影响，见 4.1）。因此：
 - UFM 不写入 `PLANNED_DEVICES` 和 `DEVICE_FAILURES`，不复用会写入失败记录的 `run_parallel`，也不置 `collection_failed`。UFM 采集失败不能被当成交换机采集失败。
 - UFM 失败不置 `collection_failed`，不影响交换机的机器结果，也不影响页面生成。
-- UFM 失败的处理参照现有的「设备级失败」：记 ERROR 日志，最后一行改为 `cron finish with UFM warnings`，退出码保持交换机的语义不变。
+- UFM 失败的处理参照现有的「设备级失败」：记 ERROR 日志，最后一行改为 `cron finish with UFM warnings`，退出码保持交换机的语义不变。同时有设备警告时最后一行为 `cron finish with device warnings and UFM warnings`，两个出错结尾也带 ` and UFM warnings`（I-018）。公钥准备把全部 UFM 都拒掉时，这一轮仍写一份 `skipped` 运行记录，`reason` 写各台的具体原因（I-018）。
 - **worker 路径（页面触发的自动采集）也采 UFM**（owner 2026-10-21 选 A）。
   - worker 冻结的目标计划从 5 个键扩为 6 个键：`{eth, spx, ib, nv, dynamic_identities, ufm}`。`ufm` 只在 infiniband 槽位非空，内容是冻结清单中的 `server_ufm` 行（`名称|eth0_ip`，按清单顺序；没有 eth0_ip 的行跳过）。
   - worker（`_collection_target_plan_matches_sources`）按冻结清单逐行核对 `ufm`，多一行、少一行、改了 IP 都拒绝；其它槽位的 `ufm` 必须为空。
@@ -323,7 +323,7 @@ run-id 是部署服务器为**每一次** ibdiagnet 采集生成的唯一编号�
 | 等待方式 | 触发后先等 1 分钟，然后每 5 秒检查一次，文件一出现就取回；各阶段原有的上限不变：ETH/IB/NV info 120 秒，IB/NV link 180 秒，SPX 300 秒，UFM info 120 秒，ibdiagnet 180 秒 | `retrieve_when_ready`（`RETRIEVE_FIRST_WAIT=60`、`RETRIEVE_POLL=5`）；UFM 的取回用同样的时序 |
 | 文件出现即表示采集完成 | 设备上的采集脚本把临时文件写在输出目录下的隐藏目录里，写完后同一文件系统内改名，取回时不可能拿到半个文件；`.info` 取回后还要核对 `# Collect complete`；部署服务器取回时也先写到目标目录下的隐藏子目录，核对后再改名 | `sw-info.sh`、`sw-link.sh`、`ufm-info.sh`、`retrieve_when_ready`；ibdiagnet 的完成标记 `.done` 在归档完成后才写 |
 | 部分失败 | 某些设备采集失败，不影响其他设备 | 交换机原本就是这样：失败的设备从目标文件里剔除并记录，其余设备照常打包。之前第 11 节写的「数量不等就整阶段不打包」不准确，只在重名这类异常情况下才会发生。UFM 也按同样方式处理 |
-| 身份核对 | 用管理口 MAC 确认连到的是对的设备 | 公钥准备阶段核对：交换机的 `eth0` MAC 必须等于 CSV 的 `eth0_mac`；UFM 的管理口 MAC 必须出现在设备上；CSV 没有 MAC 时退回原来的主机名核对；不符就跳过该设备。MAC 对照表在直接调用路径和 worker 冻结计划路径下都会加载 |
+| 身份核对 | 用管理口 MAC 确认连到的是对的设备 | 公钥准备阶段核对：交换机的 `eth0` MAC 必须等于 CSV 的 `eth0_mac`；UFM 的管理口 MAC 必须出现在设备上；CSV 的 `eth0_mac` 冒号、短横线、点分、无分隔、大小写混合都认（I-018，与 `tools/device_identity.py` 同一规则），有值但认不出时报 `[KEY][ETH0-MAC-INVALID]`，在任何 ssh 之前拒绝；CSV 没有 MAC 时退回原来的主机名核对；不符就跳过该设备，日志写这台的具体原因。MAC 对照表在直接调用路径和 worker 冻结计划路径下都会加载 |
 | 先公钥、失败再要密码、然后部署公钥 | 按登录失败的设备类型提示 | 交换机原本就是这样（`deploy_ssh_keys`）；UFM 也接入同一流程。提示语改为「Ethernet 交换机 / InfiniBand 交换机 / NVLink 交换机 / UFM 服务器 <用户> 密码 (attempt N/3): 」（保留原有的 `attempt N/3` 格式，已有测试按这个格式驱动终端输入）。UFM 的失败只写日志，不进入交换机的机器结果 |
 | 清理日志的计数 | `found 0 tar.gz` 修正 | `cleanup_data_dirs` 的计数改用 `find -H`，会跟随数据目录链接 |
 | 数据目录链接缺失 | 两个 UFM 数据目录都没有时，不连接任何 UFM；只缺一个时，只停对应的阶段 | 主流程在公钥准备之前检查 |
@@ -687,7 +687,7 @@ docker exec ufm ls /var/tmp/ibdiagnet2/
 | 6.1 文件与角色：`expected_cvt` | CVT 改为由转换器写到**项目的 `99-output-p2p`**（owner 2026-10-21，与历史用法和 ETH 一致）。转换器只放开 `<项目>/99-output-p2p/*-cvt.xlsx` 这一种 DAY0 目标；默认输出时先解析 setup 的 `output-p2p` 链接，再按原来的防换目录机制写入。REQ7 的两条拦截测试不变 | `collection_ib_producer.py:391-393` 要求 `nvos/template/P2P/output-p2p` 不是链接，与 setup 的链接冲突（这是早就存在的矛盾，不是本批引入的）。是否改为接受「解析到当前项目 `99-output-p2p`」由 REQ7 决定 |
 | 6.1 文件与角色：`validation_report` / `report_provenance` | 新增自动产生的 IB 校验报告：`99-output-p2p/<run-id>_<节点>-ibdiagnet-topology-validation.xlsx`（iblinkinfo 回退包为 `-iblinkinfo-…`），以及分析器写的 `.provenance.json`。由 `infiniband/monitor/post-collect.py` 调用**同一个** `tools/ibdiagnet-analyze-tool/analyze.py` 生成 | 报告结构（`Summary`、`Missing_Links`、`Miswired_Links` 等 sheet 和列名）来自同一个分析器，**未改动**。REQ7 是否把这些报告纳入它的九角色链，由 REQ7 决定 |
 | 6.1 文件与角色：UFM 原件 | 新增共享上游数据：`monitor/infiniband/ufm-info/<UTC>.tar.gz`（每台 `<名称>.info`，以及经 VIP 采的 `<名称>.ha`），`monitor/infiniband/ufm-ibdiagnet/<run-id>_<节点>_ibdiagnet2.tgz`（成员为 `ibdiagnet2/ibdiagnet2.*`）或 `<run-id>_<节点>_iblinkinfo.log`（降级时），各带一份 `.done`。run-id 格式 `YYYYMMDD-HHMM-(prod|air)-<16 hex>` | 这是展示线的 shell 采集器（`cron.sh` 推送 `ufm-info.sh` / `ufm-ibdiagnet.sh`），与 D-70 的 `tools/ufm_collection_agent.py` 并存。REQ7 的 `ufm_actual_archive`、`ufm_completion_receipt` 角色目前仍来自 D-70 流水线（`99-output-ufm`）。owner 2026-10-22：D-70 废弃，REQ7 改读本线的数据，由 codex 迁移；约定（运行记录、`.done`、收据、每日包、6 键计划）见桌面《UFM-IB数据源与集成-给codex的对接文档》v2 |
-| 6.3 完成与关联证据 | UFM 结果**不计入**交换机的 planned/succeeded/failed，也不进入 v2 证据计数；UFM 有问题时最后一行为 `cron finish with UFM warnings`，退出码不变 | 无需改动 |
+| 6.3 完成与关联证据 | UFM 结果**不计入**交换机的 planned/succeeded/failed，也不进入 v2 证据计数；UFM 有问题时最后一行为 `cron finish with UFM warnings`（同时有设备警告时为 `cron finish with device warnings and UFM warnings`，I-018），退出码不变 | 无需改动 |
 
 **失败语义**（codex 文档要求提供）：
 - 某台 UFM 采集失败：只记 UFM 告警，其余 UFM 和交换机照常进行。

@@ -4133,3 +4133,35 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - WP-1～WP-5 的本机 direct／workflow 验证只覆盖逻辑与合成边界；不用于宣布真实 EUI-64、FDB、DHCP、控制台回退或断线后完成。现场继续 **NOT RUN / REAL_ENV REQUIRED**（指导 :1115）。
+
+## TC-REAL-CRON-MAC-SPELLING-001 — cron.sh 的 MAC 写法、具体原因、结尾与 scp 输出
+
+- 基本信息：real-environment / collection；I-018（v3.1.6 C1，WP-8）；状态 **NOT RUN / REAL_ENV REQUIRED**。本卡只是验收条件，不授权连接设备或改项目清单。
+- 风险与目标：cron.sh 在 Ubuntu 上用的 awk（mawk）可能不支持正则区间 `{n}`，改动前的 `load_inventory_macs` 在那台机器上可能一个 MAC 都读不出（指导 :1412、:1976）；本卡在真实管理服务器上确认新的 MAC 写法规则、具体原因、结尾和 scp 输出。
+- 本机先决：`test_cases.test_cron_inventory_identity`、`test_cases.test_cron_mac_rule_workflow`、`test_cases.test_ufm_monitor_cron_workflow` 通过。
+- 前置条件：AIR 上隔离的项目副本；记录 `sha256sum ethernet/monitor/cron.sh` 和 `git status --short`，看是否有现场手改（指导 :1638，E-collection-05）。
+
+### 步骤
+
+0. 记录 `readlink -f "$(command -v awk)"`、`dpkg -s mawk | grep Version`，用 `echo 02:00:00:00:00:01 | awk '/^([0-9a-f][0-9a-f]:){5}[0-9a-f][0-9a-f]$/{print "match"}'` 试 `{5}` 区间（指导 :1976）。
+1. 一台交换机行把 `eth0_mac` 改成大写短横线写法，另造一行认不出的 MAC（如少一组），在终端手工执行 `bash ethernet/monitor/cron.sh`（指导 :1638）。
+2. 看结果 JSON 的 `failed_devices[].reason`（指导 :1638）。
+3. AIR 有 UFM 时，UFM 行同样做一次（指导 :1638）。
+
+### 预期结果
+
+- 第 0 步：如实记录是否输出 `match`；不输出说明改动前的 `load_inventory_macs` 在这台机器上读不出任何 MAC，改动后不再依赖区间（指导 :1976；`ethernet/monitor/cron.sh::load_inventory_macs` 不写 `{n}`）。
+- 第 1 步：大写短横线那台按 MAC 通过；认不出的那台打 `[KEY][ETH0-MAC-INVALID]` 并且没有任何 ssh（问题文档 I-018 期望 2；`ethernet/monitor/cron.sh::prepare_ssh_host_resilient` 先判 `invalid` 再 ssh）。终端没有 scp 进度条，scp 失败时有错误行（C1-O6 (b)；下发模板 `2>&1 >/dev/null` 只丢 stdout）。两种警告都有时最后一行是 `cron finish with device warnings and UFM warnings`，退出码与改前相同（C1-O7；主流程结尾）。
+- 第 2 步：`failed_devices[].reason` 是具体原因（如 `eth0_mac not recognised`），不是 `SSH authentication or transport unavailable`（C1-O5 (a)，问题文档 I-018 期望 4；`ethernet/monitor/cron.sh::deploy_ssh_keys` 按行取原因）。
+- 第 3 步：UFM 同样按 MAC 通过或以具体原因被拒；全部被拒时 `ufm-ibdiagnet/` 下有 `skipped` 运行记录，`reason` 写各台原因（C1-O8 (a)；`ufm_run_record_write`）。
+- 不允许的副作用：认不出 MAC 的那台被登录（问题文档 I-018 期望 2）。
+- 证据：终端输出、`cronjob.log` 片段、结果 JSON、运行记录（指导 :1638）。
+
+### 故障注入与清理
+
+- 只改隔离副本里的 CSV 两行；完成后恢复 CSV 原文并核对 sha256（指导 :1638）。
+- 风险：公钥准备会写交换机的 `authorized_keys`（与现在相同）；改动后 CSV 里 MAC 写错的设备会从按主机名通过变成被拒，先在 AIR 跑一轮看有没有新增的 `management MAC identity mismatch`（指导 :1976）。
+
+### 自动化状态
+
+- 本机 direct／workflow 只覆盖 macOS 的 BWK awk 与替身 ssh/scp；mawk 和真实 OpenSSH 的行为由本卡核实，仍为 **NOT RUN / REAL_ENV REQUIRED**（指导 :1976）。

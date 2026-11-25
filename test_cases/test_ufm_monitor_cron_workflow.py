@@ -305,7 +305,11 @@ log = open(os.environ["FAKE_UFM_CALLS"], "a")
 def home(ip):
     return os.path.join(os.environ["FAKE_UFM_HOSTS"], ip)
 def local(ip, path):
-    return path.replace("/root", home(ip) + "/root", 1) if path.startswith("/root") else path
+    # /home/admin: an IB switch's monitor directory (cron.sh IB_REMOTE_DIR), also kept in the sandbox
+    for top in ("/root", "/home/admin"):
+        if path.startswith(top):
+            return path.replace(top, home(ip) + top, 1)
+    return path
 def down(ip):
     if ip in state.get("down", []) or ip not in state["ufms"]:
         print(f"ssh: connect to host {ip} port 22: Connection timed out", file=sys.stderr)
@@ -346,6 +350,7 @@ if tool == "ssh":
         os.makedirs(home(ip) + sub, exist_ok=True)
     after = state.get("failover", {}).get("after")
     trigger = after and after in command and vip_address in state.get("failover", {}).get("vip", {})
+    command = command.replace("/home/admin", home(ip) + "/home/admin")
     command = command.replace("/root", home(ip) + "/root").replace("/sys/class/net", home(ip) + "/sys/class/net")
     custody = os.environ.get("FAKE_UFM_CUSTODY_FD")
     if custody is not None:
@@ -400,8 +405,14 @@ if "@" in src:
         sys.exit(1)
     shutil.copy(matches[0], dst)
 else:
+    # like scp on a terminal: a progress line on stdout, an error on stderr (I-018 output problem 3)
+    if ip in state.get("scp_fail", []):
+        print(f"{os.path.basename(src)}                 0%    0     0.0KB/s   --:-- ETA")
+        print(f"scp: {dst.split(':', 1)[1]}: Permission denied", file=sys.stderr)
+        sys.exit(1)
     path = local(ip, dst.split(":", 1)[1])
     shutil.copy(src, os.path.join(path, os.path.basename(src)) if path.endswith("/") else path)
+    print(f"{os.path.basename(src)}               100%   64    64.0KB/s   00:00")
 '''
 
 
@@ -713,7 +724,8 @@ class UfmCronWorkflowTest(UfmCronCase):
         result = self.run_cron()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sorted(self.members(self.archives()[0])), ["ufm01.example.test.info"])
-        self.assertIn("UFM ufm02.example.test: SSH authentication or transport unavailable", result.stdout)
+        # 问题文档 I-018 期望 4（每台的具体原因，v3.1.6 C1-O5 (a)）：连不上就写连不上
+        self.assertIn("UFM ufm02.example.test: SSH transport or remote preparation failed", result.stdout)
         self.assertIn('"state":"success"', result.stdout)
         self.assertIn("cron finish with UFM warnings", result.stdout)
 
@@ -732,7 +744,8 @@ class UfmCronWorkflowTest(UfmCronCase):
         result = self.run_cron()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(sorted(self.members(self.archives()[0])), ["ufm01.example.test.info"])
-        self.assertIn("UFM ufm02.example.test: SSH authentication or transport unavailable", result.stdout)
+        # 问题文档 I-018 期望 4（每台的具体原因，v3.1.6 C1-O5 (a)）：公钥被拒就写认证被拒
+        self.assertIn("UFM ufm02.example.test: authentication rejected", result.stdout)
         self.assertIn('"state":"success"', result.stdout, "the switch result is untouched")
         self.assertIn("cron finish with UFM warnings", result.stdout)
 
@@ -881,6 +894,117 @@ class UfmCronWorkflowTest(UfmCronCase):
         self.assertRegex(result.stdout, r"\[UFM\] SKIPPED: .*HA 未就绪")
         self.assertEqual(sorted(self.members(self.archives()[0])), sorted(f"{name}.info" for name in UFMS))
         self.assertNotIn("UFM warnings", result.stdout, "HA that is not set up yet is not a failure")
+
+
+SWITCHES = {
+    "ibsw01.example.test": ("198.51.100.21", "02:00:00:00:0a:01"),
+    "ibsw02.example.test": ("198.51.100.22", "02:00:00:00:0a:02"),
+}
+# Stand-ins for sw-info.sh and sw-link.sh on an IB switch: a complete file at once.
+SW_INFO = r'''#!/bin/bash
+cd "$(dirname "$0")" || exit 1
+printf 'Device: %s\n# Collect complete\n' "$(hostname)" > "$(hostname).info"
+'''
+SW_LINK = r'''#!/bin/bash
+cd "$(dirname "$0")" || exit 1
+printf 'Hostname,Port\n%s,1\n' "$(hostname)" > "$(hostname).link"
+'''
+
+
+class UfmCronIdentityAndEndingTest(UfmCronCase):
+    """I-018 (v3.1.6 C1, 问题文档 I-018): every MAC spelling is read, a rejected UFM keeps its own reason and a
+    run record, the final line names both kinds of warning, and the scp that deploys the switch scripts
+    shows its errors but no progress bar."""
+
+    def add_ib_switches(self):
+        """Two IB switches beside the UFMs, without eth0_mac (they pass the hostname check)."""
+        csv = self.project / "02-devices_config.csv"
+        csv.write_text(csv.read_text(encoding="utf-8") + "".join(
+            f"{name},ib,NA,{ip},24,198.51.100.254,\n" for name, (ip, _mac) in SWITCHES.items()), encoding="utf-8")
+        monitor = self.root / "infiniband/monitor"
+        self.write_exec(monitor / "sw-info.sh", SW_INFO)
+        self.write_exec(monitor / "sw-link.sh", SW_LINK)
+        for name, (ip, mac) in SWITCHES.items():
+            self.state["ufms"][ip] = {"hostname": name, "mac": mac}
+
+    def final_line(self, result):
+        return result.stdout.rstrip("\n").splitlines()[-1]
+
+    def test_a_dash_upper_case_mac_and_full_name_pass_by_mac(self):
+        # 问题文档 I-018 验收 :1127: UFM 行用短横线大写 MAC、主机名写全名，通过 MAC 核对，进入 ufm-info 和 ufm-ibdiagnet
+        csv = self.project / "02-devices_config.csv"
+        text = csv.read_text(encoding="utf-8")
+        for name, (ip, mac) in UFMS.items():
+            self.assertEqual(text.count(f",{mac}\n"), 1)
+            text = text.replace(f",{mac}\n", f",{mac.upper().replace(':', '-')}\n")
+            self.state["ufms"][ip]["hostname"] = name.split(".", 1)[0]   # `hostname -s` answers the short name
+        csv.write_text(text, encoding="utf-8")
+        self.state["vip"] = {VIP: "198.51.101.132"}
+        result = self.run_cron()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        for name, (ip, _mac) in UFMS.items():
+            self.assertIn(f"[KEY][OK]   {name} ({ip})", result.stdout)
+        self.assertNotIn("HOSTNAME-MISMATCH", output)
+        # the first part of the full name is the short name: cron.sh warns only when they differ
+        self.assertNotIn("MAC-VERIFIED-HOSTNAME-TRANSITION", output)
+        members = self.members(self.archives()[0])
+        for name in UFMS:
+            self.assertIn(f"{name}.info", members)
+        names = self.ibdiag_archives()
+        self.assertEqual(len(names), 1, result.stdout)
+        self.assertRegex(names[0], r"_ufm02_ibdiagnet2\.tgz$", "ibdiagnet ran on the VIP holder")
+        self.assertIn("cron finish ==========", result.stdout)
+
+    def test_all_ufms_rejected_still_leave_a_run_record(self):
+        # 需求文档 :374（从 ufm-run.json 读出 UFM 被拒的原因）；问题文档 I-018 期望 4 :1117；v3.1.6 C1-O8 (a)
+        for index, ip in enumerate(sorted(ip for ip, _mac in UFMS.values()), 1):
+            self.state["ufms"][ip]["mac"] = f"02:00:00:00:09:0{index}"
+        result = self.run_cron()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        records = sorted(self.ibdiag_output.glob("*.ufm-run.json"))
+        self.assertEqual(len(records), 1, result.stdout)
+        record = json.loads(records[0].read_text(encoding="utf-8"))
+        self.assertEqual((record["outcome"], record["run_id"], record["done"], record["report"]),
+                         ("skipped", None, None, None))
+        self.assertIn("management MAC identity mismatch", record["reason"])
+        for name in UFMS:
+            self.assertIn(name, record["reason"])
+        self.assertEqual(self.archives(), [], "no UFM was collected")
+        self.assertIn("cron finish with UFM warnings", result.stdout)
+
+    def test_finish_names_device_and_ufm_warnings(self):
+        # 问题文档 I-018 输出问题 2 :1103、期望 4 :1118、验收 :1126；退出码不变
+        self.add_ib_switches()
+        self.state["scp_fail"] = ["198.51.100.21"]   # a device warning
+        self.state["down"] = ["198.51.101.132"]      # a UFM warning
+        result = self.run_cron()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"state":"partial"', result.stdout)
+        self.assertTrue(self.final_line(result).endswith(
+            "] ========== cron finish with device warnings and UFM warnings =========="), result.stdout)
+
+    def test_finish_with_one_kind_of_warning_keeps_its_text(self):
+        # 问题文档 I-018 期望 4 :1118; v3.1.6 guide WP-8 第 5 条 (:1419)「只有一种时保持原文」
+        self.add_ib_switches()
+        self.state["scp_fail"] = ["198.51.100.21"]   # only a device warning
+        result = self.run_cron()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.final_line(result).endswith("] ========== cron finish with device warnings =========="),
+                        result.stdout)
+
+    def test_deploy_scp_shows_errors_without_progress(self):
+        # 问题文档 I-018 输出问题 3 :1104、期望 4 :1119（不刷进度条，失败时仍打印错误信息；C1-O6 (b)）
+        self.add_ib_switches()
+        self.state["scp_fail"] = ["198.51.100.21"]
+        result = self.run_cron()
+        output = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 0, output)
+        self.assertNotRegex(output, r"sw-(info|link)\.sh +\d+%", "no scp progress line")
+        self.assertIn("scp: /home/admin/monitor/: Permission denied", output)
+        self.assertIn("[PARALLEL][FAIL] ibsw01.example.test (198.51.100.21, exit=1)", output)
+        [archive] = sorted((self.root / "infiniband/monitor/ib-info").glob("*.tar.gz"))
+        self.assertIn("ibsw02.example.test.info", self.members(archive), "the other switch is still collected")
 
 
 class UfmCronFabricModeAndRetentionTest(UfmCronCase):

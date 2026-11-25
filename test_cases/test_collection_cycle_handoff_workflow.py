@@ -2098,7 +2098,8 @@ print(json.dumps(outcomes, sort_keys=True))
                 [{
                     "hostname": "leaf-eth",
                     "operation": "ssh_prepare",
-                    "reason": "SSH authentication or transport unavailable",
+                    # 问题文档 I-018 期望 4（v3.1.6 C1-O5 (a)）：口令也被拒的设备写认证被拒
+                    "reason": "authentication rejected",
                 }],
                 payload["failed_devices"],
             )

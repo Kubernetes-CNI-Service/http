@@ -30,8 +30,14 @@
    - 先用部署服务器公钥登录；失败时按设备类型提示「Ethernet 交换机 / InfiniBand 交换机 /
      NVLink 交换机 / UFM 服务器 <用户> 密码 (attempt N/3)」，登录后部署公钥。
    - 同一步用管理口 MAC 核对身份：交换机远端 `eth0` 的 MAC 必须等于清单的 `eth0_mac`；
-     UFM 的管理口 MAC 必须出现在该设备上。清单没有 MAC 时退回原来的 hostname 核对；不符就跳过该设备。
-3. 把采集脚本复制到设备并异步执行。设备端脚本把临时文件写在输出目录 `./monitor/` 下的
+     UFM 的管理口 MAC 必须出现在该设备上。`eth0_mac` 认冒号、短横线、点分、无分隔和大小写混合的写法，
+     与 `tools/device_identity.py` 同一规则（I-018，共用夹具 `test_cases/fixtures/mac_spellings.tsv`）；
+     有值但认不出时报 `[KEY][ETH0-MAC-INVALID]`，在任何 ssh 之前拒绝该设备。清单没有 MAC（空或 NA）时
+     退回原来的 hostname 核对；不符就跳过该设备。身份不符的标签是 `[KEY][IDENTITY-MISMATCH]`。
+   - 汇总日志和结果 JSON 的 `failed_devices[].reason` 写每台的具体原因：`hostname identity mismatch`、
+     `management MAC identity mismatch`、`eth0_mac not recognised`、`authentication rejected`、
+     `SSH transport or remote preparation failed` 等（I-018）。
+3. 把采集脚本复制到设备并异步执行；下发脚本的 scp 只丢掉进度条，出错信息照常输出（I-018）。设备端脚本把临时文件写在输出目录 `./monitor/` 下的
    隐藏目录（`.sw-info.XXXXXX`、`.sw-link.XXXXXX`、`.ufm-info.XXXXXX`）里，写完后在同一文件系统内
    `mv` 成 `.info`/`.link`，因此文件一出现就是完整的；`.info` 结尾还有 `# Collect complete`。
    未知平台、非法 hostname 或 NVLink 没有可解析端口时不会发布空快照，也不会留下空的 `./monitor/`。
@@ -48,7 +54,11 @@
 6. IB 车道（`infiniband/monitor/cron.sh`）同时采集清单中 `type=server_ufm` 的 UFM
    （`ufm-info.sh` 与 IB `sw-info.sh` 并行，`ufm-ibdiagnet.sh` 与 IB `sw-link.sh` 并行，HA 状态经 VIP
    在主机上采集）。UFM 结果与交换机结果隔离：UFM 的问题只记日志，最后一行为
-   `cron finish with UFM warnings`，退出码和机器结果不变。详见 `infiniband/monitor/UFM-MONITOR.md`。
+   `cron finish with UFM warnings`，退出码和机器结果不变；同时有设备警告时最后一行为
+   `cron finish with device warnings and UFM warnings`，两个出错结尾（`cron finish with errors`、
+   `cron finish: every selected device failed`）在 UFM 有问题时也带 ` and UFM warnings`（I-018）。
+   公钥准备把全部 UFM 都拒掉时，这一轮仍写一份 `skipped` 运行记录
+   （`ufm-ibdiagnet/<run-id>.ufm-run.json`），`reason` 写各台的具体原因。详见 `infiniband/monitor/UFM-MONITOR.md`。
 7. IB 链路校验闭环（owner 2026-10-21，参考 Ethernet）：本轮从 UFM 取回 ibdiagnet 归档
    （或降级时的 iblinkinfo 日志）后，`infiniband/monitor/post-collect.py` 用这个确切文件和当前 P2P 的
    `<p2p>-cvt.xlsx` 调用 `tools/ibdiagnet-analyze-tool/analyze.py`，生成
@@ -281,10 +291,10 @@ bash cron.sh --type spx       # 独立 SPX 网络：info + link
 bash cron.sh                  # 自动判断当前可达环境，再采集该环境 Ethernet
 ```
 
-显式限定环境时，普通静态设备的 SSH 准备阶段仍要求实际 hostname 与清单完全一致；不再接受
-`AIR-X` 清单连接到 hostname 为 `X` 的设备。唯一例外是 AIR-only 动态设备和刚从动态状态转成
-静态清单的过渡设备：它们可保留默认 hostname，但必须通过权威 eth0 MAC 校验。任何 MAC
-不一致的目标都不会进入本轮归档。
+显式限定环境时，清单没有 `eth0_mac` 的普通静态设备在 SSH 准备阶段仍要求实际 hostname 与清单完全一致；
+不再接受 `AIR-X` 清单连接到 hostname 为 `X` 的设备。清单有 `eth0_mac` 时按 MAC 核对：MAC 一致而 hostname
+第一段不同只告警（`[KEY][MAC-VERIFIED-HOSTNAME-TRANSITION][WARN]`），不拒绝。AIR-only 动态设备和刚从动态状态
+转成静态清单的过渡设备同样凭权威 eth0 MAC 通过，可保留默认 hostname。任何 MAC 不一致的目标都不会进入本轮归档。
 
 Production 未绑定 Cumulus 也使用同一条 MAC 身份门禁，但与 AIR 计划节点的语义不同：它没有
 被自动绑定到任何客户 hostname，采集文件始终保存为稳定的
