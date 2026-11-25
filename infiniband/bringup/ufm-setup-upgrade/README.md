@@ -142,6 +142,9 @@ servers:
   纯数字按以太网接口名结尾的数字唯一匹配（不会匹配 ib0/ib1）。
 - `eth1` 是 HA 直连接口：alias 中写了 `eth1` 以 alias 为准；没写时取 primary/secondary 中唯一的
   非 IPMI、非 IB 接口（这里是 eno8403），不唯一则提示在 alias 中声明。
+- ib.csv 里有两台 `server_ufm`、`eth1` 能确定时，HA 直连口在 netplan 里带 `ignore-carrier: true`
+  （I-055，v3.1.6）：对端掉电或拔线时这个口的地址仍在，DRBD 停在等待连接、恢复后自动重连。
+  只有一台 `server_ufm` 或 `eth1` 不能确定时不加；台数按 ib.csv 全部 `server_ufm` 行算，不看 `--node`。
 - `check` 会核对 P2P 中两台 UFM 的 eno8403 是否互相直连；交换机侧的数字端口在 Leaf 上对应 `swpN`。
 
 ## 使用：三个流程（owner 2026-10-20）
@@ -200,6 +203,9 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - **需要改出厂密码说明是新设备**：状态 `NEW_DEVICE`，到此为止，下一步执行 `config-upgrade --apply`。
    - 能用公钥或新密码登录的，**做全部只读检查**：
      - 基本配置各项是否符合：netplan、公钥、hostname、IPMI、DNS/搜索域、NTP、时区、`/etc/hosts`；
+       netplan 要改时先读这台的 `ufm_ha_cluster status`（只读）：HA 已配置的节点预告 config-upgrade 的做法
+       （只差 HA 口的 ignore-carrier 时为 generate 后 `networkctl reload`，不整机 apply），
+       差别不只这一项、或文件已符合只有运行状态不符时报 `STEP_FAILED_NETPLAN`（I-055，v3.1.6）；
      - 版本是否已是 global 的目标版本；
      - 两台都能检查时，再查互信，并在 master 上读 `ufm_ha_cluster status`（结果记在 `ha_config`）：
        - `OK`：已是这两台、这个 VIP，状态正常；此时不再检查 HA 前提（`ha_preconditions` 为 `SKIPPED`，因为 HA 运行时 ufm-enterprise 在运行、VIP 已被占用）。
@@ -223,6 +229,12 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - 新设备先把出厂密码改为新密码，并用新密码重新登录确认。
    - 经 OOB 进来的先写 netplan 配好 IPv4。
    - 然后依次处理 netplan、公钥、公钥直连验证、hostname、IPMI LAN、IPMI 用户、IPMI 电源测试、DNS、搜索域、NTP、时区、`/etc/hosts`。**每一步执行前再检查一次，只改不符合或缺少的项**。
+   - HA 已配置的节点（`ufm_ha_cluster status` 有集群、不是 pacemaker 自带的默认单节点集群）netplan 不整机 apply（I-055，v3.1.6）：
+     只差 HA 口的 ignore-carrier 时写入文件、`netplan generate`，核对 `/run/systemd/network` 只有
+     `10-netplan-<HA口>.network` 变化后 `networkctl reload`；变化超出这个文件（或没有变化）就还原 netplan 文件、
+     不 reload；差别不只这一项、有别的 netplan 文件也配置了这些接口、或文件已符合只有运行状态不符时，
+     设备上不写任何东西。这几种都报 `STEP_FAILED_NETPLAN`，这台停止，需人工处理。
+     建议先对备节点 `--node <备节点>` 执行，主节点放在维护窗口（问题文档 I-055 的现场做法）。
    - IPMI LAN、IPMI 用户、IPMI 电源测试这三步失败时（例如 BMC 拒绝主机侧写入），记下失败并继续后面的步骤和升级；整台最后仍标为失败，汇总里逐条列出 IPMI 的错误（owner 2026-10-20）。其它步骤失败时，这台立即停止。
 4. 最后升级（只针对 UFM）。是否已经升级完成按本次标记判断，不只看版本号（I-008，v3.1.6）：
    - 有正在运行的升级单元 `ufm-os-upgrade-*`：`UPGRADE_IN_PROGRESS`，不发起第二次升级；
@@ -432,7 +444,7 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
   | 内容 | 位置 |
   |---|---|
   | 在 UFM 上执行过的全部 sh 脚本（check、config-upgrade、ha-setup 都包括） | `/root/.setup/<运行目录名>/<序号>-<步骤>.sh` |
-  | 改动前备份的原文件 | `/root/ufm-setup-upgrade-backup/<运行目录名>/` |
+  | 改动前备份的原文件 | `/root/ufm-setup-upgrade-backup/<运行目录名>/`（HA 节点的 netplan 另有 `netplan/`、`networkd-before/`） |
 
   - owner 2026-10-20：真正在 UFM 上执行过的 sh 脚本都保留在 `/root/.setup/`，方便在设备上手工操作，脚本名前加执行顺序的序号。
     - 序号由 UFM 在脚本落盘时分配（目录中最大序号 + 1），每台从 001 起连续编号。
@@ -466,6 +478,13 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
   - 用 routes 写法，`gateway4` 会被改写。
   - apply 延后 3 秒执行（定时器精度 100ms），apply 的退出码写入备份目录；核验时要先看到这个退出码，再看网络状态。
   - 经 OOB 配好 IPv4 后，用新会话核验；部署服务器到 IPv4 不通时，经 OOB 新会话核验。
+  - 两台 HA 时 HA 直连口带 `ignore-carrier: true`；比较时期望里带这一项的接口，现有文件也要为真（`true`、`yes`），
+    期望里不带的接口不比这一项。
+  - HA 已配置的节点（I-055，v3.1.6）：只读核对用不带 ignore-carrier 的期望再比一次，只差这一项而且没有冲突文件才写。
+    设备上的脚本先把 `/etc/netplan` 备份到备份目录的 `netplan/`、`/run/systemd/network` 备份到 `networkd-before/`
+    （`/run/systemd/network` 不在时什么都不写），写入后 `netplan generate`，再用 `cmp` 逐个比较两边的普通文件，
+    一边没有也算变化；变化恰好是 `10-netplan-<HA口>.network` 才 `networkctl reload`，之后在当前会话核对管理口与各接口。
+    reload 或核对失败时报错并给出备份目录，不自动回退。
 - **公钥**：把 `publickey/*.pub`（mgmt-server.pub、laptop.pub）追加到 root 的 `authorized_keys`。之后试一次部署服务器公钥直连，不通只给警告。
 - **IPMI 用户**：核对用户槽位、权限和启用状态，再用 `ipmitool user test <id> 16` 核对密码是否就是 root 新密码。密码在 ipmitool 提示时由终端应答输入，不进命令行参数。三项都符合就不改动；否则重设。
   - 设置后再读回权限、启用状态，并用 `user test` 校验密码。ufm01 上实测过：新建用户后第一次设置的密码没有生效。所以校验不通过时会再设一次密码并重新校验，仍不通过则这一步失败（按 IPMI 失败处理：不阻断后续步骤，最后整台标为失败）。

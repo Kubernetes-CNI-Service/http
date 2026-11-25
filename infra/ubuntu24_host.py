@@ -426,12 +426,16 @@ NETPLAN_READ_SCRIPT = (
     "done\n")
 
 
-def netplan_document(mgmt_device: str, mgmt_cidr: str, gateway: str, others: dict) -> dict:
-    """Static addresses, DHCP off; the default route uses routes (gateway4 is deprecated)."""
+def netplan_document(mgmt_device: str, mgmt_cidr: str, gateway: str, others: dict, *,
+                     ignore_carrier: frozenset = frozenset()) -> dict:
+    """Static addresses, DHCP off; the default route uses routes (gateway4 is deprecated). The other links
+    named in ignore_carrier also get `ignore-carrier: true` (I-055: the HA direct link of a UFM pair)."""
     ethernets = {mgmt_device: {"dhcp4": False, "addresses": [mgmt_cidr],
                                "routes": [{"to": "default", "via": gateway}]}}
     for device, cidr in sorted(others.items()):
         ethernets[device] = {"dhcp4": False, "addresses": [cidr]}
+        if device in ignore_carrier:
+            ethernets[device]["ignore-carrier"] = True
     for device in ethernets:
         if not IFNAME_RE.fullmatch(device):
             raise HostConfigError(f"接口名无效: {device!r}")
@@ -496,10 +500,13 @@ def interface_intent(config: dict):
 
 
 def netplan_equivalent(effective: dict, desired: dict) -> bool:
-    """Same addresses, DHCP off, same default route; deprecated gateway4 counts as different."""
+    """Same addresses, DHCP off, same default route; deprecated gateway4 counts as different. A desired
+    ignore-carrier must be set too (read as dhcp4 is); where it is not desired it is not compared (I-055)."""
     for device, want in desired["network"]["ethernets"].items():
         have = effective.get(device)
         if have is None or "gateway4" in have or interface_intent(have) != interface_intent(want):
+            return False
+        if want.get("ignore-carrier") is True and have.get("ignore-carrier") not in (True, "true", "yes"):
             return False
     return True
 
@@ -546,6 +553,51 @@ def netplan_apply_script(yaml_text: str, conflicts: list, backup_dir: str, *, wr
               "  sleep 1",
               "fi",
               'echo "result=apply_scheduled"']
+    return "\n".join(lines) + "\n"
+
+
+def netplan_reload_script(yaml_text: str, backup_dir: str, device: str) -> str:
+    """I-055, a node already in HA: back up /etc/netplan and /run/systemd/network, write, `netplan generate`
+    (restore on failure), then `networkctl reload` only when exactly 10-netplan-<device>.network changed;
+    any other change set, the empty one included, restores /etc/netplan and generates again. Never a whole
+    `netplan apply`; a failed reload is reported, not rolled back (I-038)."""
+    if not IFNAME_RE.fullmatch(device):
+        raise HostConfigError(f"接口名无效: {device!r}")
+    networkd = "/run/systemd/network"
+    payload = base64.b64encode(yaml_text.encode("utf-8")).decode("ascii")
+    restore = ["  rm -f /etc/netplan/*.yaml", '  cp -a "$backup/netplan/." /etc/netplan/']
+    lines = ["set -eu", f"backup={shlex.quote(backup_dir)}",
+             'mkdir -p "$backup/netplan" "$backup/networkd-before"',
+             'cp -a /etc/netplan/. "$backup/netplan/"',
+             # without /run/systemd/network this cp fails before anything is written: no comparison, no change
+             f'cp -a {networkd}/. "$backup/networkd-before/"',
+             f"printf %s {payload} | base64 -d > {NETPLAN_TARGET}.host-new",
+             f"chmod 600 {NETPLAN_TARGET}.host-new",
+             f"mv {NETPLAN_TARGET}.host-new {NETPLAN_TARGET}",
+             "if ! netplan generate; then", *restore,
+             '  echo "result=generate_failed_restored"',
+             "  exit 3",
+             "fi",
+             # every regular file on either side; a file missing on one side counts as changed
+             "changed=",
+             'for f in "$backup/networkd-before"/*; do',
+             '  [ -f "$f" ] || continue',
+             f'  cmp -s "$f" "{networkd}/${{f##*/}}" || changed="$changed ${{f##*/}}"',
+             "done",
+             f'for f in "{networkd}"/*; do',
+             '  [ -f "$f" ] || continue',
+             '  [ -f "$backup/networkd-before/${f##*/}" ] || changed="$changed ${f##*/}"',
+             "done",
+             'changed="${changed# }"',
+             'echo "changed=$changed"',
+             f'if [ "$changed" = {shlex.quote(f"10-netplan-{device}.network")} ]; then',
+             "  networkctl reload",
+             '  echo "result=reloaded"',
+             "  exit 0",
+             "fi",
+             *restore,
+             "netplan generate",
+             'echo "result=out_of_scope_restored"']
     return "\n".join(lines) + "\n"
 
 

@@ -2844,6 +2844,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 前置条件：
   - 两台 UFM 已通过 `config-upgrade --apply`；
   - 两台都是 global 的目标版本（`/etc/ufm-release` 的 `UFM_APPLIANCE` 等于 `servers.ufm.version`），否则 ha-setup 报 `HA_NOT_READY`（v3.1.6 WP-1）；
+  - config-upgrade 已把 HA 口的 ignore-carrier 写进 netplan，`check` 的 `netplan` 为 `UNCHANGED`（v3.1.6 WP-11，I-055）；
   - owner 书面授权维护窗口：master config 会备份并清空 `/opt/ha_data`、格式化 DRBD、销毁两台原有集群；failover 会短暂中断 UFM 服务；
   - 记录两台的 `ufm_ha_cluster status`、`/opt/ufm/files/conf/gv.cfg`、`root_guid.conf`、`licenses/`；
   - 工具目录下有 setup 建的 `image` 链接，`ib.csv` 含 spine（或 core）。
@@ -2908,6 +2909,31 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 升级本身不回滚；卡住时照问题文档 I-008「现场临时处理」（不结束 apt-get、不停升级单元）。
   - 风险：升级重启和刷 BIOS 期间 UFM 服务中断；prod 改动要 owner 授权。
   - 未执行前保持 NOT RUN，不得写 PASS。
+
+## TC-REAL-UFM-HA-LINK-CARRIER-001 — HA 直连口 ignore-carrier：HA 已配置的 UFM 只 reload HA 口（I-055）
+
+- Case ID：`TC-REAL-UFM-HA-LINK-CARRIER-001`；类型：real-environment / HA / network；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 本机先决：`test_cases.test_ubuntu24_host` 的 `NetplanTest`、`NetplanReloadScriptTest`，`test_cases.test_ufm_setup_upgrade` 的 B6 用例（`InitPureTest.test_only_the_ha_link_of_a_pair_is_ignore_carrier`、`SimulatedUpgradeAndHaTest` 里名字含 `running_ha_pair`、`default_single_node`、`without_ha` 的五个），`test_cases.test_ufm_setup_upgrade_workflow.UfmHaLinkCarrierScenarioTest` 通过。替身 GREEN 不等于现场验收：替身的 networkd 文件版式是合成的。
+- 依据：问题文档 I-055（修法 :1891-1894，验证 :1895）；v3.1.6 指导 WP-11、3.2 B6-O1～O10、5.3、第 7 节第 15～19 条、8.7。
+- 执行人与核验人（分栏写；没人执行的步骤标「未执行」，不算通过）：执行人是 owner 或 owner 授权的现场人员；核验人是验证 AI，在 prod 只读核验日志、状态和结果（指导 5.3 :1641）。第 0、5 步的 `check` 会在 UFM 上留脚本副本，也由 owner 或明确授权的现场人员执行，验证 AI 只读已保存结果（指导 8.7 :2100）。
+- 前置条件：
+  - 两台已是 HA 且正常（`check` 的 `ha_config` 为 `OK`）；owner 书面授权维护窗口（主节点那台）；先做备节点（问题文档 :1894 的现场做法，B6-O9 (a)）。
+  - 改前两台各记：`/etc/netplan/*.yaml`（脱敏）、`ls -l /run/systemd/network/`、`networkctl status <HA口>`、`ip -4 addr show <HA口>`、`drbdadm status`、`ufm_ha_cluster status`、`systemctl show -p ActiveEnterTimestamp ufm-enterprise ufm-ha-watcher`、netplan 和 systemd 的版本。
+- 步骤与预期：
+  0. `check`（owner 或明确授权现场人员执行）：没手工改过的那台 `netplan` 为 `WOULD_CHANGE`，文字是 generate 加 `networkctl reload` 的路径；手工改过的为 `UNCHANGED`（B6-O7 (a)；`ufm-setup-upgrade.py::Session.step_netplan` 先比文件，要改时读 `ufm_ha_cluster status`，HA 已配置且只差 HA 口这一项时 check 只预告；手工改过的由 `ubuntu24_host.py::netplan_equivalent` 判为符合，问题文档 :1892）。
+  1. （只读）`/run/systemd/network/` 里有 `10-netplan-<HA口>.network`（B6 的文件名假设，指导第 7 节第 15 条；名字对不上时第 2 步按超范围拒绝，`ubuntu24_host.py::netplan_reload_script` 只在变化集合恰好是这个文件时 reload，B6-O5 (a)）。
+  2. 备节点 `config-upgrade --apply --node <备节点>`：`netplan` 为 `CHANGED`，`report.log` 里 `changed=` 只有 `10-netplan-<HA口>.network`，该文件含 `ConfigureWithoutCarrier=yes`、`IgnoreCarrierLoss=yes`，`networkctl status <HA口>` 能看到忽略 carrier 的设置（问题文档 :1893、:1895；`Session.step_netplan` → `netplan_reload_script` 打印 `changed=`、`result=reloaded`，再用当前会话核对网络）。另开终端每秒 `drbdadm status`：reload 前后保持 Connected（若短暂断开，记下多久恢复）；资源仍 Started 在原节点；ufm-enterprise、ufm-ha-watcher 的 `ActiveEnterTimestamp` 不变；VIP 没有迁移（指导第 7 节第 16 条，推断待核）。
+  3. 主节点在维护窗口里同样做，预期同第 2 步（问题文档 :1894）。
+  4. 在一台上拔 HA 口的线或 `ip link set <HA口> down`，保持约 60 秒：`ip -4 addr show <HA口>` 地址仍在，`drbdadm status` 不是 StandAlone，恢复后自动 Connected 并补同步，没有 failover，VIP 和 UFM 服务不重启（问题文档 :1895；指导第 7 节第 19 条）。
+  5. 由 owner 或明确授权现场人员再跑 `check`：`netplan` 为 `UNCHANGED`；再跑 `config-upgrade --apply --node <任一台>`：`UP_TO_DATE`，没有新的 generate、reload（`Session.step_netplan` 文件与运行状态都符合时直接 `UNCHANGED`，不读 HA 状态，指导 WP-11 改什么第 3 条）。
+- 不允许的副作用：任何整机 `netplan apply`（备份目录里没有新的 `netplan-apply.rc`、`netplan-apply.log`）；VIP 迁移、资源重启；DRBD 进入 StandAlone；管理口地址、默认路由变化；改到 HA 口以外的 networkd 文件（问题文档 :1893）。
+- 拒绝路径（能构造时记录，不为验证故意改 global）：差别不只 HA 口这一项时两台 `STEP_FAILED_NETPLAN`，detail 写明不整机 netplan apply，设备上不写（B6-O4 (a)）；文件已符合只有运行状态不符时同样报失败、请人工处理（B6-O3 (a)）。
+- 证据：部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 的 `report.log`、`result.json`（`netplan` 步骤和 `netplan_reload`）；UFM 上 `/root/.setup/<运行目录>/` 的脚本和输出、`/root/ufm-setup-upgrade-backup/<运行目录>/`（`netplan/`、`networkd-before/`）；改前改后的 `ls -l`、`cmp` 结果、`drbdadm status` 时间序列、`ufm_ha_cluster status`、`ActiveEnterTimestamp`；第 4 步 `journalctl -k` 里 HA 口的 Link down/up 和 drbd 行。主机名、地址、MAC 脱敏。
+- 故障注入与清理：
+  - 第 4 步恢复连线；DRBD 若仍进入 StandAlone，按现场做法手工 `drbdadm connect <资源>`（问题文档 :1882），记下并停止后续步骤报 http dev。
+  - reload 后异常时由 owner 决定是否用备份目录里的 netplan 手工还原（代码不自动回退，I-038，问题文档 :1666）。
+- 风险：中。`networkctl reload` 会让 networkd 重新配置 HA 口，DRBD 连接可能短暂断开（推断）；会断的话 B6-O9 回到 http dev 重定（指导第 7 节第 16 条）。第 4 步会让 DRBD 断开约 1 分钟、期间不复制；主节点要维护窗口；prod 写操作要 owner 授权。
+- 未执行前保持 NOT RUN，不得写 PASS。
 
 ## TC-REAL-UFM-MONITOR-001 — UFM 监控采集、降级、failover 期间的取回、保留期与日志轮转
 

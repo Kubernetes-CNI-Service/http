@@ -1,5 +1,10 @@
-"""Workflow: setup-created bringup links are the only inputs ufm-setup-upgrade needs; unsetup knows them."""
+"""Workflows: setup links feed ufm-setup-upgrade; a running HA pair reloads only its HA link (ubuntu24_host).
 
+Setup-created bringup links are the only inputs the tool needs and unsetup knows them. A running HA pair
+takes the HA link's ignore-carrier by networkd reload only, then checks clean (v3.1.6 B6, B6-O8 (b)).
+"""
+
+import json
 import os
 import shutil
 import subprocess
@@ -11,6 +16,7 @@ from unittest import mock
 
 from test_cases.module_loader import load_script
 from test_cases.test_ufm_setup_upgrade import make_inputs
+import test_cases.test_ufm_setup_upgrade as tufm
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "infiniband/bringup/ufm-setup-upgrade"
@@ -79,6 +85,42 @@ class SetupLinksFeedUfmToolTest(unittest.TestCase):
                 known = set(UNSETUP._known_workspace_links()) | set(UNSETUP._known_ztp_project_links())
             for name in ("ib.csv", "p2p.xlsx", "ufm-setup-upgrade-logs"):
                 self.assertNotIn(os.fspath(tool / name), known, name)
+
+
+class UfmHaLinkCarrierScenarioTest(tufm.ConfiguredPairCase):
+    """问题文档 I-055 (:1890-1895) end to end through the UFM script and the host module: a running HA pair whose
+    netplan predates ignore-carrier gets it by generate + networkctl reload (no whole netplan apply, the VIP
+    stays), and the following check finds netplan unchanged and the HA configuration OK."""
+
+    def test_a_running_ha_pair_takes_ignore_carrier_then_checks_clean(self):
+        import yaml
+        for name, document in (("ufm01", tufm.desired_netplan("198.51.101.130/23", "192.0.2.1/30", "100.126.255.1/16",
+                                                              "100.126.255.2/16", carrier=False)),
+                               ("ufm02", tufm.desired_netplan("198.51.101.132/23", "192.0.2.2/30", "100.126.255.3/16",
+                                                              "100.126.255.4/16", carrier=False))):
+            files = self.state["ufms"][name]["files"]
+            files["etc/netplan/01-netcfg.yaml"] = yaml.safe_dump(document)
+            for unit, text in tufm.networkd_units(document["network"]["ethernets"]).items():
+                files[f"run/systemd/network/{unit}"] = text
+        self.make_upgraded()
+        state = json.loads(self.state_path.read_text())
+        state["ha"] = {"master": "ufm01", "standby": "ufm02", "vip": "198.51.101.133", "started": True,
+                       "sync_left": 0}
+        state["ufms"]["ufm01"]["ipv4"] += " 198.51.101.133/23"
+        self.state_path.write_text(json.dumps(state))
+
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(dict(self.outcomes(results[name]))["netplan"], "CHANGED", results[name].steps)
+            self.assertEqual(state["ufms"][name]["networkctl"], ["reload"])
+            self.assertEqual(state["ufms"][name].get("applied", 0), 0, "no whole netplan apply")
+        self.assertIn("198.51.101.133/23", state["ufms"]["ufm01"]["ipv4"].split(), "the VIP stays on the master")
+
+        checked, state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            outcomes = dict(self.outcomes(checked[name]))
+            self.assertEqual((outcomes["netplan"], outcomes["ha_config"]), ("UNCHANGED", "OK"), checked[name].steps)
+            self.assertEqual(state["ufms"][name]["networkctl"], ["reload"])
 
 
 if __name__ == "__main__":

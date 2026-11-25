@@ -126,6 +126,7 @@ class Plan:
     devices: list = field(default_factory=list)
     mgmt_device: str = ""
     nodes: list = field(default_factory=list)
+    source_ufm_count: int = 0   # server_ufm rows in ib.csv, before any per-node filter (B6-O1, v3.1.6 指导 8.6)
     roles: dict = field(default_factory=dict)
     addresses: dict = field(default_factory=dict)
     ipmi_gateways: dict = field(default_factory=dict)   # role -> IPMI gateway when global gives its own
@@ -424,6 +425,7 @@ def load_csv(path: Path, plan: Plan) -> None:
         if dev_type == "ufm":
             errors.append(f"{where}: type 应为 {UFM_TYPE}")
         elif dev_type == UFM_TYPE:
+            plan.source_ufm_count += 1
             node = parse_node_row(row, header, line, where, errors)
             if node:
                 plan.nodes.append(node)
@@ -2190,7 +2192,12 @@ def node_others(plan: Plan, node: UfmNode) -> dict:
 
 
 def node_netplan(plan: Plan, node: UfmNode) -> dict:
-    return host.netplan_document(plan.mgmt_device, node.interface, node.gateway, node_others(plan, node))
+    """I-055 (B6-O1 (a)): two server_ufm rows in ib.csv and eth1 among this node's links: eth1 is ignore-carrier."""
+    others, ha_link = node_others(plan, node), plan.logical.get("eth1")
+    if plan.source_ufm_count == 2 and ha_link in others:
+        return host.netplan_document(plan.mgmt_device, node.interface, node.gateway, others,
+                                     ignore_carrier={ha_link})
+    return host.netplan_document(plan.mgmt_device, node.interface, node.gateway, others)
 
 
 def node_network_problems(plan: Plan, node: UfmNode, facts: dict) -> tuple:
@@ -2769,12 +2776,57 @@ class Session:
             self.save(self.numbered(f"{node.hostname}-before-{os.path.basename(path)}"), text)
         conflicts = host.netplan_conflicts(files, desired)
         config_ok = not conflicts and host.netplan_equivalent(host.effective_ethernets(files), desired)
+        problems = []
         if config_ok:
             problems, pending = node_network_problems(self.plan, node,
                                                       self.network_facts(node, result, "network-read"))
             if not problems:
                 result.facts["network_pending"] = pending
                 return "UNCHANGED"
+        # I-055 修法 3 (B6-O2): a node already in HA (not pacemaker's own default cluster, I-009) never gets a
+        # whole `netplan apply`; only the HA link's ignore-carrier is written, then networkd reloads that file.
+        status = self.ha_read_status(node, result, "netplan-ha-status")
+        if (not ha_default_cluster(status, node)
+                and ha_cluster_kind(status, self.plan.nodes, self.plan.vip)[0] != "absent"):
+            if config_ok:   # B6-O3 (a)
+                raise UfmError(f"HA 已配置：netplan 文件已符合，但运行状态不符（{'; '.join(problems)}）；"
+                               "不整机 netplan apply，请人工处理")
+            plain = host.netplan_document(self.plan.mgmt_device, node.interface, node.gateway,
+                                          node_others(self.plan, node))
+            if conflicts or not host.netplan_equivalent(host.effective_ethernets(files), plain):   # B6-O4 (a)
+                raise UfmError("HA 已配置：netplan 与期望的差别不只 HA 口的 ignore-carrier"
+                               + (f"（另有文件也配置了这些接口: {', '.join(conflicts)}）" if conflicts else "")
+                               + "；不整机 netplan apply，设备上未做改动，请人工处理")
+            device = self.plan.logical["eth1"]
+            unit = f"10-netplan-{device}.network"
+            yaml_text = host.render_netplan(desired)
+            self.save(self.numbered(f"{node.hostname}-01-netcfg.yaml"), yaml_text)
+            action = (f"HA 已配置：写入 {host.NETPLAN_TARGET}（只差 {device} 的 ignore-carrier，内容见运行目录 "
+                      f"{node.hostname}-01-netcfg.yaml），netplan generate，核对 /run/systemd/network 只有 {unit} "
+                      "变化后 networkctl reload，不整机 netplan apply")
+            if not self.apply:
+                return self.would("netplan", action)
+            self.authorize(node, action)
+            backup = self.backup_dir()
+            try:
+                body = self.run_script(node, result, "netplan-reload",
+                                       host.netplan_reload_script(yaml_text, backup, device))
+            except UfmError as exc:   # the operator needs the backup path; no automatic rollback (I-038)
+                raise UfmError(f"{exc}；设备上的原配置备份在 {backup}") from exc
+            reload = host.parse_kv(body)
+            if reload.get("result") != "reloaded":   # B6-O5 (a)
+                raise UfmError(f"HA 已配置：/run/systemd/network 的变化不是只有 {unit}"
+                               f"（{reload.get('changed') or '没有变化'}），已还原 netplan 文件、未 reload"
+                               f"（{reload.get('result') or '无结果'}）；备份在 {backup}")
+            problems, pending = node_network_problems(self.plan, node,
+                                                      self.network_facts(node, result, "network-verify-reload"))
+            if problems:
+                raise UfmError(f"networkctl reload 后核验未通过: {'; '.join(problems)}；设备上的原配置备份在 {backup}")
+            result.facts["network_pending"] = pending
+            result.facts["netplan_reload"] = {"changed": reload["changed"].split(), "backup": backup}
+            self.say(f"    HA 已配置：只 reload 了 {unit}，未整机 netplan apply（备份 {backup}）")
+            return "CHANGED"
+        if config_ok:
             self.say(f"    netplan 内容已符合，但运行状态不符（{'; '.join(problems)}），只重新 apply")
         elif conflicts:
             self.say(f"    这些 netplan 文件也配置了相同接口，将移入备份目录: {', '.join(conflicts)}")

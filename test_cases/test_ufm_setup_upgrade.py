@@ -1,5 +1,6 @@
 """Direct and simulated-login tests for infiniband/bringup/ufm-setup-upgrade."""
 
+import inspect
 import json
 import os
 import pty
@@ -698,11 +699,32 @@ if name is None or host in state.get("no_direct", []):
 ufm_session(name, host, remote)
 '''
 
+def networkd_units(ethernets):
+    """What the fake `netplan generate` leaves in /run/systemd/network: one 10-netplan-<interface>.network per
+    interface (v3.1.6 B6; layout synthetic, the directive names as 问题文档 I-055 :1884 infers them)."""
+    units = {}
+    for device, config in sorted(ethernets.items()):
+        lines = ["[Match]", f"Name={device}", "", "[Network]"]
+        lines += [f"Address={value}" for value in config.get("addresses") or []]
+        gateway = config.get("gateway4")
+        for route in config.get("routes") or []:
+            if str(route.get("to")) in ("default", "0.0.0.0/0"):
+                gateway = route.get("via")
+        lines += [f"Gateway={gateway}"] if gateway else []
+        if config.get("ignore-carrier") in (True, "true", "yes"):
+            lines += ["ConfigureWithoutCarrier=yes", "IgnoreCarrierLoss=yes"]
+        units[f"10-netplan-{device}.network"] = "\n".join(lines) + "\n"
+    return units
+
+
 # A stateful stand-in for the UFM host tools seen in ufm-manual.log; one file, dispatched by argv[0].
 FAKE_TOOL = r'''#!{python}
 import getpass, glob, hashlib, json, os, subprocess, sys, tempfile, time
 STATE = os.environ["FAKE_UFM_STATE"]
 MGMT = "eno8303"
+
+
+# {networkd_units}
 
 
 def load():
@@ -729,7 +751,7 @@ def shared_dir():
 def rewrite(text, base):
     # /tmp/ first: on Linux the sandbox itself may live under /tmp
     for old in ("/tmp/", "/etc/netplan", "/etc/os-release", "/etc/systemd", "/etc/hosts", "/usr/share/zoneinfo",
-                "/sys/class/net", "/root/", "/etc/ufm-release", "/var/log/", "/etc/ssh/"):
+                "/sys/class/net", "/root/", "/etc/ufm-release", "/var/log/", "/etc/ssh/", "/run/systemd/network"):
         text = text.replace(old, base + old)
     text = text.replace(BOOT_ID, base + ".boot_id")
     return text.replace("/opt/ufm/", shared_dir() + "/opt/ufm/")
@@ -852,9 +874,20 @@ def netplan(state, item, base, args):
         for device, config in ((document.get("network") or {}).get("ethernets") or {}).items():
             merged.setdefault(device, {}).update(config or {})
     if args[:1] == ["generate"]:
+        item["generated"] = item.get("generated", 0) + 1
+        save(state)
         if item.get("generate_fails"):
             print("netplan generate: invalid configuration (fake)", file=sys.stderr)
             return 1
+        folder = os.path.join(base, "run/systemd/network")
+        os.makedirs(folder, exist_ok=True)
+        units = networkd_units(merged)
+        for stale in glob.glob(os.path.join(folder, "10-netplan-*")):
+            if os.path.basename(stale) not in units:
+                os.remove(stale)
+        for unit, text in units.items():
+            with open(os.path.join(folder, unit), "w") as handle:
+                handle.write(text)
         return 0
     if args[:1] == ["apply"]:
         config = merged.get(MGMT, {})
@@ -1454,6 +1487,10 @@ def main():
         return 1
     if tool == "netplan":
         return netplan(state, item, base, args)
+    if tool == "networkctl" and args == ["reload"]:
+        item.setdefault("networkctl", []).append("reload")
+        save(state)
+        return 1 if item.get("networkctl_fails") else 0
     if tool == "ipmitool":
         return ipmitool(state, item, args)
     if tool == "systemctl":
@@ -1552,7 +1589,9 @@ if __name__ == "__main__":
 FAKE_TOOL_NAMES = ("hostname", "hostnamectl", "ip", "netplan", "ipmitool", "sha256sum", "setsid", "bash",
                    "systemctl", "timedatectl", "getent", "ssh-keygen", "ssh", "ping", "wget", "tar",
                    "systemd-run", "ufm-fake-os-upgrade", "ibstat", "arping",
-                   "ufm_ha_cluster", "drbdadm", "ufm_enterprise_sanity.sh", "nohup", "timeout", "docker", "pcs")
+                   "ufm_ha_cluster", "drbdadm", "ufm_enterprise_sanity.sh", "nohup", "timeout", "docker", "pcs",
+                   "networkctl")
+FAKE_TOOL = FAKE_TOOL.replace("# {networkd_units}\n", inspect.getsource(networkd_units))
 TEST_KEY_BLOB = "AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYmgmtserver"
 UBUNTU_RESOLVED = "[Resolve]\n#DNS=\n#FallbackDNS=\n#Domains=\n#DNSSEC=no\n"
 UBUNTU_TIMESYNCD = "[Time]\n#NTP=\n#FallbackNTP=ntp.ubuntu.com\n#RootDistanceMaxSec=5\n"
@@ -1942,10 +1981,12 @@ class SpineJumpLoginTest(FakeSshCase):
         self.assertEqual(self.nested_targets(calls), [])
 
 
-def desired_netplan(address, ha, ib0, ib1):
+def desired_netplan(address, ha, ib0, ib1, carrier=True):
+    """carrier: the HA link of a pair carries `ignore-carrier: true` (问题文档 I-055 修法 1, :1891); False builds
+    the file deployed before v3.1.6."""
     return {"network": {"version": 2, "ethernets": {
         "eno8303": {"dhcp4": False, "addresses": [address], "routes": [{"to": "default", "via": "198.51.101.254"}]},
-        "eno8403": {"dhcp4": False, "addresses": [ha]},
+        "eno8403": {"dhcp4": False, "addresses": [ha], **({"ignore-carrier": True} if carrier else {})},
         "ib0": {"dhcp4": False, "addresses": [ib0]},
         "ib1": {"dhcp4": False, "addresses": [ib1]}}}}
 
@@ -1963,6 +2004,35 @@ class InitPureTest(unittest.TestCase):
     def test_node_netplan_follows_csv_and_role_block(self):
         self.assertEqual(ufm.node_netplan(self.plan, self.nodes["ufm02"]), UFM02_NETPLAN)
         self.assertEqual(ufm.node_netplan(self.plan, self.nodes["ufm01"]), UFM01_NETPLAN)
+
+    def test_only_the_ha_link_of_a_pair_is_ignore_carrier(self):
+        # 问题文档 I-055 修法 1 (:1891); B6-O1 (a): two server_ufm rows in ib.csv, eth1 known, its address in the
+        # role block. One server_ufm row or an eth1 that cannot be told apart: the netplan stays as it was.
+        carriers = {name: [device for device, config in ufm.node_netplan(self.plan, node)["network"]["ethernets"]
+                           .items() if config.get("ignore-carrier") is True]
+                    for name, node in self.nodes.items()}
+        self.assertEqual(carriers, {"ufm01": ["eno8403"], "ufm02": ["eno8403"]})
+        one_node = GLOBAL.replace('      vip: "198.51.101.133"\n', "").replace(
+            '        secondary:\n' + IPMI_SECONDARY + '          eno8403: "192.0.2.2/30"\n'
+            '          ib0: "100.126.255.3/16"\n          ib1: "100.126.255.4/16"\n', "")
+        self.assertNotIn("secondary", one_node)
+        with tempfile.TemporaryDirectory() as tmp:
+            single = ufm.build_plan(make_inputs(tmp, csv_rows=OTHER_ROWS + [UFM01], global_text=one_node))
+        self.assertEqual((single.errors, single.logical.get("eth1")), ([], "eno8403"))
+        self.assertEqual(ufm.node_netplan(single, single.nodes[0]),
+                         desired_netplan("198.51.101.130/23", "192.0.2.1/30", "100.126.255.1/16", "100.126.255.2/16",
+                                         carrier=False))
+        text = (GLOBAL.replace('          eno8403: "192.0.2.1/30"\n',
+                               '          eno8403: "192.0.2.1/30"\n          eno12399: "192.0.2.65/30"\n')
+                .replace('          eno8403: "192.0.2.2/30"\n',
+                         '          eno8403: "192.0.2.2/30"\n          eno12399: "192.0.2.66/30"\n'))
+        with tempfile.TemporaryDirectory() as tmp:
+            ambiguous = ufm.build_plan(make_inputs(tmp, global_text=text, p2p_rows=[
+                ["Name", "Port", "Name", "Port"], ["ufm-01", "eth1", "ufm-02", "eth1"]]))
+        self.assertEqual((ambiguous.errors, ambiguous.logical.get("eth1")), ([], None))
+        for node in ambiguous.nodes:
+            ethernets = ufm.node_netplan(ambiguous, node)["network"]["ethernets"]
+            self.assertEqual([device for device, config in ethernets.items() if "ignore-carrier" in config], [])
 
     def test_infra_settings_come_from_common_switch_system(self):
         self.assertEqual((self.plan.dns, self.plan.ntp, self.plan.timezone),
@@ -3170,6 +3240,120 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
             self.assertEqual(steps["ha_config"], "SKIPPED", checked[name].steps)
             for absent in ("ha_preconditions", "root_keypair"):
                 self.assertNotIn(absent, steps)
+
+    # v3.1.6 B6 (问题文档 I-055 :1890-1895): the netplan of a pair as deployed before v3.1.6 has no ignore-carrier
+    DEPLOYED_NETPLAN = {
+        "ufm01": desired_netplan("198.51.101.130/23", "192.0.2.1/30", "100.126.255.1/16", "100.126.255.2/16",
+                                 carrier=False),
+        "ufm02": desired_netplan("198.51.101.132/23", "192.0.2.2/30", "100.126.255.3/16", "100.126.255.4/16",
+                                 carrier=False)}
+
+    def seed_deployed_netplan(self):
+        """The old netplan file and the networkd units netplan rendered from it (networkd_units, synthetic)."""
+        import yaml
+        for name, document in self.DEPLOYED_NETPLAN.items():
+            files = self.state["ufms"][name]["files"]
+            files["etc/netplan/01-netcfg.yaml"] = yaml.safe_dump(document)
+            for unit, text in networkd_units(document["network"]["ethernets"]).items():
+                files[f"run/systemd/network/{unit}"] = text
+
+    def make_running_pair(self):
+        """Both nodes upgraded, HA configured and started: ufm01 the master with the global VIP on eno8303."""
+        self.seed_deployed_netplan()
+        self.make_upgraded()
+        state = json.loads(self.state_path.read_text())
+        state["ha"] = {"master": "ufm01", "standby": "ufm02", "vip": "198.51.101.133", "started": True,
+                       "sync_left": 0}
+        state["ufms"]["ufm01"]["ipv4"] += " 198.51.101.133/23"
+        self.state_path.write_text(json.dumps(state))
+        return state["ha"]
+
+    def networkd_and_netplan(self, name):
+        root = self.sandbox / name
+        return {str(path.relative_to(root)): path.read_text()
+                for folder in ("etc/netplan", "run/systemd/network") for path in (root / folder).iterdir()}
+
+    def test_a_running_ha_pair_gets_ignore_carrier_by_networkd_reload_only(self):
+        # 问题文档 I-055 修法 3 (:1893) and its check (:1895): generate, only the HA link's networkd file changed,
+        # networkctl reload; never a whole `netplan apply`, the VIP and the cluster stay as they are
+        import yaml
+        ha = self.make_running_pair()
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name, desired in (("ufm01", UFM01_NETPLAN), ("ufm02", UFM02_NETPLAN)):
+            item = state["ufms"][name]
+            self.assertEqual(dict(self.outcomes(results[name]))["netplan"], "CHANGED", results[name].steps)
+            self.assertNotIn("FAILED", results[name].status, results[name].detail)
+            self.assertEqual(item.get("applied", 0), 0, "no whole netplan apply on an HA node")
+            self.assertEqual(item["networkctl"], ["reload"])
+            self.assertEqual(yaml.safe_load(self.read(name, "etc/netplan/01-netcfg.yaml")), desired)
+            unit = self.read(name, "run/systemd/network/10-netplan-eno8403.network")
+            self.assertIn("ConfigureWithoutCarrier=yes", unit)
+            self.assertIn("IgnoreCarrierLoss=yes", unit)
+            self.assertEqual(results[name].facts["netplan_reload"]["changed"], ["10-netplan-eno8403.network"])
+        self.assertIn("198.51.101.133/23", state["ufms"]["ufm01"]["ipv4"].split(), "the VIP stays on the master")
+        self.assertEqual(state["ha"], ha, "the cluster is untouched: no failover, still started")
+
+        again, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(dict(self.outcomes(again[name]))["netplan"], "UNCHANGED", again[name].steps)
+            self.assertEqual(state["ufms"][name]["networkctl"], ["reload"], "no second reload")
+
+    def test_a_running_ha_pair_with_other_netplan_changes_is_reported_not_applied(self):
+        # 问题文档 I-055 修法 3 (:1893); B6-O4 (a): more than the HA link's ignore-carrier differs, nothing is written
+        self.make_running_pair()
+        (self.inputs / "01-global.yaml").write_text(
+            GLOBAL.replace("100.126.255.2/16", "100.126.255.12/16").replace("100.126.255.4/16", "100.126.255.14/16"),
+            encoding="utf-8")
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            item = state["ufms"][name]
+            seeded = {path: text for path, text in self.state["ufms"][name]["files"].items()
+                      if path.startswith(("etc/netplan/", "run/systemd/network/"))}
+            self.assertEqual(results[name].status, "STEP_FAILED_NETPLAN", results[name].detail)
+            self.assertIn("不整机 netplan apply", results[name].detail)
+            self.assertEqual(self.networkd_and_netplan(name), seeded)
+            for key in ("generated", "applied", "networkctl"):
+                self.assertNotIn(key, item)
+
+    def test_check_previews_the_reload_for_a_running_ha_pair(self):
+        # 问题文档 I-055 (:1892-1893); B6-O7 (a): check reads the HA state and shows the reload it would do
+        self.make_running_pair()
+        results, state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            step = next(step for step in results[name].steps if step["step"] == "netplan")
+            self.assertEqual(step["outcome"], "WOULD_CHANGE", results[name].steps)
+            self.assertIn("networkctl reload", step["detail"])
+            for key in ("generated", "applied", "networkctl"):
+                self.assertNotIn(key, state["ufms"][name])
+            InspectModeTest.assert_untouched(self, name)
+
+    def test_a_default_single_node_cluster_still_gets_the_whole_netplan_applied(self):
+        # 问题文档 I-009 期望 1 (:671-677): pacemaker's own default cluster is no HA; I-055 (:1893) 末句 照旧
+        self.seed_deployed_netplan()
+        self.make_upgraded()
+        state = json.loads(self.state_path.read_text())
+        for name in ("ufm01", "ufm02"):
+            state["ufms"][name]["default_cluster"] = True
+        self.state_path.write_text(json.dumps(state))
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(dict(self.outcomes(results[name]))["netplan"], "CHANGED", results[name].steps)
+            self.assertEqual(state["ufms"][name].get("applied", 0), 1, "one whole netplan apply")
+            self.assertNotIn("networkctl", state["ufms"][name])
+
+    def test_without_ha_the_whole_netplan_is_applied_and_carries_ignore_carrier(self):
+        # 问题文档 I-055 :1893 末句「HA 还没配置的节点照旧」and :1891
+        import yaml
+        self.seed_deployed_netplan()
+        self.make_upgraded()
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name, desired in (("ufm01", UFM01_NETPLAN), ("ufm02", UFM02_NETPLAN)):
+            self.assertEqual(dict(self.outcomes(results[name]))["netplan"], "CHANGED", results[name].steps)
+            self.assertEqual(state["ufms"][name].get("applied", 0), 1, "one whole netplan apply")
+            self.assertIs(results[name].facts["ipv4_verified_from_server"], True, "verified by a new session")
+            self.assertNotIn("networkctl", state["ufms"][name])
+            self.assertEqual(yaml.safe_load(self.read(name, "etc/netplan/01-netcfg.yaml")), desired)
+            self.assertEqual(desired["network"]["ethernets"]["eno8403"]["ignore-carrier"], True)
 
 
 class HaPostConfigTest(ConfiguredPairCase):

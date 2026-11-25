@@ -1,5 +1,6 @@
 """Direct tests for infra/ubuntu24_host.py; device output fixtures are verbatim from ufm-manual.log."""
 
+import copy
 import os
 import subprocess
 import tempfile
@@ -125,6 +126,49 @@ class NetplanTest(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         self.assertNotIn("\nnetplan apply", script)
         self.assertIn("--on-active=3", script)
+
+    def test_document_marks_only_the_named_link_ignore_carrier(self):
+        # 问题文档 I-055 修法 1 (:1891): only the HA direct link gets `ignore-carrier: true`, the others stay as they are
+        import yaml
+        others = {"eno8403": "192.0.2.2/30", "ib0": "100.126.255.3/16", "ib1": "100.126.255.4/16"}
+        document = host.netplan_document("eno8303", "198.51.101.132/23", "198.51.101.254", others,
+                                         ignore_carrier={"eno8403"})
+        expected = copy.deepcopy(DESIRED)
+        expected["network"]["ethernets"]["eno8403"]["ignore-carrier"] = True
+        self.assertEqual(document, expected)
+        self.assertEqual(list(document["network"]["ethernets"]["eno8403"]), ["dhcp4", "addresses", "ignore-carrier"])
+        self.assertEqual(yaml.safe_load(host.render_netplan(document)), expected)
+        self.assertIn("ignore-carrier: true", host.render_netplan(document))
+        self.assertEqual(host.netplan_document("eno8303", "198.51.101.132/23", "198.51.101.254", others), DESIRED)
+        self.assertEqual(host.netplan_document("eno8303", "198.51.101.132/23", "198.51.101.254", others,
+                                               ignore_carrier={"eno9999"}), DESIRED,
+                         "a name outside the other links adds no interface")
+
+    def test_equivalence_checks_ignore_carrier_only_where_desired(self):
+        # 问题文档 I-055 修法 2 (:1892): the desired ignore-carrier counts; true/yes as dhcp4 is read
+        desired = copy.deepcopy(DESIRED)
+        desired["network"]["ethernets"]["eno8403"]["ignore-carrier"] = True
+        plain = host.render_netplan(DESIRED)
+
+        def equivalent(text, want=desired):
+            return host.netplan_equivalent(host.effective_ethernets({host.NETPLAN_TARGET: text}), want)
+        ha_line = "\n      - 192.0.2.2/30\n"
+        self.assertIn(ha_line, plain)
+        self.assertFalse(equivalent(plain), "deployed without ignore-carrier: must change")
+        for value in ("true", "yes", '"true"', '"yes"'):
+            self.assertTrue(equivalent(plain.replace(ha_line, f"{ha_line}      ignore-carrier: {value}\n")), value)
+        self.assertFalse(equivalent(plain.replace(ha_line, f"{ha_line}      ignore-carrier: false\n")))
+        ib_line = "\n      - 100.126.255.3/16\n"
+        self.assertTrue(equivalent(plain.replace(ib_line, f"{ib_line}      ignore-carrier: true\n"), DESIRED),
+                        "not desired on that interface: not compared")
+
+    def test_reload_script_never_applies_and_rejects_bad_names(self):
+        # 问题文档 I-055 修法 3 (:1893): an HA node never runs a whole `netplan apply`
+        script = host.netplan_reload_script("network: {}\n", "/root/backup/run", "eno8403")
+        self.assertNotIn("netplan apply", script)
+        self.assertEqual(subprocess.run(["/bin/bash", "-n"], input=script, text=True).returncode, 0)
+        with self.assertRaises(host.HostConfigError):
+            host.netplan_reload_script("network: {}\n", "/root/backup/run", "eno 8403")
 
     def test_network_problems_require_management_and_skip_down_links(self):
         facts = host.parse_network_facts(
@@ -338,6 +382,111 @@ class LocalScriptTest(LocalScriptCase):
         self.assertEqual((facts["added"], facts["missing"]), ("1", "0"))
         self.assertEqual((home / ".ssh/authorized_keys").read_text(), existing + "\n" + keys[0] + "\n")
         self.assertEqual(self.run_script(host.authorized_keys_script(keys, str(home)))["added"], "0")
+
+
+class NetplanReloadScriptTest(LocalScriptCase):
+    """netplan_reload_script under the local shell (问题文档 I-055 修法 3, :1893): /etc/netplan and
+    /run/systemd/network are temporary directories, netplan and networkctl recording stand-ins. The netplan
+    and networkd fixtures are synthetic, not from ufm-manual.log."""
+
+    OLD = "network:\n  version: 2\n  ethernets:\n    eno8403:\n      dhcp4: false\n"
+    NEW = OLD + "      ignore-carrier: true\n"
+    UNITS = {"10-netplan-eno8303.network": "[Match]\nName=eno8303\n",
+             "10-netplan-eno8403.network": "[Match]\nName=eno8403\n"}
+    CARRIER = "[Match]\nName=eno8403\n\n[Network]\nConfigureWithoutCarrier=yes\nIgnoreCarrierLoss=yes\n"
+
+    def setUp(self):
+        super().setUp()
+        self.etc, self.networkd, self.backup = self.base / "netplan", self.base / "networkd", self.base / "backup"
+        self.calls = self.base / "calls"
+        self.etc.mkdir()
+        (self.etc / "01-netcfg.yaml").write_text(self.OLD)
+        (self.base / "bin/networkctl").write_text(f'#!/bin/sh\necho "networkctl $*" >> {self.calls}\n')
+        (self.base / "bin/networkctl").chmod(0o755)
+
+    def seed_networkd(self):
+        self.networkd.mkdir()
+        for name, text in self.UNITS.items():
+            (self.networkd / name).write_text(text)
+
+    def fake_generate(self, rendered):
+        """`netplan generate` writes `rendered` (name -> text) while /etc/netplan asks for ignore-carrier,
+        else the original units; `fail` makes it exit 1."""
+        def writes(units):
+            return "".join(f"printf %s '{text}' > {self.networkd}/{name}\n" for name, text in units.items())
+        body = ("exit 1\n" if rendered == "fail" else
+                f"if grep -q ignore-carrier {self.etc}/01-netcfg.yaml; then\n{writes(rendered) or ':' + chr(10)}"
+                f"else\n{writes(self.UNITS)}fi\n")
+        path = self.base / "bin/netplan"
+        path.write_text(f'#!/bin/sh\necho "netplan $*" >> {self.calls}\n'
+                        f'case "$1" in\n  generate)\n{body}  ;;\n  *) exit 9 ;;\nesac\n')
+        path.chmod(0o755)
+
+    def run_reload(self):
+        script = (host.netplan_reload_script(self.NEW, str(self.backup), "eno8403")
+                  .replace("/etc/netplan", str(self.etc)).replace("/run/systemd/network", str(self.networkd)))
+        result = subprocess.run(["/bin/bash", "-c", script], env=self.env, capture_output=True, text=True,
+                                timeout=30)
+        calls = self.calls.read_text().splitlines() if self.calls.exists() else []
+        return result, host.parse_kv(result.stdout), calls
+
+    def networkd_files(self):
+        return {path.name: path.read_text() for path in self.networkd.iterdir()}
+
+    def test_only_the_ha_link_file_changes_then_networkd_reloads(self):
+        self.seed_networkd()
+        self.fake_generate({"10-netplan-eno8403.network": self.CARRIER})
+        result, facts, calls = self.run_reload()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((facts["result"], facts["changed"]), ("reloaded", "10-netplan-eno8403.network"))
+        self.assertEqual(calls, ["netplan generate", "networkctl reload"])
+        self.assertEqual((self.etc / "01-netcfg.yaml").read_text(), self.NEW)
+        self.assertEqual((self.backup / "netplan/01-netcfg.yaml").read_text(), self.OLD)
+        self.assertEqual({path.name: path.read_text() for path in (self.backup / "networkd-before").iterdir()},
+                         self.UNITS)
+
+    def test_another_networkd_file_changing_restores_and_never_reloads(self):
+        # 问题文档 :1893「变化超出这个文件就不应用，只报告」
+        self.seed_networkd()
+        self.fake_generate({"10-netplan-eno8403.network": self.CARRIER,
+                            "10-netplan-eno8303.network": "[Match]\nName=eno8303\n\n[Network]\nDHCP=yes\n"})
+        result, facts, calls = self.run_reload()
+        self.assertEqual(facts.get("result"), "out_of_scope_restored", result.stdout + result.stderr)
+        self.assertEqual(sorted(facts["changed"].split()), sorted(self.UNITS))
+        self.assertNotIn("networkctl reload", calls)
+        self.assertEqual(sorted(path.name for path in self.etc.iterdir()), ["01-netcfg.yaml"])
+        self.assertEqual((self.etc / "01-netcfg.yaml").read_text(), self.OLD)
+        self.assertEqual(self.networkd_files(), self.UNITS, "generated again from the restored file")
+
+    def test_no_networkd_change_is_refused_and_restored(self):
+        # B6-O5 (a): the change set must be exactly the HA link's file; an empty set is refused too
+        self.seed_networkd()
+        self.fake_generate({})
+        result, facts, calls = self.run_reload()
+        self.assertEqual((facts.get("result"), facts.get("changed")), ("out_of_scope_restored", ""),
+                         result.stdout + result.stderr)
+        self.assertNotIn("networkctl reload", calls)
+        self.assertEqual((self.etc / "01-netcfg.yaml").read_text(), self.OLD)
+
+    def test_generate_failure_restores_without_reload(self):
+        self.seed_networkd()
+        self.fake_generate("fail")
+        result, facts, calls = self.run_reload()
+        self.assertEqual((result.returncode, facts.get("result")), (3, "generate_failed_restored"),
+                         result.stdout + result.stderr)
+        self.assertEqual(calls, ["netplan generate"])
+        self.assertEqual(sorted(path.name for path in self.etc.iterdir()), ["01-netcfg.yaml"])
+        self.assertEqual((self.etc / "01-netcfg.yaml").read_text(), self.OLD)
+
+    def test_without_a_networkd_directory_nothing_is_written(self):
+        # AGENTS.md fail closed: what cannot be compared is not written and not applied
+        self.fake_generate({"10-netplan-eno8403.network": self.CARRIER})
+        result, _facts, calls = self.run_reload()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(calls, [])
+        self.assertEqual(sorted(path.name for path in self.etc.iterdir()), ["01-netcfg.yaml"])
+        self.assertEqual((self.etc / "01-netcfg.yaml").read_text(), self.OLD)
+        self.assertFalse(self.networkd.exists())
 
 
 class DockerFindingsTest(LocalScriptCase):
