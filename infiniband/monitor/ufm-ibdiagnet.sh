@@ -7,6 +7,9 @@
 #              on the host to /root/monitor/ibdiagnet/ (no docker cp)
 #   iblinkinfo inside the container, stdout only, to /root/monitor/iblinkinfo/
 # cron.sh switches to iblinkinfo only after ibdiagnet failed three times in a row (owner 2026-10-22).
+# R-037 (L4, v3.1.6): a UFM installed from the ufm-enterprise package has no ufm container; both tools
+# then run on the host and ibdiagnet's /var/tmp/ibdiagnet2 is packed there. In either mode the fixed
+# /opt/ufm/opensm path comes first, otherwise the name from PATH (owner 2026-11-20); root either way.
 #
 # Usage: bash monitor/ufm-ibdiagnet.sh [<run-id>] [--iblinkinfo]
 #   cron.sh passes the run-id it generated; run by hand without one, the script makes its own of
@@ -47,11 +50,13 @@ IBLINKINFO=/opt/ufm/opensm/sbin/iblinkinfo
 RUN_TIMEOUT=900                             # owner 2026-10-22: at most 15 minutes inside the container
 IBLINKINFO_MAX_BYTES=$((64 * 1024 * 1024))  # owner 2026-10-22: iblinkinfo output has a size limit
 # Inside the container (it has /usr/bin/timeout, owner 2026-10-22), so the timeout ends the tool
-# itself and not only the docker client.
+# itself and not only the docker client; on the host the same wrapper (R-037).
 TIMEOUT_WRAPPER='if command -v timeout >/dev/null 2>&1; then exec timeout -k 30 '"${RUN_TIMEOUT}"' "$@"; else exec "$@"; fi'
 CONTAINER_OUT=/var/tmp/ibdiagnet2          # ibdiagnet's own output directory inside the container
 SHARED_FILES=/opt/ufm/files                # inside the container: the master mounts the host directory
 HOST_FILES="${UFM_HOST_FILES:-/opt/ufm/files}"   # the same directory on the host (tests point it elsewhere)
+HOST_OPENSM="${UFM_OPENSM:-/opt/ufm/opensm}"     # R-037 host mode: the host's own opensm (tests: elsewhere)
+HOST_OUT="${UFM_HOST_OUT:-/var/tmp/ibdiagnet2}"  # R-037 host mode: ibdiagnet's output directory on the host
 KEEP=3                                      # runs kept on the UFM per kind (owner 2026-10-21)
 if [[ "$KIND" == ibdiagnet ]]; then
     OUTDIR=./monitor/ibdiagnet
@@ -118,11 +123,54 @@ timeout_reason() {
 # The node that really ran it: the VIP moves between the two UFMs.
 { hostname; ip -br link; } > "$OUTDIR/${PREFIX}.node" 2>&1
 
+# ── R-037: the ufm container or the host (after the lock and the run-id checks) ────────────
+# A listed ufm container counts whether it runs or not: a stopped one fails in the container, it is
+# never run on the host instead; a docker that cannot answer is no answer.
+if ! command -v docker >/dev/null 2>&1; then
+    MODE=host
+else
+    listed=$(docker ps -a --filter 'name=^/ufm$' --format '{{.Names}}')
+    ps_rc=$?
+    if (( ps_rc != 0 )); then
+        finish failed "" "cannot tell whether UFM runs in the ufm container: docker ps failed (exit ${ps_rc})"
+        exit 1
+    fi
+    if [[ "$listed" == "$CONTAINER" ]]; then MODE=container; else MODE=host; fi
+fi
+# Owner 2026-11-20, both modes: the fixed full path when it is executable, otherwise the name from PATH;
+# with neither nothing runs. What is found is run once; its real failure never tries the other one.
+if [[ "$KIND" == ibdiagnet ]]; then tool_dir=bin; else tool_dir=sbin; fi
+if [[ "$MODE" == container ]]; then
+    fixed="/opt/ufm/opensm/${tool_dir}/${KIND}"
+    where="in the ufm container"
+    # the fixed path is part of the lookup script and the bare name comes last, so a lookup never looks
+    # like a tool run in the docker calls
+    tool=$(docker exec "$CONTAINER" sh -c "[ -x ${fixed} ] && printf '%s\n' ${fixed} || command -v \"\$1\"" \
+        sh "$KIND") || tool=""
+else
+    fixed="${HOST_OPENSM}/${tool_dir}/${KIND}"
+    where="on the host"
+    if [[ -x "$fixed" ]]; then tool=$fixed; else tool=$(command -v "$KIND") || tool=""; fi
+fi
+if [[ -z "$tool" ]]; then
+    finish failed "" "${KIND} not found ${where}: neither ${fixed} nor in PATH"
+    exit 1
+fi
+if [[ "$KIND" == ibdiagnet ]]; then IBDIAGNET_ARGV[0]=$tool; else IBLINKINFO=$tool; fi
+# The same timeout wrapper in the container or on the host.
+run_tool() {
+    if [[ "$MODE" == container ]]; then
+        docker exec "$CONTAINER" sh -c "$TIMEOUT_WRAPPER" sh "$@"
+    else
+        sh -c "$TIMEOUT_WRAPPER" sh "$@"
+    fi
+}
+
 started=$(date +%s)
 if [[ "$KIND" == iblinkinfo ]]; then
     # ── iblinkinfo: stdout only (warnings go to .stderr), capped ──────────────────
     artifact="${PREFIX}.log"
-    docker exec "$CONTAINER" sh -c "$TIMEOUT_WRAPPER" sh "$IBLINKINFO" 2> "$OUTDIR/${PREFIX}.stderr" \
+    run_tool "$IBLINKINFO" 2> "$OUTDIR/${PREFIX}.stderr" \
         | head -c $((IBLINKINFO_MAX_BYTES + 1)) > "$OUTDIR/${artifact}.part"
     RUN_RC=${PIPESTATUS[0]}
     size=$(wc -c < "$OUTDIR/${artifact}.part" | tr -d ' ')
@@ -141,23 +189,33 @@ if [[ "$KIND" == iblinkinfo ]]; then
     exit 1
 fi
 
-# ── ibdiagnet inside the container ───────────────────────────────────────────
-docker exec "$CONTAINER" sh -c "$TIMEOUT_WRAPPER" sh "${IBDIAGNET_ARGV[@]}" > "$OUTDIR/${PREFIX}.log" 2>&1
+# ── ibdiagnet in the container or on the host ──────────────────────────────────
+run_tool "${IBDIAGNET_ARGV[@]}" > "$OUTDIR/${PREFIX}.log" 2>&1
 RUN_RC=$?
 # Owner 2026-10-22: success needs ibdiagnet2.net_dump, written by this run (a run that stops half way
 # can leave the rest of the directory behind).
-produced=$(docker exec "$CONTAINER" stat -c %Y "${CONTAINER_OUT}/ibdiagnet2.net_dump" 2>/dev/null)
+if [[ "$MODE" == container ]]; then
+    produced=$(docker exec "$CONTAINER" stat -c %Y "${CONTAINER_OUT}/ibdiagnet2.net_dump" 2>/dev/null)
+else
+    produced=$(date -r "${HOST_OUT}/ibdiagnet2.net_dump" +%s 2>/dev/null)
+fi
 if [[ ! "$produced" =~ ^[0-9]+$ ]] || (( produced < started )); then
     finish failed "" "$(timeout_reason)ibdiagnet produced no new ibdiagnet2.net_dump (exit ${RUN_RC})"
     exit 1
 fi
-# Packed inside the container to the shared /opt/ufm/files, then moved on the host: the move crosses
-# file systems, so it lands as .part and is renamed once complete.
 artifact="${PREFIX}.tgz"
-if docker exec "$CONTAINER" sh -c "tar -zcf ${SHARED_FILES}/${artifact}.part -C ${CONTAINER_OUT%/*} ibdiagnet2 \
+if [[ "$MODE" == container ]]; then
+    # Packed inside the container to the shared /opt/ufm/files, then moved on the host: the move crosses
+    # file systems, so it lands as .part and is renamed once complete.
+    docker exec "$CONTAINER" sh -c "tar -zcf ${SHARED_FILES}/${artifact}.part -C ${CONTAINER_OUT%/*} ibdiagnet2 \
         && mv ${SHARED_FILES}/${artifact}.part ${SHARED_FILES}/${artifact}" \
-    && mv "${HOST_FILES}/${artifact}" "$OUTDIR/${artifact}.part" \
-    && tar -tzf "$OUTDIR/${artifact}.part" | grep -q '/ibdiagnet2\.net_dump$' \
+        && mv "${HOST_FILES}/${artifact}" "$OUTDIR/${artifact}.part"
+else
+    # R-037: on the host ibdiagnet's own directory is packed straight into the output directory.
+    tar -zcf "$OUTDIR/${artifact}.part" -C "${HOST_OUT%/*}" "${HOST_OUT##*/}"
+fi
+packed=$?
+if (( packed == 0 )) && tar -tzf "$OUTDIR/${artifact}.part" | grep -q '/ibdiagnet2\.net_dump$' \
     && mv "$OUTDIR/${artifact}.part" "$OUTDIR/${artifact}"; then
     # I-065 (Q-056): timed out (124/137) but this run's net_dump is archived: still ok with the vendor
     # rc, and the reason says the output is partial; every other ok keeps an empty reason.

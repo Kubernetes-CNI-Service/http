@@ -262,6 +262,16 @@ def inside(path):
 with open(os.environ["FAKE_DOCKER_LOG"], "a") as log:
     log.write(json.dumps(sys.argv[1:]) + "\n")
 args = sys.argv[1:]
+# R-037 (owner 2026-11-20): `docker ps -a` names the ufm container whether it runs or not (a stopped
+# container still lists); FAKE_DOCKER_PS=empty: docker without a ufm container, =fail: daemon unreachable.
+if args[:2] == ["ps", "-a"]:
+    listing = os.environ.get("FAKE_DOCKER_PS", "")
+    if listing == "fail":
+        print("Cannot connect to the Docker daemon", file=sys.stderr)
+        sys.exit(1)
+    if listing != "empty":
+        print("ufm")
+    sys.exit(0)
 if os.environ.get("FAKE_DOCKER_DOWN"):
     print("Error response from daemon: container ufm is not running", file=sys.stderr)
     sys.exit(1)
@@ -270,6 +280,14 @@ if args[0] == "cp":
     sys.exit(0)
 assert args[:2] == ["exec", "ufm"], args
 command = args[2:]
+# R-037: the tool lookup inside the container, `sh -c '[ -x <fixed path> ] ... || command -v "$1"' sh <name>`;
+# FAKE_CONTAINER_TOOL=fixed (default) has the fixed path, =path only /usr/local/bin/<name>, =none neither.
+if command[:2] == ["sh", "-c"] and command[2].startswith("[ -x "):
+    found = os.environ.get("FAKE_CONTAINER_TOOL", "fixed")
+    if found == "none":
+        sys.exit(1)
+    print(command[2].split()[2] if found == "fixed" else "/usr/local/bin/" + command[-1])
+    sys.exit(0)
 if command[:2] == ["sh", "-c"] and len(command) > 4 and command[4].endswith(("/ibdiagnet", "/iblinkinfo")):
     command = command[4:]   # `sh -c <timeout wrapper> sh <tool argv>`: the wrapper is in the log
 if command[0].endswith("/ibdiagnet"):
@@ -324,6 +342,48 @@ print("unexpected docker call", args, file=sys.stderr)
 sys.exit(97)
 """
 
+# R-037 (guide 8.23 item 1): how the collector asks docker whether UFM runs in the ufm container.
+PS_CALL = ["ps", "-a", "--filter", "name=^/ufm$", "--format", "{{.Names}}"]
+
+# R-037: ibdiagnet / iblinkinfo installed on the host (the ufm-enterprise package, no docker). Logs its
+# argv to FAKE_TOOL_LOG; ibdiagnet writes its output to UFM_HOST_OUT, the host's /var/tmp/ibdiagnet2.
+FAKE_HOST_TOOL = r"""#!{python}
+import json, os, sys
+with open(os.environ["FAKE_TOOL_LOG"], "a") as log:
+    log.write(json.dumps(sys.argv) + "\n")
+if sys.argv[0].endswith("/ibdiagnet"):
+    out = os.environ["UFM_HOST_OUT"]
+    os.makedirs(out, exist_ok=True)
+    with open(out + "/ibdiagnet2.log", "w") as handle:
+        handle.write("ibdiagnet run " + " ".join(sys.argv[1:]) + "\n")
+    if not os.environ.get("FAKE_IBDIAGNET_NO_NET_DUMP"):
+        with open(out + "/ibdiagnet2.net_dump", "w") as handle:
+            handle.write("net dump\n")
+    print("-I- Done")
+    sys.exit(int(os.environ.get("FAKE_IBDIAGNET_RC", "0")))
+print("Node Neighbor GUID of GUID: 0x0200000000000001 Port: 39 doesn't exist", file=sys.stderr)
+print("Switch: 0x0200000000000001 MF0;sw01:Q3400/U1:")
+sys.exit(int(os.environ.get("FAKE_IBLINKINFO_RC", "0")))
+"""
+
+
+def path_without_docker(path, farm):
+    """The given PATH with no docker in it, as on a UFM installed from the ufm-enterprise package (R-037).
+    A directory that holds a docker (Docker Desktop's /usr/local/bin, a CI runner's /usr/bin) is replaced by
+    a directory of symlinks to its other entries under `farm`, so this machine's docker is never reached."""
+    kept = []
+    for index, directory in enumerate(part for part in path.split(os.pathsep) if part):
+        if not os.path.lexists(os.path.join(directory, "docker")):
+            kept.append(directory)
+            continue
+        copy = Path(farm) / str(index)
+        copy.mkdir(parents=True)
+        for entry in os.listdir(directory):
+            if entry != "docker":
+                (copy / entry).symlink_to(os.path.join(directory, entry))
+        kept.append(str(copy))
+    return os.pathsep.join(kept)
+
 
 class UfmIbdiagnetTest(unittest.TestCase):
     def setUp(self):
@@ -349,6 +409,16 @@ class UfmIbdiagnetTest(unittest.TestCase):
         self.lock_tmp.mkdir()
         self.out = self.work / "monitor/ibdiagnet"
         self.links = self.work / "monitor/iblinkinfo"
+        # R-037 host mode: the host's /opt/ufm/opensm and /var/tmp/ibdiagnet2 (UFM_OPENSM, UFM_HOST_OUT),
+        # a PATH directory for the tools, and hostname/ip without docker
+        self.opensm = self.base / "host/opt/ufm/opensm"
+        self.host_out = self.base / "host/var/tmp/ibdiagnet2"
+        self.path_bin = self.base / "path-bin"
+        self.tool_log = self.base / "tools.log"
+        self.host_bin = self.base / "host-bin"
+        self.host_bin.mkdir()
+        for name in ("hostname", "ip"):
+            os.symlink(self.bin / name, self.host_bin / name)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -368,6 +438,46 @@ class UfmIbdiagnetTest(unittest.TestCase):
 
     def docker_calls(self):
         return [json.loads(line) for line in self.docker_log.read_text().splitlines()]
+
+    def host_tool(self, where, name):
+        """A host ibdiagnet/iblinkinfo: at its fixed path under /opt/ufm/opensm, or in a PATH directory."""
+        if where == "fixed":
+            directory = self.opensm / ("bin" if name == "ibdiagnet" else "sbin")
+        else:
+            directory = self.path_bin
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text(FAKE_HOST_TOOL.replace("{python}", sys.executable), encoding="utf-8")
+        path.chmod(0o755)
+        return str(path)
+
+    def tool_calls(self):
+        if not self.tool_log.exists():
+            return []
+        return [json.loads(line) for line in self.tool_log.read_text().splitlines()]
+
+    def run_on_host(self, *args, docker=False, **env):
+        """The collector on a UFM: no docker at all, or (docker=True) the docker stand-in in front."""
+        directories = [str(self.host_bin), str(self.path_bin)] + ([str(self.bin)] if docker else [])
+        system = path_without_docker(os.environ["PATH"], self.base / "no-docker")
+        path = os.pathsep.join(directories + [system])
+        if not docker:
+            self.assertIsNone(shutil.which("docker", path=path), "this UFM has no docker")
+        environment = dict(os.environ, PATH=path, TMPDIR=str(self.lock_tmp), FAKE_CONTAINER=str(self.container),
+                           UFM_HOST_FILES=str(self.container / "opt/ufm/files"),
+                           FAKE_DOCKER_LOG=str(self.docker_log), UFM_OPENSM=str(self.opensm),
+                           UFM_HOST_OUT=str(self.host_out), FAKE_TOOL_LOG=str(self.tool_log),
+                           COPYFILE_DISABLE="1", **env)
+        return subprocess.run(["bash", str(UFM_IBDIAGNET), *args], cwd=self.work, env=environment,
+                              capture_output=True, text=True, timeout=60)
+
+    def assert_ok_archive(self, done):
+        archive = self.out / f"ibdiagnet2_{RUN_ID}.tgz"
+        with tarfile.open(archive) as bundle:
+            self.assertIn("ibdiagnet2/ibdiagnet2.net_dump", bundle.getnames())
+        self.assertEqual((done["result"], done["kind"], done["artifact"], done["sha256"]),
+                         ("ok", "ibdiagnet", archive.name, hashlib.sha256(archive.read_bytes()).hexdigest()))
+        self.assertFalse(list(self.out.glob("*.part")))
 
     def test_the_owners_procedure_with_the_run_id_naming(self):
         result = self.run_ibdiagnet(RUN_ID)
@@ -631,6 +741,207 @@ class UfmIbdiagnetTest(unittest.TestCase):
         source = UFM_IBDIAGNET.read_text(encoding="utf-8")
         self.assertNotIn("docker exec -it", source)
         self.assertEqual(subprocess.run(["bash", "-n", str(UFM_IBDIAGNET)]).returncode, 0)
+
+    # ── R-037 (L4): UFM in the ufm container or installed on the host (guide 8.23) ──────────────────
+    # Owner (record :1917): "iblinkinfo 优先用 /opt/ufm/opensm/sbin/iblinkinfo，没有的话就直接跑；ibdiagnet
+    # 优先用 /opt/ufm/opensm/bin/ibdiagnet，没有的话就直接跑"; owner 2026-11-20: "两种模式都是先尝试全路径的
+    # 命令，不存在再按PATH跑". A real failure of the command found never falls back; neither one is an error.
+
+    def test_host_mode_uses_the_fixed_ibdiagnet_path_first(self):
+        fixed = self.host_tool("fixed", "ibdiagnet")
+        self.host_tool("path", "ibdiagnet")   # also in PATH: the fixed path still comes first
+        result = self.run_on_host(RUN_ID)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        # Q-057 (I-065): the same periodic arguments as in the container, without --routing
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]])
+        done = self.done()
+        self.assert_ok_archive(done)
+        self.assertEqual((done["rc"], done["reason"]), ("0", ""))
+
+    def test_host_mode_falls_back_to_path_without_the_fixed_path(self):
+        in_path = self.host_tool("path", "ibdiagnet")
+        result = self.run_on_host(RUN_ID)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[in_path, *IBDIAGNET_ARGV[1:]]])
+        self.assert_ok_archive(self.done())
+
+    def test_host_mode_without_any_ibdiagnet_names_the_cause_and_runs_nothing(self):
+        # Owner 2026-11-20: neither the fixed path nor PATH has it: say so, run nothing.
+        result = self.run_on_host(RUN_ID)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [])
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+        self.assertIn("ibdiagnet not found on the host", done["reason"])
+        self.assertIn(str(self.opensm / "bin/ibdiagnet"), done["reason"])
+        self.assertIn("PATH", done["reason"])
+        self.assertFalse((self.out / f"ibdiagnet2_{RUN_ID}.tgz").exists())
+
+    def test_host_mode_fixed_path_failure_does_not_fall_back_to_path(self):
+        # Owner 2026-11-20: the fixed path exists but really fails: report it, never try PATH as well.
+        fixed = self.host_tool("fixed", "ibdiagnet")
+        self.host_tool("path", "ibdiagnet")
+        result = self.run_on_host(RUN_ID, FAKE_IBDIAGNET_RC="1", FAKE_IBDIAGNET_NO_NET_DUMP="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]], "the PATH ibdiagnet is never run")
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"], done["rc"]), ("failed", "", "1"))
+        self.assertIn("no new ibdiagnet2.net_dump", done["reason"])
+
+    def test_host_mode_old_dump_is_not_this_runs_output(self):
+        # Owner 2026-10-22 (the container's contract, the same on the host): only this run's net_dump counts.
+        fixed = self.host_tool("fixed", "ibdiagnet")
+        self.host_out.mkdir(parents=True)
+        (self.host_out / "ibdiagnet2.net_dump").write_text("old\n")
+        os.utime(self.host_out / "ibdiagnet2.net_dump", (1, 1))
+        result = self.run_on_host(RUN_ID, FAKE_IBDIAGNET_NO_NET_DUMP="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]])
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+        self.assertIn("no new ibdiagnet2.net_dump", done["reason"])
+        self.assertFalse((self.out / f"ibdiagnet2_{RUN_ID}.tgz").exists())
+
+    def test_host_mode_timeout_with_fresh_output_keeps_ok_and_the_partial_notice(self):
+        # I-065 8.2 item 1, the same values on the host (guide 8.23 item 5)
+        self.host_tool("fixed", "ibdiagnet")
+        for rc in ("124", "137"):
+            with self.subTest(rc=rc):
+                shutil.rmtree(self.out, ignore_errors=True)
+                shutil.rmtree(self.host_out, ignore_errors=True)
+                result = self.run_on_host(RUN_ID, FAKE_IBDIAGNET_RC=rc)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                done = self.done()
+                self.assert_ok_archive(done)
+                self.assertEqual((done["rc"], done["reason"]), (rc, PARTIAL_NOTICE))
+
+    def test_host_mode_packing_failure_is_a_failure(self):
+        # The container's contract (packing fails: failed, nothing half written left), on the host.
+        fixed = self.host_tool("fixed", "ibdiagnet")
+        self.host_out.mkdir(parents=True)
+        locked = self.host_out / "ibdiagnet2.unreadable"
+        locked.write_text("x\n")
+        locked.chmod(0o000)   # tar cannot read it
+        try:
+            result = self.run_on_host(RUN_ID)
+        finally:
+            locked.chmod(0o600)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]])
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+        self.assertIn("packing", done["reason"])
+        self.assertFalse((self.out / f"ibdiagnet2_{RUN_ID}.tgz").exists())
+        self.assertFalse(list(self.out.glob("*.part")), "no half-written archive is left")
+
+    def test_host_mode_iblinkinfo_fixed_path_then_path_then_none(self):
+        for where in ("fixed", "path", "none"):
+            with self.subTest(where=where):
+                for directory in (self.opensm, self.path_bin, self.links):
+                    shutil.rmtree(directory, ignore_errors=True)
+                if self.tool_log.exists():
+                    self.tool_log.unlink()
+                expected = None
+                if where != "none":
+                    expected = self.host_tool(where, "iblinkinfo")
+                    if where == "fixed":
+                        self.host_tool("path", "iblinkinfo")   # the fixed path still comes first
+                result = self.run_on_host(RUN_ID, "--iblinkinfo")
+                done = self.done("iblinkinfo")
+                if expected is None:
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(self.tool_calls(), [])
+                    self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+                    self.assertIn("iblinkinfo not found on the host", done["reason"])
+                    self.assertIn(str(self.opensm / "sbin/iblinkinfo"), done["reason"])
+                    continue
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.tool_calls(), [[expected]])
+                log = self.links / f"iblinkinfo_{RUN_ID}.log"
+                self.assertEqual((done["result"], done["kind"], done["artifact"]), ("ok", "iblinkinfo", log.name))
+                self.assertTrue(log.read_text().startswith("Switch: 0x0200000000000001"), "stdout only")
+                self.assertIn("doesn't exist", (self.links / f"iblinkinfo_{RUN_ID}.stderr").read_text())
+
+    def test_container_mode_falls_back_to_path_inside_the_container(self):
+        result = self.run_ibdiagnet(RUN_ID, FAKE_CONTAINER_TOOL="path")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = self.docker_calls()
+        lookups = [call for call in calls if call[:4] == ["exec", "ufm", "sh", "-c"] and call[-1] == "ibdiagnet"]
+        runs = [call for call in calls if call[-len(IBDIAGNET_ARGV) + 1:] == IBDIAGNET_ARGV[1:]]
+        self.assertEqual((len(lookups), len(runs)), (1, 1), calls)
+        self.assertIn("/opt/ufm/opensm/bin/ibdiagnet", lookups[0][4], "the fixed path is tried first")
+        self.assertLess(calls.index(lookups[0]), calls.index(runs[0]))
+        self.assertEqual(runs[0][:4], ["exec", "ufm", "sh", "-c"])
+        self.assertEqual(runs[0][5:], ["sh", "/usr/local/bin/ibdiagnet", *IBDIAGNET_ARGV[1:]])
+        self.assertEqual(self.done()["result"], "ok")
+
+    def test_container_mode_without_the_tool_names_the_cause_and_runs_nothing(self):
+        result = self.run_ibdiagnet(RUN_ID, FAKE_CONTAINER_TOOL="none")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        calls = self.docker_calls()
+        self.assertEqual(calls[0], PS_CALL)
+        self.assertEqual(len(calls), 2, "only the mode check and the lookup, no run")
+        self.assertEqual(calls[1][-1], "ibdiagnet")
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+        self.assertIn("ibdiagnet not found in the ufm container", done["reason"])
+        self.assertIn("/opt/ufm/opensm/bin/ibdiagnet", done["reason"])
+        self.assertIn("PATH", done["reason"])
+
+    def test_container_mode_iblinkinfo_fixed_path_then_path_then_none(self):
+        for found, expected in (("fixed", "/opt/ufm/opensm/sbin/iblinkinfo"), ("path", "/usr/local/bin/iblinkinfo"),
+                                ("none", None)):
+            with self.subTest(found=found):
+                shutil.rmtree(self.links, ignore_errors=True)
+                if self.docker_log.exists():
+                    self.docker_log.unlink()
+                result = self.run_ibdiagnet(RUN_ID, "--iblinkinfo", FAKE_CONTAINER_TOOL=found)
+                calls = self.docker_calls()
+                runs = [call for call in calls if call[-1].endswith("/iblinkinfo")]
+                done = self.done("iblinkinfo")
+                if expected is None:
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    self.assertEqual(runs, [])
+                    self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+                    self.assertIn("iblinkinfo not found in the ufm container", done["reason"])
+                    self.assertIn("/opt/ufm/opensm/sbin/iblinkinfo", done["reason"])
+                    continue
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(len(runs), 1, calls)
+                self.assertEqual(runs[0][:4], ["exec", "ufm", "sh", "-c"])
+                self.assertEqual(runs[0][5:], ["sh", expected])
+                self.assertEqual(done["result"], "ok")
+
+    def test_a_stopped_ufm_container_is_a_container_failure_not_a_host_run(self):
+        # R-037: `docker ps -a` still lists a stopped ufm container; that is the container mode and its real
+        # failure is reported, never a host run (TC-REAL-UFM-MONITOR-001 step 3 keeps its meaning).
+        self.host_tool("fixed", "ibdiagnet")
+        self.host_tool("path", "ibdiagnet")
+        result = self.run_on_host(RUN_ID, docker=True, FAKE_DOCKER_DOWN="1")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.docker_calls()[0], PS_CALL)
+        self.assertEqual(self.tool_calls(), [], "no host ibdiagnet is run")
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+
+    def test_docker_without_a_ufm_container_runs_on_the_host(self):
+        fixed = self.host_tool("fixed", "ibdiagnet")
+        result = self.run_on_host(RUN_ID, docker=True, FAKE_DOCKER_PS="empty")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.docker_calls(), [PS_CALL], "docker is only asked, nothing runs in a container")
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]])
+        self.assert_ok_archive(self.done())
+
+    def test_unknown_docker_state_fails_without_a_host_run(self):
+        # R-037: docker ps fails (daemon unreachable, no permission): unknown, never taken as "no container".
+        self.host_tool("fixed", "ibdiagnet")
+        result = self.run_on_host(RUN_ID, docker=True, FAKE_DOCKER_PS="fail")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.docker_calls(), [PS_CALL])
+        self.assertEqual(self.tool_calls(), [])
+        done = self.done()
+        self.assertEqual((done["result"], done["artifact"]), ("failed", ""))
+        self.assertIn("cannot tell whether UFM runs in the ufm container: docker ps failed (exit 1)", done["reason"])
 
 
 if __name__ == "__main__":

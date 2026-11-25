@@ -2914,7 +2914,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - Case ID：`TC-REAL-UFM-MONITOR-001`；类型：real-environment / collection / failover；状态：**BLOCKED / NOT RUN**。前提是 setup 已建 `infiniband/monitor/{ufm-info,ufm-ibdiagnet,01-global.yaml,99-output-p2p}` 链接（2026-10-22 起 setup 会建立，见 `infiniband/monitor/UFM-MONITOR.md` 14.3；已部署的服务器要先重跑一次 setup）。
 - 本机先决：`test_cases.test_ufm_monitor_scripts`、`test_cases.test_ufm_monitor_cron_workflow`、`test_cases.test_ib_post_collect`、`test_cases.test_monitor_ufm_status` 全部通过。
 - 依据：owner 2026-10-22 实测 ibdiagnet 约 6 分钟（`ufm-manual.log` 第 2099–3100 行），归档约 100 MB；iblinkinfo 约 12 MB；failover 时经 VIP 的会话被重置（第 2009 行）。
-- 前置条件：HA 正常运行；owner 授权的采集窗口（ibdiagnet 会给 fabric 带来负载）；如测试 failover，需要另行授权。
+- 前置条件：HA 正常运行；owner 授权的采集窗口（ibdiagnet 会给 fabric 带来负载）；如测试 failover，需要另行授权。容器方式；宿主方式见 TC-REAL-UFM-HOST-COLLECTOR-001。
 - 步骤与预期：
   1. 页面发起一轮 IB 采集：`ufm-info/<UTC>.tar.gz` 含两台 `.info` 和主机 `.ha`；`ufm-ibdiagnet/<run-id>_<节点>_ibdiagnet2.tgz` 含 `ibdiagnet2/ibdiagnet2.net_dump`，旁边有 `.done`；`99-output-p2p` 有报告、provenance、收据；IB Link Validation 显示「采集：UFM <节点> · ibdiagnet · run-id …」。
   2. 采集中途在 VIP 上执行 failover：本轮 HA 状态和 ibdiagnet 都从启动时的那台取回，不会取到另一台的旧文件，最多记一条 UFM 警告。
@@ -2925,6 +2925,36 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 采集对 UFM 只写 `/root/monitor/`；停容器制造失败需要维护窗口。
   - 磁盘：每轮 100 MB 时，3 天约 43 GB。
   - 未执行前保持 NOT RUN。
+
+## TC-REAL-UFM-HOST-COLLECTOR-001 — UFM 直接安装（无 docker）时 ibdiagnet、iblinkinfo 在宿主采集
+
+- 基本信息：real-environment / collection；R-037（L4，v3.1.6 C1，指导 8.23）；状态 **OPEN / NOT RUN**，不能用本机替身关闭。本卡只是验收条件，不授权连接设备或制造故障。与 `TC-REAL-UFM-MONITOR-001` 分开：那张卡的前置是容器方式，第 3 步「停掉 ufm 容器制造失败」只适用于容器方式。
+- 风险与目标：UFM 由 ufm-enterprise 包直接安装、没有 docker 时，`ufm-ibdiagnet.sh` 在宿主执行 ibdiagnet／iblinkinfo（owner 记录 :1877「应该直接跑」）；两种模式都先用固定全路径、没有再按 PATH（owner 2026-11-20）。要防止的是：无 docker 时 exit 127 失败（记录 :1884-1886）、未知 docker 状态被当成没有容器、固定路径真实失败后又去跑 PATH 里的另一个。
+- 本机先决：同版本的 `test_cases.test_ufm_monitor_scripts`（direct）、`test_cases.test_ufm_monitor_cron_workflow`（workflow）、`test_cases.test_ufm_worker_collection`、`test_cases.test_ib_post_collect` 通过，且是精确的发布版本（指导 8.23「REAL_ENV」）。
+- 前置条件：owner 授权的采集窗口（ibdiagnet 会给 fabric 带来负载）；执行人是 owner 或授权的现场人员，AI 只读证据（指导 8.23「REAL_ENV」）。仍以 root 登录、root 执行，不用 sudo（owner 记录 :1877「脚本还是都用 root」）。
+
+### 步骤
+
+1. 只读记录：UFM 上 `command -v docker`、`ls -l /opt/ufm/opensm/bin/ibdiagnet /opt/ufm/opensm/sbin/iblinkinfo`、root 经 ssh 非交互执行的 `echo $PATH`；另有容器方式的 UFM 时再记 `docker exec ufm sh -c 'ls -l /opt/ufm/opensm/bin/ibdiagnet; command -v ibdiagnet'`（指导 :2671 第 1 步；PATH 未核见指导 :2626）。
+2. 部署前后在管理服务器记录 `sha256sum infiniband/monitor/ufm-ibdiagnet.sh`：现场临时补丁（问题记录 §32.9 登记的改后版本）应被正式版覆盖（指导 :2625、:2671 第 2 步）。
+3. 页面发起一轮 IB 采集，取 UFM 上的 `monitor/ibdiagnet/ibdiagnet2_<run-id>.{done,node}`、部署服务器 `ufm-ibdiagnet/<run-id>_<节点>_ibdiagnet2.{tgz,done}` 及 tgz 清单、`99-output-p2p` 的 `.receipt.json`、`ufm-ibdiagnet/<run-id>.ufm-run.json`、IB Link Validation 的「采集：」一行（指导 :2671 第 3 步）。
+4. 另有容器方式的 UFM 时同样跑一轮，作回归（指导 :2671 第 4 步）。
+
+### 预期结果
+
+- 无 docker 的 UFM：`.done` 为 `result=ok`、`kind=ibdiagnet`；tgz 里有 `ibdiagnet2/ibdiagnet2.net_dump`；收据 `collector` 来自这份 `.done`，运行记录 `outcome=ok`，失败计数清零（指导 :2630、:2637；控制路径：`infiniband/monitor/ufm-ibdiagnet.sh` 先取锁、建目录、判模式，`command -v docker` 不成立即宿主模式；`ethernet/monitor/cron.sh::ufm_ibdiag_record` 计数）。
+- 第 1 步固定路径存在时，UFM 上的执行命令是 `/opt/ufm/opensm/bin/ibdiagnet` 加周期参数（无 `--routing`，指导 :2646）；固定路径不在而 PATH 里有时用 PATH 那个；两处都没有时 `.done` 为 failed，reason 含 `not found on the host`，不运行任何工具（指导 :2632，owner 2026-11-20）。
+- 容器方式的 UFM（第 4 步）：命令仍是 `docker exec ufm sh -c <限时包装> sh /opt/ufm/opensm/bin/ibdiagnet …`，结果与改前相同（指导 :2635）。
+- 不允许的副作用：在宿主和容器之间换着重试、固定路径真实失败后再跑 PATH 里的另一个（指导 :2636）、`docker ps` 失败时当作没有容器在宿主执行（指导 :2631）、引入 sudo 或改登录账号（指导 :2638）。
+
+### 清理与风险
+
+- 清理：无持久改动；只读核对，不删现场产物。
+- 风险：ibdiagnet 的 fabric 负载；不为验证降级在 prod 上人为制造失败（指导 8.23「REAL_ENV」）。
+
+### 自动化状态
+
+- 本机 direct／workflow 只用替身工具、替身 docker 和 ssh/scp 验证逻辑；真实 UFM 上的宿主采集仍为 **OPEN / NOT RUN**。
 
 ## TC-REAL-IBSW-V2-001 — IB 交换机升级 v2（upgrade2.py）在真实 ib-sw 与 ztp-server 上运行
 

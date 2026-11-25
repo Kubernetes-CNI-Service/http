@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from test_cases.test_ufm_monitor_scripts import FAKE_DOCKER, FAKES
+from test_cases.test_ufm_monitor_scripts import FAKE_DOCKER, FAKE_HOST_TOOL, FAKES, IBDIAGNET_ARGV, path_without_docker
 
 ROOT = Path(__file__).resolve().parents[1]
 UFMS = {
@@ -1307,6 +1307,100 @@ while True:
             sys.exit(1)
         time.sleep(0.05)
 '''
+
+
+class UfmCronHostModeTest(UfmCronCase):
+    """R-037 (L4, guide 8.23): a UFM installed from the ufm-enterprise package has no docker (owner, record
+    :1877 "这台 UFM 没有部署 docker，……应该直接跑"); the real cron.sh runs the real ufm-ibdiagnet.sh there and
+    the real post-collect analyses what it collected on the host. Host tools: the fixed path under
+    UFM_OPENSM first, then PATH (owner 2026-11-20); they log their own calls (no docker log on this UFM)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.ufm_bin / "docker").unlink()   # no docker on this UFM
+        # cron.sh pins PATH and the fake ssh hands it to the UFM: leave out this machine's own docker
+        staged = self.root / "ethernet/monitor/cron.sh"
+        source = staged.read_text(encoding="utf-8")
+        pinned = PINNED_PATH.replace("PATH=", f"PATH={self.bin}:")
+        self.assertEqual(source.count(pinned), 1)
+        system = pinned.split(f"PATH={self.bin}:", 1)[1].strip()
+        source = source.replace(pinned, f"export PATH={self.bin}:{path_without_docker(system, self.root / 'no-docker')}\n")
+        staged.write_text(source, encoding="utf-8")
+        self.opensm = self.root / "ufm-host/opt/ufm/opensm"
+        self.host_out = self.root / "ufm-host/var/tmp/ibdiagnet2"
+        self.tool_log = self.root / "ufm-host/tools.log"
+        self.state["vip"] = {VIP: UFMS["ufm02.example.test"][0]}   # ufm02 holds the VIP
+
+    def host_tool(self, relative):
+        path = self.opensm / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.write_exec(path, FAKE_HOST_TOOL.replace("{python}", sys.executable))
+        return str(path)
+
+    def run_on_host_ufm(self):
+        return self.run_cron(UFM_OPENSM=str(self.opensm), UFM_HOST_OUT=str(self.host_out),
+                             FAKE_TOOL_LOG=str(self.tool_log))
+
+    def tool_calls(self):
+        return [json.loads(line) for line in self.tool_log.read_text().splitlines()] if self.tool_log.exists() else []
+
+    def counts(self):
+        text = (self.ibdiag_output / ".ibdiagnet-state").read_text()
+        return tuple(int(re.search(rf"^{key}=(\d+)$", text, re.M).group(1)) for key in ("failures", "since_probe"))
+
+    def records(self):
+        return [json.loads(path.read_text()) for path in sorted(self.ibdiag_output.glob("*.ufm-run.json"))]
+
+    def test_a_host_installed_ufm_is_collected_without_docker(self):
+        import hashlib
+        fixed = self.host_tool("bin/ibdiagnet")
+        self.ibdiag_output.mkdir(exist_ok=True)
+        (self.ibdiag_output / ".ibdiagnet-state").write_text("failures=2\nsince_probe=0\n")
+        result = self.run_on_host_ufm()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[fixed, *IBDIAGNET_ARGV[1:]]], "ibdiagnet ran on the host")
+        self.assertFalse((self.root / "hosts/198.51.101.132/docker.log").exists(), "no docker on this UFM")
+        [archive] = self.ibdiag_archives()
+        self.assertRegex(archive, r"^\d{8}-\d{4}-prod-[0-9a-f]{16}_ufm02_ibdiagnet2\.tgz$")
+        with tarfile.open(self.ibdiag_output / archive) as bundle:
+            self.assertIn("ibdiagnet2/ibdiagnet2.net_dump", bundle.getnames())
+        done = self.ibdiag_output / archive.replace(".tgz", ".done")
+        self.assertIn("result=ok", done.read_text())
+        [record] = self.records()
+        self.assertEqual((record["outcome"], record["kind"], record["node"], record["analysis"],
+                          record["ibdiagnet_failures_in_a_row"]), ("ok", "ibdiagnet", "ufm02", "ok", 0))
+        receipt = json.loads((self.p2p_output / record["receipt"]["name"]).read_text())
+        # the receipt's collector comes from this run's .done
+        self.assertEqual(receipt["done"], {"name": done.name, "sha256": hashlib.sha256(done.read_bytes()).hexdigest()})
+        self.assertEqual(receipt["collector"], {"rc": "0", "reason": "", "hostname": "ufm02.example.test"})
+        self.assertEqual(self.counts(), (0, 0), "a success clears the failure count")
+        self.assertIn("cron finish ==========", result.stdout)
+
+    def test_host_mode_failures_still_count_towards_the_iblinkinfo_fallback(self):
+        # cron.sh :2264-2286: the same count as in the container; owner 2026-10-22: three failures in a row,
+        # then iblinkinfo (here from the host's fixed path).
+        linkinfo = self.host_tool("sbin/iblinkinfo")   # no ibdiagnet anywhere on this UFM
+        for attempt in (1, 2, 3):
+            result = self.run_on_host_ufm()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(self.counts(), (attempt, 0))
+            self.assertIn("cron finish with UFM warnings", result.stdout)
+        self.assertIn("已连续失败 3 次：之后改采 iblinkinfo", result.stdout)
+        failed = self.records()
+        self.assertEqual([record["outcome"] for record in failed], ["failed"] * 3)
+        for record in failed:
+            self.assertIn("ibdiagnet not found on the host", record["reason"])
+        self.assertEqual(self.tool_calls(), [], "nothing ran: there is no ibdiagnet")
+        result = self.run_on_host_ufm()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.tool_calls(), [[linkinfo]], "the fourth run collects iblinkinfo on the host")
+        [log] = [name for name in self.ibdiag_archives() if name.endswith("_iblinkinfo.log")]
+        self.assertRegex(log, r"^\d{8}-\d{4}-prod-[0-9a-f]{16}_ufm02_iblinkinfo\.log$")
+        stem = log.replace("_iblinkinfo.log", "-iblinkinfo-topology-validation")
+        self.assertTrue((self.p2p_output / f"{stem}.xlsx").is_file())
+        receipt = json.loads((self.p2p_output / f"{stem}.receipt.json").read_text())
+        self.assertEqual((receipt["kind"], receipt["degraded"]), ("iblinkinfo", True))
+        self.assertEqual(self.counts(), (3, 1), "an iblinkinfo run only advances the countdown")
 
 
 class UfmSharedReportCleanupTest(UfmCronCase):

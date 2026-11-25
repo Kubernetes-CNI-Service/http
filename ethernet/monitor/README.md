@@ -53,7 +53,8 @@
    AIR/Production scope 刷新 `monitor.html`。它不会按目录中的“最新文件”猜测输入。
 6. IB 车道（`infiniband/monitor/cron.sh`）同时采集清单中 `type=server_ufm` 的 UFM
    （`ufm-info.sh` 与 IB `sw-info.sh` 并行，`ufm-ibdiagnet.sh` 与 IB `sw-link.sh` 并行，HA 状态经 VIP
-   在主机上采集）。UFM 结果与交换机结果隔离：UFM 的问题只记日志，最后一行为
+   在主机上采集）。ibdiagnet、iblinkinfo 在 UFM 的 `ufm` 容器里执行；UFM 直接安装（没有 `ufm` 容器）时
+   在宿主执行，两种都先用 `/opt/ufm/opensm` 下的固定路径，没有再按 PATH（R-037）。UFM 结果与交换机结果隔离：UFM 的问题只记日志，最后一行为
    `cron finish with UFM warnings`，退出码和机器结果不变；同时有设备警告时最后一行为
    `cron finish with device warnings and UFM warnings`，两个出错结尾（`cron finish with errors`、
    `cron finish: every selected device failed`）在 UFM 有问题时也带 ` and UFM warnings`（I-018）。
