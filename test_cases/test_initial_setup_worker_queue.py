@@ -32,14 +32,18 @@ patched load_target_cache); the fake IB side answers the pending-diff read empty
 
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import replace
 import json
+import multiprocessing
+from multiprocessing.connection import Connection
 import os
 from pathlib import Path
 import shlex
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -255,6 +259,111 @@ class WorkerQueueTests(unittest.TestCase):
         self.assertEqual(list(hits), [1] * 257)
         self.assertEqual(set(result["outcomes"].values()), {"CONFIGURED"})
         self.assertEqual(len(result["outcomes"]), 257)
+
+    def test_worker_exit_does_not_discard_a_result_published_after_an_empty_poll(self):
+        # The real parent runs against a local pipe. Only the producer's exit
+        # observations are controlled so the ordering is independent of load.
+        first = "example-ib001"
+        for mode in ("already-queued", "no-result", "between-observations"):
+            with self.subTest(mode=mode), ExitStack() as pipe_owners:
+                trace, receivers, dispatch = [], {}, []
+
+                class Receiver:
+                    def __init__(self, endpoint):
+                        self.endpoint, self.observed = endpoint, False
+
+                    def __getattr__(self, name):
+                        return getattr(self.endpoint, name)
+
+                    def poll(self):
+                        ready = self.endpoint.poll()
+                        if self.observed and not ready:
+                            trace.append("empty")
+                        return ready
+
+                    def recv(self):
+                        value = self.endpoint.recv()
+                        if self.observed and value[0] == "result":
+                            trace.append("received")
+                        return value
+
+                    def close(self):
+                        if self.observed and not self.endpoint.closed:
+                            trace.append("closed")
+                        self.endpoint.close()
+
+                class ControlledWorker:
+                    def __init__(self, target, args):
+                        self.child, self.task = args[:2]
+                        name = self.task.target.ib.hostname
+                        self.observed = name == first
+                        self.mode = mode if self.observed else "already-queued"
+                        self.receiver = receivers[self.child]
+                        self.receiver.observed = self.observed
+                        self.probes, self.exitcode = 0, None
+                        dispatch.append(name)
+
+                    def publish_and_exit(self):
+                        if self.mode != "no-result":
+                            self.writer.send(("result", success(self.task)))
+                            if self.observed:
+                                trace.append("sent")
+                        self.writer.close()
+                        self.exitcode = 0
+                        if self.observed:
+                            trace.append("exited")
+
+                    def start(self):
+                        self.writer = Connection(os.dup(self.child.fileno()))
+                        pipe_owners.callback(self.writer.close)
+                        if self.mode != "between-observations":
+                            self.publish_and_exit()
+
+                    def is_alive(self):
+                        self.probes += 1
+                        # The first observation is the ordinary timeout check.
+                        # Delivery then races the parent's final exit check.
+                        if self.mode == "between-observations" and self.probes == 2:
+                            self.publish_and_exit()
+                        return self.exitcode is None
+
+                    def join(self, timeout=None):
+                        if self.exitcode is None:
+                            raise AssertionError("the control cannot join a live worker")
+
+                    def terminate(self):
+                        raise AssertionError("the control cannot signal a worker")
+
+                    kill = terminate
+
+                def pipe(duplex):
+                    parent, child = multiprocessing.Pipe(duplex=duplex)
+                    pipe_owners.callback(parent.close)
+                    pipe_owners.callback(child.close)
+                    receivers[child] = Receiver(parent)
+                    return receivers[child], child
+
+                context = SimpleNamespace(Pipe=pipe, Process=ControlledWorker, Event=threading.Event)
+                facade = SimpleNamespace(get_context=lambda _: context)
+                with patch.object(app, "multiprocessing", facade):
+                    result, _, _ = run_local_pool(
+                        lambda *_a, **_kw: self.fail("no real worker in this control"),
+                        count=17, timeout=30)
+
+                expected = {f"example-ib{index:03d}": "CONFIGURED" for index in range(1, 18)}
+                self.assertEqual(Counter(dispatch), Counter(expected.keys()))
+                self.assertEqual(set(result["records"]), set(expected))
+                if mode == "no-result":
+                    expected[first] = "FAILED"
+                    self.assertEqual(trace, ["exited", "closed"])
+                    self.assertIn("worker exited without a complete result",
+                                  result["records"][first]["reason"])
+                else:
+                    self.assertEqual(trace.count("sent"), 1)
+                    self.assertEqual(trace.count("received"), 1, trace)
+                    self.assertLess(trace.index("sent"), trace.index("received"))
+                    self.assertLess(trace.index("received"), trace.index("closed"))
+                self.assertEqual(result["outcomes"], expected)
 
     # v15 WorkerProcessLifecycleTests.test_parent_prompts_once_for_batch_authorization_and_twice_for_target_password
     # (test_desktop_initial_setup.py:1227).  Only the native hash backend is replaced

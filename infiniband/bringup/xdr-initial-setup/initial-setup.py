@@ -10436,9 +10436,9 @@ def run_prepared_tasks(tasks, args, policy, initial_password, services, keys,
                         process.terminate()
                     if job["terminated"] is not None and process.is_alive() and now - job["terminated"] > 5:
                         process.kill()
-                    # Drain queued records/logs even after the child exits.
-                    more = not connection.closed and connection.poll()
-                    if not process.is_alive() and not more:
+                    # Observe exit before checking for queued records/logs:
+                    # a result sent between the checks must not be discarded.
+                    if not process.is_alive() and (connection.closed or not connection.poll()):
                         process.join(timeout=0)
                         connection.close()
                         job["handle"].close()
