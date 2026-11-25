@@ -120,6 +120,8 @@ class JumpGateTests(unittest.TestCase):
             'run_initial_stage': (READBACK, True), 'base_stage_needed': True,
             '_management_network_commands': [setter],
             '_require_empty_pending': None,
+            # U3 (v3.1.6 D1c): the write stages' pending read now enters here; empty diff.
+            '_settle_owned_pending': None,
             'verify_state': None, '_verify_management_network_state': None,
             'verify_ipv4_login': None, 'run_service_stage': (True, True),
             'run_key_stage': True, 'run_management_direct_checks': [],

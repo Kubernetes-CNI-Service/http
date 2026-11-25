@@ -1333,11 +1333,12 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertEqual(2, result["rc"])
             self.assertEqual([NETWORK_SETTERS], plans)
             # P3c map D32d :284 (the v15 stage skeleton; D1a2 report 4.3 E8; v15
-            # CURRENT-CONTRACT.md:59): a check-only run reads no pending diff.
-            self.assertEqual(["selector-return"], w["timeline"])
+            # CURRENT-CONTRACT.md:59) read no pending diff in check-only; U3 (owner 2026-11-14;
+            # v3.1.6 guide 8.10 step 5, :2137) adds exactly one read-only diff, here empty.
+            self.assertEqual(["selector-return", "diff-entry", "diff-return"], w["timeline"])
             self.assertTrue(len(w["selector"]) == 1 and w["selector"][0]["initial"]
                             and not w["selector"][0]["required"])
-            self.assertEqual([], w["returned_diff"])
+            self.assertEqual([(0, True)], [(row["rc"], row["empty"]) for row in w["returned_diff"]])
             # r660:773/I039 plus O5: parent prefetch + PROJECT authentication
             # qualification + the single real LL identity helper qualification.
             self.assertEqual(["actual-policy-fetch"] * 3, w["fetch"])

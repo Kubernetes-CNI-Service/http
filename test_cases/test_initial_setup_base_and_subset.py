@@ -17,6 +17,9 @@ Decided changes against the v15 assertions (each also cited at the test):
 - T15 (guide :2301): a write stage starts only on an empty pending diff (DEV), so v15's
   validate_owned_pending test is rewritten against the merged refusal, which refuses every
   non-empty pending diff (owned or unrelated) before any write.
+- U3 (v3.1.6 R-025, owner 2026-11-14; guide 8.10): at the Initial/Network/Services write stages an
+  all-owned pending diff is recorded, detached and re-read empty before the stage writes; an
+  unrelated one is still refused with no detach.  `_require_empty_pending` stays the D7 gate.
 
 Fixture rewrites (public audit, guide :835): synthetic host names, documentation addresses,
 02:00:00 MACs, credentials assembled at run time, a synthetic SHA-512-shaped project hash whose
@@ -194,6 +197,48 @@ class BaseAndSubsetTests(unittest.TestCase):
                 app.run_initial_stage(t, n, "cumulus", OOB_PASSWORD, "admin", 5, CONFIG,
                                       local=False, apply=True, authorized=True, ib_password=PASSWORD)
         self.assertIn(["nv", "config", "diff", "-o", "commands"], sent)
+        self.assertNotIn(["nv", "config", "detach"], sent)
+        # U3 replaces only the all-owned branch at the three write stages (owner 2026-11-14
+        # 「T15按你说的改，记录成U3放3.1.6」; v3.1.6 guide 8.10 steps 2-3, :2134-2135): this device's
+        # own setters are recorded, `nv config detach` is sent after the stage's consent, the
+        # re-read diff must be empty and only then do the stage's own writes run.  The unrelated
+        # pending above is still refused with no detach, and `_require_empty_pending` itself stays
+        # the D7 replace gate that refuses the owned body too (asserted above).
+        diff, detach = ["nv", "config", "diff", "-o", "commands"], ["nv", "config", "detach"]
+        enabled = ("nv set system config auto-save state enabled\n"
+                   "nv set system ztp config-save enabled\n")
+        for status in (0, 1):
+            sent = []
+            pending = [owned]
+
+            def owned_device(*args, **kwargs):
+                sent.append(args[7])
+                if args[7] == ["nv", "show", "system", "ztp"]:
+                    return app.SessionResult("service disabled\n", 0)
+                if args[7] == diff:
+                    return app.SessionResult(pending[0] if pending else "", status if pending else 0)
+                if args[7] == detach:
+                    pending.clear()
+                if args[7] == ["nv", "config", "show", "-o", "commands"]:
+                    return app.SessionResult(CONFIG + enabled, 0)
+                return app.SessionResult("", 0)
+            with self.subTest(owned_status=status), \
+                    patch.object(app, "run_on_ib", side_effect=owned_device), patch.object(app, "log"):
+                error = outcome = None
+                try:
+                    outcome = app.run_initial_stage(
+                        t, n, "cumulus", OOB_PASSWORD, "admin", 5, CONFIG, local=False, apply=True,
+                        authorized=True, ib_password=PASSWORD)
+                except app.SetupError as exc:
+                    error = exc
+                self.assertIsNone(error, "an all-owned pending is detached, not refused")
+                readback, authorized = outcome
+                self.assertIs(True, authorized)
+                self.assertEqual(CONFIG + enabled, readback)
+                self.assertEqual(1, sent.count(detach))
+                reads = [index for index, command in enumerate(sent) if command == diff]
+                first_write = next(index for index, command in enumerate(sent) if command[:2] == ["nv", "set"])
+                self.assertTrue(len(reads) == 2 and reads[0] < sent.index(detach) < reads[1] < first_write, sent)
 
     # -- v15 InspectFlowTests ------------------------------------------------------------------
     def inspect(self, policy, apply=True, authorized=False):

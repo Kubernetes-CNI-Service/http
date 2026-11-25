@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shlex
 import tempfile
 import unittest
 from unittest import mock
@@ -183,6 +184,36 @@ def business(command, S):
             return "", 0
     return _base_business(command, S)
 '''
+# U3 (v3.1.6 R-025) device layer, used only by the U3-rewritten pending case and appended after
+# PEER_EXTENSION so peer_program() keeps its pinned bytes: NVUE `nv config detach` drops every
+# pending change (nothing is applied or saved), and a detached pre-existing pending is not
+# re-created by later probes.
+U3_PEER_LAYER = r'''
+_precommit_business = business
+def business(command, S):
+    if command == ["nv", "config", "detach"]:
+        record("caller-detach", cleared=[shlex.join(x) for x in S["pending"]])
+        S["pending"] = []
+        S["caller_detached"] = True
+        return "", 0
+    if (command == ["nv", "config", "diff", "-o", "commands"] and S.get("caller_detached")
+            and C.get("caller_case") == "pending-first"):
+        S["caller_probes"] = S.get("caller_probes", 0) + 1
+        code = 1 if S["pending"] else 0
+        record("caller-diff", nonempty=bool(S["pending"]), actual_rc=code, attempt=S["caller_probes"])
+        return ("\n".join(shlex.join(x) for x in S["pending"]) + "\n" if S["pending"] else ""), code
+    return _precommit_business(command, S)
+'''
+
+
+def u3_peer_program():
+    marker = "def run():\n"
+    program = peer_program()
+    if program.count(marker) != 1:
+        raise RuntimeError("FIXTURE HOLD: inherited owned SSH boundary changed")
+    return program.replace(marker, U3_PEER_LAYER + "\n" + marker, 1)
+
+
 # The insertion is before run(), not after the module's real SystemExit.
 def peer_program():
     marker = "def run():\n"
@@ -277,7 +308,7 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             error.__context__ = None
 
     def fixture(self, folder, *, case, facts=("enabled", "enabled"),
-                network=True, services=True, credential="initial", scenario="normal"):
+                network=True, services=True, credential="initial", scenario="normal", peer=None):
         born = None
         f = None
         try:
@@ -287,7 +318,7 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             born = error
         if born is not None:
             self.fixed_hold()
-        f["stub"].write_text(peer_program(), encoding="utf-8")
+        f["stub"].write_text((peer or peer_program)(), encoding="utf-8")
         f["stub"].chmod(0o600)
         state = json.loads(f["state"].read_text())
         state.update(initial=facts == ("enabled", "enabled"), network=network,
@@ -358,8 +389,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             result = real_initial(*args, **kw)
             witness["stage"].append(result)
             return result
-        def classify(device, output):
-            result = real_classify(device, output)
+        def classify(device, output, **options):
+            result = real_classify(device, output, **options)
             witness["classifier"].append(dict(count=result,
                 owned_address=output == "nv set interface eth0 ipv4 address 203.0.113.2/24\n"))
             return result
@@ -661,8 +692,10 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
 
     def test_pending_owner_classification_is_not_commit_authority(self):
         scenes = (
-            dict(case="pending-first", facts=("absent","absent"), network=False, services=True),
-            dict(case="pending-later", facts=("absent","absent"), network=False, services=True),
+            dict(case="pending-first", facts=("absent","absent"), network=False, services=True,
+                 peer=u3_peer_program),
+            dict(case="pending-later", facts=("absent","absent"), network=False, services=True,
+                 peer=u3_peer_program),
             dict(case="KEY-only", facts=("enabled","enabled"), network=True, services=True),
         )
         for scene in scenes:
@@ -679,20 +712,44 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                     self.assertEqual(1, sum(e["kind"] == "ipv4-read" for e in events))
                     self.assertEqual(1, sum(e["kind"] == "key-shell" for e in events))
                 else:
-                    self.assert_hold(result)
+                    # U3 (owner 2026-11-14 「T15按你说的改，记录成U3放3.1.6」; v3.1.6 guide 8.10 steps
+                    # 2-4, :2134-2136) replaces the old HOLD of this all-owned pending: after the
+                    # stage's consent and the write backup it is detached, the re-read diff is empty
+                    # and the run continues.  The pending itself is still never committed or adopted:
+                    # NVUE drops it before any apply, and the address reaches the device only through
+                    # the Network stage's own setter after the detach.
+                    self.assert_success(result)
                     expected = 0 if scene["case"] == "pending-first" else 1
                     self.assertTrue(any(row["count"] == 1 and row["owned_address"] for row in w["classifier"]),
                                     "real owner classifier must actually accept owned pending")
                     self.assertTrue(any(row["rc"] == expected and row["owned_address"] for row in w["returned_diff"]),
-                                    "real run_on_ib must return the correct owned frame/status before caller HOLD")
-                    self.assertEqual(1 if expected == 0 else 2, len(self.diffs(events)))
-                    self.assertEqual(0 if expected == 0 else 1,
-                                     sum(e["kind"] == "apply-y" for e in events))
-                    self.assert_no_later(events)
+                                    "real run_on_ib must return the correct owned frame/status before the detach")
+                    kinds = [e["kind"] for e in events]
+                    detach = [i for i, kind in enumerate(kinds) if kind == "caller-detach"]
+                    self.assertEqual(1, len(detach), "exactly one detach of the owned pending")
+                    self.assertEqual([shlex.join(ADDRESS)], events[detach[0]]["cleared"])
+                    probes = [i for i, kind in enumerate(kinds) if kind == "caller-diff"]
+                    owned_probe = 0 if expected == 0 else 1
+                    self.assertTrue(events[probes[owned_probe]]["nonempty"])
+                    self.assertLess(probes[owned_probe], detach[0])
+                    self.assertEqual(probes[owned_probe + 1], next(i for i in probes if i > detach[0]),
+                                     "the detach is followed by its own re-read")
+                    self.assertFalse(events[probes[owned_probe + 1]]["nonempty"], "the re-read must be empty")
+                    self.assertLess(kinds.index("config-backup"), detach[0], "the write backup precedes the detach")
+                    applies = [i for i, kind in enumerate(kinds) if kind == "apply-y"]
+                    self.assertEqual(sum(i < detach[0] for i in applies), owned_probe,
+                                     "no apply between the owned pending's read and its detach")
+                    self.assertNotIn("rejected-business", kinds, "the old pending is never committed")
+                    self.assertEqual(3, len(self.diffs(events)))
+                    self.assertEqual(2, sum(e["kind"] == "apply-y" for e in events))
                     state = json.loads(f["state"].read_text())
-                    self.assertEqual([ADDRESS], state["pending"], "no clear/adopt/commit of existing pending")
-                    self.assertEqual([], [e for e in events if e.get("command") not in (AUTO,ZTP)
-                                         and e["kind"] == "mutation"])
+                    self.assertEqual([], state["pending"], "no adopted pending is left behind")
+                    address = [i for i, e in enumerate(events)
+                               if e["kind"] == "mutation" and e.get("command") == ADDRESS]
+                    self.assertTrue(len(address) == 1 and address[0] > detach[0],
+                                    "the address comes from the Network stage's own setter")
+                    self.assertTrue(bool(w["helper"]) and ("nv", "config", "detach") in w["helper"],
+                                    "the strict detach goes through the authorized helper")
                     if expected == 0:
                         # Owner Q-035 (a) item 4: with --apply the current password must equal
                         # the project target, so the target is fetched and natively verified at

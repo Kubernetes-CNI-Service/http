@@ -768,8 +768,10 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
 
     # -- check-only --------------------------------------------------------------------------------
     def test_strict_check_only_reports_v15_stage_results_without_a_pending_read(self) -> None:
-        # P3c map D32d :284 / CURRENT-CONTRACT.md:59 still forbid a check-only pending read or
-        # write. D67 now records the missing Services plan even when Network also needs work.
+        # P3c map D32d :284 / CURRENT-CONTRACT.md:59 forbade a check-only pending read or write.
+        # U3 (owner 2026-11-14; v3.1.6 guide 8.10 step 5, :2137; issue 11.4 item 4 「现在只检查不读
+        # diff，这是新增的一次只读」) adds exactly one read-only diff where --apply would first write,
+        # and still no write.  D67 records the missing Services plan even when Network needs work.
         target = secret("target")
         with tempfile.TemporaryDirectory(prefix="strict-check-") as folder:
             devices = [_Device(1, password=target, lines=unconfigured_lines()),
@@ -778,8 +780,9 @@ class InitialSetupStrictStageSkeletonTests(unittest.TestCase):
             # I-039: a global-backed read-only run qualifies the project target before opening any session.
             code, err = self.run_main(world, world.argv(), self.credentials(world, initial=target, target=target),
                                       target=target)
-            self.assertFalse([call for call in world.calls() if call == ("run", "nv config diff -o commands")],
-                             "check-only reads no pending diff")
+            self.assertEqual([("run", "nv config diff -o commands")],
+                             [call for call in world.calls() if call == ("run", "nv config diff -o commands")],
+                             "check-only reads one pending diff, only on the device that needs a write")
             record = world.record(1)
             self.assertEqual("CHECK_ONLY", record["outcome"])
             self.assertEqual("NEEDS_CONFIGURATION", record["stage_status"]["day0"])

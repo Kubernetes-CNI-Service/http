@@ -646,6 +646,10 @@ class IBConfigurationStageUncertain(SetupError):
     """A configuration write stage did not reach verified completion."""
 
 
+class PendingChangesRefused(SetupError):
+    """U3: the pending diff holds lines this run does not own; nothing was cleared or written."""
+
+
 _EXPIRED_PASSWORD = re.compile(
     r"(?i)(?:password (?:has )?expired|password has expired|"
     r"required to change your password|must change your password|"
@@ -5208,7 +5212,7 @@ def _pending_diff_has_password_update_notice(output: str) -> bool:
 def _run_on_ib_direct(target, endpoint, eth_user, ethernet_password, ib_user,
                       current_password, timeout, ib_command, *, local=False,
                       allow_password_change=False, ib_new_password=None, password_only=False,
-                      _replace_sync_failure_task=None):
+                      _replace_sync_failure_task=None, _pending_services=None):
     if (type(local) is not bool or local or eth_user != "" or ethernet_password != ""
             or type(eth_user) is not str or type(ethernet_password) is not str
             or type(current_password) is not str or not current_password
@@ -5299,7 +5303,7 @@ def _run_on_ib_direct(target, endpoint, eth_user, ethernet_password, ib_user,
                     and result.exit_code == 1 and not _NETWORK_FAILURE.search(result.output)):
                 pending = _split_comma_interface_lines(
                     extract_command_output(result.output, marker, expected_exit_code=1))
-                if not _validate_owned_pending(target.ib, pending):
+                if not _validate_owned_pending(target.ib, pending, services=_pending_services):
                     raise SetupError("pending diff returned 1 without verifiable owned changes")
                 result.output = pending
                 result._direct_endpoint = point
@@ -5317,7 +5321,7 @@ def _run_on_ib_direct(target, endpoint, eth_user, ethernet_password, ib_user,
         result.output = extract_command_output(result.output, marker)
         if ib_command == ["nv", "config", "diff", "-o", "commands"]:
             result.output = _split_comma_interface_lines(result.output)
-            _validate_owned_pending(target.ib, result.output)
+            _validate_owned_pending(target.ib, result.output, services=_pending_services)
         result._direct_endpoint = point
         return result
     raise SetupError("direct IB path is exhausted; device state is UNKNOWN")
@@ -5395,7 +5399,7 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
               ib_new_password: Optional[str] = None,
               password_only: bool = False,
               _phase_operation: Optional[str] = None, _password_policy=None,
-              _replace_sync_failure_task=None) -> SessionResult:
+              _replace_sync_failure_task=None, _pending_services=None) -> SessionResult:
     if (ib_command == ["nv", "config", "diff", "-o", "commands"]
             and allow_password_change):
         raise SetupError("read-only pending diff cannot allow password change")
@@ -5423,7 +5427,7 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
         return _run_on_ib_direct(target, neighbor, eth_user, ethernet_password, ib_user,
             ib_default_password, timeout, ib_command, local=local,
             allow_password_change=allow_password_change, ib_new_password=ib_new_password,
-            password_only=password_only, **evidence_options)
+            password_only=password_only, _pending_services=_pending_services, **evidence_options)
     category = "password" if allow_password_change else _ib_write_category(ib_command)
     marker = os.urandom(16).hex()
     command = nested_ssh_command(
@@ -5497,7 +5501,7 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
             # I-005: the pending diff passes the same readback entry before the owned check.
             pending = _split_comma_interface_lines(
                 extract_command_output(result.output, marker, expected_exit_code=1))
-            if not _validate_owned_pending(target.ib, pending):
+            if not _validate_owned_pending(target.ib, pending, services=_pending_services):
                 raise SetupError("pending diff returned 1 without verifiable owned changes")
             result.output = pending
             return result
@@ -5545,7 +5549,7 @@ def run_on_ib(target: Target, neighbor: Neighbor, eth_user: str,
         raise error from None
     if ib_command == ["nv", "config", "diff", "-o", "commands"]:
         result.output = _split_comma_interface_lines(result.output)
-        _validate_owned_pending(target.ib, result.output)
+        _validate_owned_pending(target.ib, result.output, services=_pending_services)
     return result
 
 
@@ -6063,8 +6067,9 @@ def _verify_ztp_disabled(output: str) -> None:
         raise SetupError("ZTP is not disabled after save; inspect 'nv show system ztp'")
 
 
-def _validate_owned_pending(device: Device, output: str) -> int:
-    """Qualify only closed Initial/management setters bound to this target."""
+def _validate_owned_pending(device: Device, output: str, *, services=None) -> int:
+    """Qualify only closed Initial/management setters bound to this target, and (U3, R-025)
+    every DNS/NTP/timezone value of this run's services profile; None owns no services row."""
     allowed = {
         tuple(command) for command in desired_commands(device)
         if command[:2] == ["nv", "set"]
@@ -6082,7 +6087,12 @@ def _validate_owned_pending(device: Device, output: str) -> int:
     ):
         if gateway:
             allowed.add(("nv", "set", "interface", port, "ipv4", "gateway", gateway))
-    count = 0
+    if services is not None:
+        for category in ("dns", "ntp"):
+            for value in services.get(category) or ():
+                allowed.add(("nv", "set", "system", category, "server", value))
+        allowed.add(("nv", "set", "system", "date-time", "timezone", services.get("timezone")))
+    count = unknown = 0
     for raw in output.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -6093,9 +6103,15 @@ def _validate_owned_pending(device: Device, output: str) -> int:
             tokens = tuple(shlex.split(line))
         except ValueError:
             tokens = ()
-        if tokens not in allowed:
-            raise SetupError("unrelated or unrecognized pending changes; no changes cleared or committed")
-        count += 1
+        if tokens in allowed:
+            count += 1
+        else:
+            unknown += 1
+    if unknown:
+        raise PendingChangesRefused(
+            "unrelated or unrecognized pending changes; no changes cleared or committed; "
+            f"有 {unknown} 行不认识的待提交，--apply 会拒绝；"
+            "用 `nv config diff -o commands` 核对，确认后在设备上手工 detach 或 apply，再重跑")
     return count
 
 
@@ -6108,6 +6124,53 @@ def _require_empty_pending(target: Target, neighbor: Neighbor, eth_user: str,
         ["nv", "config", "diff", "-o", "commands"], local=local, allow_password_change=False)
     if result.exit_code != 0 or result.output:
         raise SetupError("pre-existing pending configuration; no changes cleared or committed")
+
+
+def _settle_owned_pending(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                          *, local, services, stage, record):
+    """U3 (R-025): the Initial/Network/Services pending read, where T15 read it.
+
+    Empty: nothing to do.  A line outside this device's own setters and this run's services
+    profile is refused by the classifier, with no detach.  All owned: the lines are logged and
+    recorded first and returned; the stage detaches them after its own consent
+    (_detach_owned_pending).  The D7 replace gates keep _require_empty_pending.
+    """
+    result = run_on_ib(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                       ["nv", "config", "diff", "-o", "commands"], local=local,
+                       allow_password_change=False, _pending_services=services)
+    # The detach decision itself rests on this classification, not only on the reader's.
+    _validate_owned_pending(target.ib, result.output, services=services)
+    lines = [line for line in result.output.splitlines()
+             if line.strip() and not line.lstrip().startswith("#")]
+    if not lines:
+        if result.exit_code != 0 or result.output.strip():
+            raise SetupError("pre-existing pending configuration; no changes cleared or committed")
+        return None
+    entry = {"stage": stage, "lines": lines, "detached": False}
+    record.append(entry)
+    log(f"  PENDING ({stage}): {len(lines)} line(s), all this device's own values; recorded; "
+        "nv config detach follows the stage consent and the configuration backup")
+    for line in lines:
+        log(f"    PENDING: {line}")
+    return entry
+
+
+def _detach_owned_pending(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                          entry, *, local, strict, policy, services):
+    """U3: after the stage consent.  The detach is an ordinary NVUE stage write (backup and
+    permit on its own route); the re-read must be empty before any stage write."""
+    if policy is not None:
+        policy.assert_unchanged()
+    log("  PENDING DETACH: nv config detach")
+    _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                      ["nv", "config", "detach"], local=local, strict=strict, policy=policy)
+    result = run_on_ib(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                       ["nv", "config", "diff", "-o", "commands"], local=local,
+                       allow_password_change=False, _pending_services=services)
+    if result.exit_code != 0 or result.output.strip():
+        raise SetupError("pending configuration remains after nv config detach; no stage write issued")
+    entry["detached"] = True
+    log("  PENDING DETACHED: the pending diff is empty; the stage continues")
 
 
 # The latest authorized-helper failure as (weak reference to the helper's own
@@ -6353,13 +6416,15 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
                       ib_password: Optional[str] = None,
                       policy: Optional[ProjectPasswordPolicy] = None,
                       details: Optional[dict] = None, _ib_read_context=None,
-                      initial_ztp_output: Optional[str] = None) -> tuple[str, bool]:
+                      initial_ztp_output: Optional[str] = None, _pending_services=None,
+                      _pending_record=None) -> tuple[str, bool]:
     """Stage 1 (v15): auto-save and ZTP config-save, saved, then ZTP verified disabled.
 
     Returns (readback, authorized): the readback after the Initial writes, else `current`;
     execute_ib_task recomputes the later stages from it (v15 :4199-4204).  One implementation
     (owner Q-035 (a)): the current ZTP state is read first and both settings plus a disabled
-    ZTP gate the skip (T17); writes start on an empty pending diff (T15).  With the
+    ZTP gate the skip (T17); writes start on an empty pending diff (T15; U3 first detaches an
+    all-owned one, _settle_owned_pending).  With the
     management-server context (_ib_current_password/_password_policy) every read and write
     goes through the authorized helper (P3c map D32d) and a failure becomes the fixed UNKNOWN
     error; the DEV readback parse (map 2.3) gates the settings on both paths.  A read-only
@@ -6437,8 +6502,14 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
                         "verify ZTP disabled; then configure management interfaces")
         if not authorized:
             raise SetupError("initial configuration was not authorized; no changes performed")
-        _require_empty_pending(target, neighbor, eth_user, ethernet_password, ib_user,
-                               credential, timeout, local=local)
+        owned = _settle_owned_pending(target, neighbor, eth_user, ethernet_password, ib_user,
+                                      credential, timeout, local=local, services=_pending_services,
+                                      stage="initial",
+                                      record=[] if _pending_record is None else _pending_record)
+        if owned is not None:
+            _detach_owned_pending(target, neighbor, eth_user, ethernet_password, ib_user, credential,
+                                  timeout, owned, local=local, strict=strict, policy=guard,
+                                  services=_pending_services)
         try:
             for index, command in enumerate(commands, 1):
                 if guard is not None:
@@ -6465,7 +6536,7 @@ def run_initial_stage(target: Target, neighbor: Neighbor, eth_user: str,
                 "initial configuration was not fully verified; writes may be partial: " + str(exc)
             ), exc) from None
         return readback, authorized
-    except (ProjectInputChanged, BatchStopped):
+    except (ProjectInputChanged, BatchStopped, PendingChangesRefused):
         raise
     except (SetupError, OSError) as error:
         if not strict:
@@ -7490,7 +7561,7 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
                       *, local: bool, apply: bool, authorized: bool,
                       _ib_current_password=None, _password_policy=None,
                       ib_password: Optional[str] = None, _ib_read_context=None,
-                      _replace_restore=False) -> tuple[bool, bool]:
+                      _replace_restore=False, _owned_pending=None) -> tuple[bool, bool]:
     """Infra Services stage (v15); returns (authorized, skipped).
 
     One implementation (owner Q-035 (a)): the management-server context
@@ -7574,6 +7645,10 @@ def run_service_stage(target: Target, neighbor: Neighbor, eth_user: str,
             return False, True
     stage_commands = [*commands, ["nv", "config", "apply", "-y"], ["nv", "config", "save"]]
     password = _ib_current_password if strict else ib_password
+    if _owned_pending is not None:
+        _detach_owned_pending(target, neighbor, eth_user, eth_password, ib_user, password, timeout,
+                              _owned_pending, local=local, strict=strict, policy=_password_policy,
+                              services=services)
     try:
         for index, command in enumerate(stage_commands, 1):
             log(f"  INFRA SERVICES RUN [{index}/{len(stage_commands)}]: {shlex.join(command)}")
@@ -9415,7 +9490,8 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
     device (table 6-1 row 1).  A management-server task with the project global (main sets
     args._strict_cache) only sends each IB read and write through the DEV phase session or the
     authorized helper and passes the per-task cache/project admission first; a write stage starts
-    only on an empty pending diff (T15) and Network writes only the missing setters (T16).
+    only on an empty pending diff (T15; U3 first records and detaches an all-owned one) and Network
+    writes only the missing setters (T16).
     """
     global _TASK_IB_CONFIG
     target, neighbor = task.target, task.neighbor
@@ -9429,13 +9505,13 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                      "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
                      "existing_configuration": [], "planned_changes": [], "conflicts": [],
                      "needs_change": None, "verified_complete": False, "config_mode": config_mode,
-                     "attention_category": None,
+                     "attention_category": None, "pending_detached": [],
                      "stage_status": {stage: "NOT_REACHED" for stage in
                          ("authentication", "initial", "day0", "ipv4_readiness", "services", "public_keys", "direct_ssh")}}
     stages = result_record["stage_status"]
     change_needs = {"network": None, "initial": None,
                     "services": False if services is None else None,
-                    "public_keys": False if not keys else None}
+                    "public_keys": False if not keys else None, "pending": False}
     stage = "authentication"
     credential = None
     readback = ""
@@ -9670,6 +9746,30 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                         operator_forced=operator_forced, host_key_records=host_key_records)
                     return retried_readback[0]
 
+            pending_checked = False
+
+            def report_pending():
+                """U3 check-only: one read-only diff where --apply would first write (no detach)."""
+                nonlocal pending_checked
+                if pending_checked:
+                    return
+                pending_checked = True
+                if credential is None:
+                    log("  PENDING: not read; a key-only read-only check has no NVUE pending reader")
+                    return
+                diff = run_on_ib(target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
+                                 credential, args.connect_timeout, ["nv", "config", "diff", "-o", "commands"],
+                                 local=task.local, allow_password_change=False, _pending_services=services)
+                lines = [line for line in diff.output.splitlines()
+                         if line.strip() and not line.lstrip().startswith("#")]
+                if lines:
+                    log(f"  PENDING: 有 {len(lines)} 行自有待提交，--apply 时会 detach 后重做")
+                    for line in lines:
+                        log(f"    PENDING: {line}")
+                    result_record["planned_changes"].append(
+                        {"item": "pending", "value": f"{len(lines)} owned lines"})
+                    change_needs["pending"] = True
+
             result_record["device_state"] = "factory" if state_is_unconfigured(state) else "existing"
             stage = "initial"
             stages[stage] = "RUNNING"
@@ -9689,7 +9789,8 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                     target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
                     args.connect_timeout, current.output, local=task.local,
                     apply=True, authorized=authorized, policy=policy, details=initial_details,
-                    initial_ztp_output=initial_ztp_output, **stage_context)
+                    initial_ztp_output=initial_ztp_output, _pending_services=services,
+                    _pending_record=result_record["pending_detached"], **stage_context)
                 stages["initial"] = "VERIFIED"
                 stage = "day0"
                 stages[stage] = "RUNNING"
@@ -9773,9 +9874,11 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                     target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
                     args.connect_timeout, current.output, local=task.local,
                     apply=args.apply, authorized=authorized, policy=policy, details=initial_details,
-                    initial_ztp_output=initial_ztp_output,
-                    **stage_context)
+                    initial_ztp_output=initial_ztp_output, _pending_services=services,
+                    _pending_record=result_record["pending_detached"], **stage_context)
                 change_needs["initial"] = initial_details.get("needed")
+                if not args.apply and change_needs["initial"]:
+                    report_pending()
                 body = _split_comma_interface_lines(readback)
                 stages[stage] = "VERIFIED" if args.apply else "CHECKED"
                 state = parse_nvue_state(body)
@@ -9798,13 +9901,19 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                     for command in commands:
                         log(f"  {'PLAN' if args.apply else 'WOULD APPLY'}: {shlex.join(command)}")
                     if not args.apply:
+                        report_pending()
                         result_record["outcome"] = "CHECK_ONLY"
                         stages[stage] = "NEEDS_CONFIGURATION"
                     else:
                         if not authorized:
                             authorized = confirm_first_device_change(target, "apply Network commands and verify IPv4 SSH")
-                        _require_empty_pending(target, neighbor, ib_eth_user, task.ethernet_password,
-                                               args.ib_user, credential, args.connect_timeout, local=task.local)
+                        owned = _settle_owned_pending(target, neighbor, ib_eth_user, task.ethernet_password,
+                            args.ib_user, credential, args.connect_timeout, local=task.local, services=services,
+                            stage="day0", record=result_record["pending_detached"])
+                        if owned is not None:
+                            _detach_owned_pending(target, neighbor, ib_eth_user, task.ethernet_password,
+                                args.ib_user, credential, args.connect_timeout, owned, local=task.local,
+                                strict=strict, policy=policy, services=services)
                         for index, command in enumerate(commands, 1):
                             if policy is not None:
                                 policy.assert_unchanged()
@@ -9866,13 +9975,17 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 stage = "services"
                 stages[stage] = "RUNNING"
                 services_missing = services is not None and bool(desired_service_commands(services, body))
-                if args.apply and services_missing:
-                    _require_empty_pending(target, neighbor, ib_eth_user, task.ethernet_password,
-                                           args.ib_user, credential, args.connect_timeout, local=task.local)
+                owned = None
+                if services_missing and args.apply:
+                    owned = _settle_owned_pending(target, neighbor, ib_eth_user, task.ethernet_password,
+                        args.ib_user, credential, args.connect_timeout, local=task.local, services=services,
+                        stage="services", record=result_record["pending_detached"])
+                elif services_missing:
+                    report_pending()
                 authorized, service_skipped = run_service_stage(
                     target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user,
                     args.connect_timeout, services, body, local=task.local, apply=args.apply,
-                    authorized=authorized, **stage_context)
+                    authorized=authorized, _owned_pending=owned, **stage_context)
                 stages[stage] = ("NOT_CONFIGURED" if services is None else "ALREADY_PRESENT" if not services_missing
                                  else "UNVERIFIED" if service_skipped else "VERIFIED" if args.apply else "PLANNED_NOT_APPLIED")
                 task_phase("IB public keys")
@@ -11010,7 +11123,7 @@ def _setup_record_verified(record, rows):
 def _complete_result_fields(record):
     """Close the same result before persistence and before summary consumption."""
     for key, value in {"device_state": "unknown", "existing_configuration": [],
-                       "planned_changes": [], "conflicts": [], "needs_change": None,
+                       "planned_changes": [], "conflicts": [], "needs_change": None, "pending_detached": [],
                        "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
                        "config_mode": "patch"}.items():
         record.setdefault(key, value)

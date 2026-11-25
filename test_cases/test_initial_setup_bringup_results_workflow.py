@@ -1056,3 +1056,125 @@ class ManagedSelectionWorkflowTests(unittest.TestCase):
             self.assertIsNone(helper.authority.read_method_receipt(cycle.root, HOST))
             self.assertEqual("failed", helper.authority.read_method_current(cycle.root, HOST)["state"])
             self.assertEqual(["EXAMPLE-IB01", "EXAMPLE-IB02"], [target.ib.hostname for target in cycle.targets])
+
+
+# U3 / R-025 (v3.1.6 D1c).  Expectations: owner 2026-11-14 「T15按你说的改，记录成U3放3.1.6」 on the
+# issue file's 11.4/11.5 and v3.1.6 guide 8.10 steps 1-6 (:2133-2140).  The 11.5 field scenario:
+# an earlier run wrote one DNS row in Infra Services and was interrupted before apply; the rerun
+# with --apply detaches it, writes DNS/NTP/timezone, applies and verifies the readback, while a
+# device with unrelated pending in the same run is refused with zero detach and zero writes.
+_U3_DIFF = ("nv", "config", "diff", "-o", "commands")
+_U3_DETACH = ("nv", "config", "detach")
+_U3_SERVICES = (("nv", "set", "system", "dns", "server", "203.0.113.53"),
+                ("nv", "set", "system", "ntp", "server", "ntp.ubuntu.com"),
+                ("nv", "set", "system", "ntp", "server", "time.ib.example.test"),
+                ("nv", "set", "system", "date-time", "timezone", "Asia/Taipei"))
+_U3_HINT = "用 `nv config diff -o commands` 核对，确认后在设备上手工 detach 或 apply，再重跑"
+
+
+class _PendingFiveDevices(_FiveDevices):
+    """The same five PUBLIC devices with independently stated pending diffs (U3)."""
+
+    def __init__(self, test, app, kat):
+        super().__init__(test, app, kat)
+        # EXAMPLE-IB004 (jump): the 11.5 field case, no services applied, one DNS row pending.
+        self.rows[NAMES[3]] = [row for row in self.rows[NAMES[3]] if not row.startswith(
+            ("nv set system dns ", "nv set system ntp ", "nv set system date-time "))]
+        self.pending[NAMES[3]] = [_U3_SERVICES[0]]
+        # EXAMPLE-IB005 (direct): only the timezone is missing and that row is pending.
+        self.rows[NAMES[4]] = [row for row in self.rows[NAMES[4]]
+                               if not row.startswith("nv set system date-time ")]
+        self.pending[NAMES[4]] = [_U3_SERVICES[3]]
+        # EXAMPLE-IB001 (factory): one row that no profile or CSV value owns.
+        self.pending[NAMES[0]] = [("nv", "set", "system", "dns", "server", "198.51.100.99")]
+
+    def _reply(self, name, command):
+        if command == _U3_DIFF:
+            self.events.append((name, command))
+            body = "".join(shlex.join(row) + "\n" for row in self.pending[name])
+            return body, 1 if self.pending[name] else 0
+        if command == _U3_DETACH:
+            self.events.append((name, command))
+            self.pending[name] = []
+            return "", 0
+        if command in _U3_SERVICES and name in (NAMES[3], NAMES[4]):
+            self.events.append((name, command))
+            self.pending[name].append(command)
+            return "", 0
+        return super()._reply(name, command)
+
+
+class OwnedPendingWorkflowTests(unittest.TestCase):
+    """Real MAIN -> stages -> closed commands -> write permits -> summary.json, U3 pending."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = load_script("d1c_u3_pending_workflow_source", INITIAL)
+
+    def run_pending(self, *, apply):
+        with mock.patch(__name__ + "._FiveDevices", _PendingFiveDevices):
+            return BringupResultsWorkflowTests.run_five(self, apply=apply)
+
+    def test_apply_detaches_owned_pending_and_refuses_unrelated_pending(self):
+        code, evidence, console, report, world, per_device = self.run_pending(apply=True)
+        self.assertIs(type(world), _PendingFiveDevices)
+        records = evidence["records"]
+        foreign = records[NAMES[0].casefold()]
+        self.assertEqual("FAILED", foreign["outcome"], world.public_failure_note(evidence))
+        self.assertIn("有 1 行不认识的待提交", foreign["reason"])
+        self.assertIn(_U3_HINT, foreign["reason"])
+        self.assertIs(False, foreign["writes_attempted"])
+        self.assertIsNone(foreign["backup"])
+        self.assertEqual([], foreign.get("pending_detached"))
+        events = [command for peer, command in world.events if peer == NAMES[0]]
+        self.assertEqual(1, events.count(_U3_DIFF))
+        self.assertFalse(any(command == _U3_DETACH or command[:2] in (("nv", "set"), ("sh", "-c"))
+                             or command[:3] in (("nv", "config", "apply"), ("nv", "config", "save"))
+                             for command in events), events)
+        self.assertEqual([("nv", "set", "system", "dns", "server", "198.51.100.99")], world.pending[NAMES[0]])
+        for name, line in ((NAMES[3], "nv set system dns server 203.0.113.53"),
+                           (NAMES[4], "nv set system date-time timezone Asia/Taipei")):
+            with self.subTest(device=name):
+                record = records[name.casefold()]
+                self.assertNotIn("failed_stage", record, world.public_failure_note(evidence))
+                self.assertEqual([{"stage": "services", "lines": [line], "detached": True}],
+                                 record.get("pending_detached"))
+                events = [command for peer, command in world.events if peer == name]
+                diffs = [index for index, command in enumerate(events) if command == _U3_DIFF]
+                backup = next(index for index, command in enumerate(events)
+                              if command[:3] == ("sh", "-c", EXPECTED_BACKUP_SCRIPT))
+                detach = events.index(_U3_DETACH)
+                setters = [index for index, command in enumerate(events) if command[:2] == ("nv", "set")]
+                self.assertEqual(1, events.count(_U3_DETACH))
+                self.assertTrue(len(diffs) == 2 and diffs[0] < backup < detach < diffs[1] < setters[0], events)
+                self.assertLess(detach, events.index(("nv", "config", "apply", "-y")))
+                self.assertEqual([], world.pending[name])
+                rows = world.rows[name]
+                for row in ("nv set system dns server 203.0.113.53",
+                            "nv set system ntp server ntp.ubuntu.com state enabled",
+                            "nv set system ntp server time.ib.example.test state enabled",
+                            "nv set system date-time timezone Asia/Taipei"):
+                    self.assertIn(row, rows)
+                nvue = [command for command in events if command == _U3_DETACH or command[:2] == ("nv", "set")
+                        or command[:3] in (("nv", "config", "apply"), ("nv", "config", "save"))]
+                self.assertEqual(len(nvue), record["metrics"]["nvue_write_commands"])
+                self.assertIs(True, record["writes_attempted"])
+                self.assertEqual("CHECKED_AND_CONFIGURED", record["category"])
+                self.assertIs(True, record["verified_complete"])
+                self.assertIn(line, report)
+                self.assertEqual(record, next(item for item in per_device if item["hostname"] == name))
+
+    def test_check_only_reports_owned_and_unrelated_pending_without_detach(self):
+        code, evidence, console, report, world, per_device = self.run_pending(apply=False)
+        records = evidence["records"]
+        self.assertNotIn(_U3_DETACH, [command for _, command in world.events])
+        self.assertEqual([], world.permits)
+        foreign = records[NAMES[0].casefold()]
+        self.assertIn("有 1 行不认识的待提交，--apply 会拒绝", foreign["reason"], world.public_failure_note(evidence))
+        owned = records[NAMES[3].casefold()]
+        self.assertIn({"item": "pending", "value": "1 owned lines"}, owned["planned_changes"])
+        self.assertIs(True, owned["needs_change"])
+        self.assertEqual([], owned.get("pending_detached"))
+        self.assertEqual(1, [command for peer, command in world.events if peer == NAMES[3]].count(_U3_DIFF))
+        self.assertIn("有 1 行自有待提交，--apply 时会 detach 后重做", report)
+        self.assertEqual([_U3_SERVICES[0]], world.pending[NAMES[3]])

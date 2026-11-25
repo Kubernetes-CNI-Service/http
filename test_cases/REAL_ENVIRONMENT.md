@@ -4271,3 +4271,31 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - 本机 direct／workflow 只用替身 docker、ssh/scp 和离线分析器验证逻辑；真实 UFM 上的超时与部分输出仍为 **OPEN / NOT RUN**。
+
+## TC-REAL-D1C-PENDING-DETACH-001 — 写阶段前本台自有待提交改动记录后 detach 再做
+
+- 基本信息：real-environment / scenario，R-025／U3（v3.1.6 D1c，指导 :2124-2159）；状态 **NOT RUN / REAL_ENV REQUIRED**。卡名按指导 :2159「默认新立拟名卡」，由 http dev 最终定是新立还是并入 `TC-REAL-D1-INITIAL-SETUP-MERGED-001`。本卡只写验收条件，不授权连接设备、写入或 prod 操作。
+- 风险与目标：`nv config detach` 是配置写，会丢掉设备上全部待提交改动。验证只有全部属于本台 CSV 与本次 services profile 的待提交才会在记录、确认、写前备份和写许可之后被 detach，复读为空后照常做本阶段；含外来改动的设备照旧拒绝、零 detach；D7 replace 的三个空 pending 门（`TC-REAL-D7-REPLACE-001`）不变。
+- 前置条件与输入：另行批准的 AIR 隔离项目和写窗口；执行人为 owner 或其明确授权的现场人员；获准的两台测试 IB 与可恢复控制台、项目 `01-global.yaml`（含 DNS/NTP/时区）；一台只含本台自有待提交（例如 Infra Services 写了一条 profile 里的 DNS 后中断，未 apply），另一台含一条 profile 以外的待提交；绑定本轮源码、测试、manifest、平台与正式全量证明。缺任一条件的分项保持 NOT RUN。
+
+### 步骤
+
+1. 现场人员在两台测试 IB 上各记录 `nv config diff -o commands` 与 `nv config show -o commands` 的脱敏结构和 SHA256（不外带配置正文）。
+2. 同一选择先跑一次只读检查：自有那台报告「有 N 行自有待提交，`--apply` 时会 detach 后重做」，`planned_changes` 含 `pending` 项；外来那台报告不认识的行数，均不发 detach。
+3. 在获准写窗口跑 `--apply`：自有那台依次出现记录（日志与 `summary.json` 的 `pending_detached`）、确认、写前备份 `current_<时间戳>.yaml`、`nv config detach`、复读为空，再补齐 DNS/NTP/时区、apply、save、回读通过；外来那台失败，原因含不认识的行数和「用 `nv config diff -o commands` 核对，确认后在设备上手工 detach 或 apply，再重跑」，没有备份和任何写入。
+4. 两台各再取一次 diff 与 show 的脱敏结构和 SHA256，与第 1 步对照。
+
+### 预期结果
+
+- 自有那台：detach 恰一次，在备份之后、Infra Services 第一条写之前；`metrics.nvue_write_commands` 计入 detach；`pending_detached` 记原行与阶段；最终配置含 profile 的 DNS/NTP/时区，待提交为空。
+- 外来那台：`writes_attempted=false`、无备份、待提交前后 SHA256 一致。
+- 不允许：Keys-only 或改密阶段新增待提交查询；D7 replace 吞掉全自有待提交；只读检查发出 detach。
+- 证据：源码/测试/manifest/平台身份、两台 diff/show 前后 SHA256、detach 与复读的日志行、两台 `summary.json` 记录、运行完整 END 与退出码；不保存配置正文、口令或私有标识。
+
+### 故障注入与清理
+
+- 只在获准的 AIR 测试设备上预置待提交；不在 prod 制造待提交。外来那台的待提交由现场人员按记录手工 detach；自有那台按项目恢复方案恢复，再核身份、配置和管理连通。设备侧备份由 owner 决定保留或移除。
+
+### 自动化状态
+
+- 本机 direct：`test_initial_setup_pending_diff`（`OwnedPendingDetachTests`）、`test_initial_setup_base_and_subset`、`test_initial_setup_config_mode`；workflow：`test_initial_setup_bringup_results_workflow`（`OwnedPendingWorkflowTests`）、`test_initial_setup_main_caller_precommit`。本机模型通过不代表现场通过；本卡 **NOT RUN / REAL_ENV REQUIRED**。

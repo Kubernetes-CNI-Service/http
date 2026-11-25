@@ -3668,3 +3668,121 @@ class ConfigModeTests(unittest.TestCase):
                 self.assertEqual(case != "deny", coordinator.writes_attempted)
                 self.assertEqual(None if case in {"backup-failed", "deny"} else backup_receipt, result["backup"])
         self.assertEqual([], self.effects)
+
+    def test_replace_mode_initial_stage_detaches_owned_pending_but_replace_gates_do_not(self):
+        # U3 (owner 2026-11-14; v3.1.6 guide 8.10 step 2, :2134): the replace-mode Initial stage
+        # (entered from execute_ib_task before the replace) settles an all-owned pending exactly
+        # like patch mode: record, consent, write backup, permit, `nv config detach`, an empty
+        # re-read, then the Initial writes.  The empty-pending gate in front of the replace itself
+        # (`_require_empty_pending`) still refuses an owned pending with no detach.
+        app = self.app
+        route = app._import_tools("tools.login_path").Route(NAMES[0], "direct", "PUBLIC", None, None, None)
+        target = app.Target(self.target().ib, None, "", "eth0", route=route)
+        endpoint = app.DirectEndpoint("203.0.113.11")
+        task = app.PreparedIBTask(target, endpoint, "", False)
+        selected = self.release / "EXAMPLE-IB001.yaml"
+        global_file = self.project / "01-global.yaml"
+        global_file.write_text("switches:\n  - ib:\n      system:\n        aaa:\n          user:\n"
+                               "            admin:\n              password: '$6$PublicFixture$" + "A" * 86 + "'\n",
+                               encoding="ascii")
+        policy = app.ProjectPasswordPolicy(global_file, "admin", interactive=False)
+        authority = app.RuntimeInputAuthority((global_file, selected))
+        stamp = "20261125-091100"
+        nonce = "67676767676767676767676767676767"
+        prefix = 'printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; '
+        suffix = '; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce + '__=%s\\n" "$task_rc"; exit "$task_rc"'
+        base = ("nv set system hostname example-ib001\n"
+                "nv set interface eth0 ipv4 address 203.0.113.11/24\n"
+                "nv set interface eth0 ipv4 gateway 203.0.113.1\n")
+        auto = "nv set system config auto-save state enabled"
+        ztp_save = "nv set system ztp config-save enabled"
+        ready = base + auto + "\n" + ztp_save + "\n"
+        backup_receipt = {"path": f"/devices/PUBLIC/current_{stamp}.yaml", "bytes": 137}
+        args = SimpleNamespace(config_mode="replace", apply=True, yes=True, ib_user="admin", eth_user="admin",
+            execution_mode="management", connect_timeout=10, run_stamp=stamp, _on_management_server=True,
+            _replace_runtime_authority=authority, _replace_release=self.release, _replace_selected={
+                "example-ib001": {"verdict": "WOULD_REPLACE", "file": str(selected),
+                "sha256": "a596e8c95db198f49c2402dc80d4a4312f665519600ffce069cbf3476af23368", "reason": ""}})
+        coordinator = app.RuntimeCoordinator(args, policy, "PUBLIC-INITIAL-MODEL", [task], authority)
+        calls = []
+        pending = [auto]
+
+        def captured(argv, responder, timeout):
+            self.assertEqual("admin@203.0.113.11", argv[-2])
+            program = shlex.split(argv[-1])
+            self.assertTrue(program[2].startswith(prefix) and program[2].endswith(suffix))
+            command = tuple(shlex.split(program[2][len(prefix):-len(suffix)]))
+            effects = {
+                ("ip", "addr", "show", "eth0"): ("IP",
+                    "2: eth0: <UP> mtu 1500\n    link/ether 02:00:00:00:00:11\n    inet 203.0.113.11/24\n"),
+                ("ip", "route"): ("ROUTE", "default via 203.0.113.1 dev eth0\n"),
+                ("nv", "show", "system", "ztp"): ("ZTP", "service disabled\nstatus aborted\n"),
+                ("nv", "config", "diff", "-o", "commands"): ("PENDING", "".join(row + "\n" for row in pending)),
+                ("nv", "config", "detach"): ("DETACH", ""),
+                tuple(auto.split()): ("AUTO", ""), tuple(ztp_save.split()): ("ZTP_SAVE", ""),
+                ("nv", "config", "apply", "-y"): ("APPLY", ""), ("nv", "config", "save"): ("SAVE", ""),
+                ("nv", "config", "show", "-o", "commands"): ("READ", ready),
+            }
+            if (len(command) == 5 and command[:2] == ("sh", "-c") and command[3:] == ("--", stamp)
+                    and hashlib.sha256(command[2].encode()).hexdigest()
+                    == "7c1a6e279773a41477e0e7a061d8ecf828273157b785aca844361a14ff3344b6"):
+                label, output = "BACKUP", f"path={backup_receipt['path']}\nbytes=137\n"
+            else:
+                self.assertIn(command, effects, "model refuses any unlisted external operation")
+                label, output = effects[command]
+            if label == "DETACH":
+                pending.clear()
+            calls.append(label)
+            return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{output}\n__HTTP_IB_END_{nonce}__=0\n", 0)
+
+        def inspect_model(device, point, *_ignored, **options):
+            calls.append("INSPECT")
+            result = app.SessionResult(base, 0)
+            result._direct_endpoint = endpoint
+            return result, "PUBLIC-VERIFIED-MODEL", False
+
+        def replace_model(state, supplied_args, services, *, timeout, authorized, strict, policy):
+            # The replace's own empty-pending gate (D7) still refuses this owned row, no detach.
+            refused = []
+
+            def owned_pending(*_args, **_kwargs):
+                refused.append("PENDING")
+                return app.SessionResult(auto + "\n", 1)
+            with mock.patch.object(app, "run_on_ib", owned_pending):
+                with self.assertRaisesRegex(app.SetupError, "pre-existing pending configuration"):
+                    app._require_empty_pending(target, endpoint, "", "", "admin", "PUBLIC-VERIFIED-MODEL",
+                                               10, local=False)
+            self.assertEqual(["PENDING"], refused)
+            calls.append("REPLACE_COMPLETE")
+            app._ensure_ib_config_backup(target, endpoint, "", "", "admin", "PUBLIC-VERIFIED-MODEL", 10, local=False)
+            app.obtain_write_permit("nvue")
+            return True, False, "service disabled\nstatus success\n"
+
+        def d4_model(device, account, credential, timeout, **options):
+            options["details"].update(identity={"ok": True, "via_ipv4": True}, endpoint=endpoint)
+            calls.append("D4")
+            return ready
+
+        previous = object()
+        with ExitStack() as guards:
+            guards.enter_context(redirect_stdout(io.StringIO()))
+            for name, value in (("_TASK_IB_CONFIG", previous), ("_TASK_LOG_BUFFER", None), ("_TASK_DEADLINE", None),
+                                ("REPORT_HANDLE", None), ("_WORKER_CONNECTION", None), ("_WORKER_STOP", None),
+                                ("_ACTIVE_COORDINATOR", coordinator)):
+                guards.enter_context(mock.patch.object(app, name, value))
+            guards.enter_context(mock.patch.object(app, "os", Facade(app.os, urandom=lambda count: b"\x67" * count)))
+            guards.enter_context(mock.patch.object(app.ProjectPasswordPolicy, "password", self.deny))
+            for name, effect in (("inspect_ib_device", inspect_model), ("interactive_run", captured),
+                ("_run_admitted_replace_to_ztp", replace_model),
+                ("run_key_stage", lambda *_a, **k: k["authorized"]),
+                ("_wait_direct_ipv4_readback", d4_model), ("run_management_direct_checks", lambda *_a, **_k: []),
+                ("refresh_ib_host_key", self.deny), ("verify_ipv4_login", self.deny)):
+                guards.enter_context(mock.patch.object(app, name, side_effect=effect))
+            result = app.execute_ib_task(task, args, policy, "PUBLIC-INITIAL-MODEL", None, [], None)
+            self.assertIs(previous, app._TASK_IB_CONFIG)
+        self.assertEqual(["INSPECT", "IP", "ROUTE", "ZTP", "PENDING", "BACKUP", "DETACH", "PENDING",
+                          "AUTO", "ZTP_SAVE", "APPLY", "SAVE", "READ", "ZTP", "REPLACE_COMPLETE", "D4"], calls)
+        self.assertEqual("REPLACED", result["replace"]["verdict"])
+        self.assertEqual([{"stage": "initial", "lines": [auto], "detached": True}], result.get("pending_detached"))
+        self.assertEqual(backup_receipt, result["backup"])
+        self.assertEqual([], self.effects)

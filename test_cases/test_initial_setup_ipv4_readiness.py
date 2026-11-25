@@ -284,6 +284,8 @@ class Ipv4ReadinessTests(unittest.TestCase):
                     app, "run_initial_stage", return_value=("PUBLIC-state", True)))
                 stack.enter_context(mock.patch.object(app, "_management_network_commands", return_value=[]))
                 stack.enter_context(mock.patch.object(app, "_require_empty_pending"))
+                # U3 (v3.1.6 D1c): the Network write stage reads its pending through this entry.
+                stack.enter_context(mock.patch.object(app, "_settle_owned_pending", return_value=None))
                 stage_boundary = stack.enter_context(mock.patch.object(app, "_stage_ib_command", side_effect=stage))
                 stack.enter_context(mock.patch.object(app, "verify_state"))
                 stack.enter_context(mock.patch.object(app, "_verify_management_network_state"))

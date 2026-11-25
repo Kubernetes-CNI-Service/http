@@ -105,6 +105,27 @@ root 等待父进程不创建它；在 OOB Leaf 本机执行的命令不创建 m
   不写地址等值。行号按设备返回的原始读回计算。
 - 不修改设备上的 fnm 配置。
 
+### 写阶段前的待提交改动（U3，R-025）
+
+Initial、Network、Infra Services 三个写阶段在本阶段第一条写之前读 `nv config diff -o commands`
+（原来 T15 读的位置）：
+
+- 空：照常做。
+- 每一行都是本台自有的值：本台 CSV 决定的 Initial、Network 设置，以及本次 services profile 里的全部 DNS、NTP 和时区
+  （不只缺的那几项；没有 `01-global.yaml` 时不认服务类的行），按 token 逐字比对。先把原行写进设备日志和逐台结果的
+  `pending_detached`（`[{"stage": "initial" | "day0" | "services", "lines": [原行…], "detached": true | false}]`），
+  再经本阶段原有的确认（Infra Services 在它自己的确认之后）、写前配置备份和写许可执行 `nv config detach`，复读必须为空，
+  然后照常做本阶段。detach 是一次配置写，计入 `metrics.nvue_write_commands`，所以这台的结果类别是
+  `CHECKED_AND_CONFIGURED`，不会是 `CHECKED_EXISTING_KEYS_*`。备份失败、detach 非零、复读不空或读不到，这台失败，
+  不发后续写，`detached` 记 `false`。
+- 有任何一行不认识（profile 以外的值、`nv unset`、带别的属性的 ntp 行、其他行）：照旧拒绝，不 detach、不写；
+  原因里写出不认识的行数，并提示「用 `nv config diff -o commands` 核对，确认后在设备上手工 detach 或 apply，再重跑」。
+- 只读检查：在 `--apply` 第一次要写的位置读一次 diff，不 detach。全是自有的行时设备日志写
+  「有 N 行自有待提交，`--apply` 时会 detach 后重做」，`planned_changes` 加 `{"item": "pending", "value": "<N> owned lines"}`，
+  `needs_change` 为 `true`；有不认识的行时这台按上面的原因失败。只用公钥做的只读检查不读待提交。
+- 不变的：Keys 和改密阶段前不加这道检查；`--config-mode replace` 替换本体前后的空 pending 门照旧非空即拒；
+  不提交、不接着用设备上原有的待提交。
+
 ## 输入文件
 
 ### ib.csv
@@ -481,7 +502,7 @@ SSH 的 `known_hosts` 也可能新增主机密钥（`StrictHostKeyChecking=accep
 - 未指定 `--apply` 时不执行首次改密、任何 `nv set` 或 `nv config apply/save`；只生成本地 JSON、报告、快照，并执行只读
   设备命令。
 - `--apply` 在第一台实际变更前确认；拒绝时整次停下、不改设备（以 1 退出）。`--apply --yes` 明确跳过交互确认。
-- patch 默认只补缺；`--force` 与默认相同。真实冲突在写入前拒绝该台，不覆盖原值。设备上有不明的待提交改动时不写。
+- patch 默认只补缺；`--force` 与默认相同。真实冲突在写入前拒绝该台，不覆盖原值。设备上有不认识的待提交改动时不写；全是本台自有的值时记录后 detach 再做（见「写阶段前的待提交改动」）。
 - 有公钥时只读核对一次，无公钥不读取；不回传 `authorized_keys`，也不写设备配置。
 - 一台 IB 匹配多条管理链路、必填 CSV 输入无效或不能核对设备身份时，明确记录且不配置该台。线路检查根据本节前述 FDB 与已选入口判定。
 - 改密或写入结果不确定时停下这台、标为要人工核对，不自动重放。
