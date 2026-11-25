@@ -83,6 +83,11 @@ class HaWaitTimeout(UfmError):
     """A bounded HA wait (DRBD sync, status after start) ran out; the cluster is left as it is."""
 
 
+class UpgradeInProgress(UfmError):
+    """I-008 (v3.1.6 B2-O3): an upgrade is running, unfinished or outlasted the wait; run_steps reports it as
+    UPGRADE_IN_PROGRESS, a retry (config-upgrade detects it and never starts a second one)."""
+
+
 # ---------------------------------------------------------------- input model
 
 @dataclass(frozen=True)
@@ -1484,22 +1489,69 @@ UPGRADE_LOG = "/var/log/ufm-setup-upgrade-os-upgrade.log"
 STAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{2}_[0-9]{2}_[0-9]{2}$")
 
 
-def upgrade_status_script(since: str) -> str:
-    """Status lines look like `20261019-13_18_58: UFM-OS-FIRSTBOOT   [PASSED    ]`; only lines stamped
-    at or after this run's start count, so an older attempt's FAILED/PASSED cannot decide."""
+# The block of one upgrade in the newest status log (I-008 expectation 3, v3.1.6 B2-O1 (a)): from the last
+# `UFM_OS_UPGRADE ... [STARTED` line stamped at or after `since` ("" = the last one) to the end, whatever the
+# later lines' own timestamps (NTP may set the clock back during the reboot). complete: UFM-OS-UPGRADE and
+# UFM-OS-FIRSTBOOT PASSED without FAILED (expectation 2); a STARTED line alone is incomplete.
+UPGRADE_BLOCK_AWK = r"""{ line[NR] = $0 }
+substr($1, 1, 17) >= since && $2 == "UFM_OS_UPGRADE" && $0 ~ /\[ *STARTED/ { n = NR }
+END {
+  block = "incomplete"
+  if (n) {
+    started = substr(line[n], 1, 17)
+    for (i = n; i <= NR; i++) {
+      if (split(line[i], f, " ") < 2) continue
+      result = line[i]; sub(/.*\[ */, "", result); sub(/ *\].*/, "", result)
+      last_stamp = substr(f[1], 1, 17); last_step = f[2]
+      if (f[2] == "UFM-OS-UPGRADE") os_upgrade = result
+      if (f[2] == "UFM-OS-FIRSTBOOT") firstboot = result
+      if (result == "FAILED") { failed = line[i]; gsub(/ +/, " ", failed) }
+    }
+    if (failed != "") block = "failed"
+    else if (os_upgrade == "PASSED" && firstboot == "PASSED") block = "complete"
+  }
+  printf "started=%s\nlast_step=%s\nlast_stamp=%s\nos_upgrade=%s\nfirstboot=%s\nfailed=%s\nblock=%s\n", started, last_step, last_stamp, os_upgrade, firstboot, failed, block
+}"""
+# Active transient units of ufm-setup-upgrade's own upgrades (the start script names them ufm-os-upgrade-<n>).
+UPGRADE_UNITS = ("$(systemctl list-units --state=active --no-legend --plain 'ufm-os-upgrade-*' 2>/dev/null "
+                 "| awk '{ printf \"%s%s\", sep, $1; sep = \" \" }')")
+UPGRADE_DIAG_MARK = "----ufm-setup-upgrade-stall-diagnostics----"
+
+
+def upgrade_block_lines(since: str) -> str:
+    """bash: status_log=, then the block facts of UPGRADE_BLOCK_AWK (block=none without a status log);
+    leaves the verdict in $block. `since` is a checked stamp or ""."""
+    return ("log=$(ls -t /var/log/ufm_os_upgrade_*_status.log 2>/dev/null | head -n 1)\n"
+            "printf 'status_log=%s\\n' \"$log\"\n"
+            f"if [ -n \"$log\" ]; then facts=$(awk -v since={shlex.quote(since)} {shlex.quote(UPGRADE_BLOCK_AWK)} "
+            "\"$log\"); else facts='block=none'; fi\n"
+            "printf '%s\\n' \"$facts\"\n"
+            "block=$(printf '%s\\n' \"$facts\" | sed -n 's/^block=//p')\n")
+
+
+def upgrade_status_script(since: str, unit: str = "", diagnose: bool = False) -> str:
+    """Read-only, one per probe while waiting: version, this run's block of the status log (from the STARTED
+    line stamped at or after `since`, the start script's started_at), the state of the unit the start script
+    named and the boot id (I-008 expectations 3 and 4). `diagnose` adds `systemctl list-jobs` and the CGroup
+    part of `systemctl status <unit>` after UPGRADE_DIAG_MARK lines."""
     if not STAMP_RE.fullmatch(since):
         raise UfmError(f"升级开始时间戳无效: {since!r}")
-    recent = f"awk -v since={since} 'substr($1, 1, 17) >= since' \"$log\""
-    return ("set -u\n"
+    if unit and not SELECTOR_RE.fullmatch(unit):
+        raise UfmError(f"升级单元名无效: {unit!r}")
+    text = ("set -u\n"
             "printf 'appliance=%s\\n' \"$(grep -E '^UFM_APPLIANCE=' /etc/ufm-release 2>/dev/null "
             "| head -n 1 | cut -d= -f2)\"\n"
-            "log=$(ls -t /var/log/ufm_os_upgrade_*_status.log 2>/dev/null | head -n 1)\n"
-            "printf 'status_log=%s\\n' \"$log\"\n"
-            'if [ -n "$log" ]; then\n'
-            f"  printf 'firstboot=%s\\n' \"$({recent} | grep -E 'UFM-OS-FIRSTBOOT' | tail -n 1 "
-            "| sed -E 's/.*\\[ *([A-Z]+) *\\].*/\\1/')\"\n"
-            f"  printf 'failed=%s\\n' \"$({recent} | grep -E '\\[ *FAILED *\\]' | tail -n 1 | tr -s ' ')\"\n"
-            "fi\n")
+            + upgrade_block_lines(since)
+            + (f"printf 'unit_state=%s\\n' \"$(systemctl is-active {shlex.quote(unit)} 2>/dev/null || true)\"\n"
+               if unit else "printf 'unit_state=\\n'\n")
+            + "printf 'boot_id=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)\"\n")
+    if diagnose and unit:
+        text += (f"echo {UPGRADE_DIAG_MARK}\n"
+                 "systemctl list-jobs --no-pager 2>&1 || true\n"
+                 f"echo {UPGRADE_DIAG_MARK}\n"
+                 f"systemctl status {shlex.quote(unit)} --no-pager 2>&1 "
+                 "| awk '/CGroup:/ { p = 1 } p && /^$/ { exit } p' || true\n")
+    return text
 
 
 def image_name(version: str) -> str:
@@ -1519,10 +1571,20 @@ def upgrade_start_script(version: str, url: str) -> str:
         raise UfmError(f"镜像地址无效: {url!r}")
     command = (f"cd /root/{folder} && bash ./ufm-os-upgrade.sh --appliance-sw-upgrade -r -y "
                f"> {UPGRADE_LOG} 2>&1")
+    # I-008 (v3.1.6 B2): an upgrade under way (an active unit; or the target version with an unfinished block)
+    # is never started again; at the target version only a complete block or no status log at all is done.
+    in_progress = (f'units={UPGRADE_UNITS}\n'
+                   'if [ -n "$units" ]; then printf "units=%s\\n" "$units"; echo "result=in_progress"; exit 0; fi\n')
     return ("set -eu\n"
             "before=$(grep -E '^UFM_APPLIANCE=' /etc/ufm-release 2>/dev/null | head -n 1 | cut -d= -f2 || true)\n"
             'printf "before=%s\\n" "$before"\n'
-            f'if [ "$before" = {shlex.quote(version)} ]; then echo "result=already"; exit 0; fi\n'
+            + in_progress
+            + f'if [ "$before" = {shlex.quote(version)} ]; then\n'
+            + upgrade_block_lines("")
+            + '  case "$block" in none|complete) echo "result=already";; failed) echo "result=failed";; '
+              '*) echo "result=in_progress";; esac\n'
+              "  exit 0\n"
+              "fi\n"
             # No checksum (owner), but a file left by an interrupted or older download must not be
             # reused: keep it only when its size equals the server's Content-Length.
             f"remote_size=$(wget -q --spider -S {shlex.quote(url)} 2>&1 | awk 'tolower($1) == \"content-length:\" "
@@ -1544,10 +1606,17 @@ def upgrade_start_script(version: str, url: str) -> str:
             "state=$(systemctl is-active ufm-enterprise || true)\n"
             'printf "ufm_enterprise=%s\\n" "$state"\n'
             'case "$state" in active|activating|reloading) echo "result=ufm_enterprise_running"; exit 7;; esac\n'
-            'printf "started_at=%s\\n" "$(date +%Y%m%d-%H_%M_%S)"\n'
-            'systemd-run --quiet --unit "ufm-os-upgrade-$(date +%s)" /bin/bash -c '
-            f"{shlex.quote(command)}\n"
-            'echo "result=started"\n')
+            # again right before the start: nobody may have started one while this script downloaded
+            + in_progress
+            # I-008 expectation 1: apt's needrestart hook skips itself when NEEDRESTART_SUSPEND is set; the unit
+            # name and the boot id let the wait report the unit and the reboot (expectation 4)
+            + 'unit="ufm-os-upgrade-$(date +%s)"\n'
+              'printf "unit=%s\\n" "$unit"\n'
+              'printf "boot_id=%s\\n" "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"\n'
+              'printf "started_at=%s\\n" "$(date +%Y%m%d-%H_%M_%S)"\n'
+              'systemd-run --quiet --unit "$unit" --setenv=NEEDRESTART_SUSPEND=1 /bin/bash -c '
+            + f"{shlex.quote(command)}\n"
+              'echo "result=started"\n')
 
 
 def netplan_applied_script(backup: str) -> str:
@@ -1572,7 +1641,8 @@ def ipmi_getaccess_script(channel: int, uid: int) -> str:
 
 
 def upgrade_probe_script(url: str) -> str:
-    """Read-only: current appliance version, ufm-enterprise state and whether the image can be fetched."""
+    """Read-only: current appliance version, ufm-enterprise state and whether the image can be fetched; the
+    last block of the newest status log and the active upgrade units (I-008 expectation 2, v3.1.6 B2)."""
     if not re.fullmatch(r"http://[0-9.]+:[0-9]+/image/[A-Za-z0-9._+-]+", url):
         raise UfmError(f"镜像地址无效: {url!r}")
     image = "/root/" + url.rsplit("/", 1)[1]
@@ -1589,7 +1659,9 @@ def upgrade_probe_script(url: str) -> str:
             f"local_size=$(wc -c 2>/dev/null < {image} | tr -d ' ' || true)\n"
             'printf "remote_size=%s\\nlocal_size=%s\\n" "$remote_size" "$local_size"\n'
             'if [ -n "$local_size" ] && [ "$local_size" != 0 ] && [ -n "$remote_size" ] '
-            '&& [ "$local_size" = "$remote_size" ]; then echo image_local=reuse; else echo image_local=no; fi\n')
+            '&& [ "$local_size" = "$remote_size" ]; then echo image_local=reuse; else echo image_local=no; fi\n'
+            + upgrade_block_lines("")
+            + f'printf "units=%s\\n" "{UPGRADE_UNITS}"\n')
 
 
 def address_probe_command(vrf: str, interface: str, address: str) -> list:
@@ -2814,6 +2886,8 @@ class Session:
             result.facts["key_login"] = str(exc)
             self.say(f"    注意: 部署服务器暂时无法用公钥直连 {node.address}（{str(exc)[:160]}）；"
                      "公钥已写入，不影响后续步骤")
+            # v3.1.6 B2-O7: the warnings go to one list too; the review before HA shows them before the plan
+            result.facts.setdefault("attention", []).append(f"部署服务器暂时无法用公钥直连 {node.address}")
             return "WARN_NO_DIRECT_KEY_LOGIN"
 
     def config_line(self, node: UfmNode, result: NodeResult, step: str, path: str, key: str,
@@ -2822,6 +2896,7 @@ class Session:
             path, key, value, service, None, check_only=True)))
         if probe.get("result") == "service_missing":
             self.say(f"    注意: {service} 未安装，跳过 {key}")
+            result.facts.setdefault("attention", []).append(f"{service} 未安装，跳过 {key}")
             return "SKIPPED_SERVICE_MISSING"
         changes = ([f"{path} 中 {key}={value}（当前 {probe.get('before') or '未设置'}），重启 {service}"]
                    if probe.get("would_write") == "yes" else []) + (
@@ -2858,6 +2933,8 @@ class Session:
         result.facts["ntp_synchronized"] = probe.get("synced", "")
         if probe.get("synced") != "yes":
             self.say("    注意: NTP 尚未同步（timedatectl NTPSynchronized≠yes），请检查 NTP 服务器可达性")
+            result.facts.setdefault("attention", []).append(
+                "NTP 尚未同步（timedatectl NTPSynchronized≠yes），请检查 NTP 服务器可达性")
         if not self.plan.timezone:
             return "SKIPPED"
         if probe.get("would_timezone") != "yes":
@@ -3068,9 +3145,24 @@ class Session:
         self.say(f"  {node.hostname}: 升级检查（目标 UFM_APPLIANCE={version}）")
         probe = host.parse_kv(self.run_script(node, result, "upgrade-check", upgrade_probe_script(url)))
         result.facts["upgrade_before"] = probe.get("before", "")
+        # I-008 expectation 2 (v3.1.6 WP-2 table, first match wins): an active upgrade unit, then the target
+        # version with the last block complete or no status log (B2-O2), FAILED, unfinished; below the target
+        # an earlier run's PASSED or FAILED does not count and the upgrade starts as before.
+        if probe.get("units"):
+            raise UpgradeInProgress(f"升级单元 {probe['units']} 正在运行（UFM_APPLIANCE={probe.get('before') or '未知'}）；"
+                                    "不发起第二次升级，等它完成后再运行")
         if probe.get("before") == version:
-            self.say(f"    已是 UFM_APPLIANCE={version}，不升级")
-            return "UNCHANGED"
+            if probe.get("block") in ("complete", "none"):
+                self.say(f"    已是 UFM_APPLIANCE={version}，不升级")
+                return "UNCHANGED"
+            if probe.get("block") == "failed":
+                raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: {probe.get('failed')}；"
+                               "需人工处理，不重新发起升级")
+            raise UpgradeInProgress(
+                f"UFM_APPLIANCE 已是 {version}，但最近一次升级还没有完成：状态日志 {probe.get('status_log')} 从 "
+                f"{probe.get('started') or '-'} 的 STARTED 起，最后一步 {probe.get('last_step') or '-'}"
+                f"（设备时间 {probe.get('last_stamp') or '-'}），没有 UFM-OS-UPGRADE、UFM-OS-FIRSTBOOT 都 PASSED；"
+                "不按已完成处理，也不重新发起升级")
         if probe.get("image_remote") != "yes":
             # The start script re-checks the server size before reusing anything, so it needs the server too.
             raise UfmError(f"IMAGE_UNAVAILABLE: 无法从 {url} 获取镜像（wget --spider 失败）；不升级")
@@ -3090,17 +3182,32 @@ class Session:
         if facts.get("result") == "already":
             self.say(f"    已是 UFM_APPLIANCE={version}，不升级")
             return "UNCHANGED"
+        if facts.get("result") == "in_progress":   # found by the start script's own check, right before starting
+            raise UpgradeInProgress(f"启动前发现升级正在进行（{facts.get('units') or '最近一次升级还没有完成'}，"
+                                    f"UFM_APPLIANCE={facts.get('before') or '未知'}）；不发起第二次升级")
+        if facts.get("result") == "failed":
+            raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: {facts.get('failed')}；"
+                           "需人工处理，不重新发起升级")
         if facts.get("result") != "started" or not STAMP_RE.fullmatch(facts.get("started_at", "")):
             raise UfmError(f"升级未启动: {facts}")
         result.facts["upgrade_started_at"] = facts["started_at"]
-        self.wait_upgrade(node, result, version, facts["started_at"])
+        result.facts["upgrade_unit"] = facts.get("unit", "")
+        self.wait_upgrade(node, result, version, facts["started_at"], facts.get("unit", ""), facts.get("boot_id", ""))
         return "UPGRADED"
 
     PROGRESS_EVERY = 100   # seconds between progress lines while nothing else is printed
+    # I-008 expectation 4 (B2-O5 (a)): no new status line for this long while the unit is active and the
+    # device has not rebooted prints the read-only diagnostics once, then again after every further period.
+    UPGRADE_STALL_AFTER = 600
 
-    def wait_upgrade(self, node: UfmNode, result: NodeResult, version: str, since: str) -> None:
-        """Rule from the requirements: wait first, then probe every interval, with a hard limit."""
+    def wait_upgrade(self, node: UfmNode, result: NodeResult, version: str, since: str, unit: str,
+                     boot_id: str) -> None:
+        """Rule from the requirements: wait first, then probe every interval, with a hard limit. Each probe
+        prints the last step and its device time, the seconds since the status log last changed (this
+        server's monotonic clock), the unit's state and whether the boot id changed (I-008 expectation 4).
+        A stall is reported, never acted on: no early end, no process is stopped (B2-O5)."""
         initial, interval, limit = self.upgrade_wait
+        script, diagnose = upgrade_status_script(since, unit), upgrade_status_script(since, unit, diagnose=True)
         self.say(f"    [{clock()}] 升级已在设备上启动（完成后自动重启）；先等 {initial}s，之后每 {interval}s 探测，"
                  f"最长 {limit}s")
         started = time.monotonic()
@@ -3111,26 +3218,52 @@ class Session:
                 self.say(f"    [{clock()}] 等待升级：已等待 {int(time.monotonic() - started)}s / {initial}s，"
                          "之后开始探测")
         probe, last = 0, "未探测"
+        seen, changed, reported = None, time.monotonic(), None
         while True:
             probe += 1
             failed = ""
+            due = (time.monotonic() - changed >= self.UPGRADE_STALL_AFTER
+                   and (reported is None or time.monotonic() - reported >= self.UPGRADE_STALL_AFTER))
             try:
-                facts = host.parse_kv(self.run_script(node, result, f"upgrade-status-{probe}",
-                                                      upgrade_status_script(since)))
+                body = self.run_script(node, result, f"upgrade-status-{probe}", diagnose if due else script)
+                head, *diagnostics = body.split(UPGRADE_DIAG_MARK)
+                facts = host.parse_kv(head)
                 failed = facts.get("failed", "")
-                if not failed and facts.get("appliance") == version and facts.get("firstboot") == "PASSED":
+                rebooted = bool(boot_id) and facts.get("boot_id", "") not in ("", boot_id)
+                reboot = "已重启" if rebooted else "未重启" if boot_id else "是否重启未知"
+                if not failed and facts.get("appliance") == version and facts.get("block") == "complete":
                     result.facts["upgrade_after"] = version
                     result.facts["upgrade_status_log"] = facts.get("status_log", "")
                     self.say(f"    [{clock()}] 升级完成: UFM_APPLIANCE={version}，UFM-OS-FIRSTBOOT PASSED"
-                             f"（用时 {int(time.monotonic() - started)}s）")
+                             f"（用时 {int(time.monotonic() - started)}s，设备{reboot}）")
                     return
-                last = f"UFM_APPLIANCE={facts.get('appliance') or '-'} FIRSTBOOT={facts.get('firstboot') or '-'}"
+                step = (facts.get("last_step", ""), facts.get("last_stamp", ""))
+                if step != seen:
+                    seen, changed = step, time.monotonic()
+                state = facts.get("unit_state") or "-"
+                last = (f"UFM_APPLIANCE={facts.get('appliance') or '-'} FIRSTBOOT={facts.get('firstboot') or '-'}；"
+                        f"最后一步 {step[0] or '-'}（设备时间 {step[1] or '-'}），"
+                        f"{int(time.monotonic() - changed)}s 无进展；升级单元 {state}；{reboot}")
+                if (len(diagnostics) == 2 and state == "active" and not rebooted
+                        and time.monotonic() - changed >= self.UPGRADE_STALL_AFTER):
+                    reported = time.monotonic()
+                    self.say(f"    [{clock()}] 状态日志 {int(reported - changed)}s 没有进展，升级单元 {unit} 仍在运行、"
+                             f"设备未重启：卡在 {step[0] or '-'} 之后的阶段（只报告，不结束任何进程，照旧等到 {limit}s）")
+                    for title, text in (("systemctl list-jobs --no-pager", diagnostics[0]),
+                                        (f"systemctl status {unit} --no-pager（CGroup）", diagnostics[1])):
+                        self.say(f"      {title}:")
+                        for line in text.strip("\n").splitlines():
+                            self.say(f"        {line}")
+                    self.say("      只读排查：systemctl list-jobs --no-pager；pgrep -af '^systemctl restart'；"
+                             "cat /proc/mdstat（mdcheck_start 正在 start 时 needrestart 的 systemctl restart 会一直等它）；"
+                             "不要结束 apt-get，也不要停掉升级单元")
             except (UfmError, host.HostConfigError) as exc:
                 last = f"暂不可达（可能正在重启）: {str(exc)[:120]}"
             if failed:
                 raise UfmError(f"升级状态日志出现 FAILED: {failed}；详见设备 {UPGRADE_LOG} 与状态日志")
             if time.monotonic() - started >= limit:
-                raise UfmError(f"等待 {limit}s 仍未完成（{last}）；请登录设备查看 {UPGRADE_LOG}，不要重复启动升级")
+                raise UpgradeInProgress(f"等待 {limit}s 仍未完成（{last}）；请登录设备查看 {UPGRADE_LOG}；"
+                                        "可以重跑 config-upgrade：会先检测在途升级，不会重复启动")
             self.say(f"    [{clock()}] 探测 [{probe}] 已等待 {int(time.monotonic() - started)}s: {last}")
             time.sleep(interval)
 
@@ -3202,6 +3335,8 @@ class Session:
             return [self.stop(result, "HA_NOT_READY", str(exc)) for result in results.values()]
         if found:
             return self.ha_exists(found, master, nodes, results)
+        if not self.ha_review([master, standby], results, "ha-setup"):
+            return list(results.values())
         if (not self.ha_prepare(master, standby, results, defaults)
                 or not self.ha_configure(master, standby, results)):
             return list(results.values())
@@ -3236,6 +3371,34 @@ class Session:
             "要重新部署 HA，请先清除现有的 HA 配置，再运行 ha-setup --apply；"
             "如果确认当前 HA 正常，可直接运行 ha-post-config --apply 完成 HA 之后的配置")
         return list(results.values())
+
+    def ha_review(self, nodes: list, results: dict, command: str) -> bool:
+        """I-008 expectation 5 (owner 2026-11-01; v3.1.6 B2-O6, B2-O8): before any HA change, every configuration
+        step of check and the upgrade verdict, read-only, on both nodes, each on a scratch NodeResult so that
+        nothing lands in result.steps (written to facts["ha_review"]). A node that is not COMPLIANT (a WOULD_*
+        step, a failed step, UPGRADE_IN_PROGRESS, a deferred IPMI failure) is HA_NOT_READY with every item and
+        its detail, the peer WAITING_PEER. Warnings only go to facts["attention"] and do not block (B2-O7)."""
+        self.apply = False
+        try:
+            for node in nodes:
+                result = results[node.hostname]
+                self.say(f"  {node.hostname}: 只读复核配置和升级（与 check 相同；HA 之前两台都要完成 config-upgrade）")
+                scratch = NodeResult(node.hostname, result.role, password=result.password)
+                self.settle_deferred(self.run_steps(node, scratch, self.config_steps() + (("upgrade", self.step_upgrade),),
+                                                    "COMPLIANT"))
+                result.facts["ha_review"] = {"status": scratch.status, "detail": scratch.detail, "steps": scratch.steps}
+                result.facts.setdefault("attention", []).extend(scratch.facts.get("attention", []))
+                if scratch.status == "COMPLIANT":
+                    continue
+                items = [f"{step['step']} {step['outcome']}" + (f"：{step['detail']}" if step.get("detail") else "")
+                         for step in scratch.steps if step["outcome"].startswith("WOULD") or step["outcome"] == "FAILED"]
+                if scratch.status == "UPGRADE_IN_PROGRESS" or not items:
+                    items.append(f"{scratch.status}：{scratch.detail}")
+                self.stop(result, "HA_NOT_READY", f"配置或升级未完成：{'；'.join(items)}。"
+                                                  f"请先运行 config-upgrade --apply 完成配置和升级，再运行 {command} --apply")
+        finally:
+            self.apply = True
+        return not self.ha_blocked(results, "HA_NOT_READY", "对端的配置或升级未完成，本端不做 HA 改动")
 
     def ha_blocked(self, results: dict, status: str, detail: str) -> bool:
         if not any(result.status == status for result in results.values()):
@@ -3279,8 +3442,12 @@ class Session:
             return False
         running = [node for node in (master, standby)
                    if facts[node.hostname].get("ufm_enterprise") in RUNNING_STATES]
+        # v3.1.6 B2-O7: what the review only warned about is listed before the plan and does not block HA
+        notes = [f"{node.hostname}: {item}" for node in (master, standby)
+                 for item in dict.fromkeys(results[node.hostname].facts.get("attention", []))]
+        heading = "注意（不阻止 HA）：\n      " + "\n      ".join(notes) + "\n    " if notes else ""
         try:
-            self.authorize(master, self.ha_plan_text(master, standby, running, defaults))
+            self.authorize(master, heading + self.ha_plan_text(master, standby, running, defaults))
             for node in defaults:   # I-009: confirmed with the plan; nothing of HA has been changed yet
                 result = results[node.hostname]
                 self.say(f"  {node.hostname}: 停止 pacemaker 自带的默认单节点集群")
@@ -3664,6 +3831,8 @@ class Session:
         if problems:
             return [self.stop(result, "HA_NOT_READY", "HA 不正常，不做 ha-post-config: " + "; ".join(problems))
                     for result in results.values()]
+        if not self.ha_review(nodes, results, "ha-post-config"):   # v3.1.6 B2-O8: before any change
+            return list(results.values())
         promoted = ha_member(status["masters"][0], nodes)
         other = next(node for node in nodes if node is not promoted)
         done, _status = self.ha_post_config(promoted, other, results, status)
@@ -3692,6 +3861,8 @@ class Session:
                 outcome = action(node, result)
             except NotAuthorized as exc:
                 return self.stop(result, "NOT_AUTHORIZED", str(exc))
+            except UpgradeInProgress as exc:   # I-008 (B2-O3): a retry, not a failure that needs a person
+                return self.stop(result, "UPGRADE_IN_PROGRESS", str(exc))
             except (UfmError, host.HostConfigError) as exc:
                 result.steps.append({"step": step, "outcome": "FAILED", "detail": str(exc)})
                 if step in DEFERRED_FAILURE_STEPS:
@@ -3699,10 +3870,13 @@ class Session:
                     self.say(f"    [{step}] FAILED（不影响后续步骤，最后整台仍标为失败）: {exc}")
                     continue
                 return self.stop(result, f"STEP_FAILED_{step.upper()}", str(exc))
-            result.steps.append({"step": step, "outcome": outcome})
+            # the action of a WOULD_* step stays with it, so the review before HA can list it (I-008 expectation 5)
+            action = self.pending_action if outcome.startswith("WOULD") else ""
+            result.steps.append({"step": step, "outcome": outcome, **({"detail": action} if action else {})})
             self.say(f"    [{step}] {self.outcome_line(outcome)}")
         for item in result.facts.get("network_pending", []):
             self.say(f"    待验证: {item}")
+            result.facts.setdefault("attention", []).append(f"待验证: {item}")
         pending = [step["step"] for step in result.steps if step["outcome"].startswith("WOULD")]
         if pending:
             result.status = "NEEDS_CONFIGURATION"

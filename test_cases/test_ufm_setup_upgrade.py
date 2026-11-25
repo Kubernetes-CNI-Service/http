@@ -700,7 +700,7 @@ ufm_session(name, host, remote)
 
 # A stateful stand-in for the UFM host tools seen in ufm-manual.log; one file, dispatched by argv[0].
 FAKE_TOOL = r'''#!{python}
-import getpass, glob, hashlib, json, os, sys, tempfile, time
+import getpass, glob, hashlib, json, os, subprocess, sys, tempfile, time
 STATE = os.environ["FAKE_UFM_STATE"]
 MGMT = "eno8303"
 
@@ -731,7 +731,23 @@ def rewrite(text, base):
     for old in ("/tmp/", "/etc/netplan", "/etc/os-release", "/etc/systemd", "/etc/hosts", "/usr/share/zoneinfo",
                 "/sys/class/net", "/root/", "/etc/ufm-release", "/var/log/", "/etc/ssh/"):
         text = text.replace(old, base + old)
+    text = text.replace(BOOT_ID, base + ".boot_id")
     return text.replace("/opt/ufm/", shared_dir() + "/opt/ufm/")
+
+
+BOOT_ID = "/proc/sys/kernel/random/boot_id"
+
+
+def new_boot_id(base):
+    """The kernel's boot id (beside the sandbox, not in it); the fake reboot of the upgrade writes a new one."""
+    import uuid
+    with open(base + ".boot_id", "w") as handle:
+        handle.write(f"{uuid.uuid4()}\n")
+
+
+def unit_path(base, unit):
+    """Transient units started by the fake systemd-run: one file per unit holding active/inactive."""
+    return os.path.join(base + ".units", unit[:-len(".service")] if unit.endswith(".service") else unit)
 
 
 def prepare(name):
@@ -740,6 +756,8 @@ def prepare(name):
     base = base_dir(name)
     for sub in ("etc/netplan", "root", "var/log", "tmp"):
         os.makedirs(os.path.join(base, sub), exist_ok=True)
+    if not os.path.exists(base + ".boot_id"):
+        new_boot_id(base)
     with open(os.path.join(base, "etc/os-release"), "w") as handle:
         handle.write('PRETTY_NAME="Ubuntu 24.04.3 LTS"\n')
     os.makedirs(os.path.join(base, "etc/ssh"), exist_ok=True)
@@ -768,6 +786,35 @@ def prepare(name):
 
 def systemctl(state, item, args):
     unit = args[-1] if args else ""
+    base = base_dir(os.environ["FAKE_UFM_NAME"])
+    if args[:1] == ["is-active"] and unit.startswith("ufm-os-upgrade-"):
+        path = unit_path(base, unit)
+        active = open(path).read().strip() if os.path.exists(path) else "inactive"   # gone after the reboot
+        print(active)
+        return 0 if active == "active" else 3
+    if args[:1] == ["list-units"]:
+        import fnmatch
+        folder = base + ".units"
+        patterns = [arg for arg in args[1:] if not arg.startswith("--")] or ["*"]
+        for name in sorted(os.listdir(folder)) if os.path.isdir(folder) else []:
+            state_now = open(os.path.join(folder, name)).read().strip()
+            if (any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
+                    and ("--state=active" not in args or state_now == "active")):
+                print(f"{name}.service loaded {state_now} running /bin/bash -c ufm-os-upgrade.sh")
+        return 0
+    if args[:1] == ["list-jobs"]:
+        print(item.get("jobs", "No jobs running."))
+        if item.get("release_on_list_jobs"):   # stands in for the operator who frees the stuck upgrade
+            open(base + ".upgrade-released", "w").close()
+        return 0
+    if args[:1] == ["status"]:
+        unit = next(arg for arg in args[1:] if not arg.startswith("--"))
+        print(f"● {unit}.service - /bin/bash -c ufm-os-upgrade.sh\n     Active: active (running)\n"
+              f"     CGroup: /system.slice/{unit}.service\n"
+              "             ├─4101 /bin/bash ./ufm-os-upgrade.sh --appliance-sw-upgrade -r -y\n"
+              "             └─4242 apt-get -o Dpkg::Options::=--force-confold upgrade -y\n\n"
+              "Nov 01 09:29:51 ufm01 bash[4101]: Upgrading packages...")
+        return 0
     if args[:3] == ["show", "--property=LoadState", "--value"]:
         print("not-found" if unit in item.get("missing_units", []) else "loaded")
         return 0
@@ -976,6 +1023,7 @@ def ufm_os_upgrade(state, item, base, args):
     item["os_upgrade_runs"] = item.get("os_upgrade_runs", 0) + 1
     item["upgrade_saw_ufm_enterprise"] = item.get("services", {}).get("ufm-enterprise", "active")
     item["upgrade_tty"] = os.isatty(0)
+    item["upgrade_needrestart_suspend"] = os.environ.get("NEEDRESTART_SUSPEND")
     save(state)
     line("UFM_OS_UPGRADE", "STARTED")
     if item.get("upgrade_hangs"):
@@ -984,10 +1032,21 @@ def ufm_os_upgrade(state, item, base, args):
         line("APPLIANCE-UPGRADE", "FAILED")
         return 1
     line("APPLIANCE-UPGRADE", "PASSED")
+    line("TELEMETRY-REQUIREMENTS-UPGRADE", "PASSED")
+    if item.get("upgrade_stuck_after") == "TELEMETRY-REQUIREMENTS-UPGRADE":
+        # I-008: needrestart's `systemctl restart` waits on mdcheck_start; the upgrade goes on once released
+        released = base + ".upgrade-released"
+        deadline = time.monotonic() + 30
+        while not os.path.exists(released):
+            if time.monotonic() > deadline:
+                return 1
+            time.sleep(0.1)
+    line("PACKAGES-UPGRADE", "PASSED")
     line("UFM-OS-UPGRADE", "PASSED")
     state = load()
     state["ufms"][os.environ["FAKE_UFM_NAME"]]["down_sessions"] = 2   # the reboot: next two logins time out
     save(state)
+    new_boot_id(base)
     release = os.path.join(base, "etc/ufm-release")
     text = open(release).read() if os.path.exists(release) else ""
     kept = [entry for entry in text.splitlines() if not entry.startswith("UFM_APPLIANCE=")]
@@ -1000,22 +1059,34 @@ def ufm_os_upgrade(state, item, base, args):
     return 0
 
 
-def systemd_run(args):
-    index, delay = 0, 0
+def systemd_run(args, base):
+    index, delay, unit, env = 0, 0, "", dict(os.environ)
     while index < len(args) and args[index].startswith("--"):
         if args[index] == "--unit":
             index += 1
+            unit = args[index]
         elif args[index].startswith("--on-active="):
             delay = int(args[index].split("=", 1)[1])
+        elif args[index].startswith("--setenv="):
+            key, _sep, value = args[index][len("--setenv="):].partition("=")
+            env[key] = value
         index += 1
     command = args[index:]
+    if unit:
+        os.makedirs(os.path.dirname(unit_path(base, unit)), exist_ok=True)
+        with open(unit_path(base, unit), "w") as handle:
+            handle.write("active\n")
     if os.fork() == 0:
         os.setsid()
         null = os.open(os.devnull, os.O_RDWR)
         for descriptor in (0, 1, 2):
             os.dup2(null, descriptor)
         time.sleep(delay)
-        os.execvp(command[0], command)
+        code = subprocess.call(command, env=env)
+        if unit:
+            with open(unit_path(base, unit), "w") as handle:
+                handle.write("inactive\n")
+        os._exit(code)
     return 0
 
 
@@ -1331,7 +1402,7 @@ def main():
     if tool == "ufm-fake-os-upgrade":
         return ufm_os_upgrade(state, item, base, args)
     if tool == "systemd-run":
-        return systemd_run(args)
+        return systemd_run(args, base)
     if tool == "arping" and "-D" in args:
         return 1 if args[-1] in state.get("lan_hosts", {}) else 0   # DAD: 0 means nobody answered
     if tool == "ibstat":
@@ -2373,17 +2444,24 @@ class ConfiguredPairCase(PhasesCase):
                     ("dns", "UNCHANGED"), ("dns_domains", "UNCHANGED"), ("ntp", "UNCHANGED"),
                     ("timezone", "UNCHANGED"), ("hosts", "UNCHANGED"))
 
-    def make_upgraded(self):
+    def make_upgraded(self, status_log=UPGRADE_STATUS_LOG_COMPLETE):
         """Both nodes already upgraded to the target version of global (v3.1.6 WP-1, shared with B2):
         UFM_APPLIANCE in /etc/ufm-release and one complete status log, steps and layout as ufm-manual.log
-        662-677 records them (STARTED ... UFM-OS-UPGRADE PASSED, the reboot, ... UFM-OS-FIRSTBOOT PASSED)."""
+        662-677 records them (STARTED ... UFM-OS-UPGRADE PASSED, the reboot, ... UFM-OS-FIRSTBOOT PASSED).
+        B2 passes a partial log (an upgrade still under way) or None (no status log at all)."""
         state = (json.loads(self.state_path.read_text()) if self.state_path.exists()
                  else dict(self.state, image_url=IMAGE_URL))
-        files = {"etc/ufm-release": UFM_RELEASE_SHIPPED.replace("UFM_APPLIANCE=2.3.1-8", "UFM_APPLIANCE=2.6.1-8"),
-                 "var/log/ufm_os_upgrade_26.07.24-9_status.log": UPGRADE_STATUS_LOG_COMPLETE}
+        files = {"etc/ufm-release": UFM_RELEASE_SHIPPED.replace("UFM_APPLIANCE=2.3.1-8", "UFM_APPLIANCE=2.6.1-8")}
+        if status_log is not None:
+            files["var/log/ufm_os_upgrade_26.07.24-9_status.log"] = status_log
         for name in ("ufm01", "ufm02"):
             item = state["ufms"][name]
             item["files"].update(files)
+            # config-upgrade --apply also leaves the IPMI admin user with the root new password (owner
+            # 2026-10-19), which the read-only review before HA checks (v3.1.6 B2, 问题文档 I-008 期望 5)
+            item["ipmi"]["users"]["3"] = {"name": "admin", "link": True, "ipmi": True,
+                                         "priv": "ADMINISTRATOR", "enabled": True}
+            item["ipmi"]["passwords"]["3"] = self.NEW
             if item.get("seeded"):   # the fake writes item["files"] into the sandbox only once
                 for relative, text in files.items():
                     path = self.sandbox / name / relative
@@ -2636,10 +2714,85 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
             self.state["ufms"][name]["upgrade_hangs"] = True
         results, state, _calls, _logs = self.run_login(action="config_upgrade_all", upgrade_wait=(0, 1, 2))
         for name in ("ufm01", "ufm02"):
-            self.assertEqual(results[name].status, "STEP_FAILED_UPGRADE")
+            # v3.1.6 B2-O3 (R-012 设计 :297 等待超时可改为重试、:594 启动升级前检测在途升级): a retry, not a FAILED line
+            self.assertEqual(results[name].status, "UPGRADE_IN_PROGRESS")
             self.assertIn("等待 2s 仍未完成", results[name].detail)
             self.assertIn("UFM_APPLIANCE=2.3.1-8", results[name].detail)
             self.assertEqual(state["ufms"][name]["os_upgrade_runs"], 1)
+
+    def test_a_half_done_upgrade_at_the_target_version_is_neither_compliant_nor_restarted(self):
+        # 问题文档 I-008 期望 2 and 验收 (direct): UFM_APPLIANCE is written right after APPLIANCE-UPGRADE, long
+        # before the reboot; then check must not report COMPLIANT and config-upgrade neither skips nor restarts.
+        self.make_upgraded(status_log="".join(UPGRADE_STATUS_LOG_COMPLETE.splitlines(True)[:3]))
+        checked, _state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(checked[name].status, "UPGRADE_IN_PROGRESS", checked[name].detail)
+            self.assertIn("APPLIANCE-UPGRADE", checked[name].detail)
+        with tempfile.TemporaryDirectory() as tmp:
+            code = ufm.summarize(ufm.parse_args(["check"]), list(checked.values()), Path(tmp), lambda _text: None)
+        self.assertEqual(code, 1)
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(results[name].status, "UPGRADE_IN_PROGRESS", results[name].detail)
+            self.assertIn("APPLIANCE-UPGRADE", results[name].detail)
+            self.assertNotIn("wget", state["ufms"][name])
+            self.assertNotIn("os_upgrade_runs", state["ufms"][name])
+
+    def test_the_upgrade_unit_carries_needrestart_suspend(self):
+        # 问题文档 I-008 期望 1: systemd-run --setenv=NEEDRESTART_SUSPEND=1 (the fake passes it to the upgrade;
+        # that the device passes it on to apt-get is the real-environment card's job)
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(results[name].status, "UPGRADED", results[name].detail)
+            self.assertEqual(state["ufms"][name]["upgrade_needrestart_suspend"], "1")
+
+    def test_a_stuck_upgrade_is_reported_then_finishes_after_it_is_released(self):
+        # 问题文档 I-008 期望 4 and 验收 (workflow): stuck in needrestart after TELEMETRY-REQUIREMENTS-UPGRADE with
+        # mdcheck_start running -> released by hand -> reboot -> FIRSTBOOT; config-upgrade waits and decides.
+        item = self.state["ufms"]["ufm01"]
+        item.update(upgrade_stuck_after="TELEMETRY-REQUIREMENTS-UPGRADE", release_on_list_jobs=True,
+                    jobs="JOB  UNIT                  TYPE  STATE\n4242 mdcheck_start.service start running\n\n"
+                         "1 jobs listed.")
+        with mock.patch.object(ufm.Session, "UPGRADE_STALL_AFTER", 1):
+            results, state, _calls, logs = self.run_login(action="config_upgrade_all", upgrade_wait=(0, 1, 20))
+        self.assertEqual(results["ufm01"].status, "UPGRADED", results["ufm01"].detail)
+        self.assertEqual(state["ufms"]["ufm01"]["os_upgrade_runs"], 1)
+        self.assertRegex(logs, r"最后一步 TELEMETRY-REQUIREMENTS-UPGRADE（设备时间 \d{8}-\d{2}_\d{2}_\d{2}），\d+s 无进展")
+        self.assertIn("升级单元 active", logs)
+        self.assertIn("4242 mdcheck_start.service start running", logs)
+        self.assertIn("卡在 TELEMETRY-REQUIREMENTS-UPGRADE 之后的阶段", logs)
+        self.assertIn("ufm-os-upgrade.sh --appliance-sw-upgrade", logs, "the CGroup of the upgrade unit")
+        self.assertIn("pgrep -af '^systemctl restart'", logs, "the read-only commands of the field workaround")
+        self.assertIn("已重启", logs, "the boot id changed after the release")
+        for line in logs.splitlines():
+            if "探测 [" in line:
+                self.assertRegex(line, r"\[\d{2}:\d{2}:\d{2}\] ")
+
+    def test_a_second_run_during_an_upgrade_does_not_start_another(self):
+        # 问题文档 I-008 期望 2; R-012 设计 :594 (启动升级前检测在途升级): an active ufm-os-upgrade-* unit
+        item = self.state["ufms"]["ufm01"]
+        item["os_upgrade_runs"] = 1
+        (self.sandbox / "ufm01.units").mkdir(parents=True)
+        (self.sandbox / "ufm01.units/ufm-os-upgrade-1761900000").write_text("active\n")
+        checked, _state, _calls, _logs = self.run_login(action="check", apply=False)
+        self.assertEqual(checked["ufm01"].status, "UPGRADE_IN_PROGRESS", checked["ufm01"].detail)
+        self.assertIn("ufm-os-upgrade-1761900000", checked["ufm01"].detail)
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        self.assertEqual(results["ufm01"].status, "UPGRADE_IN_PROGRESS", results["ufm01"].detail)
+        self.assertEqual(state["ufms"]["ufm01"]["os_upgrade_runs"], 1)
+        self.assertNotIn("wget", state["ufms"]["ufm01"])
+        self.assertEqual(results["ufm02"].status, "UPGRADED", results["ufm02"].detail)
+
+    def test_a_device_shipped_at_the_target_version_is_up_to_date(self):
+        # B2-O2 (v3.1.6 指导 3.2): at the target version without any status log the upgrade is done
+        self.make_upgraded(status_log=None)
+        checked, _state, _calls, _logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(dict(self.outcomes(checked[name]))["upgrade"], "UNCHANGED", checked[name].detail)
+        results, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(self.outcomes(results[name])[-1], ("upgrade", "UNCHANGED"), results[name].detail)
+            self.assertNotIn("os_upgrade_runs", state["ufms"][name])
 
     def test_missing_image_stops_before_ufm_enterprise_is_touched(self):
         self.state["image_url"] = "http://198.51.103.200:8088/image/other.tar"
@@ -2681,6 +2834,9 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
         self.state_path.write_text(json.dumps(state))
 
     def test_ha_setup_stops_at_a_real_blocker_and_changes_nothing(self):
+        # v3.1.6 B2 (问题文档 I-008 期望 5): both nodes have finished config-upgrade, so the real blocker is
+        # still the IB LinkUp (the service stays active, no LinkUp)
+        self.make_upgraded()
         results, state, _calls, _logs = self.run_login(action="ha_setup")
         for name in ("ufm01", "ufm02"):
             self.assertEqual(results[name].status, "HA_NOT_READY")
@@ -2956,6 +3112,49 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
                 self.assertNotIn(key, state["ufms"][name])
         self.assertFalse((self.sandbox / "ufm01/root/.ssh/id_ed25519").exists(), "no trust either")
 
+    def test_ha_setup_refuses_until_config_upgrade_has_finished_on_both(self):
+        # 问题文档 I-008 期望 5 and 验收 (direct + workflow): a hostname reset to localhost stops ha-setup before
+        # any HA change on both; once config-upgrade has corrected it, ha-setup passes.
+        self.make_ha_ready()
+        state = json.loads(self.state_path.read_text())
+        state["ufms"]["ufm02"]["hostname"] = "localhost"
+        self.state_path.write_text(json.dumps(state))
+        results, state, _calls, _logs = self.run_login(action="ha_setup")
+        self.assertEqual(results["ufm02"].status, "HA_NOT_READY", results["ufm02"].detail)
+        self.assertIn("hostname", results["ufm02"].detail)
+        self.assertIn("请先运行 config-upgrade --apply 完成配置和升级，再运行 ha-setup --apply", results["ufm02"].detail)
+        self.assertEqual(results["ufm01"].status, "WAITING_PEER", results["ufm01"].detail)
+        for name in ("ufm01", "ufm02"):
+            for key in ("ha_config_calls", "systemctl", "pcs_calls"):
+                self.assertNotIn(key, state["ufms"][name])
+            self.assertEqual(results[name].steps, [], "the review is reported in facts, not as steps")
+        self.assertIn("ha_review", results["ufm02"].facts)
+        self.assertFalse((self.sandbox / "ufm01/root/.ssh/id_ed25519").exists(), "no trust either")
+
+        fixed, state, _calls, _logs = self.run_login(action="config_upgrade_all")
+        self.assertEqual(state["ufms"]["ufm02"]["hostname"], self.U2, fixed["ufm02"].detail)
+        again, _state, _calls, _logs = self.run_login(action="ha_setup")
+        self.assertEqual({item.status for item in again.values()}, {"HA_CONFIGURED"},
+                         {name: item.detail for name, item in again.items()})
+
+    def test_warnings_do_not_block_ha_but_are_listed_before_the_confirmation(self):
+        # B2-O7 (问题文档 I-008 期望 5, the default for warnings): NTP not synchronised does not block HA; it is
+        # listed before the HA plan in the one confirmation.
+        self.make_ha_ready()
+        state = json.loads(self.state_path.read_text())
+        state["ufms"]["ufm01"]["ntp_synced"] = "yes"
+        state["ufms"]["ufm02"]["ntp_synced"] = "no"
+        self.state_path.write_text(json.dumps(state))
+        asked = []
+        results, _state, _calls, _logs = self.run_login(
+            action="ha_setup", confirm=lambda host, action: asked.append(action) or True)
+        self.assertEqual({item.status for item in results.values()}, {"HA_CONFIGURED"},
+                         {name: item.detail for name, item in results.items()})
+        self.assertEqual(len(asked), 1)
+        self.assertIn(f"{self.U2}: NTP 尚未同步", asked[0])
+        self.assertNotIn(f"{self.U1}: NTP 尚未同步", asked[0])
+        self.assertLess(asked[0].index("NTP 尚未同步"), asked[0].index("HA 部署"))
+
     def test_without_a_target_version_ha_setup_ends_before_any_device_contact(self):
         # Owner 11-03 (需求文档 :753, :757; R-012 设计 :240, :244): no servers.ufm.version in global, no HA.
         (self.inputs / "01-global.yaml").write_text(GLOBAL.replace('      version: "2.6.1-8"\n', ""), encoding="utf-8")
@@ -2986,6 +3185,7 @@ class HaPostConfigTest(ConfiguredPairCase):
         master["services"]["ufm-enterprise"] = "active"
         (self.files / "log/opensm-smdb.dump").write_text('0x0200000000000a01, VALID    , MAIN     ,    0, "smi0:1"\n')
         self.state_path.write_text(json.dumps(state))
+        self.make_upgraded()   # v3.1.6 B2-O8 (问题文档 I-008 期望 5): an HA pair has finished config-upgrade
 
     def add_ib_rows(self, *names):
         with (self.inputs / "ib.csv").open("a", encoding="utf-8") as handle:
@@ -3094,6 +3294,20 @@ class HaPostConfigTest(ConfiguredPairCase):
             self.assertIn("Host key verification failed", results[name].detail)
         self.assertEqual((self.files / "conf/gv.cfg").read_text(), GV_CFG_SHIPPED)
         self.assertNotIn("failovers", state["ha"])
+
+    def test_ha_post_config_first_checks_the_configuration(self):
+        # B2-O8 (问题文档 I-008 期望 5, the default for ha-post-config): the same read-only review after the HA
+        # state check and before any change; a node with DNS to change stops it, gv.cfg unchanged, no failover.
+        self.state["ufms"]["ufm02"]["files"]["etc/systemd/resolved.conf"] = UBUNTU_RESOLVED
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual(results["ufm02"].status, "HA_NOT_READY", results["ufm02"].detail)
+        self.assertIn("dns", results["ufm02"].detail)
+        self.assertIn("请先运行 config-upgrade --apply", results["ufm02"].detail)
+        self.assertEqual(results["ufm01"].status, "WAITING_PEER", results["ufm01"].detail)
+        self.assertEqual((self.files / "conf/gv.cfg").read_text(), GV_CFG_SHIPPED)
+        self.assertNotIn("failovers", state["ha"])
+        self.assertEqual(state["ha"]["master"], "ufm01")
 
     def test_no_running_ha_means_no_post_config(self):
         results, _state, _calls, _logs = self.run_login(action="ha_post_config_command")
@@ -4037,7 +4251,9 @@ class UpgradeScriptTest(unittest.TestCase):
     def test_status_lines_before_this_run_are_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "status.log"
+            # every block of a real status log starts with this run's STARTED line (ufm-manual.log :662)
             log.write_text("20250101-00_00_00: APPLIANCE-UPGRADE   [FAILED    ]\n"
+                           "20261019-12_55_39: UFM_OS_UPGRADE      [STARTED   ]\n"
                            "20261019-13_06_46: UFM-OS-UPGRADE      [PASSED    ]\n"
                            "20261019-13_18_58: UFM-OS-FIRSTBOOT    [PASSED    ]\n")
             script = ufm.upgrade_status_script("20261019-12_55_39").replace(
@@ -4061,6 +4277,126 @@ class UpgradeScriptTest(unittest.TestCase):
             ufm.upgrade_start_script("2.6.1-5", "http://evil/$(reboot)")
         with self.assertRaises(ufm.UfmError):
             ufm.image_name("2.6.1-5; reboot")
+
+    # ---- v3.1.6 B2 (问题文档 I-008): the status log block of this run, needrestart, in-progress detection
+
+    LINE = "{}: {:<36}[{:<10}]\n"
+    IMAGE = "http://198.51.103.200:8088/image/ufm-appliance-2.6.1-8-omu.x86_64.tar"
+
+    def on_device(self, script, status_log=None, version="2.6.1-8", active_units=()):
+        """Run a generated read-only script locally: the status log, /etc/ufm-release and the boot id live in
+        a temporary directory; `systemctl` answers for the given active upgrade units, `wget` always fails
+        and records its calls. Returns the k=v facts and the wget calls."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "var/log").mkdir(parents=True)
+            if status_log is not None:
+                (root / "var/log/ufm_os_upgrade_26.07.24-9_status.log").write_text(status_log)
+            (root / "ufm-release").write_text(f"UFM_OS=26.07.24-9\nUFM_APPLIANCE={version}\n")
+            (root / "boot_id").write_text("b2-test-boot-id-before-the-upgrade\n")
+            shim = root / "bin"
+            shim.mkdir()
+            (shim / "systemctl").write_text(
+                "#!/bin/sh\nactive='" + " ".join(active_units) + "'\n"
+                'case "$1" in\n'
+                '  is-active) for u in $active; do [ "$u" = "$2" ] && { echo active; exit 0; }; done; '
+                "echo inactive; exit 3;;\n"
+                '  list-units) for u in $active; do echo "$u.service loaded active running x"; done; exit 0;;\n'
+                "  *) exit 1;;\nesac\n")
+            (shim / "wget").write_text(f"#!/bin/sh\necho \"$*\" >> {root}/wget.calls\nexit 4\n")
+            for tool in ("systemctl", "wget"):
+                (shim / tool).chmod(0o755)
+            text = (script.replace("/var/log/ufm_os_upgrade_*_status.log",
+                                   f"{root}/var/log/ufm_os_upgrade_*_status.log")
+                    .replace("/etc/ufm-release", f"{root}/ufm-release")
+                    .replace("/proc/sys/kernel/random/boot_id", f"{root}/boot_id")
+                    .replace("/root/", f"{root}/"))
+            env = dict(os.environ, PATH=f"{shim}{os.pathsep}{os.environ['PATH']}")
+            out = subprocess.run(["bash", "-c", text], text=True, capture_output=True, env=env, timeout=60).stdout
+            calls = (root / "wget.calls").read_text().splitlines() if (root / "wget.calls").exists() else []
+        return dict(line.split("=", 1) for line in out.splitlines() if "=" in line), calls
+
+    def test_the_upgrade_unit_runs_with_needrestart_suspended(self):
+        # 问题文档 I-008 期望 1 and 验收: systemd-run --setenv=NEEDRESTART_SUSPEND=1, as one argument
+        script = ufm.upgrade_start_script("2.6.1-8", self.IMAGE)
+        start = script.index("systemd-run")
+        self.assertLess(start, script.index("--setenv=NEEDRESTART_SUSPEND=1"))
+        self.assertLess(script.index("--setenv=NEEDRESTART_SUSPEND=1"), script.index("/bin/bash -c"))
+        self.assertEqual(subprocess.run(["bash", "-n"], input=script, text=True).returncode, 0)
+        self.assertNotIn("sha256", script.lower(), "owner: no image checksum")
+
+    def test_this_runs_block_counts_even_after_the_clock_went_back(self):
+        # 问题文档 I-008 期望 3 and 验收: the block starts at this run's STARTED line; a FIRSTBOOT stamped before
+        # started_at (NTP set the clock back during the reboot) still completes it.
+        log = (self.LINE.format("20261101-12_27_00", "UFM_OS_UPGRADE", "STARTED")
+               + self.LINE.format("20261101-12_29_00", "APPLIANCE-UPGRADE", "PASSED")
+               + self.LINE.format("20261101-13_12_42", "UFM-OS-UPGRADE", "PASSED")
+               + self.LINE.format("20261101-10_25_10", "UFMCLI-UPGRADE", "PASSED")
+               + self.LINE.format("20261101-10_25_10", "UFM-OS-FIRSTBOOT", "PASSED"))
+        facts, _calls = self.on_device(ufm.upgrade_status_script("20261101-12_26_58"), log)
+        self.assertEqual((facts.get("firstboot"), facts.get("failed")), ("PASSED", ""))
+
+    def test_a_previous_runs_lines_never_decide(self):
+        # 问题文档 I-008 验收: a PASSED or FAILED of an earlier run, before this run's STARTED, does not count,
+        # even when its timestamps are later (that run had a clock running ahead).
+        log = (self.LINE.format("20261102-09_00_00", "UFM_OS_UPGRADE", "STARTED")
+               + self.LINE.format("20261102-09_01_00", "APPLIANCE-UPGRADE", "FAILED")
+               + self.LINE.format("20261102-10_00_00", "UFM_OS_UPGRADE", "STARTED")
+               + self.LINE.format("20261102-10_20_00", "UFM-OS-UPGRADE", "PASSED")
+               + self.LINE.format("20261102-10_32_00", "UFM-OS-FIRSTBOOT", "PASSED")
+               + self.LINE.format("20261101-07_00_01", "UFM_OS_UPGRADE", "STARTED"))
+        facts, _calls = self.on_device(ufm.upgrade_status_script("20261101-07_00_00"), log)
+        self.assertEqual((facts.get("firstboot"), facts.get("failed")), ("", ""))
+
+    def test_the_probe_reports_an_incomplete_block(self):
+        # 问题文档 I-008 期望 2: check reads the last block of the newest status log (no `since`)
+        complete = (self.LINE.format("20261019-12_55_39", "UFM_OS_UPGRADE", "STARTED")
+                    + self.LINE.format("20261019-12_57_59", "APPLIANCE-UPGRADE", "PASSED")
+                    + self.LINE.format("20261019-13_06_46", "UFM-OS-UPGRADE", "PASSED")
+                    + self.LINE.format("20261019-13_18_58", "UFM-OS-FIRSTBOOT", "PASSED"))
+        partial = "".join(complete.splitlines(True)[:2])
+        probe = ufm.upgrade_probe_script(self.IMAGE)
+        facts, _calls = self.on_device(probe, partial)
+        self.assertEqual((facts.get("block"), facts.get("last_step"), facts.get("started")),
+                         ("incomplete", "APPLIANCE-UPGRADE", "20261019-12_55_39"))
+        facts, _calls = self.on_device(probe, complete)
+        self.assertEqual((facts.get("block"), facts.get("firstboot"), facts.get("os_upgrade")),
+                         ("complete", "PASSED", "PASSED"))
+        facts, _calls = self.on_device(probe, None)
+        self.assertEqual((facts.get("block"), facts.get("status_log")), ("none", ""))
+        facts, _calls = self.on_device(probe, complete, active_units=("ufm-os-upgrade-1761900000",))
+        self.assertEqual(facts.get("units"), "ufm-os-upgrade-1761900000.service")
+
+    def test_the_status_script_reports_step_unit_and_boot_id(self):
+        # 问题文档 I-008 期望 4: the last step and its device time, the unit started by this run, the boot id
+        log = (self.LINE.format("20261101-09_04_10", "UFM_OS_UPGRADE", "STARTED")
+               + self.LINE.format("20261101-09_06_30", "APPLIANCE-UPGRADE", "PASSED")
+               + self.LINE.format("20261101-09_29_51", "TELEMETRY-REQUIREMENTS-UPGRADE", "PASSED"))
+        script = ufm.upgrade_status_script("20261101-09_04_09", "ufm-os-upgrade-1761987849")
+        facts, _calls = self.on_device(script, log, active_units=("ufm-os-upgrade-1761987849",))
+        self.assertEqual((facts.get("last_step"), facts.get("last_stamp")),
+                         ("TELEMETRY-REQUIREMENTS-UPGRADE", "20261101-09_29_51"))
+        self.assertEqual(facts.get("unit_state"), "active")
+        self.assertEqual(facts.get("boot_id"), "b2-test-boot-id-before-the-upgrade")
+        self.assertEqual(facts.get("firstboot"), "")
+        with self.assertRaises(ufm.UfmError):
+            ufm.upgrade_status_script("20261101-09_04_09", "ufm-os-upgrade-1; reboot")
+        self.assertEqual(subprocess.run(["bash", "-n"], input=script, text=True).returncode, 0)
+        for write in (r"\brm\b", r"\bmv\b", r"\bcp\b", r"\btee\b", r"\btouch\b", r"\bkill\b",
+                      r"systemctl (stop|start|restart|kill)", r"(?<![0-9&])>>?\s*/(?!dev/null)"):
+            self.assertNotRegex(script, write, "the status script stays read-only")
+
+    def test_the_start_script_does_not_start_while_an_upgrade_is_under_way(self):
+        # 问题文档 I-008 期望 2 and R-012 设计 :594 (启动升级前检测在途升级): an active upgrade unit, or the target
+        # version with an incomplete block, ends the start script before any download
+        script = ufm.upgrade_start_script("2.6.1-8", self.IMAGE)
+        started = self.LINE.format("20261101-09_04_10", "UFM_OS_UPGRADE", "STARTED")
+        facts, calls = self.on_device(script, started, version="2.3.1-8",
+                                      active_units=("ufm-os-upgrade-1761987849",))
+        self.assertEqual((facts.get("result"), calls), ("in_progress", []))
+        facts, calls = self.on_device(script, started + self.LINE.format("20261101-09_06_30", "APPLIANCE-UPGRADE",
+                                                                         "PASSED"))
+        self.assertEqual((facts.get("result"), calls), ("in_progress", []))
 
 
 if __name__ == "__main__":

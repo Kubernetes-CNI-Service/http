@@ -2860,6 +2860,31 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - 风险同 `TC-REAL-UFM-HA-SETUP-001`（master 的 config 会清空 `/opt/ha_data`、格式化 DRBD）；现有两台已做好 HA，这张卡要等下一对新 UFM。
   - 未执行前保持 NOT RUN，不得写 PASS。
 
+## TC-REAL-UFM-UPGRADE-001 — ufm-setup-upgrade 的升级：needrestart、本次完成判定、在途检测、卡住时的输出（I-008）
+
+- Case ID：`TC-REAL-UFM-UPGRADE-001`；类型：real-environment / destructive（升级会重启、刷 BIOS）；状态：**OPEN / NOT RUN**。
+- 本机先决：`test_cases.test_ufm_setup_upgrade` 中 `UpgradeScriptTest`、`SimulatedUpgradeAndHaTest` 全部通过。替身 GREEN 不等于现场验收：替身只证明 `systemd-run --setenv` 进了替身升级的环境，设备上是否一路传到 apt-get 只能在这里核实。
+- 依据：问题文档 I-008（owner 2026-11-01 现场发现）；v3.1.6 指导 WP-2、5.3、第 7 节第 4、5 条。
+- 前置条件：
+  - 至少一台 UFM 低于 global 的 `servers.ufm.version`，部署服务器的 `image/` 有对应镜像；
+  - owner 书面授权维护窗口；执行人 owner 或现场人员，验证 AI 只读核验（分栏写执行人、核验人，没人执行的步骤标「未执行」、不算通过）；
+  - 升级前记录：`/etc/ufm-release`、`ls -l /var/log/ufm_os_upgrade_*_status.log`、`cat /proc/sys/kernel/random/boot_id`、`timedatectl`。
+- 步骤与预期：
+  0. （不碰设备）附上落地前 B2-O11 (a) 的核对结果：从镜像 tar 里只读取出 `ufm-os-upgrade.sh`，查它调 `apt-get` 时会不会清环境（`env -i`、`sudo -i`、`su -` 一类）；没做过就在这里做，会清就停下报 http dev。
+  1. `check`：这台的 `upgrade` 是 `WOULD_CHANGE`。
+  2. `config-upgrade --apply`；进入 Upgrading packages 后在设备上只读执行 `systemctl show -p Environment <单元>`（应含 `NEEDRESTART_SUSPEND=1`）、读 apt-get 进程的环境（`NEEDRESTART_SUSPEND` 应为 1）、`pgrep -af '^systemctl restart'`（应为空）。
+  3. 升级期间在另一个终端跑 `check`：`UPGRADE_IN_PROGRESS`；再跑一次 `config-upgrade --apply`：`UPGRADE_IN_PROGRESS`，不下载、设备上只有一个升级单元。
+  4. 第一个终端的探测行有最后一步、多久没有进展、单元 active、重启后 boot id 变化（「已重启」）；结果 `UPGRADED`；再跑一次 `UP_TO_DATE`。
+  5. 升级后再列一次状态日志文件：同一份追加还是新建一份、旧段还在不在（B2-O1、B2-O2 的残余风险）。
+  6. 维护窗口尽量排在当月第一个周日起的那几天（`mdcheck_start.timer` 在每月 1～7 日的周日起）；碰上 mdcheck 正在运行时记下升级没有卡住。不为验证手工启动 mdcheck、不为验证给设备加负载（对问题文档「在 mdcheck 正在运行时做升级」的有意收窄）。
+  7. 重启后 NTP 同步、时钟跳变时记下仍判成完成。
+- 不允许的副作用：第二个升级单元；结束 apt-get 或升级单元。
+- 证据：部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 的 `report.log`、`result.json`；状态日志副本（主机名、地址脱敏）；第 2 步三条命令的输出；第 5 步的文件清单。
+- 清理与风险：
+  - 升级本身不回滚；卡住时照问题文档 I-008「现场临时处理」（不结束 apt-get、不停升级单元）。
+  - 风险：升级重启和刷 BIOS 期间 UFM 服务中断；prod 改动要 owner 授权。
+  - 未执行前保持 NOT RUN，不得写 PASS。
+
 ## TC-REAL-UFM-MONITOR-001 — UFM 监控采集、降级、failover 期间的取回、保留期与日志轮转
 
 - Case ID：`TC-REAL-UFM-MONITOR-001`；类型：real-environment / collection / failover；状态：**BLOCKED / NOT RUN**。前提是 setup 已建 `infiniband/monitor/{ufm-info,ufm-ibdiagnet,01-global.yaml,99-output-p2p}` 链接（2026-10-22 起 setup 会建立，见 `infiniband/monitor/UFM-MONITOR.md` 14.3；已部署的服务器要先重跑一次 setup）。

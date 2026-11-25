@@ -212,6 +212,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 5. 结果：
    - 全部符合为 `COMPLIANT`，退出码 0。
    - 有需要改动的为 `NEEDS_CONFIGURATION`，或者有新设备 `NEW_DEVICE`，退出码 3。
+   - 升级在途或没有完成为 `UPGRADE_IN_PROGRESS`，退出码 1（I-008，v3.1.6）：设备上有正在运行的升级单元 `ufm-os-upgrade-*`，或 `UFM_APPLIANCE` 已是目标版本、但最近一次升级的状态日志还没有 `UFM-OS-UPGRADE` 和 `UFM-OS-FIRSTBOOT` 都 PASSED。这时不报 `COMPLIANT`。
    - 失败（含地址冲突和不继续的 P2P 连线问题）退出码 1。
 
 ### config-upgrade --apply
@@ -223,7 +224,13 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - 经 OOB 进来的先写 netplan 配好 IPv4。
    - 然后依次处理 netplan、公钥、公钥直连验证、hostname、IPMI LAN、IPMI 用户、IPMI 电源测试、DNS、搜索域、NTP、时区、`/etc/hosts`。**每一步执行前再检查一次，只改不符合或缺少的项**。
    - IPMI LAN、IPMI 用户、IPMI 电源测试这三步失败时（例如 BMC 拒绝主机侧写入），记下失败并继续后面的步骤和升级；整台最后仍标为失败，汇总里逐条列出 IPMI 的错误（owner 2026-10-20）。其它步骤失败时，这台立即停止。
-4. 最后升级（只针对 UFM）：`/etc/ufm-release` 中 `UFM_APPLIANCE` 已是目标版本就跳过。
+4. 最后升级（只针对 UFM）。是否已经升级完成按本次标记判断，不只看版本号（I-008，v3.1.6）：
+   - 有正在运行的升级单元 `ufm-os-upgrade-*`：`UPGRADE_IN_PROGRESS`，不发起第二次升级；
+   - `UFM_APPLIANCE` 已是目标版本，且最近一次升级的状态日志 `UFM-OS-UPGRADE`、`UFM-OS-FIRSTBOOT` 都 PASSED、没有 FAILED，或者设备上一份状态日志都没有（出厂就是目标版本）：跳过（`UNCHANGED`）；
+   - 已是目标版本、最近一次升级有 FAILED：`STEP_FAILED_UPGRADE`，不重新发起，需人工处理；
+   - 已是目标版本、最近一次升级既没有 FIRSTBOOT PASSED 也没有 FAILED（例如只走到 `APPLIANCE-UPGRADE`）：`UPGRADE_IN_PROGRESS`，不跳过、也不重新发起，并写出状态日志的最后一步；
+   - 版本不是目标版本：照常升级（上一次留下的 PASSED、FAILED 都不算）。
+   - 起升级的脚本在下载前和启动前各再查一次在途升级，发现就以 `UPGRADE_IN_PROGRESS` 结束。所以等待超时以后（手工或 bringup）重跑 config-upgrade 是安全的，不会再起一个升级。
 5. 升级重启后：重新登录，确认 `UFM_APPLIANCE` 已是目标版本，再把全部配置步骤检查一遍。
    升级改动过的配置会列出来，并当场重新配置（步骤名前缀 `post_upgrade_`；被重新配置的项记在 `result.json` 的 `post_upgrade_reconfigured`）。
 6. 结果：
@@ -231,6 +238,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - `UPGRADED`：已升级，升级后的复查也通过。
    - `CONFIGURED`：有配置改动，版本本来就是目标版本或 global 未声明版本。
    - `UP_TO_DATE`：什么都没改。
+   - `UPGRADE_IN_PROGRESS`（退出码 1）：升级在途、没有完成或等待超时；这台的其它配置也不改。稍后重跑即可，不会重复启动升级。
 
 ### ha-setup --apply
 
@@ -244,6 +252,11 @@ global 没有声明 `servers.ufm.version` 时不做 HA（owner 2026-11-03）：�
    - 清除 HA 配置的命令不在提示里给出：情况各不相同，由用户自己操作（owner 2026-10-22）。
    - pacemaker 自带的默认单节点集群不算已有 HA 配置（I-009）：status 同时满足报「HA is not configured」、节点只有读的这一台、资源数为 0、没有 DRBD 和 VIRTUAL_IP。新升级的 UFM 上常见。它会列进第 3 步的确认，确认后在第 4 步停掉；任何一条不满足（例如有资源、有其他节点、有 VIP）仍按已有 HA 配置处理。一台是默认集群、另一台是真集群时按已有 HA 配置处理。
    - 两台都读不到集群（或只有默认单节点集群）：继续第 2 步。读 status 本身失败（例如没有 `ufm_ha_cluster`）：`HA_NOT_READY`。
+
+1'. **只读复核两台的配置和升级**（I-008，owner 2026-11-01；v3.1.6）：在做任何 HA 改动之前，对两台各跑一遍 check 的全部配置项（含 hostname 按 CSV 原值精确比较、`/etc/hosts`）和上面的升级判定。
+   - 任何一项不符合（`WOULD_CHANGE`、某步失败、`UPGRADE_IN_PROGRESS`、IPMI 失败）：这台 `HA_NOT_READY`，逐项列出不符合的内容，并提示「请先运行 config-upgrade --apply 完成配置和升级，再运行 ha-setup --apply」；另一台 `WAITING_PEER`；两台都不做任何 HA 改动。
+   - 复核结果写进 `result.json` 的 `ha_review`，不算作步骤。
+   - 只告警、config-upgrade 也改不了的项（NTP 没有同步、部署服务器不能用公钥直连、服务没有安装、待验证的网络项）不阻止 HA，记在 `attention`，在第 3 步的确认内容开头列出。
 2. 查 HA 六项前提：
    - ① ufm-enterprise 未运行
    - ② eth0（eno8303）互通
@@ -253,7 +266,7 @@ global 没有声明 `servers.ufm.version` 时不做 HA（owner 2026-11-03）：�
    - ⑥ 每台 `/etc/ufm-release` 的 `UFM_APPLIANCE` 等于 global 的 `servers.ufm.version`（owner 2026-11-03；读不到也算不满足；不满足时先运行 `config-upgrade --apply`）。确认后的复查同样查这一项。
 
    除 ①（ufm-enterprise 在运行）以外的任何一项不满足时停止（`HA_NOT_READY`），不做改动。
-3. **确认一次**：列出全部要做的事，包括要停止默认单节点集群的设备（`pcs cluster stop --force`；可用 `pcs cluster start` 恢复）、要停止 ufm-enterprise 的设备、互信、standby 和 master 的完整 `ufm_ha_cluster config` 命令。
+3. **确认一次**：先列出第 1' 步的注意项（不阻止 HA），再列出全部要做的事，包括要停止默认单节点集群的设备（`pcs cluster stop --force`；可用 `pcs cluster start` 恢复）、要停止 ufm-enterprise 的设备、互信、standby 和 master 的完整 `ufm_ha_cluster config` 命令。
    - 确认内容里写明代价：两台的 `/opt/ha_data` 备份到 `/ha_backup/<时间>/` 后清空并交给 DRBD，在 master 上格式化 `/dev/drbd0`，并销毁两台上原有的集群配置。
    - 这一次确认覆盖本次运行的全部改动；回答 N 则什么都不改（`NOT_AUTHORIZED`）。
 4. 先在有默认单节点集群的设备上执行 `pcs cluster stop --force`，再读一次 `ufm_ha_cluster status`，必须已没有集群（步骤记 `ha_default_cluster: STOPPED`）；停失败或复读仍有集群时两台 `HA_NOT_READY`，这时还没有任何 HA 改动。然后停止 ufm-enterprise（如在运行），做互信，再查一次全部前提。
@@ -285,6 +298,7 @@ global 没有声明 `servers.ufm.version` 时不做 HA（owner 2026-11-03）：�
 HA 的操作分成两块：`ha-setup` 只负责部署 HA；`ha-post-config` 负责 HA 之后的配置。`ha-setup` 新部署完 HA 会自动调用 `ha-post-config`；已有 HA 时，确认 HA 正常后可以单独运行它。
 
 1. **前提**：两台都能登录，`ufm_ha_cluster status` 显示是这两台、这个 VIP，并且状态正常（不要求 Promoted 是哪一台）。否则 `HA_NOT_READY`，不做任何事。
+   - 之后、任何改动之前，与 ha-setup 第 1' 步相同地只读复核两台的配置和升级（v3.1.6，B2-O8）：不符合的那台 `HA_NOT_READY`（提示先运行 config-upgrade --apply，再运行 ha-post-config --apply），另一台 `WAITING_PEER`；gv.cfg 不变、不 failover。
 2. **登录 VIP**：全部操作都经 VIP 在当时的主机上执行。
    - failover 后 VIP 的主机密钥会变（ufm-manual.log 第 2014–2028 行）。所以先经两台各自的地址读出它们的 SSH 主机密钥（`/etc/ssh/ssh_host_*_key.pub`），写进本次运行目录下的 `vip-known-hosts`。
    - 登录 VIP 时用 `StrictHostKeyChecking=yes` 加这个文件：只接受这两台的密钥，不读也不改 `~/.ssh/known_hosts`。
@@ -472,13 +486,16 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
   - `/root/` 下已有的同名文件，只有大小与服务器 Content-Length 一致才复用，否则重新下载。
   - 停止 `ufm-enterprise` 后确认它不再运行；停不下来就不升级。
   - 以 systemd 临时单元在后台执行 `ufm-os-upgrade.sh --appliance-sw-upgrade -r -y`，输出写入设备的 `/var/log/ufm-setup-upgrade-os-upgrade.log`。这样做是因为升级结束设备会自动重启。
+  - 单元带 `--setenv=NEEDRESTART_SUSPEND=1`（I-008）：apt 的 needrestart 钩子见到它就跳过，不会在没有终端时自动重启服务（每月第一个周日起 mdcheck 在跑时，重启 `mdcheck_start.service` 会让升级卡住数小时）。升级最后总会重启，跳过 needrestart 没有损失。单元名（`ufm-os-upgrade-<n>`）和起升级时的 boot id 会打印出来，等待时用。
   - 先等 `--wait-initial`（默认 600s），再每 `--wait-interval`（30s）探测一次，最长 `--wait-max`（默认 2400s；手工升级约 23 分钟）。
   - 判定规则：
     - 重启期间连不上视为正常。
-    - 只有本次开始之后的状态日志行才算数。
-    - `UFM_APPLIANCE` 等于目标版本、且本次的 `UFM-OS-FIRSTBOOT` 为 PASSED 才算完成。
-    - 出现 `[FAILED]` 立即停止。
-    - 超时则停止并提示登录设备查看日志，不会重复启动升级。
+    - 状态日志只看本次这一段：最新的状态日志里最后一个时间戳不早于起升级时间的 `UFM_OS_UPGRADE [STARTED]` 行之后的所有行，不再看这些行自己的时间戳（重启后 NTP 把设备时钟拨回也能判成完成；I-008）。
+    - `UFM_APPLIANCE` 等于目标版本、且本次这一段 `UFM-OS-UPGRADE` 和 `UFM-OS-FIRSTBOOT` 都为 PASSED 才算完成。
+    - 本次这一段出现 `[FAILED]` 立即停止（`STEP_FAILED_UPGRADE`）。
+    - 每次探测打印：状态日志的最后一步和它的设备时间、距上次状态日志变化多少秒（部署服务器的单调时钟）、升级单元是否还在运行、设备是否已重启（boot id 与起升级时比较）。
+    - 状态日志 600 秒没有进展、升级单元仍在运行、设备还没有重启时：打印一次 `systemctl list-jobs --no-pager` 和 `systemctl status <单元> --no-pager` 的 CGroup 段，提示「卡在 <最后一步> 之后的阶段」和只读排查命令（`pgrep -af '^systemctl restart'`、`cat /proc/mdstat`），之后每过 600 秒再打一次。只报告：不提前结束，不结束任何进程，照旧等到 `--wait-max`。不要结束 apt-get，也不要停掉升级单元。
+    - 超时为 `UPGRADE_IN_PROGRESS`（退出码 1），提示登录设备查看日志；可以重跑 config-upgrade：会先检测在途升级，不会重复启动。
 - **互信**：验证登录时先不记录主机密钥（StrictHostKeyChecking=yes）；失败后才以 accept-new 记录对端主机密钥再重试。
 - **HA 的 VIP 检查**：
   - 先清掉该地址的邻居缓存；
