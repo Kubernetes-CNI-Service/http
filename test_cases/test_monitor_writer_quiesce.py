@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import importlib.util
 import inspect
+import itertools
 import os
 from pathlib import Path
 import signal
 import tempfile
 import unittest
+from unittest import mock
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT =Path(__file__).resolve().parents[1]
 RUNTIME_PATH = ROOT / "tools/ztp_service_runtime.py"
 GUARD_PATH = ROOT / "tools/deployment_prewrite_guard.py"
 _RUNTIME = None
@@ -523,6 +525,308 @@ class NativeMonitorQuiesceDirectTests(unittest.TestCase):
                         ),
                     )
                     self.assertEqual([(8201, signal.SIGTERM)], signals)
+
+    # ----- WP-NS1 (R-034 / P052): unrelated processes must not block the stop -----
+    # Every expectation below is written by hand from the v3.1.6 guide WP-NS1
+    # (guide :670-:699, owner 「别的进程或者服务不应该挡住 load」); none is
+    # produced by comparing the two implementations.
+
+    NS1_MONITOR_PID = 9100
+
+    def ns1_implementations(self):
+        return (
+            ("runtime", load_runtime().stop_native_ztp_monitors,
+             load_runtime().RuntimeContractError),
+            ("guard", load_guard().stop_native_ztp_monitors,
+             load_guard().GuardError),
+        )
+
+    def ns1_reset(self) -> None:
+        for process in tuple(self.proc_root.iterdir()):
+            for child in tuple(process.iterdir()):
+                child.unlink()
+            process.rmdir()
+        for pid_path in self.http_root.glob("DAY0-Prepare/*/99-output-ztp/ztp-monitor.pid"):
+            pid_path.unlink()
+
+    def add_raw_process(self, pid: int, raw: bytes) -> Path:
+        process = self.proc_root / str(pid)
+        process.mkdir()
+        (process / "cmdline").write_bytes(raw)
+        return process
+
+    def ns1_monitor_raw(self, *extra: str) -> bytes:
+        argv = self.monitor_argv() + extra
+        return b"\0".join(part.encode("utf-8") for part in argv) + b"\0"
+
+    @staticmethod
+    def ns1_cmdline(prefix: bytes, total: int, unit: bytes) -> bytes:
+        """``prefix`` followed by repeated ``unit`` bytes; exactly ``total`` bytes, NUL-terminated."""
+        fill = (unit * (total // len(unit) + 1))[: total - len(prefix) - 1]
+        raw = prefix + fill + b"\0"
+        assert len(raw) == total, (len(raw), total)
+        return raw
+
+    def ns1_stop(self, implementation, signals: list, *, terminate=(NS1_MONITOR_PID,)):
+        def kill(pid: int, sig: int) -> None:
+            signals.append((pid, sig))
+            if pid in terminate:
+                process = self.proc_root / str(pid)
+                (process / "cmdline").unlink()
+                process.rmdir()
+
+        # An advancing injected clock: an unexpected exit wait ends in the
+        # bounded 5 s timeout instead of spinning; nothing really sleeps.
+        clock = itertools.count()
+        return implementation(
+            self.http_root, proc_root=self.proc_root, kill=kill,
+            monotonic=lambda: float(next(clock)), sleep=lambda _seconds: None,
+        )
+
+    def ns1_project_pid(self, project_name: str, value: str) -> Path:
+        output = self.http_root / "DAY0-Prepare" / project_name / "99-output-ztp"
+        output.mkdir(parents=True, exist_ok=True)
+        path = output / "ztp-monitor.pid"
+        path.write_text(value, encoding="ascii")
+        return path
+
+    def ns1_assert_only_monitor_stopped(
+        self, implementation, error_type, pid_path: Path | None,
+    ) -> None:
+        signals: list = []
+        try:
+            stopped = self.ns1_stop(implementation, signals)
+        except error_type as exc:
+            self.fail(f"an unrelated process blocked the Native Monitor stop: {exc}")
+        self.assertEqual((self.NS1_MONITOR_PID,), stopped)
+        self.assertEqual([(self.NS1_MONITOR_PID, signal.SIGTERM)], signals)
+        if pid_path is not None:
+            self.assertFalse(pid_path.exists())
+
+    def ns1_assert_refused(self, implementation, error_type, pid_path: Path | None) -> None:
+        before = None
+        if pid_path is not None:
+            status = pid_path.stat()
+            before = (pid_path.read_bytes(), status.st_dev, status.st_ino)
+        signals: list = []
+        with self.assertRaises(error_type):
+            self.ns1_stop(implementation, signals)
+        self.assertEqual([], signals)
+        if pid_path is not None:
+            status = pid_path.stat()
+            self.assertEqual(before, (pid_path.read_bytes(), status.st_dev, status.st_ino))
+
+    def test_ns1_unrelated_long_cmdline_never_blocks_the_monitor_stop(self) -> None:
+        # Guide :671-:674 rules A/B and :689-:693: argv0 ssh/java, or python with a
+        # different script in the script slot, is not the monitor at any length or
+        # tail encoding; the real monitor 9100 alone gets exactly one SIGTERM.
+        prefixes = {
+            "ssh": b"ssh\0",
+            "java": b"/usr/bin/java\0",
+            "python3_other": b"/usr/bin/python3\0/opt/tools/other.py\0",
+            "python3_u_other": b"/usr/bin/python3\0-u\0/opt/tools/other.py\0",
+            "python3_B_other": b"/usr/bin/python3\0-B\0/opt/tools/other.py\0",
+        }
+        tails = {"ascii": b"-oSetting=value\0", "bad_utf8": b"\xff\xfe\x80\0"}
+        for name, implementation, error_type in self.ns1_implementations():
+            for kind, prefix in prefixes.items():
+                for total in (65535, 65536, 65537, 70000):
+                    for tail, unit in tails.items():
+                        with self.subTest(implementation=name, kind=kind, total=total, tail=tail):
+                            self.ns1_reset()
+                            self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                            pid_path = self.write_pid("9100\n")
+                            self.add_raw_process(9200, self.ns1_cmdline(prefix, total, unit))
+                            self.ns1_assert_only_monitor_stopped(implementation, error_type, pid_path)
+
+    def test_ns1_empty_cmdlines_are_not_monitors_but_a_referenced_one_is_refused(self) -> None:
+        # Guide :672 rule a and :694: unreferenced 0-byte cmdlines (kernel threads,
+        # zombies) are not monitors and never HOLD; a PID file naming one is refused.
+        for name, implementation, error_type in self.ns1_implementations():
+            with self.subTest(implementation=name, case="unreferenced"):
+                self.ns1_reset()
+                for pid in (2, 3, 57):
+                    self.add_raw_process(pid, b"")
+                self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                self.ns1_assert_only_monitor_stopped(implementation, error_type, None)
+            with self.subTest(implementation=name, case="referenced"):
+                self.ns1_reset()
+                self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                self.add_raw_process(9300, b"")
+                pid_path = self.ns1_project_pid("customer-b", "9300\n")
+                self.ns1_assert_refused(implementation, error_type, pid_path)
+
+    def test_ns1_candidate_monitor_keeps_the_complete_64k_contract(self) -> None:
+        # Guide :675 rule d and :695: the expected script in the script slot is a
+        # candidate; it is read completely.  A legal long --output-dir value with a
+        # total of 65536 bytes is stopped; 65537, 70000 or bad UTF-8 are refused with
+        # zero signals even next to a legal monitor.
+        head = self.ns1_monitor_raw("--output-dir")
+        for name, implementation, error_type in self.ns1_implementations():
+            with self.subTest(implementation=name, total=65536):
+                self.ns1_reset()
+                self.add_raw_process(
+                    self.NS1_MONITOR_PID, self.ns1_cmdline(head + b"/", 65536, b"d"),
+                )
+                self.ns1_assert_only_monitor_stopped(implementation, error_type, None)
+            for case, raw in (
+                ("65537", self.ns1_cmdline(head + b"/", 65537, b"d")),
+                ("70000", self.ns1_cmdline(head + b"/", 70000, b"d")),
+                ("bad_utf8_short", head + b"/data/\xff\xfe\0"),
+                ("bad_utf8_65536", self.ns1_cmdline(head + b"/data/", 65536, b"\xff")),
+            ):
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                    pid_path = self.write_pid("9100\n")
+                    self.add_raw_process(9400, raw)
+                    self.ns1_assert_refused(implementation, error_type, pid_path)
+
+    def test_ns1_budget_cut_inside_an_undecided_token_keeps_the_original_error(self) -> None:
+        # Guide :671 (read until EOF or 65537 bytes) and :696: a token cut by the
+        # budget cannot be judged, so the original size error stays; argv0 whose
+        # NUL is the 65537th byte is complete and is excluded by rule A.
+        refused = {
+            "argv0_70000": b"/usr/bin/" + b"p" * 70000 + b"\0",
+            "argv0_exactly_65537": b"p" * 65537 + b"\0tail\0",
+            "flag_cut": b"/usr/bin/python3\0-" + b"u" * 70000 + b"\0",
+            "slot_cut": b"/usr/bin/python3\0/opt/" + b"s" * 70000 + b"\0",
+            "slot_cut_after_u": b"/usr/bin/python3\0-u\0/opt/" + b"s" * 70000 + b"\0",
+        }
+        for name, implementation, error_type in self.ns1_implementations():
+            for case, raw in refused.items():
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                    pid_path = self.write_pid("9100\n")
+                    self.add_raw_process(9500, raw)
+                    self.ns1_assert_refused(implementation, error_type, pid_path)
+            with self.subTest(implementation=name, case="argv0_nul_is_byte_65537"):
+                self.ns1_reset()
+                self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                pid_path = self.write_pid("9100\n")
+                self.add_raw_process(9500, b"p" * 65536 + b"\0" + b"t" * 5000 + b"\0")
+                self.ns1_assert_only_monitor_stopped(implementation, error_type, pid_path)
+
+    def test_ns1_final_token_without_nul_keeps_the_original_complete_grammar(self) -> None:
+        # Guide :696: a last token without its NUL goes to the original complete
+        # judgement: a legal monitor without a trailing NUL or with several trailing
+        # NULs is still the monitor; an empty middle token makes a second positional
+        # (two positionals are not the grammar), so that process is not a monitor.
+        monitor = self.ns1_monitor_raw()
+        for name, implementation, error_type in self.ns1_implementations():
+            for case, raw in (
+                ("no_trailing_nul", monitor[:-1]),
+                ("several_trailing_nuls", monitor + b"\0\0"),
+            ):
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(self.NS1_MONITOR_PID, raw)
+                    self.ns1_assert_only_monitor_stopped(implementation, error_type, None)
+            script = os.fspath(self.http_root / "DAY0-Prepare/12-ztp-monitor.py").encode()
+            project = os.fspath(self.project).encode()
+            for case, raw in (
+                ("empty_middle_token",
+                 b"/usr/bin/python3\0" + script + b"\0" + project + b"\0\0--watch\x0030\0"),
+                ("ssh_without_nul", b"ssh"),
+                ("python3_u_only", b"/usr/bin/python3\0-u"),
+            ):
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(8301, raw)
+                    signals: list = []
+                    self.assertEqual((), self.ns1_stop(implementation, signals))
+                    self.assertEqual([], signals)
+
+    def test_ns1_referenced_pid_stays_strict_for_unrelated_processes(self) -> None:
+        # Guide :670 item 1 and :697: a PID file naming ssh, another script, an
+        # oversized or a bad-tail process is refused with zero signals and the PID
+        # file bytes and inode stay unchanged.
+        referenced = {
+            "ssh": b"ssh\0-T\0host\0",
+            "other_script": b"/usr/bin/python3\0/opt/tools/other.py\0",
+            "oversized": self.ns1_cmdline(b"ssh\0", 70000, b"-oSetting=value\0"),
+            "bad_tail": b"ssh\0\xff\xfe\0",
+        }
+        for name, implementation, error_type in self.ns1_implementations():
+            for case, raw in referenced.items():
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                    self.add_raw_process(9600, raw)
+                    pid_path = self.ns1_project_pid("customer-b", "9600\n")
+                    self.ns1_assert_refused(implementation, error_type, pid_path)
+
+    def test_ns1_process_gone_while_reading_is_gone_but_unreadable_stays_refused(self) -> None:
+        # Guide :676 rule e and :698: when the read fails and /proc/<pid> no longer
+        # exists the process has exited ("gone"); when the directory is still there
+        # the original error stays (as test_cmdline_unreadable_before_signal_is_fail_closed).
+        real_open = os.open
+        for name, implementation, error_type in self.ns1_implementations():
+            for case in ("directory_gone", "cmdline_unreadable"):
+                with self.subTest(implementation=name, case=case):
+                    self.ns1_reset()
+                    self.add_raw_process(self.NS1_MONITOR_PID, self.ns1_monitor_raw())
+                    pid_path = self.write_pid("9100\n")
+                    vanishing = self.add_raw_process(9700, b"ssh\0-T\0host\0")
+                    target = os.fspath(vanishing / "cmdline")
+
+                    def opening(path, flags, *args, **kwargs):
+                        if os.fspath(path) == target and (vanishing / "cmdline").exists():
+                            (vanishing / "cmdline").unlink()
+                            if case == "directory_gone":
+                                vanishing.rmdir()
+                        return real_open(path, flags, *args, **kwargs)
+
+                    with mock.patch.object(os, "open", opening):
+                        if case == "directory_gone":
+                            self.ns1_assert_only_monitor_stopped(implementation, error_type, pid_path)
+                        else:
+                            self.ns1_assert_refused(implementation, error_type, pid_path)
+
+    def test_ns1_original_grammar_vectors_keep_their_results(self) -> None:
+        # Guide :699 and 8.22.1: python basenames (str.isdigit semantics, including a
+        # Unicode digit suffix), a non-standard directory and a single -u/-B flag are
+        # the monitor; other names, a second flag, an unsupported flag in the script
+        # slot and a duplicate script as an option value are not.
+        script = os.fspath(self.http_root / "DAY0-Prepare/12-ztp-monitor.py")
+        project = os.fspath(self.project)
+        tail = (project, "--watch", "30")
+        accepted = {
+            "python": ("python", script) + tail,
+            "python3": ("python3", script) + tail,
+            "python3_9": ("python3.9", script) + tail,
+            "python3_12_custom_dir": ("/opt/custom/bin/python3.12", script) + tail,
+            "python3_unicode_digit": ("/usr/bin/python3.٣", script) + tail,
+            "single_u_flag": ("/usr/local/bin/python3.11", "-u", script) + tail,
+            "single_B_flag": ("python3", "-B", script) + tail,
+        }
+        rejected = {
+            "python2": ("/usr/bin/python2", script) + tail,
+            "python3_dot_only": ("/usr/bin/python3.", script) + tail,
+            "python3_letter_suffix": ("/usr/bin/python3.x", script) + tail,
+            "pypy3": ("/usr/bin/pypy3", script) + tail,
+            "python3_config": ("/usr/bin/python3-config", script) + tail,
+            "unsupported_flag": ("/usr/bin/python3", "-I", script) + tail,
+            "two_flags": ("/usr/bin/python3", "-u", "-B", script) + tail,
+            "duplicate_script_as_option_value": (
+                "/usr/bin/python3", script, project, "--watch", "30",
+                "--html-script", script,
+            ),
+        }
+        for name, implementation, error_type in self.ns1_implementations():
+            for case, argv in accepted.items():
+                with self.subTest(implementation=name, case=case, expected="monitor"):
+                    self.ns1_reset()
+                    self.add_process(self.NS1_MONITOR_PID, argv)
+                    self.ns1_assert_only_monitor_stopped(implementation, error_type, None)
+            for case, argv in rejected.items():
+                with self.subTest(implementation=name, case=case, expected="not-monitor"):
+                    self.ns1_reset()
+                    self.add_process(8301, argv)
+                    signals: list = []
+                    self.assertEqual((), self.ns1_stop(implementation, signals))
+                    self.assertEqual([], signals)
 
 
 if __name__ == "__main__":

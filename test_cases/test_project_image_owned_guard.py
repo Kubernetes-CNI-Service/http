@@ -145,6 +145,11 @@ class HeldInputsTests(unittest.TestCase):
 # test_project_image_bundle.py; were bootstrap
 # 79f0c06d882ae3d337a26b27f944566731c3f6964ccad80e028a03e74202802d, guard
 # 0b293410b466ce5fd41d63faa51b9843b7adec42b1379eca292fc17a0171ad33.
+# 2026-11-25 v3.1.6 NS1 (Q-103 pending owner, default re-pin; precedent owner 2026-10-23, 2026-11-08
+# WP-17 O8): the three fixtures' bootstrap_sha256/guard_sha256 re-pinned with
+# test_project_image_bundle.py; were bootstrap
+# 2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0, guard
+# 4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd.
 def interpreter_fixture(interpreter):
     key = (17, 901, 0o100600, 1, 501, 20, 37, 11, 12)
     root = '/literal-owned/live'
@@ -154,8 +159,8 @@ def interpreter_fixture(interpreter):
         '--archive-sha256', 'a'*64, '--source-manifest-sha256', 'b'*64]
     argv = [interpreter, '-I', '-S', '-B', '-c', BOOTSTRAP, *domain]
     binding = dict(parent='/literal-owned', root=root, directory=directory,
-        bootstrap_sha256='2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0',
-        guard_sha256='4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd',
+        bootstrap_sha256='96e1978fa3085534eb196698cd878f2a617fdcbe5d592f6785cff0284e3fb08f',
+        guard_sha256='dcf62cd0d5bd164d0f63ccbb981a9048be8fc5d835a45831278563dfbed025a6',
         archive_key=[str(n) for n in key], domain_argv=domain, phase='OWNED_PARAMETERS')
     env = dict(PATH=directory+'/bin', TMPDIR=directory+'/tmp',
         PYTHONDONTWRITEBYTECODE='1', HTTP_TEST_GUARD_BINDING=json.dumps(binding, sort_keys=True))
@@ -214,8 +219,8 @@ def phase_fixture(phase):
     domain=['--lock',root+'/.deployment.lock','--root',root,'--runtime','native','--archive-fd','77','--archive-sha256','a'*64,'--source-manifest-sha256','b'*64]
     argv=[sys.executable,'-I','-S','-B','-c',BOOTSTRAP,*domain]
     binding=dict(parent='/literal-owned',root=root,directory=directory,
-        bootstrap_sha256='2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0',
-        guard_sha256='4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd',
+        bootstrap_sha256='96e1978fa3085534eb196698cd878f2a617fdcbe5d592f6785cff0284e3fb08f',
+        guard_sha256='dcf62cd0d5bd164d0f63ccbb981a9048be8fc5d835a45831278563dfbed025a6',
         archive_key=[str(n) for n in key],domain_argv=domain,phase=phase)
     env=dict(PATH=directory+'/bin',TMPDIR=directory+'/tmp',PYTHONDONTWRITEBYTECODE='1',HTTP_TEST_GUARD_BINDING=json.dumps(binding,sort_keys=True))
     return argv,env,key
@@ -304,8 +309,8 @@ class MemoryWorld:
             '--source-manifest-sha256','b'*64]
         binding=dict(parent='/literal-owned',root='/literal-owned/live',
             directory='/literal-owned/owned-native-guard.literal',
-            bootstrap_sha256='2f05041501c167aff815a2c76873e14f7be404b8ca1406b88311354a85e1e3b0',
-            guard_sha256='4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd',
+            bootstrap_sha256='96e1978fa3085534eb196698cd878f2a617fdcbe5d592f6785cff0284e3fb08f',
+            guard_sha256='dcf62cd0d5bd164d0f63ccbb981a9048be8fc5d835a45831278563dfbed025a6',
             archive_key=[str(getattr(self.archive,n)) for n in ('st_dev','st_ino','st_mode',
                 'st_nlink','st_uid','st_gid','st_size','st_mtime_ns','st_ctime_ns')],
             domain_argv=list(self.argv[6:]),phase='OBSERVE_DEFAULTS')

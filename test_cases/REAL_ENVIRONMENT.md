@@ -1900,14 +1900,38 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   generator、password update、feedback global writeback，以及通过 deployment prewrite guard 的
   source/archive 更新。逐项证明同一 deployment lock 覆盖 identity 校验、停止确认和首次 authority
   mutation；load 的 generator/password 子流程只复用一次继承的 lock/quiesce。另注入 stale、复用、
-  malformed、跨项目和不可读 PID，以及 TERM timeout/KILL failure，确认任何 authority byte 都未改变。
+  malformed、跨项目和不可读 PID，以及 SIGTERM 发送失败与退出确认超时，确认任何 authority byte 都未改变。
 - 预期：仅严格匹配 Python/受支持 option grammar、精确 Monitor script、project 与 positive `--watch`
-  的进程可被发信号；所有候选 identity 必须先全部验证，随后 TERM/KILL 有界完成并确认退出，才允许
+  的进程可被发信号；所有候选 identity 必须先全部验证，随后只发 SIGTERM 并有界确认退出，才允许
   writer 首次写入。Docker 路径继续由 hostlock/owner 合同处理，不套用 Native PID 停止逻辑；
   import-from-download 对既有四项 authority 必须逐字节保留，只能增加不存在的项目条目。
 - 证据、清理与风险：保存脱敏后的 exact argv、PID/starttime、lock 时间线、信号/退出时间线和四项
   authority 的前后 hash，不保存密码或项目秘密。每个场景恢复 VM 快照并确认无残留 Monitor、lock
   holder、临时文件或被停止服务；信号目标错误可能终止无关进程，因此只能在一次性 VM 执行。
+
+## TC-REAL-NS1-NATIVE-SCOPE-001 — Native 停旧 Monitor 时无关的超长命令行进程不挡 load
+
+- 类型：real-environment。对应需求：R-034（问题 P052），v3.1.6 WP-NS1（指导 :642-:725，卡见指导 8.21.E2）。
+- 自动化：`test_cases/test_monitor_writer_quiesce.py` 的 `test_ns1_*` 方法（canonical runtime 与独立 guard
+  两份实现各跑一遍），`test_cases/test_monitor_writer_quiesce_workflow.py` 的
+  `test_ns1_real_load_main_stops_only_the_monitor_past_unrelated_processes`、
+  `test_ns1_real_unload_main_stops_only_the_monitor_past_unrelated_processes`、
+  `test_ns1_real_guard_holder_and_archive_quiesce_past_unrelated_processes`。自动化只用假 `/proc`、
+  注入的 kill 与时钟，未以 root 运行、未向真实 PID 发信号，不得当作真机证据。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 前置条件：获准的一次性 Ubuntu 22.04/24.04 Native 管理 VM，不服务真实交换机；项目、服务与
+  authority 的前像可回退（VM 快照）。项目已正式 load，detached `12-ztp-monitor.py --watch` 正在运行；
+  记录 Monitor 的 PID/starttime/cmdline、PID 文件的 inode/hash 与 deployment lock 状态。
+- 步骤：
+  1. 起一个与本工具无关、命令行约 70KB 的进程（argv0 为 ssh，尾部是长选项），确认它的 `/proc/<pid>/cmdline` 超过 64KiB（R-034，指导 :659）。
+  2. 执行正式 load：只对真实 Monitor 发一次 SIGTERM，确认退出后按身份删除它的 PID 文件；无关进程不收任何信号，load 继续走到后续写者（`tools/ztp_service_runtime.py::stop_native_ztp_monitors`，指导 :671-:674、:692）。
+  3. 重新起 Monitor，经 deployment prewrite guard 做一次 source/archive 更新：同一把锁内先停 Monitor，后续写者再到达（`tools/deployment_prewrite_guard.py::quiesce_for_source_update`，指导 :704-:708）。
+  4. 疑似本工具：起一个 argv 是真实 `12-ztp-monitor.py`、带合法但超长 `--output-dir` 值（总长超过 64KiB）的进程，再执行正式 load 与 guard 更新：整轮拒绝、零 signal、后续写者零写，guard 不输出 `HTTP_ZTP_PREWRITE_READY`（指导 :675、:709）。
+  5. `--dry-run`、`--help`、Supervisor 与纯装配（artifact）路径仍不停 Monitor（指导 :711）。
+- 预期与证据：保存脱敏的进程摘要（只记 cmdline 长度与 argv0 basename）、exit code、同一把锁内的事件时间线、信号时间线、PID 文件与 authority 的前后 hash 和真实退出确认（R-034，指导 :692、:713）。
+- 故障注入与清理：只结束本卡自己起的夹具进程，不向未知进程发 SIGKILL，不做整机 reset；失败时
+  保留原始日志与 receipt，不删 stale 或损坏的 PID 文件，按 VM 快照恢复后由正式入口整轮重跑。
+- 风险：判错信号目标会误停无关进程，或只停一部分 Monitor；因此只在一次性 VM 执行。
 
 ## TC-REAL-ZTP-MONITOR-WATCH-RESILIENCE-001 — Native/Docker 持续 Monitor 恢复与 PID 串行
 

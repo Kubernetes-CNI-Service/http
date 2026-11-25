@@ -746,9 +746,45 @@ def _native_monitor_process(
         return None
     except OSError as exc:
         raise GuardError(f"cannot inspect Native Monitor PID {pid}: {exc}") from exc
-    content, _opened = _native_monitor_read(
-        process_path / "cmdline", 64 * 1024, f"process {pid} cmdline",
-    )
+    expected_script = (
+        http_root / "DAY0-Prepare/12-ztp-monitor.py"
+    ).resolve(strict=False)
+    cmdline_path = process_path / "cmdline"
+    if referenced:
+        content, _opened = _native_monitor_read(
+            cmdline_path, 64 * 1024, f"process {pid} cmdline",
+        )
+    else:
+        # R-034 / P052 (v3.1.6 guide WP-NS1), same semantics as the canonical
+        # runtime: bounded chunks until EOF or 64 KiB + 1 bytes; stop on
+        # rejection A or B; an unreadable process HOLDs unless it is gone.
+        flags = (
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        content = b""
+        try:
+            descriptor = os.open(os.fspath(cmdline_path), flags)
+            try:
+                while len(content) <= 64 * 1024:
+                    chunk = os.read(descriptor, min(4096, 64 * 1024 + 1 - len(content)))
+                    content += chunk
+                    if _native_monitor_argv_prefix_excludes(
+                        content, not chunk, expected_script,
+                    ):
+                        return None
+                    if not chunk:
+                        break
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            if not process_path.exists():
+                return None
+            raise GuardError(
+                f"cannot read process {pid} cmdline {cmdline_path}: {exc}"
+            ) from exc
+        if len(content) > 64 * 1024:
+            raise GuardError(f"process {pid} cmdline is too large: {cmdline_path}")
     if not content:
         if referenced:
             raise GuardError(f"Native Monitor PID {pid} has empty cmdline")
@@ -760,9 +796,6 @@ def _native_monitor_process(
         )
     except UnicodeDecodeError as exc:
         raise GuardError(f"Native Monitor PID {pid} cmdline is invalid") from exc
-    expected_script = (
-        http_root / "DAY0-Prepare/12-ztp-monitor.py"
-    ).resolve(strict=False)
     project_token = _native_monitor_project_from_argv(cmdline, expected_script)
     if project_token is None:
         if referenced:
@@ -780,6 +813,51 @@ def _native_monitor_process(
             raise GuardError(f"Native Monitor PID {pid} project is out of scope")
         return None
     return (pid, process_status.st_dev, process_status.st_ino, cmdline)
+
+
+def _native_monitor_argv_prefix_excludes(prefix, at_eof, expected_script):
+    """Return True when complete leading argv tokens prove "not the monitor".
+
+    R-034 / P052 (v3.1.6 guide WP-NS1 rules A and B): an unreferenced PID is
+    read in bounded chunks.  A complete argv0 that is not a supported Python
+    name (or is not UTF-8), or a complete script-slot token that is not the
+    expected script, excludes the process exactly as the complete grammar in
+    ``_native_monitor_project_from_argv`` would.  This never accepts a
+    process; every other prefix still needs the complete original judgement.
+    """
+    if not prefix:
+        return False
+    if at_eof:
+        tokens = prefix.rstrip(b"\0").split(b"\0")
+    else:
+        tokens = prefix.split(b"\0")[:-1]
+    if not tokens:
+        return False
+    try:
+        executable_name = Path(tokens[0].decode("utf-8")).name
+    except UnicodeDecodeError:
+        return True
+    if not (
+        executable_name in {"python", "python3"}
+        or (
+            executable_name.startswith("python3.")
+            and executable_name[len("python3."):].isdigit()
+        )
+    ):
+        return True
+    script_index = 1
+    if len(tokens) > 1 and tokens[1] in {b"-u", b"-B"}:
+        script_index = 2
+    if script_index >= len(tokens):
+        return False
+    try:
+        token = tokens[script_index].decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    try:
+        return Path(token).resolve(strict=False) != expected_script
+    except (OSError, RuntimeError):
+        return True
 
 
 def _native_monitor_project_from_argv(cmdline, expected_script):

@@ -10,8 +10,10 @@ from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
+import itertools
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,7 @@ TOOLS = ROOT / "tools"
 if os.fspath(TOOLS) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS))
 from deployment_lock import DeploymentLockError
+from test_cases.ns1_monitor_stop_source_layer import restore_ns1_runtime_tree
 
 
 def load_module(name: str, relative: str):
@@ -1202,12 +1205,17 @@ def _source_bound_feedback_recovery_path(
     feedback_tree: ast.AST, runtime_tree: ast.AST,
 ) -> dict[str, ast.AST]:
     """Accept this bounded path only in both exactly reviewed source ASTs."""
+    # v3.1.6 NS1 (http dev 2026-11-25 21:0x): the runtime pin below is not re-pinned.  The exact
+    # generated NS1 DATA layer is restored on a private copy first; a refused layer withdraws.
+    runtime_reviewed = restore_ns1_runtime_tree(runtime_tree, _reviewed_source_ast_sha256)
+    if runtime_reviewed is None:
+        return {}
     reviewed = (
         # 2026-11-08 v3.1.1 WP-17: ztp/optimize/feedback.py changed with WP-9c (9a33094: discover_sample_inputs without inputs takes active_project_dir, R-016 5.1; WP-9c P1) (was 7e472596fc86a656465a8ba1361a553486decf71e996d9d71e891744e6f47216); the structural path was checked on the current files before re-pinning.
         (feedback_tree, "9e0159e57b6beead3009ed39a08fcdae5dd87d0d47fe64b93e742ddf29359df2"),
         # 2026-10-23 owner load->collection handoff: ztp_service_runtime.py changed (was 0d11ab1cf740…); its structural path still holds.
         # 2026-11-07 M1a: tools/ztp_service_runtime.py became TEST f384f73 base + DEV replay (batch P1 9968948) (was f40fa82b425085c5859e9dc8d3b47230d958a3781744d048f79fabda6db8a3eb); the structural path was checked on the current files before re-pinning.
-        (runtime_tree, "6daae46cd55ac6fb6f85705be2d4b1bf455ef068ef7631365514af1d1959cde5"),
+        (runtime_reviewed, "6daae46cd55ac6fb6f85705be2d4b1bf455ef068ef7631365514af1d1959cde5"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
@@ -8498,6 +8506,345 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             self.assertEqual(source, fixture.devices_file.read_bytes())
             self.assertEqual(outputs, fixture.snapshot())
             self.assertEqual(0o600, destination.stat().st_mode & 0o777)
+
+    # ----- WP-NS1 (R-034 / P052): real writer chains past unrelated processes -----
+    # Guide :704-:713: a fake /proc holds a 70 KB unrelated ssh, several 0-byte
+    # PIDs and one real monitor 9100.  kill and the clock are injected; no real
+    # signal is sent and nothing sleeps.  Expectations are written by hand.
+
+    NS1_MONITOR_PID = 9100
+    NS1_CANDIDATE_PID = 9400
+
+    def ns1_fake_proc(self, proc: Path, http_root: Path, project: Path, *, candidate: bool):
+        proc.mkdir()
+        script = os.fspath(http_root / "DAY0-Prepare/12-ztp-monitor.py").encode()
+        monitor = b"\0".join((
+            b"/usr/bin/python3", script, os.fspath(project).encode(), b"--watch", b"30",
+        )) + b"\0"
+        processes = {
+            2: b"", 3: b"", 57: b"",
+            4100: b"ssh\0" + (b"-oSetting=value\0" * 4700)[: 70000 - 5] + b"\0",
+            self.NS1_MONITOR_PID: monitor,
+        }
+        if candidate:
+            # The exact script in the script slot with a legal but oversized
+            # --output-dir value: a candidate that must keep the 64 KiB contract.
+            head = monitor + b"--output-dir\0/"
+            processes[self.NS1_CANDIDATE_PID] = head + b"d" * (70000 - len(head) - 1) + b"\0"
+        for pid, raw in processes.items():
+            (proc / str(pid)).mkdir()
+            (proc / str(pid) / "cmdline").write_bytes(raw)
+        self.assertEqual(70000, len(processes[4100]))
+        pid_path = project / "99-output-ztp/ztp-monitor.pid"
+        pid_path.parent.mkdir(parents=True, exist_ok=True)
+        pid_path.write_text(f"{self.NS1_MONITOR_PID}\n", encoding="ascii")
+        return pid_path
+
+    def ns1_real_stop(self, real_stop, proc: Path, events: list, signals: list):
+        def kill(pid: int, sig: int) -> None:
+            signals.append((pid, sig))
+            if pid == self.NS1_MONITOR_PID:
+                (proc / str(pid) / "cmdline").unlink()
+                (proc / str(pid)).rmdir()
+
+        def stop(http_root):
+            events.append("monitor-stop")
+            # Advancing injected clock: a stray exit wait ends in the bounded
+            # timeout instead of spinning; nothing really sleeps.
+            clock = itertools.count()
+            return real_stop(
+                http_root, proc_root=proc, kill=kill,
+                monotonic=lambda: float(next(clock)), sleep=lambda _seconds: None,
+            )
+
+        return stop
+
+    def test_ns1_real_load_main_stops_only_the_monitor_past_unrelated_processes(self) -> None:
+        load = load_module("mwq_ns1_load", "DAY0-Prepare/11-load.py")
+        real_stop = load.stop_native_ztp_monitors
+        backend = SimpleNamespace(name="systemd")
+        for candidate in (False, True):
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as temporary:
+                events: list = []
+                signals: list = []
+                project = Path(temporary) / "DAY0-Prepare" / "customer"
+                project.mkdir(parents=True)
+                (project / "01-global.yaml").write_text("fixture\n", encoding="utf-8")
+                proc = Path(temporary) / "proc"
+                pid_path = self.ns1_fake_proc(
+                    proc, project.parent.parent, project, candidate=candidate,
+                )
+
+                def event(name):
+                    return lambda *_a, **_k: events.append(name)
+
+                with self._http_management_load_fixture(load, project), \
+                     mock.patch.multiple(load, HTTP_ROOT=project.parent.parent, ZTP_DIR=project.parent.parent / "ztp"), \
+                     mock.patch.object(load, "preflight_password_update_backend"), \
+                     mock.patch.object(load, "_require_root_for_load"), \
+                     mock.patch.object(
+                         load, "acquire_deployment_lock",
+                         side_effect=lambda **_k: events.append("lock-enter") or 95,
+                     ), mock.patch.object(
+                         load, "release_deployment_lock", side_effect=event("lock-exit"),
+                     ), \
+                     mock.patch.object(load, "runtime_os", return_value="Linux"), \
+                     mock.patch.object(load, "service_runtime_backend", return_value=backend), \
+                     mock.patch.object(load, "validate_runtime_options"), \
+                     mock.patch.object(load, "resolve_project", return_value=project), \
+                     mock.patch.object(load, "active_project", return_value=project.resolve()), \
+                     mock.patch.object(load, "sync_marker_present", return_value=False), \
+                     mock.patch.object(
+                         load, "stop_native_ztp_monitors",
+                         self.ns1_real_stop(real_stop, proc, events, signals),
+                     ), mock.patch.object(
+                         load, "initialize_from_template", side_effect=event("template-write"),
+                     ), mock.patch.object(
+                         load, "prompt_password_update_selection", return_value=("all", True),
+                     ), mock.patch.object(
+                         load, "update_passwords_before_load", side_effect=event("password-write"),
+                     ), mock.patch.object(
+                         load, "validate_inputs",
+                         side_effect=lambda *_a, **_k: (
+                             events.append("validate"),
+                             (_ for _ in ()).throw(load.LoadError("fixture stop")),
+                         )[-1],
+                     ):
+                    # Both phases end in exit 1: the positive control on the
+                    # fixture validate stop, the negative control on the refusal.
+                    self.assertEqual(1, load.main([
+                        str(project), "--update-passwords", "--host-role=management-server",
+                    ]))
+                if candidate:
+                    # Negative control: the oversized candidate is refused before
+                    # any signal and no later writer arrives.
+                    self.assertEqual(["lock-enter", "monitor-stop", "lock-exit"], events)
+                    self.assertEqual([], signals)
+                    self.assertEqual("9100\n", pid_path.read_text(encoding="ascii"))
+                else:
+                    # Positive control: inside the same lock the monitor is stopped
+                    # first and only then do the later writers arrive.
+                    self.assertEqual(
+                        ["lock-enter", "monitor-stop", "template-write",
+                         "password-write", "validate", "lock-exit"],
+                        events,
+                    )
+                    self.assertEqual([(self.NS1_MONITOR_PID, signal.SIGTERM)], signals)
+                    self.assertFalse(pid_path.exists())
+
+    def test_ns1_real_unload_main_stops_only_the_monitor_past_unrelated_processes(self) -> None:
+        unload = load_module("mwq_ns1_unload", "DAY0-Prepare/13-unload.py")
+        real_stop = unload.stop_native_ztp_monitors
+        backend = SimpleNamespace(name="systemd")
+        for candidate in (False, True):
+            with self.subTest(candidate=candidate), tempfile.TemporaryDirectory() as temporary:
+                events: list = []
+                signals: list = []
+                http_root = Path(temporary) / "http"
+                project = http_root / "DAY0-Prepare/customer"
+                project.mkdir(parents=True)
+                proc = Path(temporary) / "proc"
+                pid_path = self.ns1_fake_proc(proc, http_root, project, candidate=candidate)
+
+                @contextmanager
+                def held(*_args, **_kwargs):
+                    events.append("lock-enter")
+                    try:
+                        yield 96
+                    finally:
+                        events.append("lock-exit")
+
+                identity = SimpleNamespace(banner="operator fixture", refusal=None, operator=None)
+                with mock.patch.object(unload, "HTTP_ROOT", http_root), \
+                     mock.patch.object(unload, "resolve_project", return_value=project), \
+                     mock.patch.object(unload.os, "geteuid", return_value=0), \
+                     mock.patch.object(unload, "confirm", return_value=True), \
+                     mock.patch.object(unload, "deployment_lock", held), \
+                     mock.patch.object(unload, "service_runtime_backend", return_value=backend), \
+                     mock.patch.object(unload.operator_identity, "resolve_operator", return_value=identity), \
+                     mock.patch.object(
+                         unload, "stop_native_ztp_monitors",
+                         self.ns1_real_stop(real_stop, proc, events, signals),
+                     ), mock.patch.object(
+                         unload, "stop_monitor_workers",
+                         side_effect=lambda *_a, **_k: events.append("workers"),
+                     ), mock.patch.object(
+                         unload, "stop_services",
+                         side_effect=lambda *_a, **_k: events.append("services"),
+                     ), mock.patch.object(unload, "ok"), mock.patch.object(unload, "info"), \
+                     mock.patch.object(unload, "warn"), \
+                     mock.patch.object(sys, "stderr", io.StringIO()):
+                    code = unload.main([project.name, "--stop-only", "--yes"])
+                if candidate:
+                    self.assertEqual(1, code)
+                    self.assertEqual(["lock-enter", "monitor-stop", "lock-exit"], events)
+                    self.assertEqual([], signals)
+                    self.assertEqual("9100\n", pid_path.read_text(encoding="ascii"))
+                else:
+                    self.assertEqual(0, code)
+                    self.assertEqual(
+                        ["lock-enter", "monitor-stop", "workers", "services", "lock-exit"],
+                        events,
+                    )
+                    self.assertEqual([(self.NS1_MONITOR_PID, signal.SIGTERM)], signals)
+                    self.assertFalse(pid_path.exists())
+
+    def test_ns1_real_guard_holder_and_archive_quiesce_past_unrelated_processes(self) -> None:
+        for entry in ("holder", "archive"):
+            for candidate in (False, True):
+                with self.subTest(entry=entry, candidate=candidate), \
+                        tempfile.TemporaryDirectory() as temporary:
+                    guard = load_module(
+                        f"mwq_ns1_guard_{entry}_{int(candidate)}",
+                        "tools/deployment_prewrite_guard.py",
+                    )
+                    real_stop = guard.stop_native_ztp_monitors
+                    real_quiesce = guard.quiesce_for_source_update
+                    events: list = []
+                    signals: list = []
+                    http_root = Path(temporary) / "http"
+                    project = http_root / "DAY0-Prepare/customer"
+                    project.mkdir(parents=True)
+                    state_root = Path(temporary) / "state"
+                    state_root.mkdir()
+                    proc = Path(temporary) / "proc"
+                    pid_path = self.ns1_fake_proc(proc, http_root, project, candidate=candidate)
+
+                    @contextmanager
+                    def fake_lock(*_args, **_kwargs):
+                        events.append("lock-enter")
+                        try:
+                            yield
+                        finally:
+                            events.append("lock-exit")
+
+                    def quiesce(*args, **kwargs):
+                        # The real quiesce with no Docker CLI on this fixture host.
+                        return real_quiesce(*args, which=lambda _name: None, **kwargs)
+
+                    stdout = io.StringIO()
+                    with mock.patch.object(guard, "safe_lock", fake_lock), \
+                         mock.patch.object(guard, "quiesce_for_source_update", quiesce), \
+                         mock.patch.object(
+                             guard, "stop_native_ztp_monitors",
+                             self.ns1_real_stop(real_stop, proc, events, signals),
+                         ), mock.patch.object(sys, "stdout", stdout):
+                        if entry == "holder":
+                            with mock.patch.object(
+                                sys, "stdin", io.StringIO(guard.PREWRITE_REQUEST + "\n"),
+                            ):
+                                run = lambda: guard.run_lock_holder(  # noqa: E731
+                                    http_root / ".deployment.lock", http_root,
+                                    runtime="native", state_root=state_root,
+                                )
+                                try:
+                                    outcome = run()
+                                except guard.GuardError as exc:
+                                    outcome = exc
+                        else:
+                            staging = Path(temporary) / "staging"
+                            staging.mkdir()
+                            with mock.patch.object(
+                                guard, "_extract_archive_staging", return_value=(staging, ()),
+                            ), mock.patch.object(guard, "_live_capacity_authority", return_value=object()), \
+                                 mock.patch.object(guard, "ensure_deployment_root", return_value=mock.Mock()), \
+                                 mock.patch.object(guard, "_recheck_live_capacity_after_root_creation"), \
+                                 mock.patch.object(guard, "_write_sync_marker", side_effect=lambda *_a: events.append("marker")), \
+                                 mock.patch.object(guard, "_apply_prepared_archive_overlay", side_effect=lambda *_a, **_k: events.append("overlay")), \
+                                 mock.patch.object(guard, "finalize_source_update", side_effect=lambda *_a, **_k: events.append("finalize")), \
+                                 mock.patch.object(guard, "_safe_unlink"), \
+                                 mock.patch.object(guard, "_close_live_capacity_authority"), \
+                                 mock.patch.object(guard, "_remove_archive_staging"):
+                                run = lambda: guard.run_locked_archive(  # noqa: E731
+                                    http_root / ".deployment.lock", http_root,
+                                    Path(temporary) / "payload.tar", "a" * 64, "b" * 64,
+                                    runtime="native", state_root=state_root,
+                                )
+                                try:
+                                    outcome = run()
+                                except guard.GuardError as exc:
+                                    outcome = exc
+                    printed = stdout.getvalue()
+                    if candidate:
+                        self.assertIsInstance(outcome, guard.GuardError)
+                        self.assertEqual(["lock-enter", "monitor-stop", "lock-exit"], events)
+                        self.assertEqual([], signals)
+                        self.assertNotIn(guard.PREWRITE_READY, printed)
+                        self.assertNotIn(guard.NO_MANAGED_DOCKER, printed)
+                        self.assertEqual("9100\n", pid_path.read_text(encoding="ascii"))
+                    else:
+                        self.assertEqual(0, outcome)
+                        if entry == "holder":
+                            self.assertEqual(["lock-enter", "monitor-stop", "lock-exit"], events)
+                            self.assertIn(
+                                f"{guard.NO_MANAGED_DOCKER} {guard.PREWRITE_READY}", printed,
+                            )
+                        else:
+                            self.assertEqual(
+                                ["lock-enter", "monitor-stop", "marker", "overlay",
+                                 "finalize", "lock-exit"],
+                                events,
+                            )
+                        self.assertEqual([(self.NS1_MONITOR_PID, signal.SIGTERM)], signals)
+                        self.assertFalse(pid_path.exists())
+
+    def test_ns1_reviewed_runtime_layer_is_exact_for_the_feedback_recovery_pin(self) -> None:
+        """Only the exact reviewed NS1 runtime layer keeps the unchanged source pin.
+
+        http dev 2026-11-25 21:0x (NS1 pending point 1): the runtime pin is not
+        re-pinned; an exact DATA inverse of the NS1 layer restores the reviewed
+        source first.  Missing, truncated, duplicated, reordered or changed
+        layer parts and any change outside the layer withdraw the proof.
+        """
+        feedback = (ROOT / "ztp/optimize/feedback.py").read_text(encoding="utf-8")
+        runtime = (ROOT / "tools/ztp_service_runtime.py").read_text(encoding="utf-8")
+        expected = {
+            "lock": "deployment_lock(plan.http_base)",
+            "stop": "stop_native_ztp_monitors(plan.http_base)",
+            "recover": "recover_global_writeback_state(authority, workspace_root=plan.http_base, held_lock_fd=held_lock_fd)",
+            "pid_files": "_native_monitor_pid_files(root)",
+        }
+
+        def proof(runtime_text):
+            return {
+                role: ast.unparse(node)
+                for role, node in _source_bound_feedback_recovery_path(
+                    ast.parse(feedback), ast.parse(runtime_text),
+                ).items()
+            }
+
+        self.assertEqual(expected, proof(runtime))
+        helper_start = runtime.index("def _native_monitor_argv_prefix_excludes(")
+        helper_end = runtime.index("def _native_monitor_project_from_argv(")
+        helper = runtime[helper_start:helper_end]
+        self.assertEqual(1, runtime.count(helper))
+        tail = (
+            "    try:\n"
+            "        return Path(token).resolve(strict=False) != expected_script\n"
+            "    except (OSError, RuntimeError):\n"
+            "        return True\n"
+        )
+        self.assertEqual(1, runtime.count(tail))
+        loop = "                while len(content) <= _MAX_NATIVE_MONITOR_CMDLINE_BYTES:\n"
+        self.assertEqual(1, runtime.count(loop))
+        limit = "_MAX_NATIVE_MONITOR_CMDLINE_BYTES = 64 * 1024\n"
+        self.assertEqual(1, runtime.count(limit))
+        variants = {
+            "missing_helper": runtime.replace(helper, "", 1),
+            "truncated_helper": runtime.replace(tail, "", 1),
+            "duplicated_helper": runtime.replace(helper, helper + helper, 1),
+            "reordered_helper": runtime.replace(helper, "", 1) + "\n\n" + helper,
+            "changed_layer_hunk": runtime.replace(
+                loop, loop.replace("<=", "<"), 1,
+            ),
+            "change_outside_layer": runtime.replace(
+                limit, "_MAX_NATIVE_MONITOR_CMDLINE_BYTES = 128 * 1024\n", 1,
+            ),
+        }
+        for label, changed in variants.items():
+            with self.subTest(variant=label):
+                self.assertNotEqual(runtime, changed)
+                self.assertEqual({}, proof(changed))
 
 
 if __name__ == "__main__":
