@@ -31,11 +31,11 @@ NORMAL_COUNTS = (
     ("test_cases.test_ibsw225_device_globs", 15),
     ("test_cases.test_ibsw225_input_isolation", 24),
     ("test_cases.test_ibsw225_os_alternatives", 28),
-    ("test_cases.test_ibsw225_three_component_workflow", 19),
+    ("test_cases.test_ibsw225_three_component_workflow", 22),
     ("test_cases.test_ibsw225_known_hosts", 17),
     ("test_cases.test_ibsw225_access_recovery", 51),
     ("test_cases.test_ibsw225_os_canary_coverage", 26),
-    ("test_cases.test_ibsw225_cooperative_pipeline", 14),
+    ("test_cases.test_ibsw225_cooperative_pipeline", 20),
 )
 # Independent additions to the original 180-method discovery contract:
 # OS-only operator schema/docs (2), HTTP-disabled diagnostics/mapping (3),
@@ -120,8 +120,8 @@ class GenuineFixtureDiscoveryContractTests(unittest.TestCase):
         for expected in ADDED_NORMAL_IDS:
             with self.subTest(added_contract=expected):
                 self.assertEqual(all_ids.count(expected), 1)
-        self.assertEqual(len(all_ids), 194)
-        self.assertEqual(len(set(all_ids)), 194)
-        self.assertEqual(len(set(all_ids) - set(ADDED_NORMAL_IDS)), 180)
+        self.assertEqual(len(all_ids), 203)
+        self.assertEqual(len(set(all_ids)), 203)
+        self.assertEqual(len(set(all_ids) - set(ADDED_NORMAL_IDS)), 189)
         self.assertFalse(any("._fixture_" in name for name in all_ids))
         self.assertTrue(all(sys.modules[name] is module for name, module in loaded.items()))

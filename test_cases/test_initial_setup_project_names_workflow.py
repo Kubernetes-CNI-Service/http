@@ -230,8 +230,11 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
         return Path(directory.name).resolve()
 
     def run_main(self, cwd: Path, *options: str, plan: bool = True, mode: str = "management",
-                 allow_i039: bool = False) -> _Run:
-        """Run the copied MAIN with no device, terminal or real HOME."""
+                 allow_i039: bool = False, validator_exit_delay: float = 0.0) -> _Run:
+        """Run the copied MAIN with no device, terminal or real HOME.
+
+        validator_exit_delay > 0: the real ssh-keygen child closes its output and then exits that much
+        later, as a loaded host may reap it, so subprocess.run(timeout=) polls for its exit."""
         global _RECORDED
         app = self.app
         real_popen = subprocess.Popen
@@ -242,10 +245,27 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
             # The cache generator validates each key with `ssh-keygen -l` (P1); nothing else may run.
             if [Path(str(argv[0])).name, *argv[1:]] != KEYGEN:
                 raise AssertionError(f"fixture: unexpected external command {argv!r}")
-            return real_popen(argv, *args, **kwargs)
+            if validator_exit_delay:
+                argv = ["/bin/sh", "-c", f'"$@"; s=$?; exec >&- 2>&-; /bin/sleep {float(validator_exit_delay)!r}; '
+                        'exit "$s"', "late-exit", *argv]
+            child = real_popen(argv, *args, **kwargs)
+            keygen_children.append(child)
+            return child
 
         def forbidden(*args, **kwargs):
             raise AssertionError("fixture: no terminal, device session or wait in this run")
+
+        keygen_children = []
+        real_sleep, reap_poll = app.time.sleep, real_popen._wait.__code__
+
+        def sleep_only_to_reap_keygen(seconds):
+            # subprocess.run(timeout=) reaps a permitted ssh-keygen child that closed its output but has
+            # not exited yet by polling with time.sleep inside Popen._wait. Only that poll may sleep;
+            # every other sleep is a product wait and stays forbidden.
+            caller = sys._getframe(1)
+            if caller.f_code is reap_poll and any(caller.f_locals.get("self") is child for child in keygen_children):
+                return real_sleep(seconds)
+            return forbidden()
 
         def startup_prompt(prompt):
             index = len(prompts)
@@ -294,9 +314,9 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
             stack.enter_context(mock.patch.dict(os.environ, {"HOME": str(home)}))
             stack.enter_context(mock.patch.object(Path, "home", return_value=home))
             stack.enter_context(mock.patch.object(app.subprocess, "Popen", new=keygen_only))
-            for owner, name in ((app.pty, "fork"), (app.os, "execvp"), (app, "interactive_run"),
-                                (app.time, "sleep")):
+            for owner, name in ((app.pty, "fork"), (app.os, "execvp"), (app, "interactive_run")):
                 stack.enter_context(mock.patch.object(owner, name, new=forbidden))
+            stack.enter_context(mock.patch.object(app.time, "sleep", new=sleep_only_to_reap_keygen))
             stack.enter_context(mock.patch.object(app.getpass, "getpass",
                                                   new=startup_prompt if allow_i039 else forbidden))
             if allow_i039:
@@ -405,8 +425,9 @@ class InitialSetupProjectNamesWorkflowTests(unittest.TestCase):
 
     def test_project_dir_on_active_project_matches_bridge_reads(self):
         active = self.project(ACTIVE)
-        bridged = self.run_main(self.script_dir)
-        direct = self.run_main(self.fresh_cwd(), "--project-dir", str(active))
+        # Both runs reap each key validator late (after its output closed), as under load.
+        bridged = self.run_main(self.script_dir, validator_exit_delay=0.5)
+        direct = self.run_main(self.fresh_cwd(), "--project-dir", str(active), validator_exit_delay=0.5)
         self.assertIsNone(bridged.refusal)
         self.assertIsNone(direct.refusal, "表 8-1: --project-dir reads the active project's own files too")
         self.assertEqual(0, direct.code)

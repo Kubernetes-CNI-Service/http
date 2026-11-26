@@ -57,7 +57,8 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
                os_branch_case=None,os_branch_hook=None,skip_canary=False,os_branch_drift=None,
                os_branch_fail_target=None,health_payloads=None,pre_boot_exit=None,download_telemetry=False,
                jitter_window=0,preboot_uid_timeout_once=False,password_prompt_attempts=1,pre_boot_log=None,
-               download_ack_disappears=False,remote_hook=None,prewrite_query_timeout=None,entry_args=None):
+               download_ack_disappears=False,remote_hook=None,prewrite_query_timeout=None,entry_args=None,
+               virtual_origin=None):
         project,home,known=fixtures.WorkflowTests().fixture(root)
         from test_access_recovery import install_pair
         install_pair(home)
@@ -137,7 +138,10 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
         if unlisted_os: current[HOST]['os']='25.01.9999'
         calls=[]
         self._ssd_query_context=[]
-        virtual=SimpleNamespace(now=time.monotonic())
+        # Virtual seconds start on the next whole second after the process clock (so real-clock
+        # deadline checks stay ahead): every settle sum (x.25, +10, +30) is then exact in binary.
+        # A fractional origin can round ready+30 below 30 s where a wait crosses a power of two.
+        virtual=SimpleNamespace(now=float(int(time.monotonic() if virtual_origin is None else virtual_origin)+1))
         boot_times={}
         ready_times={}
         service_times={}
@@ -608,9 +612,13 @@ class ThreeComponentWorkflowTests(unittest.TestCase):
     def test_every_real_reboot_waits_thirty_seconds_after_nvue_ready_before_verification(self):
         """R-024 / U2 (owner 2026-11-14, 问题文件 10.1; 需求 R-024; 指导 8.12): both OS hops, BIOS and CPLD
         each wait a fixed 30 s after nvued+CLI readiness on the new boot, inside the original component
-        deadline, before the first post-reboot version/configuration/health query. Virtual clock."""
+        deadline, before the first post-reboot version/configuration/health query. Virtual clock.
+
+        The clock origin is a process-clock reading with a fraction (macOS monotonic starts near 0 per
+        process). This one makes the CPLD wait cross 2**30, where ready+30 is not exact in binary."""
         with tempfile.TemporaryDirectory() as folder:
-            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,os_chain=True)
+            code,report,err,calls,installs=self.invoke(Path(folder).resolve(),controlled_grace=True,os_chain=True,
+                                                      virtual_origin=1073741724.0009767)
             self.assertEqual(code,0,err+repr(report))
             self.assertEqual([c for n,c,v in installs],['os','os','bios','cpld'])
             self.assertNotIn('STABILIZING',err)
