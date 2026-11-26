@@ -40,6 +40,11 @@ class SetupLinksFeedUfmToolTest(unittest.TestCase):
         shutil.copy2(TOOL / "ufm-setup-upgrade.py", tool)
         (root / "infra").mkdir()
         shutil.copy2(ROOT / "infra/ubuntu24_host.py", root / "infra/ubuntu24_host.py")
+        (root / "tools").mkdir()   # v3.1.6 B0: the tool imports four shared tools modules
+        for name in tufm.STANDALONE_TOOLS:
+            shutil.copy2(ROOT / "tools" / name, root / "tools" / name)
+        # B0-O6 (b): the repository's master inventory, here the project's 02 itself (需求文档 :974, :976)
+        (infiniband / "02-devices_config.csv").symlink_to(os.path.relpath(project / "02-devices_config.csv", infiniband))
         for name in ("01-global.yaml", "publickey"):
             self.assertTrue((TOOL / name).is_symlink(), f"{name} must be a tracked repository link")
             (tool / name).symlink_to(os.readlink(TOOL / name))

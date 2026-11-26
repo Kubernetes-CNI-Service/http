@@ -117,6 +117,13 @@ LEAF_NEIGH = f"""\
 {UFM02_LL} dev vlan1000 lladdr 02:00:00:00:02:01 STALE
 203.0.112.1 dev eth0 lladdr aa:bb:cc:dd:ee:ff REACHABLE
 """
+# `bridge vlan show` (Cumulus text layout): the login VLAN of a P2P port (v3.1.6 B0, D1b-O18 (a))
+LEAF_VLANS = """\
+port              vlan-id
+swp17             1000 PVID Egress Untagged
+swp18             1000 PVID Egress Untagged
+br_default        1 PVID Egress Untagged
+"""
 
 
 def nv_interface_table(rows):
@@ -132,6 +139,11 @@ def nv_interface_table(rows):
     return "\n".join(lines) + "\n"
 
 
+# The eth0 MAC each switch reports in `ip -j address show`, the same as its CSV eth0_mac in OTHER_ROWS (v3.1.6
+# B0-O1 (a): a jump reached on eth0 with a filled eth0_mac is checked against it).
+SWITCH_ETH0_MACS = {"203.0.112.119": "02:00:00:00:a1:17", "203.0.112.117": "02:00:00:00:a1:15"}
+
+
 def address_rows(*items):
     rows = []
     for name, ipv4, ipv6, state in items:
@@ -143,12 +155,15 @@ def address_rows(*items):
             info.append({"family": "inet6", "local": ipv6, "prefixlen": 64, "scope": "link"})
         rows.append({"ifname": name, "flags": ["BROADCAST", "MULTICAST", "UP"] if state == "UP" else ["BROADCAST"],
                      "operstate": state, "addr_info": info})
+        if name == "eth0" and ipv4 and ipv4.split("/")[0] in SWITCH_ETH0_MACS:
+            rows[-1]["address"] = SWITCH_ETH0_MACS[ipv4.split("/")[0]]
     return rows
 
 
-def switch_state(hostname, interfaces, links, fdb, neigh, addresses, *, reach, vrf="oob", iface="vlan1000"):
+def switch_state(hostname, interfaces, links, fdb, neigh, addresses, *, reach, vrf="oob", iface="vlan1000",
+                 vlans=LEAF_VLANS):
     return {"hostname": hostname, "interfaces": interfaces, "links": links, "fdb": fdb, "neigh": neigh,
-            "addresses": addresses, "reach": reach, "vrf": vrf, "iface": iface,
+            "addresses": addresses, "reach": reach, "vrf": vrf, "iface": iface, "vlans": vlans,
             "ifquery": {iface: f"auto {iface}\niface {iface}\n    vlan-id 1000\n    vrf {vrf}"}}
 
 
@@ -205,6 +220,8 @@ def make_inputs(directory, *, csv_rows=None, global_text=GLOBAL, p2p_rows=P2P_RO
     directory = Path(directory)
     rows = csv_rows if csv_rows is not None else OTHER_ROWS + [UFM01, UFM02]
     (directory / "ib.csv").write_text(HEADER + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
+    # v3.1.6 B0-O6 (b): an explicit --input-dir holds its own master inventory 02 (需求文档 :976)
+    (directory / "02-devices_config.csv").write_text(HEADER + "\n" + "\n".join(rows) + "\n", encoding="utf-8")
     (directory / "01-global.yaml").write_text(global_text, encoding="utf-8")
     if p2p_rows is not None:
         write_xlsx(directory / "p2p.xlsx", p2p_rows)
@@ -222,6 +239,15 @@ class InputContractTest(unittest.TestCase):
     def assert_rejected(self, plan, *needles):
         self.assertTrue(plan.errors, "expected an input error")
         text = "\n".join(plan.errors)
+        for needle in needles:
+            self.assertIn(needle, text)
+
+    def assert_skipped(self, plan, hostname, *needles):
+        """v3.1.6 B0-O7 (a): a problem of one UFM's own data skips that UFM only (问题文档 :1619, :1621;
+        D1b-O9 (b)); the run is not stopped."""
+        self.assertEqual(plan.errors, [])
+        self.assertNotIn(hostname, [node.hostname for node in plan.nodes])
+        text = "\n".join(plan.incomplete.get(hostname, []))
         for needle in needles:
             self.assertIn(needle, text)
 
@@ -261,17 +287,21 @@ class InputContractTest(unittest.TestCase):
 
     def test_values_after_seventh_column_are_rejected(self):
         stale = UFM01 + ",192.0.2.1,/30"
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [stale, UFM02]), "eth1_ip", "01-global.yaml")
+        plan = self.plan(csv_rows=OTHER_ROWS + [stale, UFM02])
+        self.assert_skipped(plan, "ufm01.site01.example.test", "eth1_ip", "01-global.yaml")
+        self.assertEqual([node.hostname for node in plan.nodes], ["ufm02.site01.example.test"])
 
     def test_duplicate_mac_is_rejected(self):
         twin = UFM02.replace("02:00:00:00:02:01", "02:00:00:00:01:01")
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [UFM01, twin]), "eth0_mac")
+        plan = self.plan(csv_rows=OTHER_ROWS + [UFM01, twin])
+        self.assert_skipped(plan, "ufm01.site01.example.test", "eth0_mac")
+        self.assert_skipped(plan, "ufm02.site01.example.test", "eth0_mac")
 
     def test_missing_gateway_and_gateway_outside_subnet_are_rejected(self):
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [UFM01.replace("198.51.101.254", ""), UFM02]),
-                             "eth0_gw")
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [UFM01.replace("198.51.101.254", "198.51.102.1"), UFM02]),
-                             "eth0_gw")
+        for gateway in ("", "198.51.102.1"):
+            plan = self.plan(csv_rows=OTHER_ROWS + [UFM01.replace("198.51.101.254", gateway), UFM02])
+            self.assert_skipped(plan, "ufm01.site01.example.test", "eth0_gw")
+            self.assertEqual([node.hostname for node in plan.nodes], ["ufm02.site01.example.test"])
 
     def test_primary_must_be_uniquely_identifiable(self):
         renamed = UFM01.replace("ufm01.site01", "ufm03.site01")
@@ -288,11 +318,11 @@ class InputContractTest(unittest.TestCase):
     def test_addresses_and_macs_owned_by_other_csv_rows_are_rejected(self):
         # Owner 2026-10-20: check validates the inputs; no UFM address may clash with another device.
         clash = "oob-leaf119,eth_jump,NA,198.51.101.130,23,203.0.113.254,02:00:00:00:a1:19,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [clash, UFM01, UFM02]),
-                             "198.51.101.130", "已在 ib.csv 中分配给 oob-leaf119 eth0_ip")
+        self.assert_skipped(self.plan(csv_rows=OTHER_ROWS + [clash, UFM01, UFM02]), "ufm01.site01.example.test",
+                            "198.51.101.130", "已在 ib.csv 中分配给 oob-leaf119 eth0_ip")
         same_mac = "oob-leaf119,eth_jump,NA,203.0.112.121,23,203.0.113.254,02:00:00:00:02:01,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"
-        self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [same_mac, UFM01, UFM02]),
-                             "02:00:00:00:02:01", "oob-leaf119 eth0_mac")
+        self.assert_skipped(self.plan(csv_rows=OTHER_ROWS + [same_mac, UFM01, UFM02]), "ufm02.site01.example.test",
+                            "02:00:00:00:02:01", "oob-leaf119 eth0_mac")
         vip_on_switch = "oob-leaf119,eth_jump,NA,198.51.101.133,23,203.0.113.254,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,"
         self.assert_rejected(self.plan(csv_rows=OTHER_ROWS + [vip_on_switch, UFM01, UFM02]), "198.51.101.133（vip）")
 
@@ -333,12 +363,21 @@ class InputContractTest(unittest.TestCase):
 
     def test_ambiguous_management_link_is_rejected(self):
         rows = P2P_ROWS + [["ufm-01", "eno8303", "oob-leaf115", "40"]]
-        self.assert_rejected(self.plan(p2p_rows=rows), "ufm01")
+        plan = self.plan(p2p_rows=rows)
+        self.assert_skipped(plan, "ufm01.site01.example.test", "管理口", "oob-leaf115:40")
+        self.assertEqual([node.hostname for node in plan.nodes], ["ufm02.site01.example.test"])
 
     def test_p2p_peer_missing_from_csv_is_rejected(self):
         rows = [row if row[0] != "ufm-02" or row[1] != "8303" else ["ufm-02", "8303", "oob-leaf999", "18"]
                 for row in P2P_ROWS]
-        self.assert_rejected(self.plan(p2p_rows=rows), "oob-leaf999")
+        # v3.1.6 B0 (问题文档 :1563; D1b-O16, O21): a peer that is not a *jump row of ib.csv is no error; the UFM
+        # is logged into directly
+        plan = self.plan(p2p_rows=rows)
+        self.assertEqual(plan.errors, [])
+        self.assertEqual(len(plan.nodes), 2)
+        self.assertNotIn("ufm02.site01.example.test", plan.attachments)
+        route = ufm.route_table(plan, frozenset())["ufm02.site01.example.test"]
+        self.assertEqual((route.path, route.reason), ("direct", "PEER_NOT_JUMP"))
 
 
 class P2PPortNamingTest(unittest.TestCase):
@@ -410,13 +449,22 @@ class P2PPortNamingTest(unittest.TestCase):
         self.assertTrue([w for w in plan.warnings if "eno8403" in w], plan.warnings)
 
 
+STANDALONE_TOOLS = ("login_path.py", "inventory_subset.py", "device_identity.py", "hostname_ranges.py")
+
+
 def standalone_tool(root):
-    """Only the entry script, the shared host module and the inputs; no git, setup, load or lock files."""
+    """Only the entry script, the shared host module, the four shared tools modules and the master 02 (v3.1.6
+    B0-O6 (b); 需求文档 :976), then the inputs; no git, setup, load or lock files."""
     tool = Path(root) / "infiniband/bringup/ufm-setup-upgrade"
     tool.mkdir(parents=True)
     shutil.copy2(SCRIPT, tool / SCRIPT.name)
     (Path(root) / "infra").mkdir()
     shutil.copy2(ROOT / "infra/ubuntu24_host.py", Path(root) / "infra/ubuntu24_host.py")
+    (Path(root) / "tools").mkdir()
+    for name in STANDALONE_TOOLS:
+        shutil.copy2(ROOT / "tools" / name, Path(root) / "tools" / name)
+    (Path(root) / "infiniband/02-devices_config.csv").write_text(
+        HEADER + "\n" + "\n".join(OTHER_ROWS + [UFM01, UFM02]) + "\n", encoding="utf-8")
     return tool
 
 
@@ -464,28 +512,50 @@ class LeafDiscoveryTest(unittest.TestCase):
     def attachment(self, short):
         return self.plan.attachments[self.nodes[short].hostname]
 
+    def tables(self, fdb=LEAF_FDB, vlans=LEAF_VLANS):
+        return {"links": LEAF_LINKS, "fdb": fdb, "vlans": vlans}
+
     def test_neighbor_table_entry_is_used_when_present(self):
+        # v3.1.6 B0 (I-037 rule 5, 问题文档 :1597 第 3 条): the neighbour table is never read; the link-local is
+        # always the EUI-64 of the CSV MAC, source CSV_EUI64 (B0-O5)
         node = self.nodes["ufm02"]
-        self.assertEqual(ufm.select_neighbor(node, self.attachment("ufm02"), LEAF_LINKS, LEAF_FDB, LEAF_NEIGH),
-                         (UFM02_LL, "vlan1000", "ND"))
+        check = ufm.leaf_cable_check(node, self.attachment("ufm02"), self.tables())
+        self.assertEqual((check.verdict, check.link_local, check.login_interface), ("MATCH", UFM02_LL, "vlan1000"))
+        self.assertEqual(ufm.csv_neighbor(node.mac, check.login_interface, "oob"),
+                         ufm.Neighbor(UFM02_LL, "vlan1000", "oob", "CSV_EUI64"))
 
     def test_eui64_candidate_uses_fdb_vlan_svi_when_neighbor_missing(self):
+        # v3.1.6 B0 (D1b-O18 (a)): the login VLAN is the one `bridge vlan show` gives the expected port
         node = self.nodes["ufm01"]
-        self.assertEqual(ufm.select_neighbor(node, self.attachment("ufm01"), LEAF_LINKS, LEAF_FDB, LEAF_NEIGH),
-                         (UFM01_LL, "vlan1000", "FDB_EUI64"))
+        check = ufm.leaf_cable_check(node, self.attachment("ufm01"), self.tables())
+        self.assertEqual((check.verdict, check.link_local, check.login_interface), ("MATCH", UFM01_LL, "vlan1000"))
+        other = ufm.leaf_cable_check(node, self.attachment("ufm01"), self.tables(
+            vlans="port vlan-id\nswp17 2000 PVID Egress Untagged\nswp18 1000 PVID Egress Untagged\n"))
+        self.assertIsNone(other.login_interface, "VLAN 2000 has no SVI on this Leaf")
 
     def test_other_mac_on_port_stops(self):
-        node = self.nodes["ufm01"]
+        # v3.1.6 B0: another MAC beside the CSV MAC passes with a note (D1b-O3 (a)); the CSV MAC elsewhere or
+        # nowhere is ELSEWHERE or NOT_LEARNED (问题文档 :1624 第 4 条, :1628-1633)
+        node, attachment = self.nodes["ufm01"], self.attachment("ufm01")
+        extra = LEAF_FDB + "02:11:22:33:44:55 dev swp17 vlan 1000 master br_default\n"
+        check = ufm.leaf_cable_check(node, attachment, self.tables(fdb=extra))
+        self.assertEqual((check.verdict, check.extra_macs), ("MATCH", ("02:11:22:33:44:55",)))
         fdb = LEAF_FDB.replace("02:00:00:00:01:01 dev swp17", "02:11:22:33:44:55 dev swp17")
-        with self.assertRaises(ufm.UfmError) as caught:
-            ufm.select_neighbor(node, self.attachment("ufm01"), LEAF_LINKS, fdb, LEAF_NEIGH)
-        self.assertIn("02:11:22:33:44:55", str(caught.exception))
+        check = ufm.leaf_cable_check(node, attachment, self.tables(fdb=fdb))
+        self.assertEqual((check.verdict, check.extra_macs), ("NOT_LEARNED", ("02:11:22:33:44:55",)))
+        moved = LEAF_FDB.replace("02:00:00:00:01:01 dev swp17", "02:00:00:00:01:01 dev swp20")
+        check = ufm.leaf_cable_check(node, attachment, self.tables(fdb=moved))
+        self.assertEqual((check.verdict, check.actual), ("ELSEWHERE", (("oob-leaf117", "swp20"),)))
 
     def test_no_learned_mac_stops(self):
+        # v3.1.6 B0 (I-037 设计 :99-106): not learned, and after the one ping and second read still not learned
         node = self.nodes["ufm01"]
         fdb = "\n".join(line for line in LEAF_FDB.splitlines() if "swp17" not in line or "permanent" in line)
-        with self.assertRaises(ufm.UfmError):
-            ufm.select_neighbor(node, self.attachment("ufm01"), LEAF_LINKS, fdb, LEAF_NEIGH)
+        check = ufm.leaf_cable_check(node, self.attachment("ufm01"), self.tables(fdb=fdb))
+        self.assertEqual((check.verdict, check.after_ping), ("NOT_LEARNED", False))
+        again = ufm.leaf_cable_check(node, self.attachment("ufm01"), self.tables(fdb=fdb), after_ping=True,
+                                     ping_ok=False)
+        self.assertEqual((again.verdict, again.after_ping, again.ping_ok), ("NOT_LEARNED", True, False))
 
     def test_nested_command_matches_manual_hop(self):
         argv = ufm.nested_ufm_argv(self.attachment("ufm02").leaf, "cumulus",
@@ -579,6 +649,42 @@ user, host = target.split("@", 1)
 def say(text):
     print(text, flush=True)
 
+def changed_key(dest, blob, path, line):
+    """OpenSSH's warning for a changed host key (v3.1.6 B0 WP-6 fixtures)."""
+    import base64, hashlib
+    digest = base64.b64encode(hashlib.sha256(base64.b64decode(blob)).digest()).decode().rstrip("=")
+    say("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n"
+        "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+        "The fingerprint for the ED25519 key sent by the remote host is\n"
+        f"SHA256:{digest}.\n"
+        f"Offending ED25519 key in {path}:{line}\n"
+        "  remove with:\n"
+        f"  ssh-keygen -f '{path}' -R '{dest}'\n"
+        f"Host key for {dest} has changed and you have requested strict checking.\n"
+        "Host key verification failed.")
+    sys.exit(255)
+
+def host_key_gate(dest, name):
+    """v3.1.6 B0 WP-6: with FAKE_KNOWN_HOSTS, this server's known_hosts as OpenSSH treats it under
+    StrictHostKeyChecking=accept-new: another key for the address is refused with the warning; a missing entry
+    is added before authentication (state["no_direct_after_refresh"]: the address times out instead)."""
+    path = os.environ.get("FAKE_KNOWN_HOSTS")
+    if not path:
+        return
+    item = state["ufms"][name]
+    kind, blob = item.get("presented_key", item.get("host_key", "")).split()[:2]
+    rows = [line.split() for line in open(path).read().splitlines()] if os.path.exists(path) else []
+    bad = [index for index, row in enumerate(rows, 1) if row[:1] == [dest] and row[2:3] != [blob]]
+    if bad:
+        changed_key(dest, blob, path, bad[0])
+    if not any(row[:1] == [dest] for row in rows):
+        if state.get("no_direct_after_refresh"):
+            say(f"ssh: connect to host {dest} port 22: Connection timed out")
+            sys.exit(255)
+        with open(path, "a") as handle:
+            handle.write(f"{dest} {kind} {blob}\n")
+
 def ufm_session(name, dest, command):
     item = state["ufms"][name]
     if item.get("down_sessions", 0) > 0:
@@ -653,6 +759,14 @@ if user == "cumulus":
         say(f"neigh={probe.group(1)} lladdr {mac} REACHABLE" if mac else
             f"neigh={probe.group(1)} lladdr {evpn} extern_learn NOARP proto zebra" if evpn else "neigh=")
         sys.exit(0)
+    ping = re.search(r"exec ip vrf exec (\S+) ping -6 -c 2 -W 1 (fe80::[0-9a-f:]+)%([A-Za-z0-9_.:-]+)", remote)
+    if ping:   # v3.1.6 B0: the one ping of a CSV link-local; a UFM it reaches may be learned (state["ping_learns"])
+        sw.setdefault("pings", []).append(f"{ping.group(2)}%{ping.group(3)}")
+        learned = state.get("ping_learns", {}).get(ping.group(2))
+        if learned:
+            state["switches"][learned[0]]["fdb"] += learned[1]
+        json.dump(state, open(STATE, "w"))
+        sys.exit(0 if ping.group(2) in sw["reach"] else 1)
     if "ip vrf exec" in remote:
         dest = re.search(r"root@(fe80::[0-9a-f:]+)", remote).group(1)
         if f"ip vrf exec {sw['vrf']} ssh -6" not in remote or f"-B {sw['iface']}" not in remote:
@@ -662,6 +776,9 @@ if user == "cumulus":
         if name is None:
             say(f"ssh: connect to host {dest} port 22: No route to host")
             sys.exit(255)
+        if state["ufms"][name].get("jump_known_hosts_conflict"):   # the inner ssh's file lives on the jump
+            changed_key(dest, "AAAAC3NzaC1lZDI1NTE5AAAAIJUMPSIDEKEYFIXTURE0000000000000000000000000",
+                        "/home/cumulus/.ssh/known_hosts", 2)
         ufm_session(name, dest, shlex.split(shlex.split(remote)[2])[-1])
     query = re.search(r"exec ifquery ([A-Za-z0-9_.:-]+)", remote)
     if query:
@@ -672,7 +789,7 @@ if user == "cumulus":
         sys.exit(0)
     for needle, key in (("nv show interface", "interfaces"), ("ip -j address show", "addresses"),
                         ("bridge fdb show", "fdb"), ("ip neighbor", "neigh"), ("ip -d link show", "links"),
-                        ("exec hostname", "hostname")):
+                        ("bridge vlan show", "vlans"), ("exec hostname", "hostname")):
         if needle in remote:
             value = sw[key]
             say(value if isinstance(value, str) else json.dumps(value))
@@ -692,12 +809,50 @@ if host == ha.get("vip") and ha.get("started"):
             "you have requested strict checking.\nHost key verification failed.")
         sys.exit(255)
     ufm_session(name, host, remote)
+if "%" in host:   # v3.1.6 B0: this server's own link-local login on the same subnet (I-037 设计 :111-113)
+    name = next((n for n, u in state["ufms"].items() if u["lladdr"] == host.split("%")[0] and u.get("local_link")),
+                None)
+    if name is None:
+        say(f"ssh: connect to host {host} port 22: Connection timed out")
+        sys.exit(255)
+    host_key_gate(host, name)
+    ufm_session(name, host, remote)
 name = next((n for n, u in state["ufms"].items() if u["answers_on"] and u["answers_on"] == host), None)
 if name is None or host in state.get("no_direct", []):
     say(f"ssh: connect to host {host} port 22: Connection timed out")
     sys.exit(255)
+host_key_gate(host, name)
 ufm_session(name, host, remote)
 '''
+
+# This management server's own `ip` and `ping` (v3.1.6 B0, table 7-1; v3.1.6 指导 2.2 第 4 条): without
+# state["local"] there is no such command, as on macOS; a test never reads the real host's interfaces.
+FAKE_LOCAL = r'''#!{python}
+import json, os, sys
+STATE = os.environ["FAKE_UFM_STATE"]
+state = json.load(open(STATE)) if os.path.exists(STATE) else {}
+local, tool, args = state.get("local"), os.path.basename(sys.argv[0]), sys.argv[1:]
+if local is None:
+    sys.exit(127)
+if tool == "ip" and args == ["-j", "address", "show"]:
+    print(json.dumps(local["addresses"]))
+    sys.exit(0)
+if tool == "ip" and args[:3] == ["-4", "neigh", "show"] and len(args) == 4:
+    line = local.get("neigh", {}).get(args[3])
+    if line:
+        print(line)
+    sys.exit(0)
+if tool == "ping":
+    local.setdefault("pings", []).append(args[-1])
+    learned = local.get("ping_learns", {}).get(args[-1])
+    if learned:
+        local.setdefault("neigh", {})[args[-1]] = learned
+    json.dump(state, open(STATE, "w"))
+    sys.exit(0 if learned else 1)
+print(f"fake local: unsupported {tool} {args}", file=sys.stderr)
+sys.exit(2)
+'''
+
 
 def networkd_units(ethernets):
     """What the fake `netplan generate` leaves in /run/systemd/network: one 10-netplan-<interface>.network per
@@ -1656,6 +1811,11 @@ class FakeSshCase(unittest.TestCase):
         fake = self.bin / "ssh"
         fake.write_text(FAKE_SSH.replace("{python}", sys.executable), encoding="utf-8")
         fake.chmod(0o755)
+        local = self.bin / "_local_tool.py"   # v3.1.6 B0: this server's ip and ping
+        local.write_text(FAKE_LOCAL.replace("{python}", sys.executable), encoding="utf-8")
+        local.chmod(0o755)
+        for name in ("ip", "ping"):
+            (self.bin / name).symlink_to("_local_tool.py")
         self.devbin = base / "devbin"
         self.devbin.mkdir()
         tool = self.devbin / "_ufm_tool.py"
@@ -1690,8 +1850,9 @@ class FakeSshCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_login(self, allow_change=True, choose=None, action="login", ipmi_password="", upgrade_wait=(1, 1, 30),
-                  apply=True, confirm=None, factory=None, ask_continue=None, confirm_new_password=None,
-                  eth_password=None, ask_eth=None, ha_wait=(0, 60, 0, 60)):
+                  apply=True, confirm=None, factory=None, confirm_new_password=None,
+                  eth_password=None, ask_eth=None, ha_wait=(0, 60, 0, 60), direct_access=frozenset(),
+                  ignore_cable_check=False, refresh_host_key=frozenset()):
         if not self.state_path.exists():
             self.state.setdefault("image_url", IMAGE_URL)
             self.state_path.write_text(json.dumps(self.state), encoding="utf-8")
@@ -1705,8 +1866,9 @@ class FakeSshCase(unittest.TestCase):
         session = ufm.Session(plan, creds, 5, run_dir, lines.append, ask_eth or (lambda: self.LEAF),
                               choose=choose or (lambda items: items[0]), apply_wait=(4, 1, 8),
                               ask_ufm_password=lambda: self.NEW, upgrade_wait=upgrade_wait,
-                              apply=apply, confirm=confirm, ask_continue=ask_continue,
-                              confirm_new_password=confirm_new_password, ha_wait=ha_wait)
+                              apply=apply, confirm=confirm, confirm_new_password=confirm_new_password,
+                              ha_wait=ha_wait, direct_access=direct_access, ignore_cable_check=ignore_cable_check,
+                              refresh_host_key=refresh_host_key)
         self.session = session
         if action in ("trust", "ha_setup", "check", "config_upgrade_all", "ha_post_config_command"):
             results = {item.hostname.split(".")[0]: item for item in getattr(session, action)(plan.nodes)}
@@ -1728,24 +1890,29 @@ class SimulatedLoginTest(FakeSshCase):
                           "ufm02": ("VERIFIED", "oob-leaf117", "LEAF", "swp18")})
 
     def test_access_port_down_stops_before_any_ufm_login(self):
-        self.state["switches"]["203.0.112.119"]["interfaces"] = nv_interface_table([
-            ("swp17", "down", "", ""), ("swp18", "up", "", "")])
+        leaf = self.state["switches"]["203.0.112.119"]
+        leaf["interfaces"] = nv_interface_table([("swp17", "down", "", ""), ("swp18", "up", "", "")])
+        # a port that is down holds no dynamic FDB entry (fixture made physical, v3.1.6 B0; D1b-O4 (a))
+        leaf["fdb"] = LEAF_FDB.replace("02:00:00:00:01:01 dev swp17 vlan 1000 master br_default\n", "")
         results, _state, calls, _logs = self.run_login()
-        self.assertEqual(results["ufm01"].status, "OOB_DISCOVERY_FAILED")
+        # v3.1.6 B0 (D1b-O4 (a), B0-O5): a port that is down is pinged and read again like one that learned
+        # nothing; still not learned -> CABLE_CHECK_FAILED with the port state in the report
+        self.assertEqual(results["ufm01"].status, "CABLE_CHECK_FAILED")
         self.assertIn("swp17", results["ufm01"].detail)
-        self.assertFalse([c for c in calls if UFM01_LL in c["remote"]])
+        self.assertFalse([c for c in calls if UFM01_LL in c["remote"] and "ssh -6" in c["remote"]])
         self.assertEqual(results["ufm02"].status, "VERIFIED")
 
-    def test_unreachable_ipv4_falls_back_to_oob_and_completes_forced_change(self):
+    def test_jump_routed_ufm_logs_in_over_oob_and_completes_forced_change(self):
+        # v3.1.6 B0 (问题文档 :1544 第 4 条, :1656; I-037 rules 3, 5): a UFM cabled to a *jump goes by the jump
+        # only, no IPv4 password attempt first; its link-local is the CSV MAC's EUI-64
         results, state, calls, logs = self.run_login()
         one, two = results["ufm01"], results["ufm02"]
         self.assertEqual((one.status, one.path, one.password), ("VERIFIED", "OOB-IPv6", "new"))
-        self.assertEqual(one.neighbor, {"ipv6": UFM01_LL, "interface": "vlan1000", "vrf": "oob", "source": "FDB_EUI64"})
+        self.assertEqual(one.neighbor, {"ipv6": UFM01_LL, "interface": "vlan1000", "vrf": "oob", "source": "CSV_EUI64"})
         self.assertEqual((two.status, two.path, two.password), ("VERIFIED", "OOB-IPv6", "changed"))
-        self.assertEqual(two.neighbor["source"], "ND")
+        self.assertEqual(two.neighbor["source"], "CSV_EUI64")
         # The forced change is detected first without answering it, confirmed (--apply), then performed.
         self.assertEqual([(a["path"], a["password"], a["outcome"]) for a in two.attempts], [
-            ("IPv4", "new", "UNREACHABLE"),
             ("OOB-IPv6", "new", "AUTH_REJECTED"),
             ("OOB-IPv6", "factory", "PASSWORD_CHANGE_REQUIRED"),
             ("OOB-IPv6", "factory", "PASSWORD_CHANGED"),
@@ -1794,7 +1961,8 @@ class SimulatedLoginTest(FakeSshCase):
         for item, address in (("ufm01", "198.51.101.130/23"), ("ufm02", "198.51.101.132/23")):
             self.state["ufms"][item].update(answers_on=address.split("/")[0], ipv4=address,
                                             expired=False, password=self.NEW)
-        results, _state, calls, _logs = self.run_login()
+        # v3.1.6 B0: cabled to a *jump these are jump-routed; the IPv4 path is the --direct-access one (问题文档 :1561-1562)
+        results, _state, calls, _logs = self.run_login(direct_access=frozenset({"ufm01.site01.example.test", "ufm02.site01.example.test"}))
         self.assertEqual({r.status for r in results.values()}, {"VERIFIED"})
         self.assertEqual({r.path for r in results.values()}, {"IPv4"})
         self.assertFalse([c for c in calls if c["target"].startswith("cumulus@")])
@@ -1802,7 +1970,7 @@ class SimulatedLoginTest(FakeSshCase):
     def test_ipv4_authentication_rejection_does_not_switch_path(self):
         self.state["ufms"]["ufm01"].update(answers_on="198.51.101.130", ipv4="198.51.101.130/23")
         self.state["ufms"]["ufm01"]["password"] = self.OTHER
-        results, _state, calls, _logs = self.run_login()
+        results, _state, calls, _logs = self.run_login(direct_access=frozenset({"ufm01.site01.example.test"}))
         self.assertEqual(results["ufm01"].status, "AUTH_REJECTED")
         self.assertEqual([(a["path"], a["password"]) for a in results["ufm01"].attempts],
                          [("IPv4", "new"), ("IPv4", "factory")])
@@ -1811,9 +1979,19 @@ class SimulatedLoginTest(FakeSshCase):
 
     def test_ipv4_address_not_on_management_interface_stops(self):
         self.state["ufms"]["ufm01"].update(answers_on="198.51.101.130", ipv4="198.18.0.5/24")
-        results, _state, _calls, _logs = self.run_login()
+        results, _state, _calls, _logs = self.run_login(direct_access=frozenset({"ufm01.site01.example.test"}))
         self.assertEqual(results["ufm01"].status, "IDENTITY_MISMATCH")
         self.assertEqual([a["path"] for a in results["ufm01"].attempts], ["IPv4"])
+        # v3.1.6 B0 (问题文档 :1565, :1569; I-037 rule 8): the netmask and the default route are checked too
+        for change in ({"ipv4": "198.51.101.130/24"},
+                       {"ipv4": "198.51.101.130/23", "default": "default via 198.51.101.1 dev eno8303 proto static"}):
+            with self.subTest(change=change):
+                state = json.loads(self.state_path.read_text())
+                state["ufms"]["ufm01"].update(change)
+                self.state_path.write_text(json.dumps(state))
+                results, _state, _calls, _logs = self.run_login(direct_access=frozenset({"ufm01.site01.example.test"}))
+                self.assertEqual(results["ufm01"].status, "IDENTITY_MISMATCH")
+                self.assertEqual([a["path"] for a in results["ufm01"].attempts], ["IPv4"])
 
 
 class SpineDirectTest(unittest.TestCase):
@@ -1878,15 +2056,11 @@ class SpineDirectTest(unittest.TestCase):
                 ufm.parse_oob_addresses(text)
 
     def test_spine_neighbor_prefers_nd_then_eui64_and_rejects_conflicts(self):
+        # v3.1.6 B0-O4 (a) (I-037 rule 5; D1b-O1 ①): a Spine's neighbour table is no longer read; the link-local
+        # is always the CSV MAC's EUI-64 (问题文档 :1587 第 3 条, :1597)
         mac = "02:00:00:00:02:01"
-        self.assertEqual(ufm.spine_neighbor(mac, f"{UFM02_LL} dev vlan1000 lladdr {mac} REACHABLE\n", "vlan1000", "oob"),
-                         ufm.Neighbor(UFM02_LL, "vlan1000", "oob", "ND"))
-        self.assertEqual(ufm.spine_neighbor(mac, "", "vlan1000", "oob"),
-                         ufm.Neighbor(UFM02_LL, "vlan1000", "oob", "FDB_EUI64"))
-        self.assertEqual(ufm.spine_neighbor(mac, f"{UFM02_LL} dev vlan2000 lladdr {mac} REACHABLE\n",
-                                            "vlan1000", "oob").source, "FDB_EUI64")
-        with self.assertRaises(ufm.UfmError):
-            ufm.spine_neighbor(mac, f"{UFM02_LL} dev vlan1000 lladdr 02:11:22:33:44:55 STALE\n", "vlan1000", "oob")
+        self.assertEqual(ufm.csv_neighbor(mac, "vlan1000", "oob"), ufm.Neighbor(UFM02_LL, "vlan1000", "oob", "CSV_EUI64"))
+        self.assertFalse(hasattr(ufm, "spine_neighbor"), "no ND-first neighbour selection is left")
 
 
 class SpineJumpLoginTest(FakeSshCase):
@@ -1910,7 +2084,8 @@ class SpineJumpLoginTest(FakeSshCase):
 
     @staticmethod
     def nested_targets(calls):
-        return sorted({c["target"] for c in calls if "ip vrf exec" in c["remote"]})
+        # v3.1.6 B0 (I-037 设计 :101): only the nested ssh is a login through the switch, not its ping
+        return sorted({c["target"] for c in calls if "ip vrf exec" in c["remote"] and "ssh -6" in c["remote"]})
 
     def test_leaf_svi_without_ipv4_uses_the_only_qualified_spine_for_both_nodes(self):
         results, _state, calls, _logs = self.run_login()
@@ -1920,9 +2095,9 @@ class SpineJumpLoginTest(FakeSshCase):
             self.assertEqual((route["leaf"], route["jump"], route["reason"], route["vlan"]),
                              ("oob-leaf117", self.SPINE2, "LEAF_SVI_HAS_NO_IPV4", "1000"))
             self.assertIn("oob-spine01", route["rejected"])
-        self.assertEqual(results["ufm02"].neighbor["source"], "ND")
+        self.assertEqual(results["ufm02"].neighbor["source"], "CSV_EUI64")   # v3.1.6 B0-O4 (a), I-037 rule 5
         self.assertEqual(results["ufm01"].neighbor,
-                         {"ipv6": UFM01_LL, "interface": "vlan1000", "vrf": "oob", "source": "FDB_EUI64"})
+                         {"ipv6": UFM01_LL, "interface": "vlan1000", "vrf": "oob", "source": "CSV_EUI64"})
         self.assertEqual(self.nested_targets(calls), ["cumulus@203.0.113.202"])
         for ip in ("203.0.112.119", "203.0.113.201", "203.0.113.202"):
             snapshots = [c for c in calls if c["target"] == f"cumulus@{ip}" and "ip -j address show" in c["remote"]]
@@ -2229,7 +2404,8 @@ class SimulatedPhasesTest(PhasesCase):
         keys.write_text("".join(line + "\n" for line in keys.read_text().splitlines() if TEST_KEY_BLOB not in line))
         trust, _state, _calls, _logs = self.run_login(action="trust")
         self.assertEqual({item.status for item in trust.values()}, {"TRUSTED"}, [t.detail for t in trust.values()])
-        self.assertEqual((trust["ufm01"].path, trust["ufm02"].path), ("IPv4-KEY", "IPv4"),
+        # v3.1.6 B0 (I-037 设计 :13, :17): ufm02 is cabled to a *jump, so without its key it goes by the jump
+        self.assertEqual((trust["ufm01"].path, trust["ufm02"].path), ("IPv4-KEY", "OOB-IPv6"),
                          "mutual trust must not depend on deployment-key login")
         self.assertEqual(self.outcomes(trust["ufm01"]),
                          [("root_keypair", "CREATED"), ("peer_key", "ADDED"), ("peer_login", "OK")])
@@ -2268,7 +2444,8 @@ class SimulatedPhasesTest(PhasesCase):
         results, _state, _calls, _logs = self.run_login(action="config_upgrade_all", ipmi_password=self.IPMI)
         two = results["ufm02"]
         self.assertEqual(two.status, "UPGRADED", two.detail)
-        self.assertIn(("IPv4", "new", "OK"), [(a["path"], a["password"], a["outcome"]) for a in two.attempts])
+        # v3.1.6 B0 (I-037 rule 3): by password over the jump it is cabled to, not over IPv4
+        self.assertIn(("OOB-IPv6", "new", "OK"), [(a["path"], a["password"], a["outcome"]) for a in two.attempts])
         self.assertEqual(dict(self.outcomes(two))["authorized_keys"], "ADDED_1")
         self.assertEqual(self.read("ufm02", "root/.ssh/authorized_keys").count(TEST_KEY_BLOB), 1)
 
@@ -3678,7 +3855,8 @@ class AddressOccupancyTest(AddressOccupancyCase):
 
 class CablingCheckTest(AddressOccupancyCase):
     """ib-initial-setup v15 rule: the MAC learned on the P2P OOB Leaf port of eth0 must be the CSV eth0_mac.
-    Owner 2026-10-20: otherwise show the details and ask whether to continue (default no, 15 s)."""
+    v3.1.6 B0-O3 (a) (问题文档 :1587 第 2、4 条, :1627-1640; I-037 设计 :14, :16, :96, :99-106): no question any more;
+    a failure is CABLE_CHECK_FAILED with the expected and the actual place, and --ignore-cable-check goes on."""
     SWAPPED = ("02:00:00:00:02:01 dev swp17 vlan 1000 master br_default\n"
                "02:00:00:00:01:01 dev swp18 vlan 1000 master br_default\n")
 
@@ -3686,14 +3864,15 @@ class CablingCheckTest(AddressOccupancyCase):
         return self.state["switches"]["203.0.112.119"]
 
     def logged_in(self, calls, name):
+        # v3.1.6 B0 (核对 A, A-M7): a password login over the jump is a nested ssh to the UFM's link-local
         address = {"ufm01": "198.51.101.130", "ufm02": "198.51.101.132"}[name]
-        return [call for call in calls if address in str(call.get("target", ""))]
+        link_local = {"ufm01": UFM01_LL, "ufm02": UFM02_LL}[name]
+        return [call for call in calls if address in str(call.get("target", ""))
+                or (f"root@{link_local}" in call["remote"] and "ssh -6" in call["remote"])]
 
     def test_learned_macs_matching_the_csv_need_no_question(self):
-        asked = []
-        results, _state, _calls, logs = self.run_login(action="check", apply=False,
-                                                       ask_continue=lambda text: asked.append(text) or False)
-        self.assertEqual(asked, [])
+        results, _state, _calls, logs = self.run_login(action="check", apply=False)
+        self.assertNotIn("[y/N]", logs, "no question is asked (B0-O3 (a))")
         for name, mac, port in (("ufm01", "02:00:00:00:01:01", "swp17"), ("ufm02", "02:00:00:00:02:01", "swp18")):
             self.assertEqual(results[name].facts["cabling"]["outcome"], "MATCH")
             self.assertIn(f"eth0 MATCH: oob-leaf117 {port} 学到 {mac}", logs)
@@ -3701,58 +3880,58 @@ class CablingCheckTest(AddressOccupancyCase):
 
     def test_swapped_cabling_is_explained_and_by_default_nothing_is_done(self):
         self.leaf()["fdb"] = self.SWAPPED
-        asked = []
-        results, state, calls, logs = self.run_login(action="config_upgrade_all",
-                                                     ask_continue=lambda text: asked.append(text) or False)
-        self.assertEqual([results[name].status for name in ("ufm01", "ufm02")], ["MAC_MISMATCH"] * 2)
-        self.assertEqual(len(asked), 2, "one question per UFM")
-        self.assertIn(self.U1, asked[0])
-        for text in ("P2P 连线: ufm-01:8303 -> oob-leaf117 swp17", "CSV eth0_mac: 02:00:00:00:01:01",
-                     "oob-leaf117 swp17 学到的 MAC: 02:00:00:00:02:01", "CSV 的 eth0_mac 写错"):
+        results, state, calls, logs = self.run_login(action="config_upgrade_all")
+        self.assertEqual([results[name].status for name in ("ufm01", "ufm02")], ["CABLE_CHECK_FAILED"] * 2)
+        self.assertNotIn("[y/N]", logs)
+        for text in ("预期 oob-leaf117 swp17", "CSV MAC 02:00:00:00:01:01 出现在 oob-leaf117 swp18",
+                     "预期 oob-leaf117 swp18", "CSV MAC 02:00:00:00:02:01 出现在 oob-leaf117 swp17"):
             self.assertIn(text, logs)
-        self.assertIn("不继续", logs)
-        for name in ("ufm01", "ufm02"):
+        for name, actual in (("ufm01", ["oob-leaf117 swp18"]), ("ufm02", ["oob-leaf117 swp17"])):
             self.assertEqual(self.logged_in(calls, name), [], "no login to a UFM whose cabling does not match")
             self.assertNotIn("os_upgrade_runs", state["ufms"][name])
-            self.assertEqual(results[name].facts["cabling"]["observed"],
-                             ["02:00:00:00:02:01"] if name == "ufm01" else ["02:00:00:00:01:01"])
+            cabling = results[name].facts["cabling"]
+            self.assertEqual(cabling["outcome"], "ELSEWHERE")
+            self.assertEqual(cabling["observed"], ["02:00:00:00:02:01"] if name == "ufm01" else ["02:00:00:00:01:01"])
+            self.assertEqual(cabling["actual_ports"], actual)
 
     def test_continuing_after_the_details_checks_the_node(self):
         self.leaf()["fdb"] = self.SWAPPED
-        results, _state, calls, logs = self.run_login(action="check", apply=False, ask_continue=lambda text: True)
+        results, _state, calls, logs = self.run_login(action="check", apply=False, ignore_cable_check=True)
         for name in ("ufm01", "ufm02"):
             self.assertEqual(results[name].status, "NEEDS_CONFIGURATION", results[name].detail)
-            self.assertTrue(results[name].facts["cabling"]["continued"])
+            self.assertIs(results[name].facts["cabling"]["ignored"], True)
+            self.assertNotIn("continued", results[name].facts["cabling"])
             self.assertTrue(self.logged_in(calls, name))
-        self.assertIn("用户选择继续", logs)
+        self.assertIn("按 --ignore-cable-check 继续", logs)
         printed = []
         with tempfile.TemporaryDirectory() as tmp:
             ufm.summarize(ufm.parse_args(["check"]), list(results.values()), Path(tmp), printed.append)
-        self.assertIn("P2P 连线核对 MAC_MISMATCH，用户选择继续", "\n".join(printed))
+        self.assertIn("线路核对 ELSEWHERE，按 --ignore-cable-check 继续", "\n".join(printed))
+        self.assertIn("oob-leaf117 swp18", "\n".join(printed), "the actual place is in the summary")
 
     def test_a_port_that_is_down_or_learned_nothing_is_asked_about_too(self):
         self.leaf()["interfaces"] = nv_interface_table([("swp17", "down", "", ""), ("swp18", "up", "", "")])
         self.leaf()["fdb"] = "02:00:00:00:a1:17 dev swp18 vlan 1000 master br_default permanent\n"
-        asked = []
-        results, _state, calls, logs = self.run_login(action="check", apply=False,
-                                                      ask_continue=lambda text: asked.append(text) or False)
-        self.assertEqual((results["ufm01"].status, results["ufm02"].status), ("LINK_DOWN", "MAC_NOT_LEARNED"))
-        self.assertEqual(len(asked), 2)
+        results, state, calls, logs = self.run_login(action="check", apply=False)
+        self.assertEqual((results["ufm01"].status, results["ufm02"].status), ("CABLE_CHECK_FAILED", "CABLE_CHECK_FAILED"))
+        self.assertNotIn("[y/N]", logs)
         self.assertIn("oob-leaf117 swp17 Oper Status=down", logs)
-        self.assertIn("oob-leaf117 swp18 没有学到动态 MAC", logs)
-        # Owner 2026-10-20 (as initial-setup v15): a link-local is derived only from a MAC the FDB learned
-        # (when ND has no IPv6 for it), never from the CSV MAC of a port that learned nothing.
+        for name in ("ufm01", "ufm02"):
+            self.assertIn("ping 后仍没学到", results[name].detail)
+            self.assertIs(results[name].facts["cabling"]["after_ping"], True)
+        self.assertEqual(sorted(state["switches"]["203.0.112.119"]["pings"]),
+                         [f"{UFM01_LL}%vlan1000", f"{UFM02_LL}%vlan1000"], "one ping from the expected Leaf each")
+        # I-037 rule 5 replaces the FDB-learned derivation: the ping goes to the CSV MAC's link-local, but nothing
+        # logs into a UFM whose cabling check failed.
         self.assertFalse([call for call in calls if "ssh -6" in call["remote"]], "no link-local login attempt")
 
     def test_the_csv_mac_learned_on_another_port_of_that_leaf_is_named(self):
         self.leaf()["fdb"] = ("02:00:00:00:02:01 dev swp18 vlan 1000 master br_default\n"
                               "02:00:00:00:01:01 dev swp20 vlan 1000 master br_default\n")
-        asked = []
-        results, _state, _calls, logs = self.run_login(action="check", apply=False,
-                                                       ask_continue=lambda text: asked.append(text) or False)
-        self.assertEqual(results["ufm01"].status, "MAC_MISMATCH")
+        results, _state, _calls, logs = self.run_login(action="check", apply=False)
+        self.assertEqual(results["ufm01"].status, "CABLE_CHECK_FAILED")
         self.assertIn("CSV MAC 02:00:00:00:01:01 出现在 oob-leaf117 swp20", results["ufm01"].facts["cabling"]["detail"])
-        self.assertEqual(len(asked), 1)
+        self.assertNotIn("[y/N]", logs)
 
 
 class HaProblemsTest(unittest.TestCase):
@@ -4105,7 +4284,6 @@ class CommandLineTest(unittest.TestCase):
         class FakeSession:
             def __init__(self, plan, creds, *args, **kwargs):
                 captured.update(creds=creds, apply=kwargs["apply"], confirm=kwargs["confirm"], ask_eth=args[3],
-                                ask_continue=kwargs["ask_continue"],
                                 confirm_new_password=kwargs["confirm_new_password"])
                 self.stopped = ""
 
@@ -4174,16 +4352,6 @@ class CommandLineTest(unittest.TestCase):
         code, _prompts, captured = self.run_main(["ha-post-config", "--apply", "--node", "ufm02"])
         self.assertEqual((code, captured), (1, {}))
 
-    def test_a_cabling_question_waits_15_seconds_and_defaults_to_no(self):
-        code, _prompts, captured = self.run_main(["check"])
-        self.assertEqual(code, 0)
-        with mock.patch.object(ufm, "ask_yes_no_timed", return_value=False) as timed:
-            self.assertIs(captured["ask_continue"]("继续？"), False)
-        prompt, timeout = timed.call_args[0]
-        self.assertEqual(timeout, 15)
-        self.assertIn("15 秒", prompt)
-        self.assertIn("[y/N]", prompt)
-
     def test_the_switch_password_is_asked_only_when_the_key_is_rejected(self):
         code, prompts, captured = self.run_main(["check"])
         self.assertEqual((code, len(prompts), captured["creds"].eth_password), (0, 1, ""))
@@ -4214,7 +4382,7 @@ class CommandLineTest(unittest.TestCase):
                        for index, status in enumerate(statuses, 1)]
             with tempfile.TemporaryDirectory() as tmp:
                 return ufm.summarize(args, results, Path(tmp), lambda _text: None)
-        self.assertEqual(ufm.EXIT_PENDING, 3, "2 is argparse's usage error (owner 2026-10-20)")
+        self.assertEqual(ufm.EXIT_PENDING, 3, "2 is argparse's usage error or an inventory mismatch (需求文档 :975)")
         self.assertEqual(code("check", ["COMPLIANT", "COMPLIANT"]), 0)
         self.assertEqual(code("check", ["COMPLIANT", "NEEDS_CONFIGURATION"]), 3)
         self.assertEqual(code("check", ["NEW_DEVICE", "COMPLIANT"]), 3)
@@ -4241,115 +4409,6 @@ class CommandLineTest(unittest.TestCase):
             self.assertEqual(ufm.summarize(args, results, Path(tmp), lines.append), 0)
         self.assertTrue(lines[-2].startswith("结果: 2/2"), lines)
         self.assertEqual(lines[-1], "提示: ufm01: ufm_enterprise_sanity.sh 未通过（不影响 HA 判定）: Failed")
-
-
-class TimedSecretTest(unittest.TestCase):
-    """The timed terminal reader behind the 15 s P2P cabling question (owner 2026-10-20)."""
-
-    def ask(self, keys, timeout=0.6):
-        master, slave = pty.openpty()
-        box = {}
-
-        def worker():
-            try:
-                box["value"] = ufm.read_timed("pw: ", timeout, echo=False, timeout_note="按回车处理",
-                                              tty_path=os.ttyname(slave))
-            except ufm.UfmError as exc:
-                box["error"] = str(exc)
-        shown = bytearray()
-
-        def terminal():   # a terminal keeps reading what the prompt writes
-            while thread.is_alive() or select.select([master], [], [], 0.2)[0]:
-                if select.select([master], [], [], 0.1)[0]:
-                    try:
-                        shown.extend(os.read(master, 4096))
-                    except OSError:
-                        return
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        reader = threading.Thread(target=terminal, daemon=True)
-        reader.start()
-        for delay, data in keys:
-            time.sleep(delay)
-            os.write(master, data)
-        thread.join(10)
-        reader.join(10)
-        alive = thread.is_alive()
-        os.close(master)
-        os.close(slave)
-        self.assertFalse(alive, "the prompt must return")
-        return box, bytes(shown).decode("utf-8", "replace")
-
-    def test_no_key_within_the_deadline_counts_as_enter(self):
-        started = time.monotonic()
-        box, shown = self.ask([])
-        self.assertEqual(box, {"value": ""})
-        self.assertLess(time.monotonic() - started, 5)
-        self.assertIn("pw: ", shown)
-        self.assertIn("按回车处理", shown)
-
-    def test_typed_password_is_read_without_echo(self):
-        box, shown = self.ask([(0.2, b"Leaf-Pw-9\r")])
-        self.assertEqual(box, {"value": "Leaf-Pw-9"})
-        self.assertNotIn("Leaf-Pw-9", shown)
-        self.assertNotIn("按回车处理", shown)
-
-    def test_the_first_key_cancels_the_deadline(self):
-        box, _shown = self.ask([(0.2, b"Le"), (1.0, b"af\r")], timeout=0.5)
-        self.assertEqual(box, {"value": "Leaf"})
-
-    def test_backspace_and_line_kill_edit_the_input(self):
-        box, _shown = self.ask([(0.2, b"xx\x15abx\x7fc\r")])
-        self.assertEqual(box, {"value": "abc"})
-
-    def test_ctrl_c_cancels(self):
-        box, _shown = self.ask([(0.2, b"ab\x03")])
-        self.assertEqual(box, {"error": "已取消输入"})
-
-    def answer(self, keys, timeout=0.6):
-        master, slave = pty.openpty()
-        box, shown = {}, bytearray()
-
-        def worker():
-            box["value"] = ufm.ask_yes_no_timed("go? ", timeout, tty_path=os.ttyname(slave))
-
-        def terminal():
-            while thread.is_alive() or select.select([master], [], [], 0.2)[0]:
-                if select.select([master], [], [], 0.1)[0]:
-                    try:
-                        shown.extend(os.read(master, 4096))
-                    except OSError:
-                        return
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
-        reader = threading.Thread(target=terminal, daemon=True)
-        reader.start()
-        for delay, data in keys:
-            time.sleep(delay)
-            os.write(master, data)
-        thread.join(10)
-        reader.join(10)
-        os.close(master)
-        os.close(slave)
-        return box.get("value"), bytes(shown).decode("utf-8", "replace")
-
-    def test_yes_no_question_defaults_to_no_after_the_deadline(self):
-        value, shown = self.answer([])
-        self.assertIs(value, False)
-        self.assertIn("按 N 处理", shown)
-
-    def test_yes_no_question_echoes_and_accepts_y(self):
-        value, shown = self.answer([(0.2, b"y\r")])
-        self.assertIs(value, True)
-        self.assertIn("go? y", shown)
-        self.assertIs(self.answer([(0.2, b"n\r")])[0], False)
-        self.assertIs(self.answer([(0.2, b"\r")])[0], False, "Enter keeps the default N")
-
-    def test_yes_no_question_without_a_terminal_is_no(self):
-        self.assertIs(ufm.ask_yes_no_timed("go? ", 15, tty_path="/nonexistent/tty"), False)
-
-    def test_without_a_terminal_there_is_no_answer(self):
-        self.assertIsNone(ufm.read_timed("pw: ", 10, echo=False, timeout_note="", tty_path="/nonexistent/tty"))
 
 
 class ScriptLoaderTest(unittest.TestCase):

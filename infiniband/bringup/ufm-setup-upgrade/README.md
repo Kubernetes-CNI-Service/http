@@ -1,7 +1,10 @@
 # UFM 初始化与升级
 
-`ufm-setup-upgrade.py` 只读取本目录下的输入，除公共模块 `infra/ubuntu24_host.py` 外不依赖仓库其它文件，
-也不依赖 load、git 或 load 生成的锁文件；输入文件正确即可运行：
+`ufm-setup-upgrade.py` 只读取本目录下的输入和总清单 02，除公共模块 `infra/ubuntu24_host.py` 和 `tools/` 的
+4 个公共模块（`login_path.py`、`inventory_subset.py`、`device_identity.py`、`hostname_ranges.py`，v3.1.6 起）外
+不依赖仓库其它文件，也不依赖 load、git 或 load 生成的锁文件；输入文件正确即可运行。独立运行时带上这几个模块和
+总清单 `02-devices_config.csv`（默认目录取 `<仓库>/infiniband/02-devices_config.csv`，显式 `--input-dir` 取它下面的
+`02-devices_config.csv`，不回退到仓库的）：
 
 ```text
 ufm-setup-upgrade/
@@ -161,6 +164,23 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
   `ha-setup` 总是同时处理两台，不能用 `--node` 只选一台。
 - `config-upgrade` 和 `ha-setup` 必须带 `--apply` 才执行；不带时是用法错误（退出码 2），
   并提示改用 `check`。只查看状态一律用 `check`。
+- 清单比对（需求文档 R-016，v3.1.6）：任何提问、建运行目录和登录之前，先比对 `ib.csv` 与总清单 02：`ib.csv` 必须是
+  02 本身或它的子集（02 里是 `eth` 等以太网类型、`ib.csv` 里写 `eth_jump` 允许）。不一致时每处打印一行
+  `INVENTORY MISMATCH: <主机>; <列>; ib.csv=<值>; 02=<值>; <类别>`，以 **2** 退出；02 不在或读不了也以 2 退出并写明路径。
+  `check --inputs-only` 也比对。bringup 调用时带 `--inventory-checked`（隐藏参数）跳过。
+- v3.1.6 新参数（I-037，四个子命令都有；名单与 ib.csv 里全部 `server_ufm` 比，不受 `--node` 影响，某项没匹配上
+  在碰任何设备之前以 2 退出）：
+  - `--direct-access <名单>`：这些 UFM 不经跳板、直接登录。写法同 `--devices`：逗号分隔，可用 `*`、`[01-04]`
+    这类范围，`all` 表示全部。
+  - `--ignore-cable-check`：线路核对失败时仍用 CSV MAC 的 link-local、经预期端口所属 VLAN 的 SVI 登录并继续，
+    汇总单列这台和 MAC 实际所在的位置。
+  - `--refresh-host-key <名单>`：factory reset 后只能经 IPv4 登录的 UFM，本机 known_hosts 的主机密钥变化跳过核实处理
+    （见「主机密钥」一节）。写法同上，但 `all` 不是关键字；手工参数，bringup 不传。
+- 登录前归类（I-037 规则 3）：输入检查之后、任何会话之前打印一张归类表（设备、路径、原因、跳板和端口、是否同网段、
+  跳过原因），`check --inputs-only` 也打印，并写进 `report.log` 和 `result.json` 各台的 `login_route`：
+  - P2P 管理口接在类型以 `jump` 结尾的行（`eth_jump`）上：经跳板（`JUMP_LINK`）；
+  - `--direct-access` 指定（`DIRECT_ACCESS`）、P2P 里没有管理口连线（`NO_MGMT_LINK`）、对端不是 `*jump` 或不在 ib.csv
+    （`PEER_NOT_JUMP`）：直接登录。不是 `*jump` 的以太网行不读登录地址，也不因此报错。
 
 | 命令 | 对应需求文档 | 做什么 |
 |---|---|---|
@@ -174,10 +194,18 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 1. **输入文件合法性**：
    - 格式、主备角色、子网一致；
    - 地址和 MAC 互不冲突；
-   - UFM 的地址和 MAC 不能已在 ib.csv 中分配给其它设备；
+   - UFM 的地址和 MAC 不能已在 ib.csv 中分配给其它设备（别的行的 MAC 认 `:`、`-`、`.`、不分隔各种写法）；
    - VIP 不能与任何地址重复。
-   有错误时不登录任何设备。
-2. **地址占用检查**：在 OOB Leaf/Spine 上检查输入地址是否被现网设备占用，只读。
+   - 逐台和整次分开（I-037 规则 1，v3.1.6 B0-O7）：一台 UFM 自己的数据有问题（eth0_ip/掩码、eth0_gw、eth0_mac 缺或错，
+     网关等于 eth0_ip，地址前缀与掩码列不一致，第 8 列起有值，与 ib.csv 别的行地址或 MAC 冲突，两台之间 eth0_ip 或 MAC
+     重复，两台 eth0 不在同一网段，P2P 管理口或 HA 口多条连线、对端端口名无效）只跳过涉及的那台，记为
+     `INPUT_INCOMPLETE` 并写明缺什么，其他照常；`check --inputs-only` 这时退出码 1。
+   - 仍是整次错误、不登录任何设备的：主机名非法或重名、`type=ufm`、没有或多于两台 `server_ufm`、角色认不出、
+     global（HA 接口、VIP、IPMI、DNS 等）、p2p.xlsx 解析失败、publickey。
+   - 一台被跳过时 ha-setup 只剩一台：照旧 `INPUT_ERROR`「HA 需要两台 UFM」，两台都不登录、不改。
+2. **地址占用检查**：在 OOB Leaf/Spine 上检查输入地址是否被现网设备占用，只读。只登录类型以 `jump` 结尾的交换机
+   （v3.1.6 B0-O11）：管理口或 BMC 接在 `eth` 类 Leaf 上时这两项记 `UNCHECKED`；要保留检查就把这些 Leaf 在 ib.csv
+   里改成 `eth_jump`。
    - 检查对象：每台的管理 IPv4、IPMI 地址和 VIP。
    - 选一台在该网段有自有 IPv4 SVI 的交换机：先选 P2P 中该 UFM 管理口/BMC 所接的 Leaf，再选 Leaf 的 LLDP 显示的 Spine。在它上面 `ip vrf exec <vrf> ping -I <svi>` 让交换机去 ARP，再读邻居表。
    - 结果：
@@ -188,18 +216,36 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - 只有已确认的邻居记录（REACHABLE）才算占用，残留的 STALE/FAILED 缓存不算。
    - 该网段没有带 IPv4 的 SVI 时报 `UNCHECKED`（只提示）。
    - P2P 没有 BMC 连线时，IPMI 地址有应答报 `UNVERIFIED`（只提示）。
-3. **P2P 连线核对**（规则同 ib-initial-setup v15，owner 2026-10-20）：在 P2P 中该 UFM 管理口（eno8303）所接的 OOB Leaf 端口上，重新读取 `bridge fdb show`，学到的动态 MAC 必须是 CSV 的 `eth0_mac`。bond 成员按 bond 主接口查。
-   - `MATCH`：一致，继续。
-   - `MAC_MISMATCH`：学到的是别的 MAC；或者端口没学到 MAC，而 CSV 的 MAC 出现在这台 Leaf 的别的端口上（写明实际端口）。
-   - `LINK_DOWN`：端口不是 up。`MAC_NOT_LEARNED`：端口 up 但没有学到动态 MAC。
-   - 不从 CSV 的 MAC 推导地址去尝试登录。IPv6 link-local 只在经 OOB 登录时使用：邻居表中有这个 MAC 的 IPv6 就用它；没有时，用 FDB 学到、且已核对等于 CSV 的 MAC 推导（EUI-64），与 ib-initial-setup v15 相同。
-   - 以上三种情况：
-     - 列出 P2P 连线、CSV MAC、端口实际学到的 MAC 和可能原因，然后询问是否继续处理这台 UFM：`[y/N]`，**默认不继续，15 秒无输入按不继续处理**，没有交互终端也按不继续处理。
-     - 不继续：这台 UFM 本次不登录、不改动，状态即上述结果，按失败处理。
-     - 继续：照常检查和配置，汇总里保留一行「P2P 连线核对 …，用户选择继续」。
+3. **线路核对**（I-037 规则 4～6，v3.1.6；线路核对和 link-local 由同一个函数 `tools/login_path.py::check_cable` 给出）：
+   check、config-upgrade 对经跳板的 UFM 在登录前核对（公钥能直连也核对）；ha-setup、ha-post-config 只在真的经跳板
+   登录时核对；直接登录的（含 `--direct-access`）不核对，记 `UNCHECKED`。
+   - 在预期跳板（P2P 里管理口所接的 `*jump`）上读 `bridge fdb show`，CSV 的 `eth0_mac` 学在预期端口上为 `MATCH`；
+     端口上另有别的 MAC 而 CSV MAC 也学到，照样通过并在 `observed` 里列出。bond 成员按 bond 主接口查；
+     P2P 中两端都是 `*jump` 的级联口上学到的 MAC 不算实际位置。
+   - 预期跳板上没学到时，再读 ib.csv 其它 `*jump` 的 `ip -d link show`、`bridge fdb show`（每台每次运行一次）：
+     学在同一台的别的口、或另一台跳板的口为 `ELSEWHERE`，报告写出预期和实际的跳板、端口。
+   - 哪里都没学到：在预期跳板上 `ip vrf exec <vrf> ping -6 -c 2 -W 1 <CSV MAC 的 link-local>%<预期端口 VLAN 的 SVI>`
+     一次（Leaf 上这个 VLAN 没有 SVI 时从选中的 Spine 的 SVI ping），再读一次 FDB，重做核对；仍没学到为
+     `NOT_LEARNED`，报告写「ping 后仍没学到」、ping 通没通和端口状态。端口 down 不单列，也走这条。ping 不改交换机配置。
+   - `ELSEWHERE`、`NOT_LEARNED`：这台记 `CABLE_CHECK_FAILED`，不登录、不改动；运行中不提问（v3.1.6 B0-O3，取代
+     2026-10-20 的 15 秒提问）。确认要继续时加 `--ignore-cable-check` 重跑。
    - 读不到交换机时记为 `UNCHECKED`，只提示，不阻止。
+   - `facts["cabling"]`：`outcome`（`MATCH`/`ELSEWHERE`/`NOT_LEARNED`/`UNCHECKED`）、`detail`、`expected`（CSV MAC）、
+     `observed`（预期端口上学到的动态 MAC），v3.1.6 加 `expected_port`、`actual_ports`、`after_ping`、`ping_ok`、`ignored`。
    - BMC 口 down 不检查，BMC 只在地址占用检查里用 FDB 核对应答 MAC。
-4. **登录每台 UFM**：先试部署服务器公钥，再试新密码，最后试出厂密码。
+4. **登录每台 UFM**（I-037 规则 3、7、8）：先试部署服务器公钥直连 CSV IPv4；不成（被拒、连不上、主机密钥冲突）才按
+   归类走一条路，先新密码，再出厂密码。选定的路失败就记失败，不改走另一条：
+   - 经跳板：`ip vrf exec <vrf> ssh -6 -B <SVI> root@<CSV MAC 的 link-local>`，不先试 IPv4 密码；失败的提示里有
+     `--direct-access <这台>` 的重试写法；跳板连不上为 `JUMP_UNREACHABLE`（写明跳板），跳板在 ib.csv 里没有可用登录地址为
+     `JUMP_ADDRESS_INVALID`。
+   - 直接登录、与部署服务器同网段（本机 `ip -j address show` 有同网段且带 IPv6 link-local 的接口）：先
+     `ssh -6 root@<CSV MAC 的 link-local>%<本机接口>`（路径 `LINK-LOCAL`）；只有连不上（不可达、超时、拒绝连接）才改
+     IPv4，改之前本机 `ip -4 neigh show <地址>` 的 MAC 必须是 CSV MAC（没有记录先 ping 一次再读，仍没有或不符就不登录）；
+     密码被拒、身份不符都记失败、不改试。
+   - 直接登录、不同网段，或本机没有 `ip`（例如 macOS）：直接 CSV IPv4。
+   - 登录后核对身份（`tools/login_path.py::check_identity`）：所有路径核管理口 MAC；`IPv4`、`IPv4-KEY` 两条 IPv4 路径还核
+     地址和掩码、默认路由的网关（没有默认路由算通过）。不符就停这台（`IDENTITY_MISMATCH`，`result.json` 的 `identity`
+     写预期和实际），公钥直连登录成功但身份不符时也停，不再改用口令（I-054）。
    - **需要改出厂密码说明是新设备**：状态 `NEW_DEVICE`，到此为止，下一步执行 `config-upgrade --apply`。
    - 能用公钥或新密码登录的，**做全部只读检查**：
      - 基本配置各项是否符合：netplan、公钥、hostname、IPMI、DNS/搜索域、NTP、时区、`/etc/hosts`；
@@ -219,7 +265,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - 全部符合为 `COMPLIANT`，退出码 0。
    - 有需要改动的为 `NEEDS_CONFIGURATION`，或者有新设备 `NEW_DEVICE`，退出码 3。
    - 升级在途或没有完成为 `UPGRADE_IN_PROGRESS`，退出码 1（I-008，v3.1.6）：设备上有正在运行的升级单元 `ufm-os-upgrade-*`，或 `UFM_APPLIANCE` 已是目标版本、但最近一次升级的状态日志还没有 `UFM-OS-UPGRADE` 和 `UFM-OS-FIRSTBOOT` 都 PASSED。这时不报 `COMPLIANT`。
-   - 失败（含地址冲突和不继续的 P2P 连线问题）退出码 1。
+   - 失败（含地址冲突、`CABLE_CHECK_FAILED`、`INPUT_INCOMPLETE`）退出码 1。
 
 ### config-upgrade --apply
 
@@ -423,8 +469,11 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
 ### 连通测试与验证只用地址
 
 所有连通测试（ping、ssh）的目标都是 IP/IPv6 字面地址；所有身份核验都比对地址或 MAC，从不比对主机名：
-- UFM：核对管理口 MAC，以及 IPv4 地址在管理口上。
-- OOB Leaf/Spine：登录用的 IP 必须在它自己的接口上。
+- UFM：核对管理口 MAC；经 IPv4（含公钥直连）登录时还核对地址、掩码和默认路由的网关（v3.1.6）。
+- OOB Leaf/Spine：登录用的 IP 必须在它自己的接口上。登录地址按候选依次试（I20，v3.1.6 B0-O1）：eth0_ip 在前，
+  再按 CSV 列组顺序的各 VLAN svi_ip；只有连不上才换下一个，认证被拒、身份不符不换；选中的地址本次运行一直用，写进
+  `result.json` 的 `route`。经 eth0 进入且 CSV 填了合法的跳板 eth0_mac 时，还要比 `ip -j address show` 里 eth0 的 MAC，
+  不符这台跳板停用；没填或写法不合法时照用，报告写「跳板 eth0_mac 未填，eth0 入口只核了地址」。
 - 互信：对端接口上要有我们连接的那个地址。
 - 地址占用：应答的 MAC 与 CSV 或 BMC 口的 FDB 比对。
 
@@ -459,7 +508,8 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
   - 0：全部已是目标状态。
   - 3：check 发现需要改动。
   - 1：失败或未完成。
-  - 2：命令行用法错误。
+  - 2：命令行用法错误；`ib.csv` 与总清单 02 不一致或 02 读不了（需求文档 :975，v3.1.6 B0-O12）；`--direct-access`、
+    `--refresh-host-key` 的名单有一项没匹配上。都在碰任何设备之前。
 
 ### 密码
 
@@ -524,7 +574,8 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
 - **远端执行方式**：每一步在部署服务器上生成一个小 bash 脚本，经 base64 传到设备，在设备上用 sha256 校验后再用 bash 执行。
   - 口令从不写进脚本。
   - 脚本副本、每次会话输出和 `result.json`（含输入文件摘要）保存在 `ufm-setup-upgrade-logs/<时间>-<命令>/`。
-- **出错处理**：认证拒绝不会切换访问路径；主机密钥冲突、MAC 不符、输出无法识别都会停止，不重试。
+- **出错处理**：选定的登录路径失败不改走另一条（I-037 规则 7），唯一例外是同网段 link-local 连不上时改 IPv4；
+  认证拒绝不会切换访问路径；MAC、地址、掩码或网关不符、输出无法识别都会停止，不重试；主机密钥冲突按「主机密钥」一节处理。
 - 与 Ubuntu 24.04 主机相关的配置脚本在公共模块 `infra/ubuntu24_host.py`。check 和 config 计划进一步做成模块，供 `server_mgmt` 复用。
 
 ## 为什么没有复用 f01 的 UFM 工具（2026-10-20 记录）
@@ -560,23 +611,37 @@ f01 分支（`http-f01-ufm-validation`）有一套 UFM 工具：
 f01 改过的 6 个已跟踪文件（`tools/ufm_input_contract.py`、`tools/ufm_identity_binding.py`、`tools/ufm-discover.py`、
 `infra/ufm_jump_transport.py` 及其两个测试）保留未动。
 
-## OOB 跳板选择（移植自 ib-initial-setup v15）
+## 主机密钥（v3.1.6，I-037 设计 :116；B0-O2、O8）
 
-IPv4 不可达时，先只读登录 P2P 指定的 Leaf，读取 `nv show interface`、`ip -d link show`、
-`bridge fdb show`、`ip neighbor`、`ip -j address show`（每台交换机每次运行只读一次）：
+- 只处理管理服务器上当前用户（按 passwd 的家目录）的 `~/.ssh/known_hosts`，只删告警里这台 UFM 的那一个地址
+  （CSV IPv4，或同网段 link-local 带本机接口），由 `tools/login_path.py` 的 `refresh_target_host_key` 删除并重试；
+  其它文件一律只报告：跳板上 cumulus 的 known_hosts（经跳板的内层 ssh）不删、不向跳板发任何写命令；VIP 用的本次运行目录里的
+  `vip-known-hosts` 不变（owner 2026-10-22）。
+- 公钥直连报主机密钥变化时：先按归类经跳板（或同网段 link-local）登录并核 MAC，用这条会话读设备主机公钥、算指纹，与告警一致
+  才处理。check 只记 `host_key: WOULD_REFRESH`（算需要改动，退出码 3），文件不动；`--apply` 时在删除前确认一次（`--yes`
+  时不问），只删这一条，重试一次公钥直连：factory reset 后部署公钥也没了、重试被拒不算失败，以重试后 known_hosts 里的
+  指纹为准，这台继续用已核验的会话，部署公钥由配置步骤装回。指纹不符、重试连不上都按 `HOSTKEY_CONFLICT` 报告。
+- 只能经 IPv4 登录的 UFM（不同网段、没有跳板）没有另一条会话可以核实：只报冲突，写手工命令和
+  `--refresh-host-key <这台>` 的重跑写法；操作员确认做过 factory reset 后带上它重跑，跳过核实只删这一条、重试一次，
+  再走口令 IPv4 路径，记录写「未核实（操作员指定）」。
+- `result.json` 这台的 `host_key` 记旧、新指纹、核实方式和结果，报告不放原始告警。
 
-1. 接入口 Oper Status 必须为 up；FDB 中该口必须学到 CSV 管理 MAC，并给出唯一 VLAN/bridge。
+## OOB 跳板选择（移植自 ib-initial-setup v15；v3.1.6 按 I-037 改）
+
+经跳板的 UFM（P2P 管理口接在 `*jump` 上），先只读登录 P2P 指定的 Leaf，读取 `ip -j address show`、`nv show interface`、
+`ip -d link show`、`bridge fdb show`、`bridge vlan show`（每台交换机每次运行只读一次；v3.1.6 起不读 `ip neighbor`）：
+
+1. 线路核对见 check 第 3 步；不通过且没有 `--ignore-cable-check` 时不登录。登录目标一律是 CSV MAC 的 EUI-64 link-local
+   （来源 `CSV_EUI64`），不读邻居表；登录 VLAN 取预期端口在 `bridge vlan show` 里的 VLAN。
 2. Leaf 上该 VLAN 有唯一真实 SVI 且该 SVI 有 IPv4：从 Leaf 跳（`reason=LEAF`）。
 3. SVI 不存在（`LEAF_SVI_MISSING`）或没有 IPv4（`LEAF_SVI_HAS_NO_IPV4`）：改走 Spine。
    - 候选只取 Leaf `nv show interface` 中 Oper Status=up 的 LLDP Remote Host，并且必须与
      ib.csv 中的 Spine 库存唯一对应；默认库存是短名以 `oob-spine` 开头的 eth_jump，
      也可用 `--oob-spines a,b` 指定。只在 CSV 中登记但 LLDP 中没有的 Spine 不会登录。
    - 候选 Spine 的身份按地址核对：登录用的 IP 必须出现在它的 `ip -j address show` 里；该 VLAN 上有唯一真实 SVI（`vlan1000-v0` 这类 VRR
-     macvlan 不算），SVI 为 UP 且有自有 IPv4 和 link-local，能查到 VRF，并且邻居表有该 MAC
-     的 link-local 或可由 MAC 推导（推导地址与邻居表冲突则拒绝）。
+     macvlan 不算），SVI 为 UP 且有自有 IPv4 和 link-local，能查到 VRF；目标同样是 CSV MAC 的 link-local。
    - 合格候选中随机选一台，同一 Leaf 下的两台 UFM 使用同一台 Spine；不合格原因写入结果。
-   - Spine 的登录地址取 eth0_ip；没有时取该行唯一一组 vlan_id/svi_ip。Leaf/Spine 使用同一个
-     OOB 密码（或密钥）。
+   - Spine、Leaf 的登录地址按候选依次试（见「连通测试与验证只用地址」）。Leaf/Spine 使用同一个 OOB 密码（或密钥）。
 4. 从选定的跳板执行 `ip vrf exec <vrf> ssh -6 -B <svi> root@<link-local>`，登录后照常核对 MAC。
 
 Leaf、Spine 只做只读查询，不修改任何交换机配置。

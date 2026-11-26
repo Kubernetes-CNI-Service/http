@@ -2979,6 +2979,32 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 风险：中。`networkctl reload` 会让 networkd 重新配置 HA 口，DRBD 连接可能短暂断开（推断）；会断的话 B6-O9 回到 http dev 重定（指导第 7 节第 16 条）。第 4 步会让 DRBD 断开约 1 分钟、期间不复制；主节点要维护窗口；prod 写操作要 owner 授权。
 - 未执行前保持 NOT RUN，不得写 PASS。
 
+## TC-REAL-I037-UFM-LOGIN-PATH-001 — ufm-setup-upgrade 的清单比对、登录前归类、线路核对、直接登录、身份核对和主机密钥（I-037 UFM 侧、I-054）
+
+- Case ID：`TC-REAL-I037-UFM-LOGIN-PATH-001`；类型：real-environment / login-path；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 本机先决：`test_cases.test_ufm_login_routes`、`test_cases.test_ufm_host_key_refresh`、`test_cases.test_ufm_login_routes_workflow`、`test_cases.test_ufm_setup_upgrade` 通过。替身 GREEN 不等于现场验收：交换机、UFM 和本机的 ssh、ping、`ip` 都是替身。
+- 依据：问题文档 I-037（:1544-1656）、I-054（:1867-1874）；需求文档 R-016（:970-977）；v3.1.6 指导 WP-3～WP-7、3.2 B0-O1～O13、5.3。
+- 执行人与核验人（分栏写；没人执行的步骤标「未执行」，不算通过）：执行人是 owner 或 owner 授权的现场人员；prod 上有写操作的步骤要 owner 授权；验证 AI 在 prod 只读核验日志和结果。`check` 会在 UFM 上留检查脚本副本，也由 owner 或现场人员执行，验证 AI 只读已保存的结果。
+- 前置条件：一对 UFM（或一台）；P2P 管理口接在 `eth_jump` 上；部署服务器与 UFM 管理口同网段一台、不同网段一台（做得到时）；有控制台。
+- 步骤与预期：
+  1. 只读（prod 也可）：UFM 管理口的 link-local 是否就是 MAC 的 EUI-64（`ip -6 addr show dev <管理口> scope link`，与 eth0 MAC 比）。不是时经跳板和同网段 link-local 的登录都会失败，记下并报 http dev。
+  2. 经跳板 `check`：`report.log` 的快照有 `bridge vlan show`、没有 `ip neighbor`；线路核对出现 `MATCH`；能构造时记录 `ELSEWHERE`（写出预期和实际的跳板、端口）和 `NOT_LEARNED`（预期跳板上 ping 一次、再读一次 FDB，「ping 后仍没学到」）；运行中没有任何提问；`--ignore-cable-check` 时这台仍登录，汇总单列。
+  3. `--direct-access <一台>`：同网段时先走 `LINK-LOCAL`；人为让 link-local 不通时，改 IPv4 之前本机 `ip -4 neigh show <地址>` 的 MAC 是 CSV MAC。
+  4. 身份核对的网关：有默认路由、没有默认路由两种都通过；默认路由经别的网关时 `IDENTITY_MISMATCH`，零写入。
+  5. factory reset 后的主机密钥（AIR 或现场有可 reset 的 UFM 时）：本机 known_hosts 只删这一条（删前确认一次），跳板上的 known_hosts 不动；check 只记 `WOULD_REFRESH`。
+  6. `ib.csv` 与 02 不一致：逐条打印 `INVENTORY MISMATCH`、以 2 退出，没有提问、没有运行目录、没有任何会话。
+  7. 跳板 eth0_mac：没填（报告有「跳板 eth0_mac 未填，eth0 入口只核了地址」）、填了且正确、填了但写错（这台跳板停用，它下面的 UFM 失败）三种。
+  8. 没有跳板、DHCP 按 MAC 分规划地址的 UFM（问题文档 :1643，做得到时）。
+  9. `--direct-access` 指定一两台，分别走 link-local 和 IPv4 两条直连路径（问题文档 :1654）。
+  10. 留一份跳板 `ip -j address show` 里 eth0 那一段的样本（脱敏），核对 MAC 的字段名是 `address`（B0-O1 (a) 的 eth0 入口按它比）。
+  11. 公钥直连登录到身份不符的机器时这台停、不发口令（B0-O13 (a)，构造不出就标「未执行」）。
+  12. `--refresh-host-key` 指定一台只能经 IPv4 的 UFM（factory reset 后，做得到时）：记录写「未核实（操作员指定）」。
+- 不允许的副作用：跳板零改动（00 原则 :68）；`check` 零写入（脚本副本除外）。
+- 证据：`report.log`、`result.json` 各台的 `login_route`、`path`、`facts.cabling`、`identity`、`host_key`；跳板 `nv config diff` 前后为空、跳板 known_hosts 不变；本机 known_hosts 删前后的行数，以及去掉这台之后的 SHA-256 相同。主机名、地址、MAC 脱敏。
+- 清理：设备按项目恢复；`known_hosts.old` 按 v3.1.4 D34-O3 的决定处理。
+- 风险：中（config-upgrade 会改地址）；prod 上验证 AI 只读，第 1 步的只读命令由 owner 或现场人员执行并给出输出。
+- 未执行前保持 NOT RUN，不得写 PASS。
+
 ## TC-REAL-UFM-MONITOR-001 — UFM 监控采集、降级、failover 期间的取回、保留期与日志轮转
 
 - Case ID：`TC-REAL-UFM-MONITOR-001`；类型：real-environment / collection / failover；状态：**BLOCKED / NOT RUN**。前提是 setup 已建 `infiniband/monitor/{ufm-info,ufm-ibdiagnet,01-global.yaml,99-output-p2p}` 链接（2026-10-22 起 setup 会建立，见 `infiniband/monitor/UFM-MONITOR.md` 14.3；已部署的服务器要先重跑一次 setup）。

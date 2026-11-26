@@ -458,7 +458,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>本目录由 <code>tools/update-user-manual.py</code> 从 Git tracked 与非忽略文件生成；每个受维护文件必须有独立说明。大量项目数据、镜像、缓存与运行输出按路径模式说明，不把二进制内容嵌入网页。</p>
         <!-- BEGIN GENERATED USER MANUAL FILE CATALOG -->
         <div class="catalog-summary">
-          <span><strong>903</strong> 个受维护文件</span>
+          <span><strong>906</strong> 个受维护文件</span>
           <span><strong>27</strong> 个根级分组</span>
           <span>清单范围：Git tracked + untracked/nonignored</span>
         </div>
@@ -584,7 +584,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/01-global.yaml"><td><code>infiniband/bringup/ufm-setup-upgrade/01-global.yaml</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../01-global.yaml。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/README.md"><td><code>infiniband/bringup/ufm-setup-upgrade/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：UFM 初始化与升级。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/publickey"><td><code>infiniband/bringup/ufm-setup-upgrade/publickey</code></td><td><strong>类别：</strong>仓库支持文件；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../publickey。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
-            <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py"><td><code>infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UFM setup/upgrade entry: reads only this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
+            <tr data-file-path="infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py"><td><code>infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>UFM setup/upgrade entry: reads this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/ and the master。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/01-global.yaml"><td><code>infiniband/bringup/xdr-initial-setup/01-global.yaml</code></td><td><strong>类别：</strong>配置/模板；<strong>作用：</strong>相对软链接入口，canonical target 为 ../../01-global.yaml。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/README.md"><td><code>infiniband/bringup/xdr-initial-setup/README.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：XDR IB 交换机初始配置。 <strong>维护/生成责任：</strong>文档维护者随行为变更同步更新；生成索引不得手工改写生成块。</td></tr>
             <tr data-file-path="infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh"><td><code>infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Explicit manual preparation; never invoked by load/initial-setup/UFM。 <strong>维护/生成责任：</strong>代码维护者按 tests-first 修改；生产操作员只通过本文标记为可直接运行的入口调用。</td></tr>
@@ -716,7 +716,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </tbody></table></div>
         </details>
         <details id="v2-file-group-test-cases" data-nav-title="test_cases/ 文件" class="catalog-group">
-          <summary><code>test_cases/</code> — 551 个文件</summary>
+          <summary><code>test_cases/</code> — 554 个文件</summary>
           <div><table class="file-catalog"><thead><tr><th>文件</th><th>说明</th></tr></thead><tbody>
             <tr data-file-path="test_cases/CASE_TEMPLATE.md"><td><code>test_cases/CASE_TEMPLATE.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>新增真机/破坏性验证案例时必须填写的证据模板。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/CHANGE_AWARE_TESTING.md"><td><code>test_cases/CHANGE_AWARE_TESTING.md</code></td><td><strong>类别：</strong>文档；<strong>作用：</strong>文档：脚本变更影响测试。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1234,11 +1234,14 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
             <tr data-file-path="test_cases/test_ufm_collection_archive_retrieval.py"><td><code>test_cases/test_ufm_collection_archive_retrieval.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>D-70 exact-name retrieval rejects weak identity and incomplete archives。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_collection_contract.py"><td><code>test_cases/test_ufm_collection_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>D-70 UFM collection artifact contract on synthetic local inputs only。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_ha_status_parity.py"><td><code>test_cases/test_ufm_ha_status_parity.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct test: ufm-setup-upgrade (ha-setup/check) and the monitor page read `ufm_ha_cluster status` the same way。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ufm_host_key_refresh.py"><td><code>test_cases/test_ufm_host_key_refresh.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ufm-setup-upgrade, management-server side of a changed UFM host key (v3.1.6 B0, WP-6)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_identity_binding.py"><td><code>test_cases/test_ufm_identity_binding.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Synthetic, independently expected UFM management-identity contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_identity_binding_workflow.py"><td><code>test_cases/test_ufm_identity_binding_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Discovery→pinned management identity→exact archive retrieval handoff。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_input_contract.py"><td><code>test_cases/test_ufm_input_contract.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Independent D-75 UFM family schema tests; no real UFM operations。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_jump_transport.py"><td><code>test_cases/test_ufm_jump_transport.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct contracts for the standalone UFM jump transport。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_jump_transport_workflow.py"><td><code>test_cases/test_ufm_jump_transport_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow binding between Day-0 transit and UFM file transport contracts。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ufm_login_routes.py"><td><code>test_cases/test_ufm_login_routes.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>ufm-setup-upgrade under I-037 (v3.1.6 B0, WP-3 to WP-5): the inventory check against 02, inputs judged per。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
+            <tr data-file-path="test_cases/test_ufm_login_routes_workflow.py"><td><code>test_cases/test_ufm_login_routes_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: ufm-setup-upgrade with the four shared tools modules, end to end (v3.1.6 B0, WP-7)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_monitor_cron_workflow.py"><td><code>test_cases/test_ufm_monitor_cron_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow: the real cron.sh runs the real ufm-info.sh on each server_ufm and archives the snapshots。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_monitor_scripts.py"><td><code>test_cases/test_ufm_monitor_scripts.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Direct tests for the UFM collectors that cron.sh runs on the UFM (infiniband/monitor/UFM-MONITOR.md)。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
             <tr data-file-path="test_cases/test_ufm_partial_notice_workflow.py"><td><code>test_cases/test_ufm_partial_notice_workflow.py</code></td><td><strong>类别：</strong>脚本/程序；<strong>作用：</strong>Workflow (I-065): a usable ibdiagnet run that timed out stays ok and its notice reaches every consumer。 <strong>维护/生成责任：</strong>开发者维护；测试断言必须独立评审，批准 ledger 仅由正式 runner 成功后更新。</td></tr>
@@ -1553,7 +1556,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
         <p>以下参考覆盖当前工作树中的每个 Python、Shell 与 CGI 文件，包括操作入口、内部库、worker、设备端脚本和开发测试。先看“是否直接运行”，再复制示例；内部组件不得脱离所属事务单独执行。</p>
         <!-- BEGIN GENERATED USER MANUAL SCRIPT REFERENCE -->
         <div class="catalog-summary">
-          <span><strong>723</strong> 个脚本型文件</span>
+          <span><strong>726</strong> 个脚本型文件</span>
           <span><strong>9</strong> 个功能分组</span>
           <span>每项均含运行、输入输出、示例与恢复合同</span>
         </div>
@@ -1760,15 +1763,15 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <pre><code>sed -n &#x27;1,120p&#x27; infiniband/bringup/ndr/data-collect-IB.sh  # 先读文件头 Usage/安全边界，再由所属流程调用</code></pre></div>
         </details>
         <details data-script-reference="infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py" class="script-reference">
-          <summary><code>infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py</code> — UFM setup/upgrade entry: reads only this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/。</summary>
+          <summary><code>infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py</code> — UFM setup/upgrade entry: reads this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/ and the master。</summary>
           <div class="script-body"><dl>
-            <dt>作用：</dt><dd>UFM setup/upgrade entry: reads only this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/。</dd>
+            <dt>作用：</dt><dd>UFM setup/upgrade entry: reads this directory&#x27;s 01-global.yaml, ib.csv, p2p.xlsx, publickey/ and the master。</dd>
             <dt>是否直接运行：</dt><dd>是，但仅在本节场景和权限边界内；先运行 --help、dry-run、verify-only、doctor 或 status（若提供）。</dd>
             <dt>运行环境：</dt><dd>具备对应 NVIDIA/Mellanox 工具和设备访问的受控 bring-up 主机。</dd>
             <dt>使用场景：</dt><dd>执行“InfiniBand 采集、分析、初始化与升级”中的明确操作步骤；不要把一次子步骤当作完整发布。</dd>
             <dt>前置条件：</dt><dd>项目、设备范围、运行后端、权限和输入身份已确认；任何 destructive/remote 动作先完成本地 proof 和只读检查。</dd>
             <dt>语法/调用方式：</dt><dd>python3 -B infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py [options]</dd>
-            <dt>主要参数：</dt><dd>--input-dir, --inputs-only, --ipmi-user, --ipmi-channel, --wait-initial, --wait-interval, --wait-max, --node, --ufm-user, --eth-user, --connect-timeout, --oob-spines, --ask-factory-password, --apply, --yes</dd>
+            <dt>主要参数：</dt><dd>--input-dir, --inputs-only, --ipmi-user, --ipmi-channel, --wait-initial, --wait-interval, --wait-max, --node, --ufm-user, --eth-user, --connect-timeout, --oob-spines, --direct-access, --ignore-cable-check, --refresh-host-key, --inventory-checked, --ask-factory-password, --apply, --yes</dd>
             <dt>输入：</dt><dd>所属场景的项目输入、设备清单、受信 archive/制品或运行日志；正式写入前必须完成 preflight。</dd>
             <dt>输出/状态：</dt><dd>命令日志、退出码以及该脚本声明的配置、报告、归档或运行状态；输出需按 receipt/SHA/health 复核。</dd>
             <dt>成功判据：</dt><dd>退出码 0，并且脚本打印的后置检查、receipt、状态或生成清单全部通过；仅生成文件不等于部署完成。</dd>
@@ -2698,7 +2701,7 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>readlink nvlink/monitor/sw-link.sh  # 预期解析到 ../../ethernet/monitor/sw-link.sh</code></pre></div>
         </details>
-        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 527 个脚本</h4>
+        <h4 id="v2-script-group-test-cases" data-nav-title="test_cases/ 脚本">test_cases/ — 530 个脚本</h4>
         <details data-script-reference="test_cases/__init__.py" class="script-reference">
           <summary><code>test_cases/__init__.py</code> — Canonical executable regression and integration test case package。</summary>
           <div class="script-body"><dl>
@@ -11573,6 +11576,24 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_ha_status_parity</code></pre></div>
         </details>
+        <details data-script-reference="test_cases/test_ufm_host_key_refresh.py" class="script-reference">
+          <summary><code>test_cases/test_ufm_host_key_refresh.py</code> — ufm-setup-upgrade, management-server side of a changed UFM host key (v3.1.6 B0, WP-6)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>ufm-setup-upgrade, management-server side of a changed UFM host key (v3.1.6 B0, WP-6)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ufm_host_key_refresh</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_host_key_refresh</code></pre></div>
+        </details>
         <details data-script-reference="test_cases/test_ufm_identity_binding.py" class="script-reference">
           <summary><code>test_cases/test_ufm_identity_binding.py</code> — Synthetic, independently expected UFM management-identity contracts。</summary>
           <div class="script-body"><dl>
@@ -11662,6 +11683,42 @@ python3 -B test_cases/run_related_tests.py --check</code></pre>
           </dl>
           <p><strong>示例：</strong></p>
           <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_jump_transport_workflow</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ufm_login_routes.py" class="script-reference">
+          <summary><code>test_cases/test_ufm_login_routes.py</code> — ufm-setup-upgrade under I-037 (v3.1.6 B0, WP-3 to WP-5): the inventory check against 02, inputs judged per。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>ufm-setup-upgrade under I-037 (v3.1.6 B0, WP-3 to WP-5): the inventory check against 02, inputs judged per。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ufm_login_routes</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_login_routes</code></pre></div>
+        </details>
+        <details data-script-reference="test_cases/test_ufm_login_routes_workflow.py" class="script-reference">
+          <summary><code>test_cases/test_ufm_login_routes_workflow.py</code> — Workflow: ufm-setup-upgrade with the four shared tools modules, end to end (v3.1.6 B0, WP-7)。</summary>
+          <div class="script-body"><dl>
+            <dt>作用：</dt><dd>Workflow: ufm-setup-upgrade with the four shared tools modules, end to end (v3.1.6 B0, WP-7)。</dd>
+            <dt>是否直接运行：</dt><dd>是，仅在开发/验证工作树运行；不得把 test_cases 作为生产服务依赖。</dd>
+            <dt>运行环境：</dt><dd>canonical 开发工作树；使用仓库 Python 和 /tmp 下的 pycache。</dd>
+            <dt>使用场景：</dt><dd>修改相关生产行为后运行 direct/workflow 回归，或由 change-aware/full runner 选择。</dd>
+            <dt>前置条件：</dt><dd>测试夹具完整、当前工作树已冻结；需要外部环境的案例只能使用 mock 或 REAL_ENVIRONMENT 计划。</dd>
+            <dt>语法/调用方式：</dt><dd>python3 -B -m unittest -v test_cases.test_ufm_login_routes_workflow</dd>
+            <dt>主要参数：</dt><dd>unittest 的模块、类或方法选择；正式治理另使用 run_related_tests.py。</dd>
+            <dt>输入：</dt><dd>被测源码、独立固定夹具、manifest 以及必要的临时目录；预期值不得从实现生成。</dd>
+            <dt>输出/状态：</dt><dd>测试进度与退出码；普通 unittest 不签发批准证明，也不应修改生产数据。</dd>
+            <dt>成功判据：</dt><dd>退出码 0，testsRun 与选择一致，零 failure/error；跳过项必须有明确理由。</dd>
+            <dt>失败恢复：</dt><dd>保留第一个失败和最小复现，判断实现/测试/夹具/平台原因；禁止弱化断言或手改 ledger。</dd>
+          </dl>
+          <p><strong>示例：</strong></p>
+          <pre><code>PYTHONPYCACHEPREFIX=/tmp/http-test-pyc python3 -B -m unittest -v test_cases.test_ufm_login_routes_workflow</code></pre></div>
         </details>
         <details data-script-reference="test_cases/test_ufm_monitor_cron_workflow.py" class="script-reference">
           <summary><code>test_cases/test_ufm_monitor_cron_workflow.py</code> — Workflow: the real cron.sh runs the real ufm-info.sh on each server_ufm and archives the snapshots。</summary>

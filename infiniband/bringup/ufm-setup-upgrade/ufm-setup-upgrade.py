@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""UFM setup/upgrade entry: reads only this directory's 01-global.yaml, ib.csv, p2p.xlsx, publickey/."""
+"""UFM setup/upgrade entry: reads this directory's 01-global.yaml, ib.csv, p2p.xlsx, publickey/ and the master
+inventory 02 (v3.1.6 B0: compared with ib.csv before anything else)."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ import itertools
 import json
 import os
 import pty
+import pwd
 import random
 import re
 import select
@@ -20,22 +22,28 @@ import shlex
 import signal
 import subprocess
 import sys
-import termios
 import time
 import zipfile
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
 TOOL_DIR = Path(__file__).resolve().parent
-INFRA_DIR = TOOL_DIR.parents[2] / "infra"
+REPO_DIR = TOOL_DIR.parents[2]
+INFRA_DIR = REPO_DIR / "infra"
 if str(INFRA_DIR) not in sys.path:
     sys.path.insert(0, str(INFRA_DIR))
+if str(REPO_DIR) not in sys.path:   # v3.1.6 B0: the shared tools/ modules, imported by package name
+    sys.path.insert(0, str(REPO_DIR))
 import ubuntu24_host as host  # noqa: E402  (shared Ubuntu 24.04 host configuration)
+import tools.device_identity as device_identity  # noqa: E402  (MAC spellings, P3b)
+import tools.hostname_ranges as hostname_ranges  # noqa: E402  (--refresh-host-key names)
+import tools.inventory_subset as inventory_subset  # noqa: E402  (ib.csv against 02, R-016)
+import tools.login_path as login_rules  # noqa: E402  (I-037 rules shared with initial-setup)
 LOGS_NAME = "ufm-setup-upgrade-logs"
 UFM_TYPE = "server_ufm"
-TRANSIT_TYPES = frozenset({"eth", "eth_spx", "spx", "ethernet", "eth_jump"})
+MASTER_INVENTORY = "02-devices_config.csv"
 NA_VALUES = {"", "na", "n/a", "none", "null", "tbd", "-"}
 CSV_PREFIX = ("hostname", "type", "template", "eth0_ip", "netmask", "eth0_gw", "eth0_mac")
 POLICY_KEYS = ("version", "vip", "interfaces")
@@ -79,6 +87,36 @@ class NotAuthorized(UfmError):
     """The operator declined the first device change; the run stops before any write."""
 
 
+class SwitchUnreachable(UfmError):
+    """A jump never answered on this address (no route, timeout, refused): only this moves to the next login
+    candidate of the jump (I20, B0-O1 (a)); a refusal or an identity mismatch does not."""
+
+
+class RouteStop(UfmError):
+    """The route decided for this UFM cannot be used; status is its NodeResult status (B0-O5)."""
+
+    def __init__(self, status: str, detail: str):
+        super().__init__(detail)
+        self.status = status
+
+
+class IdentityMismatch(UfmError):
+    """B0-O13 (a) (I-054): logged in, but not the UFM of the CSV; the node stops and no password is sent."""
+
+
+class KeyLoginRejected(UfmError):
+    """The deployment key was refused (classify AUTH_REJECTED); the classified route is next."""
+
+
+class HostKeyConflict(UfmError):
+    """This server's known_hosts holds another host key for the address (classify HOSTKEY_CONFLICT); change is
+    login_path.parse_host_key_change of the warning, or None when it cannot be parsed."""
+
+    def __init__(self, detail: str, change: object):
+        super().__init__(detail)
+        self.change = change
+
+
 class HaWaitTimeout(UfmError):
     """A bounded HA wait (DRBD sync, status after start) ran out; the cluster is left as it is."""
 
@@ -102,9 +140,13 @@ class UfmNode:
 
 @dataclass(frozen=True)
 class Transit:
+    """A *jump row of ib.csv (I-037: only a type ending in jump is a jump). login_ip is the address in use:
+    the first candidate until a session picks one (I20, B0-O1 (a)); eth0_mac is the CSV value as written."""
     hostname: str
     dev_type: str
     login_ip: str
+    candidates: tuple = ()
+    eth0_mac: str = ""
 
 
 @dataclass(frozen=True)
@@ -127,6 +169,13 @@ class Plan:
     mgmt_device: str = ""
     nodes: list = field(default_factory=list)
     source_ufm_count: int = 0   # server_ufm rows in ib.csv, before any per-node filter (B6-O1, v3.1.6 指导 8.6)
+    ufm_hostnames: list = field(default_factory=list)   # every server_ufm row, before any per-node filter (B0)
+    # B0-O7 (a): UFMs skipped for a problem of their own data (INPUT_INCOMPLETE), hostname -> problems; they are
+    # not in nodes, so every count and loop over nodes sees the complete UFMs only (核对 A, A-M4)
+    incomplete: dict = field(default_factory=dict)
+    inventory: dict = field(default_factory=dict)   # first label -> [(hostname, type)] of every ib.csv row
+    links: dict = field(default_factory=dict)   # hostname -> login_rules.Attachment of its management port
+    p2p_links: list = field(default_factory=list)
     roles: dict = field(default_factory=dict)
     addresses: dict = field(default_factory=dict)
     ipmi_gateways: dict = field(default_factory=dict)   # role -> IPMI gateway when global gives its own
@@ -362,43 +411,21 @@ def resolve_ufm_port(plan: Plan, port: str) -> Optional[str]:
 
 # --------------------------------------------------------------------- ib.csv
 
-def transit_login_ip(row: list, header: list, dev_type: str) -> str:
-    """eth0_ip, or for eth_jump the single vlan_id/svi_ip group (ib-initial-setup v15 rule)."""
+def jump_vlan_groups(row: list, header: list) -> list:
+    """(vlan_id, svi_ip, netmask) of each vlan_id column group of a *jump row, as the template repeats them
+    (the column groups as transit_login_ip read them before v3.1.6; I20 takes every group, B0-O1 (a))."""
     def value(index: int) -> str:
         return clean(row[index]) if index < len(row) else ""
 
-    def unicast(text: str) -> str:
-        address = ipaddress.IPv4Address(text.split("/", 1)[0])
-        if address.is_unspecified or address.is_loopback or address.is_multicast or str(address) == "255.255.255.255":
-            raise ValueError(f"{address} 不是可登录的单播地址")
-        return str(address)
-
-    if usable(value(3)):
-        return unicast(value(3))
-    if dev_type != "eth_jump":
-        raise ValueError("缺少 eth0_ip 登录地址")
-    indexes = {}
-    for index, name in enumerate(header):
-        indexes.setdefault(name, []).append(index)
     names = dict(enumerate(header))
     boundaries = {"vlan_id", "vlan_ports", "bgp_asn", "bgp_ports", "bond_ports", "evpn_vrf", "evpn_l2vlan"}
-    last = len(header)
-    candidates = []
-    for start in indexes.get("vlan_id", []):
-        end = next((i for i in range(start + 1, last) if names.get(i) in boundaries), last)
-        positions = [i for i in indexes.get("svi_ip", []) if start < i < end]
-        if not any(usable(value(i)) for i in positions):
-            continue
-        if len(positions) != 1:
-            raise ValueError("vlan_id/svi_ip 分组不唯一")
-        vlan = value(start)
-        if not re.fullmatch(r"[1-9][0-9]{0,3}", vlan) or not 1 <= int(vlan) <= 4094:
-            raise ValueError("SVI 登录需要 1-4094 的 vlan_id")
-        candidates.append(unicast(value(positions[0])))
-    if len(candidates) != 1:
-        raise ValueError("eth_jump 需要 eth0_ip 或唯一一组 vlan_id/svi_ip 作为登录地址"
-                         if not candidates else "有多组 vlan_id/svi_ip 登录地址，无法选择")
-    return candidates[0]
+    groups = []
+    for start in (index for index, name in names.items() if name == "vlan_id"):
+        end = next((i for i in range(start + 1, len(header)) if names.get(i) in boundaries), len(header))
+        for position in (i for i in range(start + 1, end) if names[i] == "svi_ip"):
+            mask = next((i for i in range(position + 1, end) if names[i] == "netmask"), None)
+            groups.append((value(start), value(position), value(mask) if mask is not None else ""))
+    return groups
 
 
 def load_csv(path: Path, plan: Plan) -> None:
@@ -426,30 +453,51 @@ def load_csv(path: Path, plan: Plan) -> None:
             errors.append(f"{where}: type 应为 {UFM_TYPE}")
         elif dev_type == UFM_TYPE:
             plan.source_ufm_count += 1
-            node = parse_node_row(row, header, line, where, errors)
+            plan.ufm_hostnames.append(hostname)
+            node, problems = parse_node_row(row, header, line, where, errors)
             if node:
                 plan.nodes.append(node)
+            elif problems:
+                plan.incomplete[hostname] = problems
         if dev_type != UFM_TYPE:
             record_foreign_identities(plan, row, header, hostname or f"第 {line} 行")
-        if dev_type in TRANSIT_TYPES and hostname:
-            try:
-                login_ip = transit_login_ip(row, header, dev_type)
-            except ValueError as exc:
-                plan.transit_errors[first_label(hostname)] = f"{where}: {exc}"
-                continue
-            plan.transits.setdefault(first_label(hostname), []).append(Transit(hostname, dev_type, login_ip))
+        if hostname:
+            plan.inventory.setdefault(first_label(hostname), []).append((hostname, dev_type))
+        if hostname and login_rules.is_jump_type(dev_type):
+            # I20 (B0-O1 (a)): eth0_ip, then each VLAN SVI address; a jump without any is unusable on its own
+            candidates, issues = login_rules.jump_login_candidates(
+                hostname, eth0_ip=clean(row[3]), vlan_groups=jump_vlan_groups(row, header))
+            if not candidates:
+                plan.transit_errors[first_label(hostname)] = f"{where}: " + "; ".join(
+                    f"{issue.field} {issue.problem} {issue.value!r}" for issue in issues)
+            plan.transits.setdefault(first_label(hostname), []).append(Transit(
+                hostname, dev_type, candidates[0].address if candidates else "", candidates, clean(row[6])))
+    names = {}
+    for line_no, name in enumerate(plan.ufm_hostnames):
+        if name.casefold() in names:
+            errors.append(f"ib.csv 中 {UFM_TYPE} 的 hostname 重复: {name}")
+        names[name.casefold()] = line_no
     seen = {}
-    for node in plan.nodes:
-        for kind, key in (("hostname", node.hostname.casefold()), ("eth0_ip", node.address),
-                          ("eth0_mac", node.mac)):
-            previous = seen.get((kind, key))
-            if previous:
-                errors.append(f"ib.csv 第 {previous} 行与第 {node.line} 行的 {kind} 重复: {key}")
-            seen[(kind, key)] = node.line
-    if not plan.nodes:
+    for node in list(plan.nodes):
+        for kind, key in (("eth0_ip", node.address), ("eth0_mac", node.mac)):
+            other = seen.get((kind, key))
+            if other:   # B0-O7 (a), D1b-O9 (b): both UFMs involved are skipped, nothing else
+                skip_node(plan, node.hostname, f"{kind} {key} 与 {other.hostname}（ib.csv 第 {other.line} 行）重复")
+                skip_node(plan, other.hostname, f"{kind} {key} 与 {node.hostname}（ib.csv 第 {node.line} 行）重复")
+            seen[(kind, key)] = node
+    if not plan.ufm_hostnames:
         errors.append(f"ib.csv 中没有 type={UFM_TYPE} 的行")
-    elif len(plan.nodes) > 2:
-        errors.append(f"ib.csv 中有 {len(plan.nodes)} 台 {UFM_TYPE}；只支持单机或两台 HA")
+    elif len(plan.ufm_hostnames) > 2:
+        errors.append(f"ib.csv 中有 {len(plan.ufm_hostnames)} 台 {UFM_TYPE}；只支持单机或两台 HA")
+
+
+def skip_node(plan: Plan, hostname: str, problem: str) -> None:
+    """B0-O7 (a): a problem of this UFM's own data skips this UFM only. It leaves plan.nodes and is reported as
+    INPUT_INCOMPLETE; problems of the run as a whole stay in plan.errors."""
+    plan.nodes = [node for node in plan.nodes if node.hostname != hostname]
+    problems = plan.incomplete.setdefault(hostname, [])
+    if problem not in problems:
+        problems.append(problem)
 
 
 def record_foreign_identities(plan: Plan, row: list, header: list, owner: str) -> None:
@@ -462,43 +510,42 @@ def record_foreign_identities(plan: Plan, row: list, header: list, owner: str) -
                                                   f"{owner} {column}")
             except ValueError:
                 continue
-        elif column.endswith("_mac") and MAC_RE.fullmatch(value):
-            plan.foreign_macs.setdefault(value.casefold().replace("-", ":"), f"{owner} {column}")
+        elif column.endswith("_mac") and usable(value):
+            try:   # every spelling tools/device_identity knows (P3b :163); one it does not know is skipped
+                mac = device_identity.normalize_mac(value)
+            except ValueError:
+                continue
+            plan.foreign_macs.setdefault(mac, f"{owner} {column}")
 
 
-def parse_node_row(row: list, header: list, line: int, where: str, errors: list) -> Optional[UfmNode]:
+def parse_node_row(row: list, header: list, line: int, where: str, errors: list) -> tuple:
+    """(UfmNode, []) or (None, problems of this UFM). I-037 rule 1: eth0_ip/netmask, eth0_gw and eth0_mac through
+    login_rules.check_eth0_inputs, plus the two UFM rules kept beside it (v3.1.6 指导 :1194): the gateway is not
+    eth0_ip, an address with a prefix agrees with the netmask column. An invalid hostname stays a run error."""
     hostname = clean(row[0])
-    before = len(errors)
     if not host.valid_hostname(hostname):
         errors.append(f"{where}: hostname 无效")
-    interface = None
-    try:
-        interface = parse_ipv4_interface(row[3], row[4])
-    except ValueError as exc:
-        errors.append(f"{where}: eth0_ip/netmask 无效: {exc}")
-    gateway = clean(row[5])
-    if not usable(gateway):
-        errors.append(f"{where}: eth0_gw 必填")
-    elif interface is not None:
+        return None, []
+    address, mask = clean(row[3]), clean(row[4]).lstrip("/")   # "/23" means 23, as before
+    eth0, issues = login_rules.check_eth0_inputs(hostname, mac=clean(row[6]), address=address, netmask=mask,
+                                                 gateway=clean(row[5]))
+    problems = [f"{where}: {issue.field} {issue.value!r} {issue.problem}" for issue in issues if issue.blocking]
+    if eth0 is not None and "/" in address and usable(mask):
         try:
-            gateway_ip = ipaddress.IPv4Address(gateway)
-            if gateway_ip not in interface.network or gateway_ip == interface.ip:
-                errors.append(f"{where}: eth0_gw {gateway} 不在 {interface.network} 内或与 eth0_ip 相同")
+            if ipaddress.IPv4Network(f"0.0.0.0/{mask}").prefixlen != eth0.address.network.prefixlen:
+                problems.append(f"{where}: eth0_ip {address} 的前缀与 netmask {mask} 不一致")
         except ValueError:
-            errors.append(f"{where}: eth0_gw 无效: {gateway!r}")
-    mac = ""
-    try:
-        mac = normalize_mac(row[6])
-    except ValueError as exc:
-        errors.append(f"{where}: eth0_mac {exc}")
+            problems.append(f"{where}: netmask {mask!r} 无效")
+    if eth0 is not None and eth0.gateway == str(eth0.address.ip):
+        problems.append(f"{where}: eth0_gw {eth0.gateway} 与 eth0_ip 相同")
     for index in range(len(CSV_PREFIX), len(row)):
         if usable(row[index]):
             name = header[index] if index < len(header) else f"第 {index + 1} 列"
-            errors.append(f"{where}: 第 {index + 1} 列 ({name}) 有值 {clean(row[index])!r}；"
-                          f"{UFM_TYPE} 只使用前 7 列，HA/IPMI/IB 地址写在 01-global.yaml")
-    if len(errors) != before or interface is None:
-        return None
-    return UfmNode(hostname, line, str(interface.ip), str(interface), gateway, mac)
+            problems.append(f"{where}: 第 {index + 1} 列 ({name}) 有值 {clean(row[index])!r}；"
+                            f"{UFM_TYPE} 只使用前 7 列，HA/IPMI/IB 地址写在 01-global.yaml")
+    if problems:
+        return None, problems
+    return UfmNode(hostname, line, str(eth0.address.ip), str(eth0.address), eth0.gateway, eth0.mac), []
 
 
 # ------------------------------------------------------------------ p2p.xlsx
@@ -605,14 +652,14 @@ def bind_ha_links(plan: Plan, links: list) -> None:
     if len(plan.nodes) != 2 or not ha:
         return
     nodes = {p2p_node_key(node.hostname): node for node in plan.nodes}
-    for node in plan.nodes:
+    for node in list(plan.nodes):
         found = ufm_port_links(plan, links, node, ha)
         if not found:
             plan.warnings.append(f"{node.hostname}: P2P 中没有 {ha}（eth1/HA 直连）的连线")
             continue
-        if len(found) > 1:
-            plan.errors.append(f"{node.hostname}: P2P 中 {ha} 有多条连线: "
-                               + "; ".join(f"{v[0]}:{v[1]} -> {v[2]}:{v[3]}" for v in found.values()))
+        if len(found) > 1:   # B0-O7 (a): this UFM's own cabling
+            skip_node(plan, node.hostname, f"P2P 中 {ha} 有多条连线: "
+                      + "; ".join(f"{v[0]}:{v[1]} -> {v[2]}:{v[3]}" for v in found.values()))
             continue
         name, port, peer, peer_port = next(iter(found.values()))
         peer_node = nodes.get(p2p_node_key(peer))
@@ -625,28 +672,33 @@ def bind_ha_links(plan: Plan, links: list) -> None:
 
 
 def bind_attachments(plan: Plan, links: list) -> None:
-    for node in plan.nodes:
+    """Where each management port is cabled. The peer is looked up by its first label among all ib.csv rows (the
+    UFM side by p2p_node_key, 核对 A, A-M5); only a *jump peer is a jump (I-037 rule 3), and a peer that is not
+    one, or not in ib.csv, is no error: that UFM is logged into directly (问题文档 :1563)."""
+    for node in list(plan.nodes):
         found = ufm_port_links(plan, links, node, plan.mgmt_device)
         if not found:
-            plan.warnings.append(f"{node.hostname}: P2P 中没有找到管理口 ({plan.mgmt_device}) 的连线；"
-                                 "IPv4 不可达时无法走 OOB")
+            plan.warnings.append(f"{node.hostname}: P2P 中没有找到管理口 ({plan.mgmt_device}) 的连线；直接登录")
             continue
-        if len(found) > 1:
-            plan.errors.append(f"{node.hostname}: P2P 中管理口有多条连线: "
-                               + "; ".join(f"{v[0]}:{v[1]} -> {v[2]}:{v[3]}" for v in found.values()))
+        if len(found) > 1:   # B0-O7 (a): this UFM's own cabling
+            skip_node(plan, node.hostname, "P2P 中管理口有多条连线: "
+                      + "; ".join(f"{v[0]}:{v[1]} -> {v[2]}:{v[3]}" for v in found.values()))
             continue
         name, port, peer, peer_port = next(iter(found.values()))
-        leaves = plan.transits.get(first_label(peer), [])
-        if len(leaves) != 1:
-            reason = plan.transit_errors.get(first_label(peer))
-            plan.errors.append(f"{node.hostname}: P2P 对端 {peer} " + (
-                reason if reason else "在 ib.csv 中有多行" if leaves else "不在 ib.csv 的 eth_jump/eth 行中"))
-            continue
         leaf_port = f"swp{clean(peer_port)}" if clean(peer_port).isdigit() else clean(peer_port)
         if not SELECTOR_RE.fullmatch(leaf_port):
-            plan.errors.append(f"{node.hostname}: P2P 对端端口无效 {peer_port!r}")
+            skip_node(plan, node.hostname, f"P2P 对端端口无效 {peer_port!r}")
             continue
-        plan.attachments[node.hostname] = Attachment(leaves[0], leaf_port, name, port)
+        leaves = plan.transits.get(first_label(peer), [])
+        if len(leaves) > 1:
+            skip_node(plan, node.hostname, f"P2P 对端 {peer} 在 ib.csv 中有多行")
+            continue
+        rows = plan.inventory.get(first_label(peer), [])
+        peer_name, peer_type = ((leaves[0].hostname, leaves[0].dev_type) if leaves
+                                else rows[0] if len(rows) == 1 else (clean(peer), ""))
+        plan.links[node.hostname] = login_rules.Attachment(peer_name, peer_type, leaf_port)
+        if leaves:
+            plan.attachments[node.hostname] = Attachment(leaves[0], leaf_port, name, port)
     bind_bmc_attachments(plan, links)
 
 
@@ -695,14 +747,14 @@ def build_plan(input_dir: Path) -> Plan:
     if csv_path.is_file():
         load_csv(csv_path, plan)
     assign_roles(plan)
-    if policy_parts and len(plan.nodes) in (1, 2):
+    if policy_parts and plan.source_ufm_count in (1, 2):
         check_addresses(plan, policy_parts)
     p2p_path = input_dir / "p2p.xlsx"
     if not p2p_path.is_file():
-        plan.warnings.append("缺少 p2p.xlsx；IPv4 不可达时无法走 OOB")
+        plan.warnings.append("缺少 p2p.xlsx；全部 UFM 直接登录（没有跳板）")
     elif plan.nodes and plan.mgmt_device:
         try:
-            links = parse_p2p_xlsx(p2p_path)
+            links = plan.p2p_links = parse_p2p_xlsx(p2p_path)
             bind_attachments(plan, links)
             bind_ha_links(plan, links)
         except UfmError as exc:
@@ -733,15 +785,18 @@ def parse_image_server(document: object, plan: Plan) -> None:
 
 
 def assign_roles(plan: Plan) -> None:
-    if len(plan.nodes) == 1:
-        plan.roles = {"primary": plan.nodes[0].hostname}
-    elif len(plan.nodes) == 2:
-        primaries = [node for node in plan.nodes if PRIMARY_LABEL_RE.search(first_label(node.hostname))]
+    """From every server_ufm row: a UFM skipped for its inputs keeps its role, so the other one never takes the
+    wrong role block of global (B6 pair facts, v3.1.6 指导 8.6)."""
+    names = plan.ufm_hostnames
+    if len(names) == 1:
+        plan.roles = {"primary": names[0]}
+    elif len(names) == 2:
+        primaries = [name for name in names if PRIMARY_LABEL_RE.search(first_label(name))]
         if len(primaries) != 1:
             plan.errors.append("无法确定安装期 primary：两台中必须恰好一台 hostname 第一段以 ufm01 结尾")
             return
-        secondary = next(node for node in plan.nodes if node is not primaries[0])
-        plan.roles = {"primary": primaries[0].hostname, "secondary": secondary.hostname}
+        secondary = next(name for name in names if name != primaries[0])
+        plan.roles = {"primary": primaries[0], "secondary": secondary}
 
 
 def check_ipmi_gateway(plan: Plan, role: str, interface: ipaddress.IPv4Interface,
@@ -765,12 +820,16 @@ def check_ipmi_gateway(plan: Plan, role: str, interface: ipaddress.IPv4Interface
 
 
 def check_addresses(plan: Plan, parts: dict) -> None:
+    """The pair or single shape of global follows the server_ufm rows; per-UFM clashes skip only the UFMs
+    involved (B0-O7 (a)); global addresses (IPMI, VIP, HA links) stay run errors."""
     errors, blocks = plan.errors, parts.get("blocks", {})
     networks = {ipaddress.IPv4Interface(node.interface).network for node in plan.nodes}
-    if len(networks) != 1:
-        errors.append("两台 UFM 的 eth0 必须在同一网段: " + ", ".join(map(str, sorted(networks))))
-    mgmt_net = next(iter(networks))
-    if len(plan.nodes) == 2:
+    if len(networks) > 1:
+        text = ", ".join(map(str, sorted(networks)))
+        for node in list(plan.nodes):
+            skip_node(plan, node.hostname, f"两台 UFM 的 eth0 必须在同一网段: {text}")
+    mgmt_net = next(iter(networks)) if len(networks) == 1 else None
+    if plan.source_ufm_count == 2:
         missing = [role for role in ROLES if role not in blocks]
         if missing:
             errors.append("双节点需要 interfaces." + " 和 interfaces.".join(missing))
@@ -793,21 +852,26 @@ def check_addresses(plan: Plan, parts: dict) -> None:
             errors.append(f"地址 {address}（{owner}）已在 ib.csv 中分配给 {plan.foreign_addresses[address]}")
         owners.setdefault(address, owner)
 
-    for node in plan.nodes:
-        claim(node.address, f"{node.hostname} eth0")
-        if node.mac in plan.foreign_macs:
-            errors.append(f"{node.hostname} 的管理 MAC {node.mac} 已在 ib.csv 中属于 {plan.foreign_macs[node.mac]}")
+    for node in list(plan.nodes):
+        if node.address in plan.foreign_addresses:
+            skip_node(plan, node.hostname, f"地址 {node.address}（{node.hostname} eth0）已在 ib.csv 中分配给 "
+                                           f"{plan.foreign_addresses[node.address]}")
+        elif node.mac in plan.foreign_macs:
+            skip_node(plan, node.hostname, f"{node.hostname} 的管理 MAC {node.mac} 已在 ib.csv 中属于 "
+                                           f"{plan.foreign_macs[node.mac]}")
+        else:
+            claim(node.address, f"{node.hostname} eth0")
     for role, block in blocks.items():
         host = plan.roles.get(role, role)
         plan.addresses[role] = {device: str(interface) for device, interface in block.items()}
         for device, interface in block.items():
             claim(str(interface.ip), f"{host} {device}")
-            if device != "ipmi" and interface.network.overlaps(mgmt_net):
+            if mgmt_net is not None and device != "ipmi" and interface.network.overlaps(mgmt_net):
                 errors.append(f"interfaces.{role}.{device} ({interface}) 与管理网段 {mgmt_net} 重叠")
-            if device == "ipmi":
+            if mgmt_net is not None and device == "ipmi":
                 check_ipmi_gateway(plan, role, interface, parts.get("ipmi_gateways", {}).get(role), mgmt_net)
     vip = parts.get("vip")
-    if len(plan.nodes) == 1:
+    if plan.source_ufm_count == 1:
         if vip is not None:
             errors.append("单节点不能配置 vip")
         return
@@ -820,7 +884,10 @@ def check_addresses(plan: Plan, parts: dict) -> None:
         errors.append(f"servers.ufm.vip 不是 IPv4 地址: {vip!r}")
         return
     gateways = {node.gateway for node in plan.nodes}
-    if address not in mgmt_net or address in {mgmt_net.network_address, mgmt_net.broadcast_address}:
+    if mgmt_net is None:   # no complete UFM is left to tell the management subnet; nobody is logged into
+        claim(str(address), "vip")
+        plan.vip = str(address)
+    elif address not in mgmt_net or address in {mgmt_net.network_address, mgmt_net.broadcast_address}:
         errors.append(f"vip {address} 必须是管理网段 {mgmt_net} 内的可用地址")
     elif str(address) in gateways:
         errors.append(f"vip {address} 与 eth0_gw 相同")
@@ -889,6 +956,51 @@ def print_plan(plan: Plan, say: Callable[[str], None]) -> None:
         say(f"WARNING: {warning}")
     for error in plan.errors:
         say(f"ERROR: {error}")
+
+
+def local_interfaces() -> tuple:
+    """This management server's interfaces from `ip -j address show` (argv fixed). None at all when there is no
+    `ip` (macOS) or it fails: every directly logged-in UFM then counts as on another subnet (v3.1.5 WP-1 item 3)."""
+    try:
+        result = subprocess.run(["ip", "-j", "address", "show"], capture_output=True, text=True, timeout=15,
+                                check=False)
+        return login_rules.parse_local_interfaces(result.stdout) if result.returncode == 0 else ()
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return ()
+
+
+def route_table(plan: Plan, direct: frozenset) -> dict:
+    """I-037 rule 3, decided once before any login: hostname -> login_rules.Route of every complete UFM."""
+    local = local_interfaces() if direct or any(node.hostname not in plan.attachments for node in plan.nodes) else ()
+    same = {node.hostname: login_rules.same_subnet_interface(node.interface, local) if local else None
+            for node in plan.nodes}
+    return {route.hostname: route for route in
+            login_rules.classify(plan.nodes, plan.links, direct=direct, same_subnet=same)}
+
+
+def route_record(plan: Plan, routes: dict, hostname: str) -> dict:
+    """The route columns kept in result.json: path, reason, jump, port, same_subnet and why it is skipped."""
+    route = routes.get(hostname)
+    if route is None:
+        return {"path": "", "reason": "", "jump": None, "port": None, "same_subnet": None,
+                "skip": "INPUT_INCOMPLETE" if hostname in plan.incomplete else ""}
+    leaves = plan.transits.get(first_label(route.jump or ""), []) if route.path == "jump" else []
+    skip = "JUMP_ADDRESS_INVALID" if leaves and not leaves[0].candidates else ""
+    return {"path": route.path, "reason": route.reason, "jump": route.jump, "port": route.port,
+            "same_subnet": route.same_subnet, "skip": skip}
+
+
+def print_routes(plan: Plan, routes: dict, say: Callable[[str], None]) -> None:
+    """The route table, before any login (I-037 设计 :67-73; 问题文档 :1561)."""
+    say("登录路径（登录前归类）: 设备  路径  原因  跳板和端口  同网段  跳过")
+    for hostname in plan.ufm_hostnames:
+        record = route_record(plan, routes, hostname)
+        if record["skip"] == "INPUT_INCOMPLETE":
+            say(f"  {hostname}  -  -  -  -  INPUT_INCOMPLETE: {'; '.join(plan.incomplete[hostname])}")
+        elif record["path"]:
+            where = f"{record['jump']} {record['port']}" if record["jump"] else "-"
+            say(f"  {hostname}  {'经跳板' if record['path'] == 'jump' else '直接登录'}  {record['reason']}  "
+                f"{where}  同网段 {record['same_subnet'] or '否'}  {record['skip'] or '-'}")
 
 
 # ----------------------------------------------------------------- SSH layer
@@ -1167,17 +1279,6 @@ def fdb_port(table: str, port: str) -> str:
     return name if re.search(r"(?m)^\s*bond\s+mode\s+", "\n".join(blocks[name])) else port
 
 
-def ports_learning(fdb: str, mac: str) -> set:
-    """Switch ports on which `mac` is a dynamic FDB entry."""
-    ports = set()
-    for line in fdb.splitlines():
-        fields = line.split()
-        if (fields and fields[0].casefold() == mac and "dev" in fields and fields.index("dev") + 1 < len(fields)
-                and not {value.casefold() for value in fields} & {"permanent", "static", "local", "self"}):
-            ports.add(fields[fields.index("dev") + 1])
-    return ports
-
-
 def fdb_entries(fdb: str, port: str) -> list:
     entries = []
     for line in fdb.splitlines():
@@ -1194,13 +1295,6 @@ def fdb_entries(fdb: str, port: str) -> list:
         bridge = fields[fields.index("master") + 1] if "master" in fields and fields.index("master") + 1 < len(fields) else ""
         entries.append((match.group(0).casefold(), vlan, bridge))
     return entries
-
-
-def mac_to_link_local(mac: str) -> str:
-    octets = bytearray.fromhex(mac.replace(":", ""))
-    octets[0] ^= 0x02
-    iid = bytes(octets[:3]) + b"\xff\xfe" + bytes(octets[3:])
-    return str(ipaddress.IPv6Address(int(ipaddress.IPv6Address("fe80::")) | int.from_bytes(iid, "big")))
 
 
 def vlan_svi_interfaces(table: str, vlan: str, bridge: Optional[str] = None) -> list:
@@ -1340,86 +1434,63 @@ def lldp_spine_candidates(table: str, inventory: list) -> list:
     return [result[key] for key in sorted(result)]
 
 
-def spine_neighbor(mac: str, neighbors: str, interface: str, vrf: str) -> Neighbor:
-    """ND on the chosen Spine SVI; otherwise the EUI-64 of the verified FDB MAC unless ND contradicts it."""
-    matches = set()
-    for line in neighbors.splitlines():
-        fields = line.split()
-        if "dev" not in fields or "lladdr" not in fields or {"FAILED", "INCOMPLETE"} & set(fields):
-            continue
-        try:
-            address = ipaddress.IPv6Address(fields[0].split("%", 1)[0])
-            dev = fields[fields.index("dev") + 1]
-            lladdr = normalize_mac(fields[fields.index("lladdr") + 1])
-        except (ValueError, IndexError):
-            continue
-        if dev == interface and address.is_link_local and lladdr == mac:
-            matches.add(str(address))
-    if len(matches) > 1:
-        raise UfmError(f"Spine {interface} 上有多条 IPv6 邻居匹配 {mac}")
-    if matches:
-        return Neighbor(next(iter(matches)), interface, vrf, "ND")
-    derived = mac_to_link_local(mac)
-    for line in neighbors.splitlines():
-        fields = line.split()
-        if (fields and fields[0].split("%", 1)[0] == derived and "dev" in fields and "lladdr" in fields
-                and fields.index("dev") + 1 < len(fields) and fields[fields.index("dev") + 1] == interface
-                and fields.index("lladdr") + 1 < len(fields)
-                and fields[fields.index("lladdr") + 1].casefold() != mac):
-            raise UfmError(f"Spine {interface} 上 {derived} 的邻居 MAC 与 {mac} 冲突")
-    return Neighbor(derived, interface, vrf, "FDB_EUI64")
+def csv_neighbor(mac: str, interface: str, vrf: str) -> Neighbor:
+    """I-037 rule 5: the UFM's link-local is always the EUI-64 of its CSV MAC, through a Leaf or a Spine alike
+    (B0-O4 (a)); no neighbour table is read."""
+    return Neighbor(login_rules.link_local_from_mac(mac), interface, vrf, "CSV_EUI64")
 
 
-def access_context(node: UfmNode, attachment: Attachment, links: str, fdb: str) -> tuple:
-    """(vlan, bridge) of the CSV management MAC learned on the P2P leaf port."""
-    port = fdb_port(links, attachment.port)
-    entries = fdb_entries(fdb, port)
-    learned = sorted({mac for mac, _vlan, _bridge in entries})
-    where = f"{attachment.leaf.hostname}:{attachment.port}"
-    if node.mac not in learned:
-        if learned:
-            raise UfmError(f"{where} 学到的 MAC {', '.join(learned)} 中没有 CSV 管理 MAC {node.mac}："
-                           "CSV MAC 或 P2P 连线有误，停止")
-        raise UfmError(f"{where} 没有学到动态 MAC：端口 down、UFM 未上电或管理口未接")
-    contexts = {(vlan, bridge) for mac, vlan, bridge in entries if mac == node.mac}
-    if len(contexts) != 1:
-        raise UfmError(f"{where}: {node.mac} 的 FDB VLAN/bridge 上下文不唯一")
-    vlan, bridge = next(iter(contexts))
-    if vlan and (not vlan.isdigit() or not 1 <= int(vlan) <= 4094):
-        raise UfmError(f"{where}: FDB VLAN 无效: {vlan}")
-    if bridge and not vlan:
-        raise UfmError(f"{where}: 桥接端口的 FDB 记录没有 VLAN")
-    return vlan, bridge
+def leaf_cable_check(node: UfmNode, attachment: Attachment, tables: dict, *, others: tuple = (),
+                     cascade_ports: frozenset = frozenset(), after_ping: bool = False,
+                     ping_ok: Optional[bool] = None) -> "login_rules.CableCheck":
+    """I-037 rules 4-6 in one call (login_path.check_cable): the expected jump's links/fdb/vlans first, other jumps'
+    JumpTables when given; the verdict is MATCH, ELSEWHERE or NOT_LEARNED."""
+    expected = login_rules.JumpTables(attachment.leaf.hostname, tables["links"], tables["fdb"], tables["vlans"])
+    return login_rules.check_cable(node.hostname, node.mac, (attachment.leaf.hostname, attachment.port),
+                                   [expected, *others], cascade_ports=cascade_ports, after_ping=after_ping,
+                                   ping_ok=ping_ok)
 
 
-def select_neighbor(node: UfmNode, attachment: Attachment, links: str, fdb: str, neighbors: str) -> tuple:
-    """Leaf path: (ipv6, interface, source) for the CSV MAC learned on the P2P leaf port."""
-    vlan, bridge = access_context(node, attachment, links, fdb)
-    where = f"{attachment.leaf.hostname}:{attachment.port}"
-    matches = set()
-    for line in neighbors.splitlines():
-        fields = line.split()
-        if "dev" not in fields or "lladdr" not in fields:
-            continue
-        try:
-            address = ipaddress.ip_address(fields[0].split("%", 1)[0])
-            interface = fields[fields.index("dev") + 1]
-            mac = fields[fields.index("lladdr") + 1].casefold()
-        except (ValueError, IndexError):
-            continue
-        if address.version == 6 and address.is_link_local and mac == node.mac:
-            matches.add((str(address), interface))
-    if len(matches) == 1:
-        ipv6, interface = next(iter(matches))
-        return ipv6, interface, "ND"
-    if len(matches) > 1:
-        raise UfmError(f"{where}: 多条 IPv6 邻居匹配 {node.mac}: {sorted(matches)}")
-    if not vlan or not bridge:
-        raise UfmError(f"{where}: 邻居表无 {node.mac}，FDB 记录缺少 VLAN/bridge，无法推导出口接口")
-    candidates = vlan_svi_interfaces(links, vlan, bridge)
-    if len(candidates) != 1:
-        raise UfmError(f"{where}: VLAN {vlan} 在 {bridge} 上有 {len(candidates)} 个三层接口，无法确定出口")
-    return mac_to_link_local(node.mac), candidates[0], "FDB_EUI64"
+def cascade_ports(plan: Plan) -> frozenset:
+    """(jump, port) of every P2P link between two *jump rows: a MAC seen there is not where a UFM is cabled."""
+    result = set()
+    for a, a_port, b, b_port in plan.p2p_links:
+        ends = [(plan.transits.get(first_label(name), []), clean(port)) for name, port in ((a, a_port), (b, b_port))]
+        if all(len(leaves) == 1 for leaves, _port in ends):
+            result.update((leaves[0].hostname, f"swp{port}" if port.isdigit() else port) for leaves, port in ends)
+    return frozenset(result)
+
+
+def cabling_fact(check: "login_rules.CableCheck", attachment: Attachment, port_state: str) -> dict:
+    """facts["cabling"] (B0-O5): outcome, detail, expected (CSV MAC) and observed (dynamic MACs on the expected
+    port) keep their meaning; expected_port, actual_ports, after_ping, ping_ok and ignored are added."""
+    where = f"{attachment.leaf.hostname} {attachment.port}"
+    actual = [f"{host} {port}" for host, port in check.actual]
+    if check.verdict == "MATCH":
+        detail = f"{where} 学到 {check.mac}" + (
+            f"；端口上另有 {', '.join(check.extra_macs)}" if check.extra_macs else "")
+    elif check.verdict == "ELSEWHERE":
+        detail = f"预期 {where}；CSV MAC {check.mac} 出现在 {', '.join(actual)}"
+    else:
+        detail = f"预期 {where} 没有学到 CSV MAC {check.mac}"
+    if check.verdict != "MATCH":
+        if check.after_ping:
+            detail += f"；ping 后仍没学到（ping {'通' if check.ping_ok else '不通'}）"
+        detail += f"；{port_state}"
+    return {"outcome": check.verdict, "detail": detail, "expected": check.mac,
+            "observed": sorted(set(([check.mac] if check.verdict == "MATCH" else []) + list(check.extra_macs))),
+            "expected_port": where, "actual_ports": actual, "after_ping": check.after_ping,
+            "ping_ok": check.ping_ok, "ignored": False}
+
+
+def local_neighbor_mac(address: str) -> Optional[str]:
+    """The MAC of this server's neighbour entry for an IPv4 (`ip -4 neigh show <address>`), or None."""
+    try:
+        result = subprocess.run(["ip", "-4", "neigh", "show", address], capture_output=True, text=True, timeout=15,
+                                check=False)
+        return login_rules.neighbor_mac(result.stdout, address) if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
 
 
 # ------------------------------------------------------------------ login
@@ -1447,6 +1518,11 @@ class NodeResult:
     facts: dict = field(default_factory=dict)
     attempts: list = field(default_factory=list)
     steps: list = field(default_factory=list)
+    # v3.1.6 B0 (B0-O5; only added, none of the fields above changes its meaning)
+    login_route: dict = field(default_factory=dict)   # the route decided before login (route_record)
+    identity: dict = field(default_factory=dict)      # expected/observed when the identity check fails
+    input_issues: list = field(default_factory=list)  # INPUT_INCOMPLETE: this UFM's own input problems
+    host_key: dict = field(default_factory=dict)      # the management-server host-key record (WP-6)
 
 
 def identity_command(device: str) -> list:
@@ -1458,7 +1534,9 @@ def identity_command(device: str) -> list:
         f'printf "mac=%s\\n" "$(cat {path} 2>/dev/null)"; '
         f'printf "ipv4=%s\\n" "$(ip -4 -o addr show dev {shlex.quote(device)} 2>/dev/null '
         "| awk '{print $4}' | tr '\\n' ' ')\"; "
-        'printf "os=%s\\n" "$(. /etc/os-release 2>/dev/null; printf %s "$PRETTY_NAME")"')
+        'printf "os=%s\\n" "$(. /etc/os-release 2>/dev/null; printf %s "$PRETTY_NAME")"; '
+        # v3.1.6 B0 (I-037 rule 8): the default route, one line per route joined by ";"
+        'printf "route=%s\\n" "$(ip route show default 2>/dev/null | tr \'\\n\' \';\')"')
     return ["sh", "-c", script]
 
 
@@ -2069,6 +2147,30 @@ def evaluation_expiry(rows: list) -> str:
 
 
 HOST_KEYS_SCRIPT = "set -u\ncat /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true\n"
+
+
+def host_key_fingerprint(line: str) -> Optional[str]:
+    """OpenSSH's SHA256 fingerprint of one public-key line (the key blob, sha256, base64 without "="); computed
+    here and not in tools/login_path.py (v3.1.4 D3 pins that module without one)."""
+    match = HOST_KEY_RE.match(line.strip())
+    if not match:
+        return None
+    try:
+        blob = base64.b64decode(match.group(2), validate=True)
+    except ValueError:
+        return None
+    return "SHA256:" + base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
+
+
+def local_home() -> Path:
+    """The effective user's passwd home: OpenSSH finds ~/.ssh/known_hosts there, not by $HOME."""
+    return Path(pwd.getpwuid(os.geteuid()).pw_dir)
+
+
+def host_key_fact(record: "login_rules.HostKeyRefreshRecord") -> dict:
+    """result.json's host_key: the library's record (no raw warning) and how it was verified."""
+    return {**asdict(record), "note": "已核实（经已核验 MAC 的会话读取设备主机公钥）" if record.verification == "verified"
+            else "未核实（操作员指定）"}
 POST_CONFIG_PLAN = ("经 VIP 在主机上：安装 image 目录里的 *.lic、gv.cfg 的 [Server] 三项、按 ibswitches 写 root_guid.conf；"
                     "任何一项有改动就执行一次 ufm_ha_cluster failover（主机切到另一台），再核对 HA 状态、gv.cfg 和 license")
 
@@ -2209,7 +2311,7 @@ def parse_facts(text: str) -> dict:
     facts = {}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
-        if sep and key in {"hostname", "mac", "ipv4", "os"}:
+        if sep and key in {"hostname", "mac", "ipv4", "os", "route"}:
             facts[key] = value.strip()
     return facts
 
@@ -2222,9 +2324,10 @@ class Session:
                  ask_ufm_password: Optional[Callable[[], str]] = None,
                  upgrade_wait: tuple = (600, 30, 2400), apply: bool = False,
                  confirm: Optional[Callable[[str, str], bool]] = None,
-                 ask_continue: Optional[Callable[[str], bool]] = None,
                  confirm_new_password: Optional[Callable[[], str]] = None,
-                 ha_wait: tuple = (100, 7200, 15, 900)):
+                 ha_wait: tuple = (100, 7200, 15, 900), direct_access: frozenset = frozenset(),
+                 routes: Optional[dict] = None, ignore_cable_check: bool = False,
+                 refresh_host_key: frozenset = frozenset()):
         self.plan, self.creds, self.timeout = plan, creds, timeout
         # (DRBD probe interval, DRBD sync limit, status probe interval, limit after start), seconds. Owner
         # 2026-10-22: the sync took under 30 minutes on ufm01/02; a line every 100 s while waiting.
@@ -2239,7 +2342,6 @@ class Session:
         # with --apply the operator confirms once, right before the first device change (--yes: confirm=None).
         self.apply, self.confirm = apply, confirm
         self.authorized = apply and confirm is None
-        self.ask_continue = ask_continue or (lambda _question: False)   # nobody to ask: do not continue
         self.confirm_new_password, self.password_confirmed = confirm_new_password, False
         self.eth_password_asked = False
         self.stopped = ""
@@ -2249,6 +2351,12 @@ class Session:
         self.leaf_jump = {}
         self.access = {}
         self.oob = {}
+        # I-037 (v3.1.6 B0): the route of each UFM is decided once, before any login
+        self.routes = route_table(plan, direct_access) if routes is None else routes
+        self.ignore_cable_check, self.refresh_host_key = ignore_cable_check, refresh_host_key
+        self.cable_checks = {}      # hostname -> CableCheck, once per run
+        self.jump_switches = {}     # jump hostname -> the Transit at the login address chosen for it (I20)
+        self.mac_noted = set()
 
     def authorize(self, node: UfmNode, action: str) -> None:
         """Gate in front of every device write."""
@@ -2283,7 +2391,12 @@ class Session:
         path.write_text(redact(text, self.secrets()), encoding="utf-8")
         os.chmod(path, 0o600)
 
+    def jump_at(self, switch: Transit) -> Transit:
+        """The jump at the login address this run chose for it (I20: chosen once by snapshot, then kept)."""
+        return self.jump_switches.get(switch.hostname, switch)
+
     def run_switch(self, switch: Transit, remote: list, label: str = "") -> str:
+        switch = self.jump_at(switch)
         if self.creds.eth_password is None:
             self.creds.eth_password = self.ask_eth_password()
         result = self.switch_session(switch, remote, label)
@@ -2301,8 +2414,11 @@ class Session:
         if result.exit_code != 0:
             hint = ("；部署服务器公钥登录被拒，且没有提供交换机密码"
                     if not leaf_pw and re.search(r"(?i)permission denied", result.output) else "")
-            raise UfmError(f"{switch.hostname} ({switch.login_ip}) 执行 {shlex.join(remote)} 失败，"
-                           f"exit={result.exit_code}: {result.output.strip()[-400:]}{hint}")
+            network = (result.exit_code == 255 and not re.search(r"(?i)permission denied", result.output)
+                       and (_UNREACHABLE.search(result.output) or _REFUSED.search(result.output)))
+            raise (SwitchUnreachable if network else UfmError)(
+                f"{switch.hostname} ({switch.login_ip}) 执行 {shlex.join(remote)} 失败，"
+                f"exit={result.exit_code}: {result.output.strip()[-400:]}{hint}")
         return re.sub(r"(?im)^[^\n]*@[^\n]*password:\s*$", "", result.output)
 
     def switch_session(self, switch: Transit, remote: list, label: str) -> "SessionResult":
@@ -2316,18 +2432,61 @@ class Session:
         return result
 
     def snapshot(self, switch: Transit) -> dict:
-        """Read-only tables, collected once per switch per run."""
+        """Read-only tables, collected once per switch per run (`bridge vlan show` added and `ip neighbor` dropped by
+        v3.1.6 B0, D1b-O18 (a), I-037 rule 5). The first command also picks the login address (I20, B0-O1 (a)):
+        only a network failure moves to the next candidate; the address must be on the switch's own interfaces
+        (owner 2026-10-19: identity by address), and on eth0 a valid CSV eth0_mac must match its eth0."""
         if switch.hostname not in self.snapshots:
-            addresses = parse_oob_addresses(self.run_switch(switch, ["ip", "-j", "address", "show"]).strip())
-            if not owns_address(addresses, switch.login_ip):
-                raise UfmError(f"交换机身份不符: 经 {switch.login_ip} 登录（CSV {switch.hostname}），"
+            candidates = switch.candidates or (
+                (login_rules.JumpCandidate(switch.login_ip, ""),) if switch.login_ip else ())
+            if not candidates:
+                raise RouteStop("JUMP_ADDRESS_INVALID", f"跳板 {switch.hostname} 在 ib.csv 中没有可用的登录地址: "
+                                f"{self.plan.transit_errors.get(first_label(switch.hostname), '')}")
+            failures = []
+            for candidate in candidates:
+                at = replace(switch, login_ip=candidate.address)
+                try:
+                    text = self.run_switch(at, ["ip", "-j", "address", "show"])
+                    break
+                except SwitchUnreachable as exc:
+                    failures.append(f"{candidate.address}: {str(exc)[-160:]}")
+            else:
+                raise RouteStop("JUMP_UNREACHABLE", f"跳板 {switch.hostname} 连不上: " + "; ".join(failures))
+            addresses = parse_oob_addresses(text.strip())
+            if not owns_address(addresses, at.login_ip):
+                raise UfmError(f"交换机身份不符: 经 {at.login_ip} 登录（CSV {switch.hostname}），"
                                "但该地址不在这台交换机的任何接口上")
-            tables = {key: self.run_switch(switch, argv) for key, argv in (
+            if candidate.entry == "JUMP_ETH0":
+                self.check_jump_eth0_mac(switch, addresses)
+            self.jump_switches[switch.hostname] = at
+            tables = {key: self.run_switch(at, argv) for key, argv in (
                 ("interfaces", ["nv", "show", "interface"]), ("links", ["ip", "-d", "link", "show"]),
-                ("fdb", ["bridge", "fdb", "show"]), ("neighbors", ["ip", "neighbor"]))}
+                ("fdb", ["bridge", "fdb", "show"]), ("vlans", ["bridge", "vlan", "show"]))}
             tables["addresses"] = addresses
+            tables["login"] = (at.login_ip, candidate.entry)
             self.snapshots[switch.hostname] = tables
         return self.snapshots[switch.hostname]
+
+    def check_jump_eth0_mac(self, switch: Transit, addresses: list) -> None:
+        """D1b-O2a (a), UFM wording: entered on eth0 with a valid CSV eth0_mac, eth0 must carry that MAC; an empty
+        or unreadable eth0_mac is used as it is and reported once."""
+        try:
+            expected = device_identity.normalize_mac(switch.eth0_mac)
+        except ValueError:
+            expected = ""
+        if not expected:
+            if switch.hostname not in self.mac_noted:
+                self.mac_noted.add(switch.hostname)
+                self.say(f"    {switch.hostname}: 跳板 eth0_mac 未填，eth0 入口只核了地址")
+            return
+        observed = next((str(row.get("address", "")) for row in addresses if row.get("ifname") == "eth0"), "")
+        try:
+            observed = device_identity.normalize_mac(observed)
+        except ValueError:
+            observed = ""
+        if observed != expected:
+            raise UfmError(f"交换机身份不符: {switch.hostname} 的 eth0 MAC 为 {observed or '空'}，"
+                           f"CSV eth0_mac 为 {expected}")
 
     def switch_vrf(self, switch: Transit, interface: str) -> str:
         values = re.findall(r"(?im)^\s*vrf\s+(\S+)\s*$", self.run_switch(switch, ["ifquery", interface]))
@@ -2336,26 +2495,92 @@ class Session:
             raise UfmError(f"{switch.hostname} {interface} 有多个 VRF: {unique}")
         return unique[0] if unique else "default"
 
-    def oob_route(self, node: UfmNode, attachment: Attachment, route: dict) -> tuple:
-        """ib-initial-setup v15 rule: Leaf with a real SVI that has IPv4, else one LLDP Spine per Leaf."""
-        leaf = attachment.leaf
+    def port_vlan(self, attachment: Attachment) -> str:
+        """The login VLAN of the expected port, from `bridge vlan show` (login_path's own reading of it, as
+        initial-setup reads it: infiniband/bringup/xdr-initial-setup/initial-setup.py::_access_vlan_facts)."""
+        tables = self.snapshot(attachment.leaf)
+        try:
+            return login_rules._login_interface_facts(tables["links"], tables["vlans"], attachment.port)[1]
+        except ValueError as exc:
+            raise UfmError(f"{attachment.leaf.hostname} {attachment.port}: {exc}") from None
+
+    def port_state(self, attachment: Attachment) -> str:
+        try:
+            status = interface_oper_status(self.snapshot(attachment.leaf)["interfaces"], attachment.port)
+        except UfmError:
+            status = "未知"
+        return f"{attachment.leaf.hostname} {attachment.port} Oper Status={status}"
+
+    def other_jump_tables(self, expected: Transit) -> tuple:
+        """B0-O10 (a): every other *jump row of ib.csv, read once each, only when the expected jump learned nothing."""
+        tables = []
+        for other in all_transits(self.plan):
+            if other.hostname == expected.hostname:
+                continue
+            try:
+                snapshot = self.snapshot(other)
+            except UfmError as exc:
+                self.say(f"    {other.hostname}: 读不到，不计入实际位置（{str(exc)[:160]}）")
+                continue
+            tables.append(login_rules.JumpTables(other.hostname, snapshot["links"], snapshot["fdb"], snapshot["vlans"]))
+        return tuple(tables)
+
+    def cable_check(self, node: UfmNode, attachment: Attachment) -> "login_rules.CableCheck":
+        """I-037 rules 4-6 once per UFM per run: the expected jump; the CSV MAC learned nowhere there, the other
+        jumps too; still nowhere, one ping of the CSV link-local from the expected jump (from the chosen Spine when
+        the Leaf has no SVI of that VLAN), one more FDB read and the check again. A port that is down takes the
+        same way (D1b-O4 (a)); the ping writes nothing on the switch (00 原则 :68)."""
+        if node.hostname not in self.cable_checks:
+            leaf, tables, cascade = attachment.leaf, self.snapshot(attachment.leaf), cascade_ports(self.plan)
+            try:
+                check = leaf_cable_check(node, attachment, tables, cascade_ports=cascade)
+                others = ()
+                if check.verdict == "NOT_LEARNED":
+                    others = self.other_jump_tables(leaf)
+                    check = leaf_cable_check(node, attachment, tables, others=others, cascade_ports=cascade)
+                if check.verdict == "NOT_LEARNED":
+                    if check.login_interface:
+                        switch, interface = leaf, check.login_interface
+                        vrf = self.switch_vrf(leaf, interface)
+                    else:
+                        switch, neighbor = self.spine_route(node, leaf, tables, self.port_vlan(attachment),
+                                                            "LEAF_SVI_MISSING", {})
+                        vrf, interface = neighbor.vrf, neighbor.interface
+                    try:
+                        self.run_switch(switch, login_rules.ping_argv(vrf, check.link_local, interface),
+                                        label=f"ping-{node.hostname}")
+                        ping_ok = True
+                    except UfmError:
+                        ping_ok = False
+                    fdb = self.run_switch(leaf, ["bridge", "fdb", "show"], label=f"fdb-after-ping-{attachment.port}")
+                    check = leaf_cable_check(node, attachment, dict(tables, fdb=fdb), others=others,
+                                             cascade_ports=cascade, after_ping=True, ping_ok=ping_ok)
+            except ValueError as exc:
+                raise UfmError(f"{leaf.hostname} {attachment.port}: {exc}") from None
+            self.cable_checks[node.hostname] = check
+        return self.cable_checks[node.hostname]
+
+    def oob_route(self, node: UfmNode, attachment: Attachment, result: NodeResult) -> tuple:
+        """The jump path (I-037 rules 4-7): the cabling check decides; the target is the CSV MAC's link-local and the
+        way out the SVI of the expected port's VLAN: a Leaf SVI with its own IPv4, else one LLDP Spine per Leaf."""
+        leaf, route = attachment.leaf, result.route
+        check = self.cable_check(node, attachment)
         tables = self.snapshot(leaf)
-        status = interface_oper_status(tables["interfaces"], attachment.port)
-        if status != "up":
-            raise UfmError(f"ACCESS_LINK_DOWN: {leaf.hostname}:{attachment.port} Oper Status={status}")
-        vlan, bridge = access_context(node, attachment, tables["links"], tables["fdb"])
+        result.facts["cabling"] = cabling_fact(check, attachment, self.port_state(attachment))
+        if check.verdict != "MATCH":
+            if not self.ignore_cable_check:
+                raise RouteStop("CABLE_CHECK_FAILED", f"P2P 线路核对不通过（{check.verdict}），未登录: "
+                                                      f"{result.facts['cabling']['detail']}")
+            result.facts["cabling"]["ignored"] = True
+            self.say(f"    {node.hostname}: 线路核对 {check.verdict}，按 --ignore-cable-check 继续")
+        vlan = self.port_vlan(attachment)
         route.update(vlan=vlan)
-        if vlan:
-            svis = vlan_svi_interfaces(tables["links"], vlan, bridge)
-            if len(svis) > 1:
-                raise UfmError(f"{leaf.hostname} 上 VLAN {vlan} 匹配多个 SVI {svis}，不选择跳板")
-            if not (svis and svi_address_ready(tables["addresses"], svis[0])):
-                reason = "LEAF_SVI_MISSING" if not svis else "LEAF_SVI_HAS_NO_IPV4"
-                return self.spine_route(node, leaf, tables, vlan, reason, route)
-        ipv6, interface, source = select_neighbor(node, attachment, tables["links"], tables["fdb"],
-                                                  tables["neighbors"])
-        route.update(jump=leaf.hostname, reason="LEAF")
-        return leaf, Neighbor(ipv6, interface, self.switch_vrf(leaf, interface), source)
+        interface = check.login_interface
+        if not (interface and svi_address_ready(tables["addresses"], interface)):
+            reason = "LEAF_SVI_MISSING" if not interface else "LEAF_SVI_HAS_NO_IPV4"
+            return self.spine_route(node, leaf, tables, vlan, reason, route)
+        route.update(jump=leaf.hostname, reason="LEAF", jump_address=tables["login"][0], jump_entry=tables["login"][1])
+        return self.jump_at(leaf), csv_neighbor(node.mac, interface, self.switch_vrf(leaf, interface))
 
     def spine_route(self, node: UfmNode, leaf: Transit, leaf_tables: dict, vlan: str,
                     reason: str, route: dict) -> tuple:
@@ -2374,7 +2599,7 @@ class Session:
                     raise UfmError(f"VLAN {vlan} 的 SVI {svis[0]} 需要 UP、自有 IPv4 和 link-local；"
                                    "VRR 网关地址不能替代")
                 vrf = self.switch_vrf(spine, svis[0])
-                eligible.append((spine, spine_neighbor(node.mac, tables["neighbors"], svis[0], vrf)))
+                eligible.append((self.jump_at(spine), csv_neighbor(node.mac, svis[0], vrf)))
             except UfmError as exc:
                 rejected[spine.hostname] = str(exc)
         route.update(reason=reason, eligible=[spine.hostname for spine, _ in eligible], rejected=rejected)
@@ -2393,7 +2618,8 @@ class Session:
                 raise UfmError(f"{leaf.hostname} 本轮已选 Spine {chosen}，但它对 {node.hostname} 不合格: "
                                f"{rejected.get(chosen, '未知')}")
             spine, neighbor = match[0]
-        route.update(jump=spine.hostname)
+        route.update(jump=spine.hostname, jump_address=spine.login_ip,
+                     jump_entry=self.snapshots[spine.hostname]["login"][1])
         return spine, neighbor
 
     def attempt(self, result: NodeResult, path: str, build: Callable[[str], list],
@@ -2433,13 +2659,17 @@ class Session:
                     shlex.join(["sh", "-c", framed(remote, marker)])]
         if access["path"] == "IPv4":
             return direct_ufm_argv(node.address, self.creds.ufm_user, remote, marker, self.timeout)
+        if access["path"] == "LINK-LOCAL":   # v3.1.6 B0: same subnet, this server's own link-local route
+            return ["ssh", "-6", "-tt", *ufm_ssh_options(self.timeout), f"{self.creds.ufm_user}@{access['address']}",
+                    shlex.join(["sh", "-c", framed(remote, marker)])]
         return nested_ufm_argv(access["jump"], self.creds.eth_user, access["neighbor"], self.creds.ufm_user,
                                remote, marker, self.timeout, batch=not self.creds.eth_password)
 
     def ufm_destination(self, node: UfmNode, access: dict) -> str:
         if access["path"] == "VIP-KEY":
             return f"{self.creds.ufm_user}@{access['address']}"
-        host = node.address if access["path"] in {"IPv4", "IPv4-KEY"} else access["neighbor"].ipv6
+        host = (node.address if access["path"] in {"IPv4", "IPv4-KEY"} else access["address"]
+                if access["path"] == "LINK-LOCAL" else access["neighbor"].ipv6)
         return f"{self.creds.ufm_user}@{host}"
 
     def login_path(self, node: UfmNode, result: NodeResult, access: dict, allow_change: bool) -> str:
@@ -2467,7 +2697,8 @@ class Session:
                 outcome = "PASSWORD_CHANGE_UNKNOWN"
         if outcome == "OK":
             result.password = label
-            result.facts = parse_facts(extract_framed(session.output, marker))
+            # the identity facts join what the route already recorded (v3.1.6 B0: facts["cabling"])
+            result.facts = {**result.facts, **parse_facts(extract_framed(session.output, marker))}
         return outcome
 
     def confirm_password_once(self) -> None:
@@ -2479,28 +2710,53 @@ class Session:
             raise NotAuthorized("再次输入的新密码与开始时输入的不一致，未修改任何设备的密码")
         self.password_confirmed = True
 
-    def verify_identity(self, node: UfmNode, result: NodeResult) -> None:
-        facts = result.facts
-        if facts.get("mac", "").casefold() != node.mac:
-            raise UfmError(f"管理口 {self.plan.mgmt_device} 的 MAC 为 {facts.get('mac') or '空'}，"
-                           f"CSV 为 {node.mac}：连到的不是这台 UFM，停止")
-        if result.path == "IPv4":
-            addresses = {item.split("/", 1)[0] for item in facts.get("ipv4", "").split()}
-            if node.address not in addresses:
-                raise UfmError(f"经 IPv4 {node.address} 登录，但该地址不在 {self.plan.mgmt_device} 上"
-                               f"（{facts.get('ipv4') or '无'}），停止")
+    def check_login_identity(self, node: UfmNode, result: NodeResult) -> None:
+        """I-037 rule 8 (问题文档 :1565, :1569): the management MAC on every path; on IPv4 and IPv4-KEY also the
+        address with its netmask and the default route's gateway (no default route passes), one shared function
+        (login_path.check_identity). Not this UFM: IdentityMismatch, the node stops (B0-O13 (a))."""
+        facts, ipv4 = result.facts, []
+        for value in facts.get("ipv4", "").split():
+            try:
+                ipv4.append(ipaddress.IPv4Interface(value))
+            except ValueError:
+                continue
+        try:
+            gateways = login_rules.parse_default_routes(facts.get("route", "").replace(";", "\n"))
+        except ValueError:
+            gateways = ("?",)
+        try:
+            mac = device_identity.normalize_mac(facts.get("mac", ""))
+        except ValueError:
+            mac = ""
+        check = login_rules.check_identity(node.mac, login_rules.IdentityFacts(mac, tuple(ipv4), gateways),
+                                           via_ipv4=result.path in {"IPv4", "IPv4-KEY"},
+                                           expected_ipv4=node.interface, expected_gateway=node.gateway)
+        if check.ok:
+            return
+        result.identity = {"path": result.path, "mismatches": [list(item) for item in check.mismatches]}
+        raise IdentityMismatch(f"IDENTITY_MISMATCH: 经 {result.path} 登录到的设备与 CSV 不符（" + "; ".join(
+            f"{field} 应为 {expected or '空'}，实际 {observed or '空'}" for field, expected, observed in check.mismatches)
+            + "）：连到的不是这台 UFM，停止，不改用口令")
 
     def login(self, node: UfmNode, allow_change: bool) -> NodeResult:
         return self.login_into(node, NodeResult(node.hostname, self.plan.role_of(node)), allow_change)
 
     def connect(self, node: UfmNode, result: NodeResult) -> None:
-        """Deployment key over IPv4 when the server reaches the UFM directly; else the phase-1 path
-        (IPv4, then OOB IPv6) with the root password — the UFM and the server may have no direct route."""
+        """The deployment key over IPv4 first; only when it does not log in, the route decided for this UFM with the
+        root password (jump, or direct) — the UFM and the server may have no direct route. Logged in by the key but
+        not this UFM: IdentityMismatch, no password is sent (B0-O13 (a), I-054)."""
         try:
             self.key_access(node, result, "key-login")
             return
+        except IdentityMismatch:
+            raise
+        except HostKeyConflict as exc:   # v3.1.6 B0 WP-6
+            if self.host_key_changed(node, result, exc, False).status != "VERIFIED":
+                detail, result.detail = result.detail, ""
+                raise UfmError(f"{node.hostname} {result.status}: {detail}") from None
+            return
         except UfmError as exc:
-            self.say(f"    部署服务器公钥直连未成功，改用 root 口令（IPv4 优先，不通则经 OOB）: {str(exc)[:160]}")
+            self.say(f"    部署服务器公钥直连未成功，按登录前归类的路径改用 root 口令: {str(exc)[:160]}")
         if not self.creds.new_password:
             if self.ask_ufm_password is None:
                 raise UfmError(f"{node.hostname}（{node.address}）公钥直连未成功，且没有提供 root 口令")
@@ -2516,35 +2772,168 @@ class Session:
         except NotAuthorized as exc:
             return self.stop(result, "NOT_AUTHORIZED", str(exc))
 
+    def host_key_changed(self, node: UfmNode, result: NodeResult, conflict: HostKeyConflict,
+                         allow_change: bool) -> NodeResult:
+        """v3.1.6 B0 WP-6 (B0-O2 (a), O8 (b); v3.1.4 指导 :740): the key login found another host key for this UFM in
+        this server's own ~/.ssh/known_hosts. Logged in by the decided route (jump, or link-local on this subnet)
+        with the MAC checked, that session reads the device's host key; check only records WOULD_REFRESH;
+        --apply lets login_path.refresh_target_host_key remove this one address after the operator's go-ahead and
+        retry the key once. Without such a session (IPv4 only) only a name in --refresh-host-key skips the
+        verification; otherwise, and for every other file (the VIP's, a jump's), it is only reported."""
+        change = conflict.change
+        route = self.routes.get(node.hostname)
+        manual = (f"ssh-keygen -f {shlex.quote(change.known_hosts_path)} -R {shlex.quote(change.address)}"
+                  if change is not None else f"ssh-keygen -R {node.address}")
+        summary = (f"本机 known_hosts 里 {change.address} 的主机密钥与设备送来的不同（{change.key_type} "
+                   f"{change.new_fingerprint}）" if change is not None else "本机 known_hosts 主机密钥冲突")
+        allowed = {node.address}
+        if route is not None and route.path == "direct" and route.same_subnet:
+            allowed.add(f"{login_rules.link_local_from_mac(node.mac)}%{route.same_subnet}")
+        try:
+            if change is None or change.location != "local" or change.address not in allowed:
+                raise ValueError("告警不是这台 UFM 在本机 known_hosts 里的地址")
+            editor = login_rules.LocalKnownHostsEditor(Path(change.known_hosts_path), home=local_home())
+        except ValueError as exc:
+            return self.stop(result, "HOSTKEY_CONFLICT", f"{summary}；只报告、不改文件（{exc}）；人工核实设备身份后执行: "
+                                                         f"{manual}")
+        forced = node.hostname in self.refresh_host_key
+        read = None
+        if route is not None and (route.path == "jump" or route.same_subnet):
+            self.say(f"  {node.hostname}: {summary}；经登录前归类的路径登录并核 MAC，再读设备主机公钥核实")
+            self.login_into(node, result, allow_change)
+            if result.status != "VERIFIED":
+                return result
+
+            def read(key_type: str) -> Optional[str]:
+                return self.device_fingerprint(node, result, key_type)
+        elif not forced:
+            return self.stop(result, "HOSTKEY_CONFLICT", f"{summary}；只能经 IPv4 登录，没有另一条已核验的会话可以核实，"
+                                                         f"文件未改；确认做过 factory reset 后加 --refresh-host-key "
+                                                         f"{first_label(node.hostname)} 重跑，或人工核实后执行: {manual}")
+        try:
+            if not self.apply:   # check: never calls the library (it has no read-only mode)
+                fingerprint = read(change.key_type) if read is not None else None
+                if read is not None and fingerprint != change.new_fingerprint:
+                    raise ValueError(f"经已核验的会话读到的指纹 {fingerprint or '无'} 与告警不同")
+                record = login_rules.HostKeyRefreshRecord(
+                    change.location, change.jump, change.known_hosts_path, change.lines, change.address,
+                    change.key_type, tuple(row[2] for row in editor.fingerprints(change.address)),
+                    change.new_fingerprint, "verified" if read is not None else "operator-forced-unverified",
+                    "refresh-pending", None)
+            else:
+                def retry() -> None:
+                    try:
+                        self.key_access(node, result, "key-login-retry")
+                    except KeyLoginRejected:
+                        return None   # the deployment key went with the factory reset; the configuration steps put it back
+                record = login_rules.refresh_target_host_key(
+                    change, editor, read_device_fingerprint=read, retry=retry, operator_forced=read is None,
+                    before_remove=lambda: self.authorize(node, f"删除本机 known_hosts 里 {change.address} 的旧主机密钥"
+                                                               "并重试公钥直连"))
+        except NotAuthorized as exc:
+            return self.stop(result, "NOT_AUTHORIZED", str(exc))
+        except IdentityMismatch as exc:
+            return self.stop(result, "IDENTITY_MISMATCH", str(exc))
+        except (ValueError, OSError, subprocess.SubprocessError, UfmError) as exc:
+            return self.stop(result, "HOSTKEY_CONFLICT", f"{summary}；未删除或刷新未完成（{exc}）；人工核实后执行: {manual}")
+        result.host_key = host_key_fact(record)
+        if record.result == "refresh-pending":
+            result.steps.append({"step": "host_key", "outcome": "WOULD_REFRESH",
+                                 "detail": f"--apply 时删除本机 known_hosts 里 {change.address} 的旧记录并重试（{result.host_key['note']}）"})
+            self.say(f"    {node.hostname} [host_key] WOULD_REFRESH：{change.address}（{result.host_key['note']}）")
+            if result.status != "VERIFIED":
+                return self.stop(result, "NEEDS_CONFIGURATION", "只读检查：主机密钥待刷新，--apply 时处理")
+            return result
+        self.say(f"    {node.hostname} [host_key] REFRESHED：{change.address}（{result.host_key['note']}）")
+        if result.status != "VERIFIED":   # named and IPv4 only: the retried key, else the password over IPv4
+            if self.access.get(node.hostname, {}).get("path") == "IPv4-KEY":
+                result.status = "VERIFIED"
+                result.password = "key"
+            else:
+                self.login_into(node, result, allow_change)
+        return result
+
+    def device_fingerprint(self, node: UfmNode, result: NodeResult, key_type: str) -> Optional[str]:
+        """The host key of the type in the warning, read over this run's session whose MAC was checked."""
+        if not re.fullmatch(r"[A-Za-z0-9]{1,16}", key_type):
+            return None
+        text = self.run_script(node, result, "host-key-read",
+                               f"set -u\ncat /etc/ssh/ssh_host_{key_type.casefold()}_key.pub\n")
+        return next((value for value in map(host_key_fingerprint, text.splitlines()) if value), None)
+
     def login_paths(self, node: UfmNode, result: NodeResult, allow_change: bool) -> NodeResult:
-        self.say(f"  {node.hostname}: 先尝试 IPv4 {node.address}")
-        result.path, access = "IPv4", {"path": "IPv4"}
+        """One path, the one decided before login (I-037 rules 3 and 7): a chosen path that fails is reported, never
+        replaced by another; the only exception is IPv4 after an unreachable same-subnet link-local (设计 :113)."""
+        route = self.routes.get(node.hostname)
+        if route is not None and route.path == "jump":
+            return self.login_jump(node, result, allow_change)
+        return self.login_direct(node, result, allow_change, route)
+
+    def login_jump(self, node: UfmNode, result: NodeResult, allow_change: bool) -> NodeResult:
+        attachment = self.plan.attachments[node.hostname]
+        self.say(f"  {node.hostname}: 经跳板 {attachment.leaf.hostname} {attachment.port} 走 IPv6 link-local")
+        result.path = "OOB-IPv6"
+        result.route = {"leaf": attachment.leaf.hostname, "port": attachment.port}
+        retry = f"；可用 --direct-access {first_label(node.hostname)} 重试"
+        try:
+            jump, neighbor = self.oob_route(node, attachment, result)
+        except RouteStop as exc:
+            return self.stop(result, exc.status, str(exc) + ("" if exc.status == "CABLE_CHECK_FAILED" else retry))
+        except UfmError as exc:
+            return self.stop(result, "OOB_DISCOVERY_FAILED", str(exc) + retry)
+        result.neighbor = asdict(neighbor)
+        self.say(f"    跳板 {jump.hostname}: 邻居 {neighbor.ipv6}%{neighbor.interface} VRF {neighbor.vrf}"
+                 f"（来源 {neighbor.source}）")
+        access = {"path": "OOB-IPv6", "jump": jump, "neighbor": neighbor}
         outcome = self.login_path(node, result, access, allow_change)
-        if outcome in {"UNREACHABLE", "TIMEOUT"}:
-            attachment = self.plan.attachments.get(node.hostname)
-            if attachment is None:
-                return self.stop(result, outcome, "IPv4 不可达，且 P2P 中没有管理口连线，无法走 OOB")
-            self.say(f"  {node.hostname}: IPv4 不可达，经 P2P 接入 {attachment.leaf.hostname} "
-                     f"{attachment.port} 走 IPv6 link-local")
-            result.path = "OOB-IPv6"
-            result.route = {"leaf": attachment.leaf.hostname, "port": attachment.port}
-            try:
-                jump, neighbor = self.oob_route(node, attachment, result.route)
-            except UfmError as exc:
-                return self.stop(result, "OOB_DISCOVERY_FAILED", str(exc))
-            result.neighbor = asdict(neighbor)
-            self.say(f"    跳板 {jump.hostname}: 邻居 {neighbor.ipv6}%{neighbor.interface} VRF {neighbor.vrf}"
-                     f"（来源 {neighbor.source}）")
-            access = {"path": "OOB-IPv6", "jump": jump, "neighbor": neighbor}
+        if outcome == "HOSTKEY_CONFLICT":   # WP-6 item 7: the inner ssh's entry is on the jump; never written to
+            retry = (f"；冲突在跳板 {jump.hostname} 上 {self.creds.eth_user} 的 known_hosts（地址 {neighbor.ipv6}），"
+                     "只报告：不删除、不向跳板发任何写命令，请人工核实后处理")
+        return self.finish_login(node, result, access, outcome, retry)
+
+    def login_direct(self, node: UfmNode, result: NodeResult, allow_change: bool,
+                     route: Optional["login_rules.Route"]) -> NodeResult:
+        """I-037 设计 :111-114: on this server's subnet first the CSV MAC's link-local; IPv4 only when that cannot be
+        reached, and only after this server's neighbour entry for the IPv4 shows the CSV MAC; else IPv4."""
+        if route is not None and route.same_subnet:
+            link_local = login_rules.link_local_from_mac(node.mac)
+            access = {"path": "LINK-LOCAL", "address": f"{link_local}%{route.same_subnet}"}
+            self.say(f"  {node.hostname}: 同网段，经本机 {route.same_subnet} 走 link-local {link_local}")
+            result.path = "LINK-LOCAL"
             outcome = self.login_path(node, result, access, allow_change)
+            if outcome not in {"UNREACHABLE", "TIMEOUT", "REFUSED"}:
+                return self.finish_login(node, result, access, outcome)
+            mac = local_neighbor_mac(node.address)
+            if mac is None:   # no entry: one ping, then read it again (v3.1.5 WP-3 item 1)
+                try:
+                    subprocess.run(["ping", "-c", "1", "-W", "1", node.address], capture_output=True, timeout=15,
+                                   check=False)
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                mac = local_neighbor_mac(node.address)
+            if mac is None:
+                return self.stop(result, "UNREACHABLE", f"link-local 不可达；本机邻居表没有 {node.address} 的记录"
+                                                        "（ping 一次后仍没有），不改走 IPv4")
+            if mac != node.mac:
+                result.identity = {"path": "IPv4", "mismatches": [["mac", node.mac, mac]]}
+                return self.stop(result, "IDENTITY_MISMATCH", f"本机邻居表里 {node.address} 的 MAC 为 {mac}，CSV 为 "
+                                                              f"{node.mac}：不改走 IPv4，未发送口令")
+        self.say(f"  {node.hostname}: 直接登录 IPv4 {node.address}")
+        result.path, access = "IPv4", {"path": "IPv4"}
+        return self.finish_login(node, result, access, self.login_path(node, result, access, allow_change))
+
+    def finish_login(self, node: UfmNode, result: NodeResult, access: dict, outcome: str,
+                     hint: str = "") -> NodeResult:
         if outcome != "OK":
             help_text = OUTCOME_HELP.get(outcome, "结果未知，停止，不重试")
             if outcome == "AUTH_REJECTED" and not self.creds.factory_password:
                 help_text = "root 新密码被拒绝（该命令不使用出厂密码）；不切换访问路径，请核实凭据"
-            return self.stop(result, outcome, help_text)
+            if outcome in {"UNREACHABLE", "TIMEOUT"}:
+                help_text = f"{access['path']} 不可达；{help_text}"
+            return self.stop(result, outcome, help_text + hint)
         try:
-            self.verify_identity(node, result)
-        except UfmError as exc:
+            self.check_login_identity(node, result)
+        except IdentityMismatch as exc:
             return self.stop(result, "IDENTITY_MISMATCH", str(exc))
         result.status = "VERIFIED"
         self.access[node.hostname] = access
@@ -2909,7 +3298,8 @@ class Session:
         return "UNCHANGED" if facts.get("added") == "0" else f"ADDED_{facts.get('added')}"
 
     def key_access(self, node: UfmNode, result: NodeResult, step: str) -> dict:
-        """Key-only IPv4 session (phases 2-4); verifies the management MAC and address again."""
+        """Key-only IPv4 session; then the identity check of an IPv4 path: MAC, address, netmask and gateway
+        (I-037 rule 8). A refused key, a host-key conflict and an identity mismatch raise their own errors."""
         access = {"path": "IPv4-KEY"}
         marker = os.urandom(12).hex()
         responder = Responder(ufm_destination=self.ufm_destination(node, access), login_password="",
@@ -2919,11 +3309,16 @@ class Session:
         self.save(self.numbered(f"{node.hostname}-{step}.txt"), session.output)
         outcome = classify(session, responder, marker)
         if outcome != "OK":
-            raise UfmError(f"部署服务器公钥登录 {self.creds.ufm_user}@{node.address} 失败（{outcome}）: "
-                           f"{session.output.strip()[-300:]}")
+            detail = (f"部署服务器公钥登录 {self.creds.ufm_user}@{node.address} 失败（{outcome}）: "
+                      f"{session.output.strip()[-300:]}")
+            if outcome == "AUTH_REJECTED":
+                raise KeyLoginRejected(detail)
+            if outcome == "HOSTKEY_CONFLICT":
+                raise HostKeyConflict(detail, login_rules.parse_host_key_change(session.output))
+            raise UfmError(detail)
         facts = parse_facts(extract_framed(session.output, marker))
         result.path, result.facts = "IPv4-KEY", {**result.facts, **facts}
-        self.verify_identity(node, result)
+        self.check_login_identity(node, result)
         self.access[node.hostname] = access
         return facts
 
@@ -3947,11 +4342,16 @@ class Session:
                 ("timezone", self.step_timezone), ("hosts", self.step_hosts))
 
     def open_node(self, node: UfmNode, allow_change: bool) -> NodeResult:
-        """The deployment key over IPv4 when it already works, else the new root password, else the
-        factory password (first login); a forced password change only with allow_change (--apply)."""
+        """The deployment key over IPv4 when it already works (问题文档 :1557 第 4 条), else the route decided for this
+        UFM with the new root password, else the factory password (first login); a forced password change only
+        with allow_change (--apply). Logged in by the key but not this UFM stops the node (B0-O13 (a))."""
         result = NodeResult(node.hostname, self.plan.role_of(node))
         try:
             self.key_access(node, result, "key-login")
+        except IdentityMismatch as exc:   # B0-O13 (a) (I-054): stop here, never a password to this address
+            return self.stop(result, "IDENTITY_MISMATCH", str(exc))
+        except HostKeyConflict as exc:   # v3.1.6 B0 WP-6
+            return self.host_key_changed(node, result, exc, allow_change)
         except UfmError:
             return self.login(node, allow_change)
         result.status = "VERIFIED"
@@ -4118,54 +4518,42 @@ class Session:
         return port, sorted({mac for mac, _vlan, _bridge in fdb_entries(fdb, port)}), fdb
 
     def check_cabling(self, nodes: list) -> dict:
-        """ib-initial-setup v15 rule: the MAC learned on the P2P OOB Leaf port of eth0 must be the CSV eth0_mac.
-        Owner 2026-10-20: otherwise show the details and ask whether to continue (default no). hostname -> verdict"""
-        self.say("  P2P 连线核对（OOB Leaf 端口学到的 MAC 与 CSV eth0_mac 比对）")
+        """B0-O9 (a): check and config-upgrade check the cabling of every jump-routed UFM before any login, the key
+        or not (I-037 rules 4-6, one function); a directly logged-in UFM (--direct-access or no *jump) is not
+        checked. B0-O3 (a): no question; a failure is CABLE_CHECK_FAILED unless --ignore-cable-check. hostname ->
+        facts["cabling"]."""
+        self.say("  P2P 线路核对（经跳板的 UFM：CSV eth0_mac 是否学在预期跳板端口上）")
         verdicts = {}
         for node in nodes:
-            attachment = self.plan.attachments.get(node.hostname)
-            where = f"{attachment.leaf.hostname} {attachment.port}" if attachment else ""
-            learned = []
-            if attachment is None:
-                outcome, detail = "UNCHECKED", "P2P 中没有这台 UFM 管理口的连线"
+            route, attachment = self.routes.get(node.hostname), self.plan.attachments.get(node.hostname)
+            if route is None or route.path != "jump" or attachment is None:
+                why = "--direct-access 指定直接登录" if route and route.reason == "DIRECT_ACCESS" else \
+                    f"直接登录（{route.reason if route else '未归类'}）"
+                verdict = {"outcome": "UNCHECKED", "detail": f"{why}，不做线路核对", "expected": node.mac,
+                           "observed": []}
             else:
                 try:
-                    status = interface_oper_status(self.snapshot(attachment.leaf)["interfaces"], attachment.port)
-                    if status != "up":
-                        outcome, detail = "LINK_DOWN", f"{where} Oper Status={status}"
-                    else:
-                        port, learned, fdb = self.learned_on(attachment)
-                        via = where if port == attachment.port else f"{where}（FDB 端口 {port}）"
-                        elsewhere = sorted(ports_learning(fdb, node.mac) - {port})
-                        if node.mac in learned:
-                            outcome, detail = "MATCH", f"{via} 学到 {node.mac}"
-                        elif learned:
-                            outcome, detail = "MAC_MISMATCH", f"{via} 学到 {', '.join(learned)}，不是 CSV eth0_mac {node.mac}"
-                        elif elsewhere:
-                            outcome, detail = "MAC_MISMATCH", (f"{via} 没有学到 MAC；CSV MAC {node.mac} 出现在 "
-                                                               f"{attachment.leaf.hostname} {', '.join(elsewhere)}，不在 P2P 端口")
-                        else:
-                            outcome, detail = "MAC_NOT_LEARNED", f"{via} 没有学到动态 MAC"
+                    verdict = cabling_fact(self.cable_check(node, attachment), attachment, self.port_state(attachment))
                 except UfmError as exc:
-                    outcome, detail = "UNCHECKED", f"无法读取 {where}: {exc}"
-            verdict = {"outcome": outcome, "detail": detail, "expected": node.mac, "observed": learned}
-            self.say(f"    {node.hostname} eth0 {outcome}: {detail}")
-            if outcome in CABLING_PROBLEMS:
-                for line in cabling_details(node, attachment, verdict):
-                    self.say(f"      {line}")
-                verdict["continued"] = bool(self.ask_continue(f"{node.hostname} 的 P2P 连线核对不通过，是否继续处理这台 UFM？"))
-                self.say(f"      {'用户选择继续' if verdict['continued'] else '不继续：这台 UFM 本次不登录、不改动'}")
+                    verdict = {"outcome": "UNCHECKED", "detail": f"无法读取 {attachment.leaf.hostname} "
+                                                                f"{attachment.port}: {exc}",
+                               "expected": node.mac, "observed": []}
+            self.say(f"    {node.hostname} eth0 {verdict['outcome']}: {verdict['detail']}")
             verdicts[node.hostname] = verdict
         return verdicts
 
     def checked(self, node: UfmNode, cabling: dict) -> NodeResult:
-        """check_node, unless the P2P cabling did not match and the operator did not choose to continue."""
+        """check_node, unless the cabling check failed and --ignore-cable-check was not given."""
         verdict = cabling.get(node.hostname, {})
-        if verdict.get("outcome") in CABLING_PROBLEMS and not verdict.get("continued"):
-            result = self.stop(NodeResult(node.hostname, self.plan.role_of(node)), verdict["outcome"],
-                               f"P2P 连线核对不通过，未登录: {verdict['detail']}")
-        else:
-            result = self.check_node(node)
+        if verdict.get("outcome") in {"ELSEWHERE", "NOT_LEARNED"}:
+            if not self.ignore_cable_check:
+                result = self.stop(NodeResult(node.hostname, self.plan.role_of(node)), "CABLE_CHECK_FAILED",
+                                   f"P2P 线路核对不通过（{verdict['outcome']}），未登录: {verdict['detail']}")
+                result.facts["cabling"] = verdict
+                return result
+            verdict = dict(verdict, ignored=True)
+            self.say(f"    {node.hostname}: 线路核对 {verdict['outcome']}，按 --ignore-cable-check 继续")
+        result = self.check_node(node)
         result.facts["cabling"] = verdict
         return result
 
@@ -4238,6 +4626,7 @@ class Session:
                     item.steps.append({"step": "ha_config", "outcome": "SKIPPED", "detail": HA_NO_VERSION})
                     self.say(f"    {item.hostname} [ha_config] SKIPPED: {HA_NO_VERSION}")
         elif (len(nodes) == 2 and all(item.status in {"COMPLIANT", "NEEDS_CONFIGURATION"} for item in results)
+                and all(node.hostname in self.access for node in nodes)   # B0 WP-6: a pending host key has no session
                 and self.plan.vip and self.plan.logical.get("eth1")):
             self.check_ha(nodes, {item.hostname: item for item in results})
         return [self.settle_deferred(item) for item in results]
@@ -4318,9 +4707,15 @@ OUTCOME_HELP = {
     "PASSWORD_CHANGE_REQUIRED": "设备要求修改 root 密码；check 不改密码，确认后执行 config-upgrade --apply",
     "PASSWORD_CHANGE_UNKNOWN": "改密结果未知；请先手工用新密码登录确认，不要盲目重试",
     "NEW_PASSWORD_REJECTED": "新密码不符合 UFM 密码策略，未修改",
-    "HOSTKEY_CONFLICT": "SSH 主机密钥与 known_hosts 冲突；核实设备身份后再处理，不自动接受",
-    "REFUSED": "IPv4 有主机应答但拒绝 SSH：可能地址被占用或 sshd 未运行，停止",
-    "UNREACHABLE": "经 OOB 的 IPv6 也不可达",
+    "HOSTKEY_CONFLICT": "SSH 主机密钥与 known_hosts 冲突；核实设备身份后再处理，不自动接受；只能经 IPv4 登录、"
+                        "确认做过 factory reset 时可加 --refresh-host-key <这台> 重跑",
+    "REFUSED": "有主机应答但拒绝 SSH：可能地址被占用或 sshd 未运行，停止",
+    "UNREACHABLE": "选定的登录路径不可达；不改走其他路径",
+    "CABLE_CHECK_FAILED": "P2P 线路核对不通过：核对 CSV eth0_mac 和 P2P 连线；确认要继续时加 --ignore-cable-check 重跑",
+    "JUMP_UNREACHABLE": "连不上跳板（全部候选登录地址）；核对跳板，或用 --direct-access <这台> 直接登录",
+    "JUMP_ADDRESS_INVALID": "P2P 对端跳板在 ib.csv 中没有可用的登录地址；补全 eth0_ip 或 vlan_id/svi_ip，"
+                            "或用 --direct-access <这台>",
+    "INPUT_INCOMPLETE": "这台 UFM 的 ib.csv 输入不齐或有误，本次跳过，其他照常；改好后重跑",
     "TIMEOUT": "会话超时",
     "SESSION_TIMEOUT": "已出现登录提示后会话超时，状态未知，停止，不切换路径",
     "UNKNOWN": "输出无法识别，停止，不重试",
@@ -4361,73 +4756,6 @@ def read_secret(prompt: str) -> str:
         raise UfmError("已取消输入") from None
 
 
-# Owner 2026-10-20: a P2P cabling problem shows the details and asks whether to continue; no answer in 15 s is no.
-CABLING_ANSWER_TIMEOUT = 15
-
-
-def read_timed(prompt: str, timeout: float, *, echo: bool, timeout_note: str,
-               tty_path: str = "/dev/tty") -> Optional[str]:
-    """One line from the terminal with a deadline: no key within `timeout` seconds returns "" (Enter). The
-    first key cancels the deadline and the line then ends with Enter as usual; Backspace and Ctrl-U edit,
-    Ctrl-C or Ctrl-D cancel. None when there is no terminal."""
-    try:
-        fd = os.open(tty_path, os.O_RDWR | os.O_NOCTTY)
-    except OSError:
-        return None
-    try:
-        saved = termios.tcgetattr(fd)
-    except termios.error:
-        os.close(fd)
-        return None
-    raw = termios.tcgetattr(fd)
-    raw[3] &= ~(termios.ECHO | termios.ICANON | termios.ISIG)
-    raw[6][termios.VMIN], raw[6][termios.VTIME] = 1, 0
-    typed, started = bytearray(), False
-    try:
-        termios.tcsetattr(fd, termios.TCSAFLUSH, raw)
-        os.write(fd, prompt.encode("utf-8"))
-        deadline = time.monotonic() + timeout
-        while True:
-            wait = None if started else deadline - time.monotonic()
-            if wait is not None and (wait <= 0 or not select.select([fd], [], [], wait)[0]):
-                os.write(fd, f"\n（{timeout_note}）\n".encode("utf-8"))
-                return ""
-            started = True
-            for byte in os.read(fd, 1024):
-                if byte in (10, 13):
-                    os.write(fd, b"\n")
-                    return typed.decode("utf-8", "replace")
-                if byte in (3, 4):
-                    os.write(fd, b"\n")
-                    raise UfmError("已取消输入")
-                if byte in (8, 127):
-                    if typed and echo:
-                        os.write(fd, b"\b \b")
-                    while typed and typed[-1] & 0xC0 == 0x80:   # a whole UTF-8 character
-                        typed.pop()
-                    if typed:
-                        typed.pop()
-                elif byte == 21:
-                    if echo:
-                        os.write(fd, b"\b \b" * len(typed.decode("utf-8", "replace")))
-                    typed.clear()
-                elif byte >= 32:
-                    typed.append(byte)
-                    if echo:
-                        os.write(fd, bytes([byte]))
-    finally:   # never wait for output to drain here: drop unread keys and restore at once
-        termios.tcflush(fd, termios.TCIFLUSH)
-        termios.tcsetattr(fd, termios.TCSANOW, saved)
-        os.close(fd)
-
-
-def ask_yes_no_timed(prompt: str, timeout: float, tty_path: str = "/dev/tty") -> bool:
-    """[y/N] with a deadline: only y/yes continues; no key in time, Enter or no terminal means no."""
-    answer = read_timed(prompt, timeout, echo=True, timeout_note=f"{timeout:g} 秒无输入，按 N 处理",
-                        tty_path=tty_path)
-    return (answer or "").strip().casefold() in {"y", "yes"}
-
-
 DEFAULT_FACTORY_PASSWORD = "UFMappliance"   # UFM appliance shipping default for root (owner, 2026-10-19)
 
 
@@ -4450,13 +4778,59 @@ def prompt_ufm_credentials(user: str, eth_user: str, *, first_login: bool, ask_f
     return Credentials(user, new, factory, eth_user)
 
 
+def master_inventory(args: argparse.Namespace) -> Path:
+    """B0-O6 (b): an explicit --input-dir holds its own 02 (never the repository's, which may be another project's);
+    the default tool directory uses <repository>/infiniband/02-devices_config.csv."""
+    return (args.input_dir if args.explicit_input_dir else REPO_DIR / "infiniband") / MASTER_INVENTORY
+
+
+def check_inventory(args: argparse.Namespace) -> int:
+    """需求文档 R-016 (:970-977): ib.csv must be 02 or a subset of it, also in read-only mode, before any prompt,
+    run directory or login. 0 when consistent; 2 (B0-O12, :975) on a difference or when 02 cannot be read."""
+    subset, master = args.input_dir / "ib.csv", master_inventory(args)
+    if args.inventory_checked or not subset.exists():   # bringup has compared; no ib.csv is an input error later
+        return 0
+    try:
+        mismatches = [] if subset.resolve() == master.resolve() else inventory_subset.compare(subset, master)
+    except (OSError, UnicodeError, csv.Error, IndexError) as exc:
+        print(f"ERROR: 无法比对 {subset} 与总清单 {master}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    for item in mismatches:   # the A2 / initial-setup line (v3.1.4 指导 :378)
+        print(f"INVENTORY MISMATCH: {item.hostname}; {item.column}; ib.csv={item.subset_value}; "
+              f"02={item.master_value}; {item.kind}")
+    if mismatches:
+        print(f"ERROR: {subset} 与总清单 {master} 不一致，未登录任何设备", file=sys.stderr)
+        return 2
+    return 0
+
+
+def resolve_selectors(args: argparse.Namespace, plan: Plan) -> tuple:
+    """(--direct-access, --refresh-host-key) as host-name sets, matched once against every server_ufm of ib.csv,
+    never only the --node one (D1b-O17 (a); D34-O5); an item that matches nothing raises SelectorError."""
+    names = plan.ufm_hostnames
+    direct = login_rules.select_direct_access(args.direct_access, names) if args.direct_access else frozenset()
+    refresh = frozenset(hostname_ranges.select(hostname_ranges.parse_selector(
+        args.refresh_host_key, option="--refresh-host-key", allow_all=False), names)) if args.refresh_host_key \
+        else frozenset()
+    return direct, refresh
+
+
 def cmd_inputs(args: argparse.Namespace) -> int:
-    """check --inputs-only: the local input check alone, no device contact."""
+    """check --inputs-only: the local input check alone, no device contact; the route table is printed too."""
     plan = build_plan(args.input_dir)
     print_plan(plan, print)
-    print(f"结果: {'通过' if not plan.errors else f'{len(plan.errors)} 个错误'}"
-          f"{f'，{len(plan.warnings)} 个警告' if plan.warnings else ''}")
-    return 0 if not plan.errors else 1
+    if plan.errors:
+        print(f"结果: {len(plan.errors)} 个错误{f'，{len(plan.warnings)} 个警告' if plan.warnings else ''}")
+        return 1
+    try:
+        direct, _refresh = resolve_selectors(args, plan)
+    except hostname_ranges.SelectorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    print_routes(plan, route_table(plan, direct), print)
+    skipped = f"{len(plan.incomplete)} 台 INPUT_INCOMPLETE" if plan.incomplete else "通过"
+    print(f"结果: {skipped}{f'，{len(plan.warnings)} 个警告' if plan.warnings else ''}")
+    return 1 if plan.incomplete else 0
 
 
 def input_digests(input_dir: Path) -> dict:
@@ -4484,28 +4858,12 @@ DONE_STATUSES = {"check": {"COMPLIANT"}, "config-upgrade": {"UPGRADED", "UP_TO_D
 # Owner 2026-10-20: IPMI is out-of-band management; when its steps fail the run records the failure,
 # carries on (DNS, NTP, upgrade ...) and still marks the node failed at the end, listing the IPMI errors.
 DEFERRED_FAILURE_STEPS = {"ipmi_lan", "ipmi_user", "ipmi_power"}
-# P2P cabling verdicts that stop a UFM unless the operator chooses to continue (UNCHECKED only warns).
-CABLING_PROBLEMS = {"MAC_MISMATCH", "MAC_NOT_LEARNED", "LINK_DOWN"}
-CABLING_CAUSES = {
-    "MAC_MISMATCH": "CSV 的 eth0_mac 写错，或这台 UFM 接到了别的 Leaf 端口（P2P 写错）",
-    "MAC_NOT_LEARNED": "端口 up 但没有学到 MAC：接在这个口上的可能不是这台 UFM 的管理口，或管理口没有流量",
-    "LINK_DOWN": "端口没有 up：这台 UFM 没有接到这个口，或线缆/端口故障",
-}
 SETTLED_BY_DEFERRED = {"COMPLIANT", "NEEDS_CONFIGURATION", "CONFIGURED", "UP_TO_DATE", "UPGRADED"}
 # Step outcomes that mean "nothing was changed".
 QUIET_OUTCOMES = {"UNCHANGED", "OK", "SKIPPED", "SKIPPED_SERVICE_MISSING", "NOT_TESTED", "WARN_NO_DIRECT_KEY_LOGIN"}
 # Inspect mode found work that only --apply may do (a forced password change counts too).
-EXIT_PENDING = 3   # 2 is argparse's usage error
+EXIT_PENDING = 3   # 2 is argparse's usage error, an inventory mismatch (需求文档 :975) or a name list matching nothing
 PENDING_STATUSES = {"NEEDS_CONFIGURATION", "NEW_DEVICE", "FACTORY_PASSWORD"}
-
-
-def cabling_details(node: UfmNode, attachment: Attachment, verdict: dict) -> list:
-    where = f"{attachment.leaf.hostname} {attachment.port}"
-    return [f"P2P 连线: {attachment.p2p_device}:{attachment.p2p_port} -> {where}",
-            f"CSV eth0_mac: {node.mac}",
-            f"{where} 学到的 MAC: {', '.join(verdict['observed']) or '无'}"
-            + (f"（{verdict['detail'].split(' ', 2)[-1]}）" if verdict["outcome"] == "LINK_DOWN" else ""),
-            f"可能原因: {CABLING_CAUSES[verdict['outcome']]}"]
 
 
 def mode_line(args: argparse.Namespace) -> str:
@@ -4529,19 +4887,39 @@ def confirmer(say: Callable[[str], None]) -> Callable[[str, str], bool]:
     return confirm
 
 
+def incomplete_result(plan: Plan, hostname: str) -> NodeResult:
+    """B0-O7 (a): a UFM skipped for its own inputs; nothing on it is touched, the others go on."""
+    problems = plan.incomplete[hostname]
+    return NodeResult(hostname, next((role for role, name in plan.roles.items() if name == hostname), ""),
+                      status="INPUT_INCOMPLETE", detail="输入不齐，本次跳过这台（其他照常）: " + "; ".join(problems),
+                      input_issues=list(problems))
+
+
 def cmd_nodes(args: argparse.Namespace) -> int:
     plan = build_plan(args.input_dir)
     if plan.errors:
         print_plan(plan, print)
         print("输入检查未通过，不登录任何设备")
         return 1
+    try:
+        direct, refresh = resolve_selectors(args, plan)
+    except hostname_ranges.SelectorError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    routes = route_table(plan, direct)
     print_plan(plan, print)   # the input check comes first, before any prompt
-    nodes = [node for node in plan.nodes
-             if not args.node or args.node.casefold() in {node.hostname.casefold(), first_label(node.hostname)}]
-    if not nodes:
+    print_routes(plan, routes, print)
+
+    def wanted(hostname: str) -> bool:
+        return not args.node or args.node.casefold() in {hostname.casefold(), first_label(hostname)}
+    nodes = [node for node in plan.nodes if wanted(node.hostname)]
+    skipped = [hostname for hostname in plan.ufm_hostnames if hostname in plan.incomplete and wanted(hostname)]
+    if not nodes and not skipped:
         raise UfmError(f"--node {args.node} 不在 ib.csv 的 {UFM_TYPE} 中")
-    if args.command in PAIR_COMMANDS and len(nodes) != len(plan.nodes):
+    if args.command in PAIR_COMMANDS and len(nodes) + len(skipped) != len(plan.ufm_hostnames):
         raise UfmError(f"{args.command} 总是处理两台 UFM，不能用 --node 只选一台")
+    if not nodes:   # only skipped UFMs: no password, no session; the run directory still records them
+        return finish_run(args, plan, routes, [incomplete_result(plan, name) for name in skipped])
     if args.apply and not args.yes and not sys.stdin.isatty():
         raise UfmError("--apply 需要在交互终端确认第一次设备改动；非交互运行请同时加 --yes")
     spines = select_spine_inventory(plan, args.oob_spines)
@@ -4565,18 +4943,19 @@ def cmd_nodes(args: argparse.Namespace) -> int:
         print_plan(plan, say.note)
         say("Spine 库存（仅在 Leaf 的 SVI 缺失或无 IPv4 时经 LLDP 选用）: "
             + (", ".join(spine.hostname for spine in spines) or "无"))
+        print_routes(plan, routes, say.note)
         session = Session(plan, creds, args.connect_timeout, run_dir, say,
                           lambda: read_secret(f"OOB Leaf/Spine ({args.eth_user}) 公钥登录被拒，请输入密码"
                                               "（直接回车则不登录交换机，相关检查记为 UNCHECKED）: "),
+                          direct_access=direct, routes=routes, ignore_cable_check=args.ignore_cable_check,
+                          refresh_host_key=refresh,
                           spines=spines, ipmi_user=getattr(args, "ipmi_user", "admin"),
                           ipmi_channel=getattr(args, "ipmi_channel", 1),
                           upgrade_wait=(args.wait_initial, args.wait_interval, args.wait_max)
                           if args.command == "config-upgrade" else (600, 30, 2400),
                           apply=args.apply, confirm=None if args.yes else confirmer(say),
                           confirm_new_password=lambda: read_secret(
-                              "设备要求把出厂密码改为新密码：请再次输入 UFM root 新密码确认: "),
-                          ask_continue=lambda question: ask_yes_no_timed(
-                              f"{question}[y/N]（{CABLING_ANSWER_TIMEOUT} 秒无输入按 N 处理）: ", CABLING_ANSWER_TIMEOUT))
+                              "设备要求把出厂密码改为新密码：请再次输入 UFM root 新密码确认: "))
         if args.command == "check":
             results = session.check(nodes)
         elif args.command == "ha-setup":
@@ -4585,18 +4964,42 @@ def cmd_nodes(args: argparse.Namespace) -> int:
             results = session.ha_post_config_command(nodes)
         else:
             results = session.config_upgrade_all(nodes)
-        (run_dir / "result.json").write_text(json.dumps(
-            {"command": args.command, "apply": args.apply, "run_id": run_dir.name,
-             "input_sha256": input_digests(args.input_dir), "nodes": [asdict(item) for item in results]},
-            ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
-        return summarize(args, results, run_dir, say)
+        return write_result(args, plan, routes, results + [incomplete_result(plan, name) for name in skipped],
+                            run_dir, say)
+    finally:
+        say.close()
+
+
+def write_result(args: argparse.Namespace, plan: Plan, routes: dict, results: list, run_dir: Path,
+                 say: Callable[[str], None]) -> int:
+    order = {name: index for index, name in enumerate(plan.ufm_hostnames)}
+    results = sorted(results, key=lambda item: order.get(item.hostname, len(order)))
+    for item in results:
+        item.login_route = route_record(plan, routes, item.hostname)
+    (run_dir / "result.json").write_text(json.dumps(
+        {"command": args.command, "apply": args.apply, "run_id": run_dir.name,
+         "input_sha256": input_digests(args.input_dir), "nodes": [asdict(item) for item in results]},
+        ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+    return summarize(args, results, run_dir, say)
+
+
+def finish_run(args: argparse.Namespace, plan: Plan, routes: dict, results: list) -> int:
+    """Every selected UFM was skipped for its inputs: the run directory, report and result.json only."""
+    run_dir = prepare_run_dir(args.input_dir, args.command)
+    say = Reporter(run_dir / "report.log")
+    try:
+        say(f"运行目录: {run_dir}")
+        print_plan(plan, say.note)
+        print_routes(plan, routes, say.note)
+        return write_result(args, plan, routes, results, run_dir, say)
     finally:
         say.close()
 
 
 def summarize(args: argparse.Namespace, results: list, run_dir: Path, say: Callable[[str], None]) -> int:
     """0: every node already in the wanted state; 3: inspect mode found changes for --apply; 1: failures.
-    (2 stays argparse's usage error, owner 2026-10-20.)"""
+    (2, before any of this: argparse's usage error, ib.csv differing from 02 (需求文档 :975, B0-O12) or a name
+    list matching no server_ufm.)"""
     done = DONE_STATUSES[args.command]
     waiting = (lambda item: item.status in PENDING_STATUSES and not args.apply)
     pending = [item for item in results if waiting(item)]
@@ -4604,10 +5007,14 @@ def summarize(args: argparse.Namespace, results: list, run_dir: Path, say: Calla
     say("")
     say(mode_line(args))
     for item in results:
-        say(f"  {item.hostname:<36} {item.status}")
+        route = item.login_route   # I-037 设计 :155-160: each UFM's route as decided before login
+        say(f"  {item.hostname:<36} {item.status}" + (
+            f"  {'经跳板' if route['path'] == 'jump' else '直接登录'} {route['reason']}" if route.get("path") else ""))
         cabling = item.facts.get("cabling", {})
-        if cabling.get("continued"):
-            say(f"      注意: P2P 连线核对 {cabling['outcome']}，用户选择继续: {cabling['detail']}")
+        if cabling.get("ignored"):   # B0-O3 (a): listed on its own line, with where the MAC really is
+            say(f"      注意: 线路核对 {cabling['outcome']}，按 --ignore-cable-check 继续: {cabling['detail']}")
+        if item.host_key:
+            say(f"      主机密钥: {item.host_key['address']} {item.host_key['result']}（{item.host_key['note']}）")
         if item.status not in done and not waiting(item):
             for reason in ([item.detail] if item.detail else []) + [
                     f"{failure['step']}: {failure['detail']}" for failure in item.facts.get("deferred_failures", [])]:
@@ -4618,6 +5025,12 @@ def summarize(args: argparse.Namespace, results: list, run_dir: Path, say: Calla
     if failed:
         line += f"；{len(failed)} 台未完成"
     say(f"{line}；日志 {run_dir}")
+    unreachable = {}   # I-037 设计 :159: an unreachable jump is its own class, named
+    for item in results:
+        if item.status == "JUMP_UNREACHABLE":
+            unreachable.setdefault(item.login_route.get("jump") or "?", []).append(first_label(item.hostname))
+    for jump, names in unreachable.items():
+        say(f"跳板不可达: {jump}（{', '.join(names)}）")
     # Owner 2026-10-22: notes (a failed ufm_enterprise_sanity.sh) come last and change no exit code.
     for item in results:
         for note in item.facts.get("notes", []):
@@ -4632,8 +5045,8 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
                     "（新做 HA 后自动 ha-post-config；已有 HA 时可单独 ha-post-config --apply）。"
                     "输入默认取脚本所在目录的 01-global.yaml、ib.csv、p2p.xlsx、publickey/。",
         epilog="不带子命令时执行 check。config-upgrade、ha-setup、ha-post-config 必须带 --apply 才执行。")
-    parser.add_argument("--input-dir", type=Path, default=TOOL_DIR,
-                        help="输入目录（默认脚本所在目录）")
+    parser.add_argument("--input-dir", type=Path, default=None,
+                        help="输入目录（默认脚本所在目录）；显式给出时总清单用它下面的 02-devices_config.csv")
     sub = parser.add_subparsers(dest="command")
     check = sub.add_parser("check", help="默认：检查输入和设备状态（新设备只核验到需要改密；能登录的做全部只读检查："
                                          "基本配置、版本、互信与 HA）")
@@ -4650,6 +5063,15 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
         command.add_argument("--connect-timeout", type=int, default=5, help="SSH 连接超时秒数，1-60（默认 5）")
         command.add_argument("--oob-spines",
                              help="逗号分隔的 Spine 主机名（默认取 ib.csv 中 oob-spine 开头的 eth_jump）；仍需实时 LLDP")
+        # v3.1.6 B0 (I-037): the names are matched against every server_ufm of ib.csv, --node or not
+        command.add_argument("--direct-access", metavar="名单",
+                             help="这些 UFM 不经跳板、直接登录（逗号分隔，可用 * 和 [01-04] 范围，all 表示全部）")
+        command.add_argument("--ignore-cable-check", action="store_true",
+                             help="线路核对失败时仍用 CSV MAC 的 link-local、经预期端口所属 VLAN 登录并继续")
+        command.add_argument("--refresh-host-key", metavar="名单",
+                             help="factory reset 后只能经 IPv4 登录的 UFM：跳过核实，只删本机 known_hosts 里它的那一条"
+                                  "并重试（只在 --apply 时删）")
+        command.add_argument("--inventory-checked", action="store_true", help=argparse.SUPPRESS)
     check.add_argument("--inputs-only", action="store_true", help="只检查本地输入，不登录设备")
     for command in (check, config_upgrade):
         command.add_argument("--ask-factory-password", action="store_true",
@@ -4666,7 +5088,8 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.command is None:
         args = parser.parse_args(argv + ["check"])
-    args.input_dir = args.input_dir.expanduser().absolute()
+    args.explicit_input_dir = args.input_dir is not None
+    args.input_dir = (args.input_dir or TOOL_DIR).expanduser().absolute()
     if args.command in WRITE_COMMANDS and not args.apply:
         parser.error(f"{args.command} 必须带 --apply 才执行；只查看状态请运行 check（不带子命令即可）")
     if args.yes and not args.apply:
@@ -4686,6 +5109,8 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
 def main(argv: Optional[list] = None) -> int:
     args = parse_args(argv)
     try:
+        if check_inventory(args):
+            return 2
         if args.command == "check" and args.inputs_only:
             return cmd_inputs(args)
         return cmd_nodes(args)
