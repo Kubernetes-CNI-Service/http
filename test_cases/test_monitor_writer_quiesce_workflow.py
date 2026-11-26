@@ -28,7 +28,7 @@ if os.fspath(TOOLS) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS))
 from deployment_lock import DeploymentLockError
 from test_cases.ns1_monitor_stop_source_layer import restore_ns1_runtime_tree
-from test_cases.ns2_load_report_source_layer import restore_ns2_load_report_trees
+from test_cases.ns3_load_report_source_layer import restore_ns3_load_report_trees
 
 
 def load_module(name: str, relative: str):
@@ -962,7 +962,8 @@ def _source_bound_load_report_path(
     """
     # v3.1.6 NS2 (http dev 2026-11-26 03:4x, NS2 pending point 3): the two pins below are not re-pinned.
     # The exact generated NS2 DATA layer is restored on private copies first; a refused layer withdraws.
-    restored = restore_ns2_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
+    # v3.1.6 NS3 (R-036/P054): the exact generated NS3 DATA layer of 11-load.py goes first, same rule.
+    restored = restore_ns3_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
     if restored is None:
         return {}
     load_reviewed, report_reviewed = restored
@@ -1001,8 +1002,9 @@ def _load_report_structural_path(
     v3.1.6 NS2 (http dev 2026-11-26 03:4x): the unchanged structural check below runs on the restored
     reviewed copies.  Each proved role is then the unique node with the same text in the original
     module's same function (main, or the report commit), so a proof never references a private copy.
+    v3.1.6 NS3: the NS3 inverse of 11-load.py runs before the NS2 one (ns3_load_report_source_layer).
     """
-    restored = restore_ns2_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
+    restored = restore_ns3_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
     if restored is None:
         return {}
     proven = _reviewed_load_report_structural_path(*restored)

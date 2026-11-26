@@ -13946,6 +13946,8 @@ def main(
     except BaseException as exc:
         primary_failure = True
         cleanup_errors = []
+        # R-036/P054: a stop cleanup that fails leaves the services unconfirmed; no [SAFE]/[STATE] then.
+        stop_cleanup_error = None
         release_committed = release_committed or bool(
             parent_candidate is not None and parent_candidate.committed
         )
@@ -13961,7 +13963,8 @@ def main(
                        if native_http_only_inputs is not None else {}),
                 )
             except (LoadError, OSError, subprocess.SubprocessError) as cleanup_exc:
-                cleanup_errors.append(f"服务停止清理失败：{cleanup_exc}")
+                stop_cleanup_error = f"服务停止清理失败：{cleanup_exc}"
+                cleanup_errors.append(stop_cleanup_error)
         if release_link_snapshot and not release_committed:
             try:
                 restore_release_links(release_link_snapshot)
@@ -14009,7 +14012,7 @@ def main(
                         f"A 恢复待办保留在 {restore_marker}：下一次 load 会在停止服务之后按回执重试恢复"
                     )
         print(f"[FAILED] load 阶段失败：{failure_phase}", file=sys.stderr)
-        if services_must_remain_stopped:
+        if services_must_remain_stopped and stop_cleanup_error is None:
             print(
                 "[SAFE] 受管服务保持停止，避免运行未完成或跨代配置",
                 file=sys.stderr,
@@ -14045,6 +14048,9 @@ def main(
             print(f"[ERROR] {exc}", file=sys.stderr)
         for cleanup_error in cleanup_errors:
             print(f"[ERROR] {cleanup_error}", file=sys.stderr)
+        if stop_cleanup_error is not None:
+            # After the primary error and every secondary one, in place of the [SAFE]/[STATE] claims.
+            print(f"[HOLD] 无法确认受管服务已停止：{stop_cleanup_error}", file=sys.stderr)
         if isinstance(exc, KeyboardInterrupt):
             # Preserve shell semantics (normally exit 130) after cleanup.
             raise

@@ -159,6 +159,30 @@ def write_deb(path, package, version, arch="amd64"):
         json.dump({"Package": package, "Version": version, "Architecture": arch}, handle)
 
 
+# R-036/P054 (v3.1.6 guide WP-NS3 :844): the one read-only Docker package query, argv exactly.
+DOCKER_NAMES = ("docker.io", "docker-ce", "docker-ce-cli", "containerd.io")
+DOCKER_QUERY = ["-W", "-f=${binary:Package}\\t${Architecture}\\t${Status}\\n"] + list(DOCKER_NAMES)
+
+
+def docker_query(state, args):
+    """Raw rc/stdout/stderr of state["docker_query"]; without it, dpkg's shape for state["installed"]."""
+    if args != DOCKER_QUERY:
+        print(f"fake dpkg-query: unlisted Docker query {args!r}", file=sys.stderr)
+        return 97
+    spec = state.get("docker_query")
+    if spec is None:
+        known = sorted(name for name in DOCKER_NAMES if name in state["installed"])
+        unknown = [name for name in DOCKER_NAMES if name not in state["installed"]]
+        spec = {"rc": 1 if unknown else 0,
+                "stdout": "".join(f"{name}\tamd64\tinstall ok installed\n" for name in known),
+                "stderr": "".join(f"dpkg-query: no packages found matching {name}\n" for name in unknown)}
+    stdout = bytes.fromhex(spec["stdout_hex"]) if "stdout_hex" in spec else spec.get("stdout", "").encode()
+    sys.stdout.buffer.write(stdout)
+    sys.stdout.flush()
+    sys.stderr.write(spec.get("stderr", ""))
+    return spec.get("rc", 0)
+
+
 def systemctl(state, args):
     units, active = state.setdefault("unit_state", {}), state.setdefault("active", {})
     if args[:3] == ["show", "--property=LoadState", "--value"]:
@@ -219,8 +243,16 @@ def apt_get(state, args):
         return 0
     for package in packages:
         if package in state.get("apt_unavailable", []):
+            if "apt_fail_marker" in state:
+                print(state["apt_fail_marker"])
             print(f"E: Unable to locate package {package}")
             return 100
+    # The L3 field shape (guide WP-NS3 :828): docker.io next to an installed Docker CE fails at 100.
+    if "docker.io" in packages and "containerd.io" in state["installed"]:
+        print("The following packages have unmet dependencies:\n"
+              " containerd.io : Conflicts: containerd\n"
+              "E: Unable to correct problems, you have held broken packages.")
+        return 100
     for package in packages:
         if package.endswith(".deb"):
             with open(package) as handle:
@@ -268,6 +300,8 @@ def main():
         for option in args:
             if option.startswith("Dir::Etc::sourcelist="):
                 entry["sources"] = open(option.split("=", 1)[1]).read()
+    if tool == "dpkg-query":
+        entry["lc_all"] = os.environ.get("LC_ALL")
     record(entry)
     key = " ".join([tool] + args)
     if key in state.get("fail", {}):
@@ -306,6 +340,9 @@ def main():
         return 97
     if tool == "dpkg" and args[:1] == ["-s"]:
         return 0 if args[1] in state["installed"] else 1
+    if tool == "dpkg-query" and (sum(name in args for name in DOCKER_NAMES) > 1
+                                 or any(item.startswith("-f=${binary:Package}") for item in args)):
+        return docker_query(state, args)
     if tool == "dpkg-query" and args[:1] == ["-W"]:
         if args[2] not in state["installed"]:
             return 1
@@ -412,6 +449,15 @@ def chown(path, user, group):
 module.chown = chown
 module.user_exists = lambda name: name in config["users"]
 module.MONITOR_DECISION_TIMEOUT = float(config["decision_timeout"])
+if config.get("spawn_error"):
+    # WP-NS3: the Docker package query cannot start (a missing or unrunnable dpkg-query).
+    import subprocess
+    real_run = subprocess.run
+    def refusing_run(command, *args, **kwargs):
+        if list(command)[:1] == ["dpkg-query"] and "docker.io" in list(command):
+            raise OSError(8, "Exec format error", "dpkg-query")
+        return real_run(command, *args, **kwargs)
+    subprocess.run = refusing_run
 if config["tty"]:
     module.stdin_is_tty = lambda: True
 sys.exit(module.main(sys.argv[1:]))
@@ -468,6 +514,8 @@ class Sandbox:
         self.state_path = base / "state.json"
         self.state = default_state()
         self.runs = 0
+        self.extra_env: dict = {}  # WP-NS3: per-test environment additions for the child
+        self.launch_extra: dict = {}  # WP-NS3: extra launcher seams (spawn_error)
 
     def write(self, relative: str, text: str) -> None:
         path = self.root / relative
@@ -497,7 +545,9 @@ class Sandbox:
                "FAKE_INFRA_LAUNCH": json.dumps({
                    "script": str(self.infra / "infra-setup.py"), "root": str(self.root),
                    "root_user": root_user, "users": list(users), "spy": str(spy_path),
-                   "chown_log": str(chown_path), "decision_timeout": decision_timeout, "tty": tty})}
+                   "chown_log": str(chown_path), "decision_timeout": decision_timeout, "tty": tty,
+                   **self.launch_extra})}
+        env.update(self.extra_env)
         result = subprocess.run([sys.executable, "-B", str(self.launcher), *args], cwd=self.http, env=env,
                                 input=answer, stdin=None if answer is not None else subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=300)
@@ -1541,6 +1591,287 @@ class InfraSetupPyDoca(unittest.TestCase):
                           commands(calls, "mlxconfig"))
             self.assertIn("  ipmitool chassis power cycle", result.stdout)
             self.assertEqual([], commands(calls, "ipmitool"))
+
+
+# ------------------------------------------------------------------ WP-NS3 (R-036/P054)
+# Every value below is handwritten from the v3.1.6 guide WP-NS3 (:843-:889) and owner 2026-11-20
+# (第3条), never read from infra-setup.py.  OWNER_CE_DPKG is the owner's real read-only dpkg-query
+# output on a management server with Docker CE installed, copied verbatim (tab separated, rc=0).
+NS3_QUERY_ARGV = ["-W", "-f=${binary:Package}\\t${Architecture}\\t${Status}\\n",
+                  "docker.io", "docker-ce", "docker-ce-cli", "containerd.io"]
+OWNER_CE_DPKG = ("containerd.io\tamd64\tinstall ok installed\n"
+                 "docker-ce\tamd64\tinstall ok installed\n"
+                 "docker-ce-cli\tamd64\tinstall ok installed\n"
+                 "docker.io\t\tunknown ok not-installed\n")
+NS3_CE_SATISFIED = "docker.io 由已安装的 Docker CE 满足（docker-ce、docker-ce-cli、containerd.io），不安装"
+NS3_IO_INSTALLED = "docker.io is already installed."
+NS3_COMMON_WITHOUT_DOCKER = ["ipmitool", "sshpass", "unzip", "nfs-common", "arping", "jq"]
+NS3_CE_HOST = {"containerd.io": "1.7.0-1", "docker-ce": "5:27.0.0-1", "docker-ce-cli": "5:27.0.0-1"}
+NS3_PACKET_DOCKER = "load-core,http,render-ib,validate-xlsx,docker,init-dns,init-ntp,init-timezone,init-lldp"
+NS3_PACKET_NO_DOCKER = "load-core,http,render-ib,validate-xlsx,init-dns,init-ntp,init-timezone,init-lldp"
+NS3_MGMT_FLAGS = ("--mgmt", "--defer-services", "--install-apache", "--skip-doca")
+NS3_SELECTED_ZTP = ["python3", "python3-yaml", "openssh-client", "curl", "python3-openpyxl"]
+NS3_NAMES = ("docker.io", "docker-ce", "docker-ce-cli", "containerd.io")
+
+
+def ns3_row(name: str, arch: str, status: str) -> str:
+    return f"{name}\t{arch}\t{status}\n"
+
+
+def ns3_not_found(*names: str) -> str:
+    return "".join(f"dpkg-query: no packages found matching {name}\n" for name in names)
+
+
+NS3_ABSENT_ROWS = (ns3_row("containerd.io", "", "unknown ok not-installed")
+                   + ns3_row("docker-ce", "", "unknown ok not-installed")
+                   + ns3_row("docker-ce-cli", "", "unknown ok not-installed")
+                   + ns3_row("docker.io", "", "unknown ok not-installed"))
+NS3_IO_ONLY = (ns3_row("containerd.io", "", "unknown ok not-installed")
+               + ns3_row("docker-ce", "", "unknown ok not-installed")
+               + ns3_row("docker-ce-cli", "", "unknown ok not-installed")
+               + ns3_row("docker.io", "amd64", "install ok installed"))
+
+
+def ns3_installs(calls: list) -> list:
+    """Package lists of the real (not --download-only) apt-get installs, in order."""
+    return [call["args"][call["args"].index("-y") + 1:] for call in calls
+            if call["tool"] == "apt-get" and "install" in call["args"]
+            and "--download-only" not in call["args"]]
+
+
+def ns3_queries(calls: list) -> list:
+    """dpkg-query calls that ask for more than one Docker name or use the multi-package format."""
+    return [call for call in calls if call["tool"] == "dpkg-query"
+            and (sum(name in call["args"] for name in NS3_NAMES) > 1
+                 or any(item.startswith("-f=${binary:Package}") for item in call["args"]))]
+
+
+class InfraSetupPyDockerEngine(unittest.TestCase):
+    """WP-NS3: a supported installed Docker CE satisfies docker.io; only dpkg's Status field decides."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="infra-setup-py-ns3-")
+        self.base = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def sandbox(self, label, *, query=None, host=None, apache=False):
+        box = Sandbox(self.base / label, apache=apache)
+        box.state["installed"]["lldpd"] = "1.0"  # no APT before Step 6, so "zero apt" is exact
+        box.state["installed"].update(host or {})
+        if query is not None:
+            box.state["docker_query"] = query
+        # Present on PATH only to record a call; dpkg state alone decides (guide :860).
+        for name in ("docker", "apt-mark", "containerd"):
+            (box.bin / name).symlink_to("_infra_tool.py")
+        return box
+
+    def client(self, label, **kwargs):
+        box = self.sandbox(label, **kwargs)
+        result, calls, _spy, _chown = box.apply("--client", "--non-interactive")
+        return box, result, calls
+
+    def assert_docker_left_alone(self, box, calls):
+        """Guide :870, :888: no remove/purge/downgrade, no Docker stop/prune, no source or hold change."""
+        for call in calls:
+            self.assertNotIn(call["tool"], ("docker", "apt-mark", "containerd"), call)
+            if call["tool"] == "apt-get":
+                for word in ("remove", "purge", "autoremove", "--allow-downgrades", "--reinstall"):
+                    self.assertNotIn(word, call["args"])
+            if call["tool"] == "systemctl":
+                self.assertFalse(any(word in " ".join(call["args"]) for word in ("docker", "containerd")), call)
+        for relative in ("etc/apt", "etc/docker"):
+            self.assertFalse(box.exists(relative), relative)
+        for name, version in NS3_CE_HOST.items():
+            if name in box.state["installed"]:
+                self.assertEqual(version, box.state["installed"][name])
+
+    def assert_one_query(self, calls):
+        queries = ns3_queries(calls)
+        self.assertEqual([NS3_QUERY_ARGV], [call["args"] for call in queries])
+        self.assertEqual("C", queries[0]["lc_all"])
+
+    def test_owner_real_ce_output_skips_docker_io_without_ownership(self):
+        # Business RED: the old entry still lists docker.io as Missing and hands it to apt (L3).
+        box, result, calls = self.client("owner", query={"rc": 0, "stdout": OWNER_CE_DPKG, "stderr": ""},
+                                         host=NS3_CE_HOST)
+        self.assertEqual([NS3_COMMON_WITHOUT_DOCKER], ns3_installs(calls))
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertIn(NS3_CE_SATISFIED, result.stdout)
+        self.assertNotIn(NS3_IO_INSTALLED, result.stdout)
+        self.assertEqual(NS3_COMMON_WITHOUT_DOCKER, list(box.packages()))
+        self.assert_one_query(calls)
+        self.assert_docker_left_alone(box, calls)
+
+    def test_held_or_config_files_still_count_as_ce_and_absent(self):
+        held = OWNER_CE_DPKG.replace(ns3_row("docker-ce-cli", "amd64", "install ok installed"),
+                                     ns3_row("docker-ce-cli", "amd64", "hold ok installed"))
+        leftover = OWNER_CE_DPKG.replace(ns3_row("docker.io", "", "unknown ok not-installed"),
+                                         ns3_row("docker.io", "amd64", "deinstall ok config-files"))
+        for label, stdout in (("hold", held), ("config-files", leftover)):
+            with self.subTest(case=label):
+                box, result, calls = self.client(label, query={"rc": 0, "stdout": stdout, "stderr": ""},
+                                                 host=NS3_CE_HOST)
+                self.assertEqual([NS3_COMMON_WITHOUT_DOCKER], ns3_installs(calls))
+                self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+                self.assertIn(NS3_CE_SATISFIED, result.stdout)
+                self.assertNotIn("docker.io", box.packages())
+                self.assert_one_query(calls)
+
+    def test_docker_io_alone_keeps_the_original_already_installed_path(self):
+        box, result, calls = self.client("io", query={"rc": 0, "stdout": NS3_IO_ONLY, "stderr": ""},
+                                         host={"docker.io": "24.0.7-0ubuntu4"})
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertIn(NS3_IO_INSTALLED, result.stdout)
+        self.assertNotIn(NS3_CE_SATISFIED, result.stdout)
+        self.assertEqual([NS3_COMMON_WITHOUT_DOCKER], ns3_installs(calls))
+        self.assertEqual(NS3_COMMON_WITHOUT_DOCKER, list(box.packages()))  # no new claim on docker.io
+        self.assert_one_query(calls)
+
+    def test_nothing_installed_installs_and_records_docker_io(self):
+        cases = (
+            ("rc0-four-not-installed", {"rc": 0, "stdout": NS3_ABSENT_ROWS, "stderr": ""}),
+            ("rc1-not-found", {"rc": 1, "stdout": "", "stderr": ns3_not_found(*NS3_NAMES)}),
+            ("rc1-mixed", {"rc": 1, "stdout": ns3_row("docker.io", "", "unknown ok not-installed")
+                           + ns3_row("docker-ce", "amd64", "deinstall ok config-files"),
+                           "stderr": ns3_not_found("docker-ce-cli", "containerd.io")}),
+            ("all-config-files", {"rc": 0, "stdout": "".join(
+                ns3_row(name, "amd64", "deinstall ok config-files")
+                for name in ("containerd.io", "docker-ce", "docker-ce-cli", "docker.io")), "stderr": ""}),
+        )
+        for label, query in cases:
+            with self.subTest(case=label):
+                box, result, calls = self.client(label, query=query)
+                self.assertEqual([SH_COMMON], ns3_installs(calls))
+                self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+                self.assertEqual(SH_COMMON, list(box.packages()))
+                # Committed ownership records the installed version (the fake apt's literal).
+                self.assertEqual("docker.io-test-1", box.packages()["docker.io"][1])
+                self.assertNotIn(NS3_CE_SATISFIED, result.stdout)
+                self.assert_one_query(calls)
+                self.assert_docker_left_alone(box, calls)
+
+    def test_docker_on_path_or_docker_host_is_not_a_package_state(self):
+        box = self.sandbox("path")
+        box.extra_env = {"DOCKER_HOST": "unix:///var/run/docker.sock", "DOCKER_CONTEXT": "default"}
+        result, calls, _spy, _chown = box.apply("--client", "--non-interactive")
+        self.assertEqual([SH_COMMON], ns3_installs(calls))
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        self.assertIn("docker.io", box.packages())
+        self.assert_docker_left_alone(box, calls)
+
+    def test_the_query_runs_under_lc_all_c(self):
+        box = self.sandbox("locale", query={"rc": 0, "stdout": OWNER_CE_DPKG, "stderr": ""}, host=NS3_CE_HOST)
+        box.extra_env = {"LC_ALL": "en_US.UTF-8"}
+        result, calls, _spy, _chown = box.apply("--client", "--non-interactive")
+        self.assert_one_query(calls)
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+
+    def test_every_other_state_holds_before_any_apt(self):
+        ce = {name: ns3_row(name, "amd64", "install ok installed")
+              for name in ("containerd.io", "docker-ce", "docker-ce-cli")}
+        absent = {name: ns3_row(name, "", "unknown ok not-installed") for name in NS3_NAMES}
+        io_absent = absent["docker.io"]
+
+        def rows(**chosen):
+            return "".join(chosen.get(name.replace(".", "_").replace("-", "_"), absent[name])
+                           for name in ("containerd.io", "docker-ce", "docker-ce-cli", "docker.io"))
+
+        cases = (
+            ("only-cli", {"rc": 0, "stdout": rows(docker_ce_cli=ce["docker-ce-cli"])}, "docker-ce-cli"),
+            ("only-containerd", {"rc": 0, "stdout": rows(containerd_io=ce["containerd.io"])}, "containerd.io"),
+            ("ce-half-configured", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["docker-ce"], ns3_row("docker-ce", "amd64", "install ok half-configured"))},
+             "install ok half-configured"),
+            ("ce-reinstreq", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["docker-ce"], ns3_row("docker-ce", "amd64", "install reinstreq half-installed"))},
+             "install reinstreq half-installed"),
+            ("ce-unpacked", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["containerd.io"], ns3_row("containerd.io", "amd64", "install ok unpacked"))},
+             "install ok unpacked"),
+            ("both-engines", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                io_absent, ns3_row("docker.io", "amd64", "install ok installed"))}, "docker.io"),
+            ("arch-mismatch", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["docker-ce"], ns3_row("docker-ce", "arm64", "install ok installed"))}, "arm64"),
+            ("duplicate-line", {"rc": 0, "stdout": OWNER_CE_DPKG + ce["docker-ce"]}, "docker-ce"),
+            ("unrequested-name", {"rc": 0, "stdout": OWNER_CE_DPKG
+                                  + ns3_row("containerd", "amd64", "install ok installed")}, "containerd"),
+            ("malformed-spaces", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["docker-ce"], "docker-ce amd64 install ok installed\n")}, "docker-ce"),
+            ("malformed-two-fields", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(
+                ce["docker-ce"], "docker-ce\tinstall ok installed\n")}, "docker-ce"),
+            ("rc0-with-stderr", {"rc": 0, "stdout": OWNER_CE_DPKG,
+                                 "stderr": "dpkg-query: warning: PUBLIC_NS3_STDERR\n"}, "PUBLIC_NS3_STDERR"),
+            ("rc0-missing-name", {"rc": 0, "stdout": OWNER_CE_DPKG.replace(io_absent, "")}, "docker.io"),
+            ("rc1-foreign-stderr", {"rc": 1, "stdout": OWNER_CE_DPKG.replace(io_absent, ""),
+                                    "stderr": "dpkg-query: error: PUBLIC_NS3_STDERR\n"}, "PUBLIC_NS3_STDERR"),
+            ("rc1-names-a-printed-package", {"rc": 1, "stdout": OWNER_CE_DPKG,
+                                             "stderr": ns3_not_found("docker.io")}, "docker.io"),
+            ("rc2", {"rc": 2, "stdout": OWNER_CE_DPKG}, "docker.io"),
+            ("undecodable", {"rc": 0, "stdout_hex": (OWNER_CE_DPKG.encode() + b"\xff\n").hex()}, "docker.io"),
+            ("spawn-error", None, "docker.io"),
+        )
+        for label, query, named in cases:
+            with self.subTest(case=label):
+                box = self.sandbox(label, query=query, host=NS3_CE_HOST)
+                if query is None:
+                    box.launch_extra = {"spawn_error": True}
+                result, calls, _spy, _chown = box.apply("--client", "--non-interactive")
+                self.assertEqual([], commands(calls, "apt-get"), "HOLD must come before any apt")
+                self.assertEqual(1, result.returncode, result.stdout)
+                self.assertIn("HOLD", result.stderr)
+                for name in NS3_NAMES + (named,):
+                    self.assertIn(name, result.stderr)
+                self.assertNotIn(NS3_CE_SATISFIED, result.stdout)
+                self.assertNotIn("docker.io", box.packages())
+                self.assertEqual(1 if query is not None else 0, len(ns3_queries(calls)))
+                self.assert_docker_left_alone(box, calls)
+
+    def mgmt(self, label, *flags, query=None, host=None):
+        box = self.sandbox(label, query=query, host=host, apache=True)
+        result, calls, _spy, _chown = box.apply(*NS3_MGMT_FLAGS, *flags, users=("_apt",))
+        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
+        downloads = [call["args"][call["args"].index("-y") + 1:] for call in calls
+                     if call["tool"] == "apt-get" and "--download-only" in call["args"]]
+        # The 22-package offline client cache keeps docker.io (guide :831, :870, :887).
+        self.assertEqual([SH_BASE + SH_COMMON + SH_ZTP + SH_OPTIONAL], downloads)
+        self.assertEqual(22, len(downloads[0]))
+        return box, result, calls
+
+    def test_management_legacy_and_component_entries_share_the_rule(self):
+        owner = {"rc": 0, "stdout": OWNER_CE_DPKG, "stderr": ""}
+        with self.subTest(entry="legacy-ce"):
+            box, result, calls = self.mgmt("legacy-ce", query=owner, host=NS3_CE_HOST)
+            self.assertIn(NS3_COMMON_WITHOUT_DOCKER, ns3_installs(calls))
+            self.assertFalse([packages for packages in ns3_installs(calls) if "docker.io" in packages])
+            self.assertIn(NS3_CE_SATISFIED, result.stdout)
+            self.assertNotIn("docker.io", box.packages())
+            self.assert_one_query(calls)
+            self.assert_docker_left_alone(box, calls)
+        with self.subTest(entry="packet-with-docker-ce"):
+            box, result, calls = self.mgmt("packet-ce", "--load-components-v1", NS3_PACKET_DOCKER,
+                                           query=owner, host=NS3_CE_HOST)
+            self.assertEqual([NS3_SELECTED_ZTP], [packages for packages in ns3_installs(calls)
+                                                  if set(packages) & set(SH_COMMON + SH_ZTP)])
+            self.assertIn(NS3_CE_SATISFIED, result.stdout)
+            self.assertNotIn("docker.io", box.packages())
+            self.assert_one_query(calls)
+            self.assert_docker_left_alone(box, calls)
+        with self.subTest(entry="packet-with-docker-absent"):
+            box, result, calls = self.mgmt("packet-absent", "--load-components-v1", NS3_PACKET_DOCKER)
+            self.assertEqual([["docker.io"], NS3_SELECTED_ZTP],
+                             [packages for packages in ns3_installs(calls)
+                              if set(packages) & set(SH_COMMON + SH_ZTP)])
+            self.assertEqual("docker.io-test-1", box.packages()["docker.io"][1])
+            self.assert_one_query(calls)
+        with self.subTest(entry="packet-without-docker"):
+            box, result, calls = self.mgmt("packet-none", "--load-components-v1", NS3_PACKET_NO_DOCKER,
+                                           query=owner, host=NS3_CE_HOST)
+            self.assertEqual([], ns3_queries(calls))
+            self.assertNotIn(NS3_CE_SATISFIED, result.stdout)
+            self.assertEqual([NS3_SELECTED_ZTP], [packages for packages in ns3_installs(calls)
+                                                  if set(packages) & set(SH_COMMON + SH_ZTP)])
 
 
 if __name__ == "__main__":

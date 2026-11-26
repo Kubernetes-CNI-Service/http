@@ -155,6 +155,12 @@ APACHE_PACKAGES = ("apache2", "apache2-utils", "ssl-cert")
 APACHE_AUTH_MODULES = ("auth_basic", "authn_file", "authn_core", "authz_user", "authz_core", "env",
                        "alias", "cgid", "headers")
 MGMT_CACHE_PACKAGES = BASE_PACKAGES + COMMON_PACKAGES + ZTP_DEPENDENCY_PACKAGES + OPTIONAL_SERVICE_PACKAGES
+# R-036/P054: an installed Docker CE satisfies the common docker.io.  Only these four dpkg package states
+# decide (never a docker on PATH, DOCKER_HOST/context or a running daemon); one fixed read-only query.
+DOCKER_ENGINE_PACKAGES = ("docker.io", "docker-ce", "docker-ce-cli", "containerd.io")
+DOCKER_CE_PACKAGES = ("docker-ce", "docker-ce-cli", "containerd.io")
+DOCKER_ENGINE_QUERY = ("dpkg-query", "-W", "-f=${binary:Package}\\t${Architecture}\\t${Status}\\n",
+                       *DOCKER_ENGINE_PACKAGES)
 # --load-components-v1 IDS: internal data from DAY0-Prepare/11-load.py prepare_infra, encoded by the
 # closed codec tools/infra_components.py.  This entry also ships alone to deployed clients and imports
 # nothing from the project tree, so the closed ID order is repeated here (the component workflow test
@@ -626,6 +632,64 @@ class InfraSetup:
 
     def dpkg_installed(self, package: str) -> bool:
         return self.succeeds(["dpkg", "-s", package])
+
+    def docker_engine_state(self) -> str:
+        """R-036/P054: "ce", "io" or "absent" from DOCKER_ENGINE_QUERY; anything else stops (HOLD).
+
+        Only the Status field decides.  Installed: want install or hold, error ok, state installed and
+        Architecture equal to this host's.  Absent: error ok and state not-installed or config-files.
+        Rows are matched by name (dpkg sorts them); a repeated, unrequested or malformed row holds.  A
+        name dpkg does not know at all counts as absent only when rc is 1 and every stderr line is
+        dpkg's exact not-found line for exactly the requested names missing from stdout.  "ce": the three
+        CE packages installed and docker.io absent; "io": only docker.io installed; "absent": none of the
+        four.  Every other combination, rc, stderr, start or decode failure stops before the common apt
+        batch and reports the four statuses; nothing is replaced or repaired.
+        """
+        statuses: dict = {}
+        states: dict = {}
+        problem = ""
+        try:
+            result = subprocess.run(list(DOCKER_ENGINE_QUERY), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env={**os.environ, "LC_ALL": "C"})
+            stdout, stderr = result.stdout.decode("utf-8"), result.stderr.decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            problem = f"dpkg-query 无法读取：{exc}"
+        if not problem:
+            rows = stdout.split("\n")
+            if rows[-1]:
+                problem = f"行没有结束：{rows[-1]!r}"
+            for row in rows[:-1]:
+                fields = row.split("\t")
+                if len(fields) != 3 or fields[0] not in DOCKER_ENGINE_PACKAGES or fields[0] in statuses:
+                    problem = f"无法识别的行：{row!r}"
+                    break
+                name, arch, status = fields
+                statuses[name] = f"{status} [{arch}]" if arch else status
+                words = status.split(" ")
+                if len(words) == 3 and words[1] == "ok" and words[2] in ("not-installed", "config-files"):
+                    states[name] = "absent"
+                elif words in (["install", "ok", "installed"], ["hold", "ok", "installed"]) and arch == self.arch:
+                    states[name] = "installed"
+        if not problem:
+            missing = [name for name in DOCKER_ENGINE_PACKAGES if name not in statuses]
+            not_found = [f"dpkg-query: no packages found matching {name}" for name in missing]
+            if result.returncode == 1 and missing and sorted(stderr.splitlines()) == sorted(not_found):
+                for name in missing:
+                    statuses[name], states[name] = "not in the dpkg database", "absent"
+            elif result.returncode != 0 or stderr or missing:
+                problem = f"dpkg-query exit={result.returncode} stderr={stderr.strip()!r}"
+        if not problem:
+            ce = [states.get(name) for name in DOCKER_CE_PACKAGES]
+            if ce == ["installed"] * 3 and states.get("docker.io") == "absent":
+                return "ce"
+            if ce == ["absent"] * 3 and states.get("docker.io") == "installed":
+                return "io"
+            if ce == ["absent"] * 3 and states.get("docker.io") == "absent":
+                return "absent"
+            problem = "不是受支持的组合"
+        report = "; ".join(f"{name}={statuses.get(name, '<unknown>')}" for name in DOCKER_ENGINE_PACKAGES)
+        self.fail(f"HOLD: Docker 包状态无法采用（{problem}），在 common 安装（apt）之前停止，不替换、不修复："
+                  f"{report}")
 
     def hostname_fqdn(self) -> str:
         """$(hostname -f 2>/dev/null || hostname)."""
@@ -2052,10 +2116,23 @@ class InfraSetup:
                 self.warn(f"BF3 [{pci}] mode undetermined (value: {offload or 'unknown'}), skipping.")
 
     def install_missing(self, packages: tuple, label: str, done_label: str) -> bool:
-        """Install and record the packages dpkg does not know; True when none were missing."""
+        """Install and record the packages dpkg does not know; True when none were missing.
+
+        R-036/P054: a list holding docker.io (the legacy common list or a packet's docker component)
+        asks docker_engine_state() once instead of `dpkg -s docker.io`; an installed Docker CE satisfies
+        docker.io (not installed, no ownership) and any other Docker state stops before this apt batch.
+        """
+        docker = self.docker_engine_state() if "docker.io" in packages else ""
         missing = []
         for package in packages:
-            if self.dpkg_installed(package):
+            if package != "docker.io":
+                installed = self.dpkg_installed(package)
+            elif docker == "ce":
+                self.success("docker.io 由已安装的 Docker CE 满足（docker-ce、docker-ce-cli、containerd.io），不安装")
+                continue
+            else:
+                installed = docker == "io"
+            if installed:
                 self.success(f"{package} is already installed.")
             else:
                 missing.append(package)

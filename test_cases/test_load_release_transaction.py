@@ -13384,7 +13384,7 @@ class _I03LiteralManager:
 
 class NativePreinstallPresenceWorkflowTests(unittest.TestCase):
     def _i03_main(self, manager, *, dhcp=True, skip_infra=False,
-                  explicit_http_only=False, expected_postinfra=False):
+                  explicit_http_only=False, expected_postinfra=False, fixture_hook=None):
         # Fresh real PUBLIC filesystem per call/subTest; no old fixture adoption.
         fixture = ReleaseTransactionTests(methodName="runTest")
         fixture.setUp()
@@ -13402,6 +13402,9 @@ class NativePreinstallPresenceWorkflowTests(unittest.TestCase):
                     fixture.inputs,
                     settings=LOAD.replace(fixture.inputs.settings, http_address="192.0.2.1"),
                 )
+            if fixture_hook is not None:
+                # WP-NS3 real-child chain: points the project inputs at its sandbox only.
+                fixture_hook(fixture)
             proc = fixture.root / "i03-empty-proc"
             proc.mkdir()
             plan = SimpleNamespace(listener_names=("eno2",), endpoint_ips=("192.0.2.10",))
@@ -14040,6 +14043,278 @@ class NativeHttpOnlyOptionalIscContractTests(unittest.TestCase):
                                                        "forbidden-postinfra")
                                              for row in manager.events))
                         self.assertEqual([], manager.adapter_errors)
+
+
+# WP-NS3 (R-036/P054, v3.1.6 guide :871-:874, :890-:894).  Independent PUBLIC labels; never SUT text.
+_NS3_PRIMARY = "PUBLIC_APT_FAILURE"
+_NS3_SECONDARY = "服务停止清理失败"  # kept prefix, test :13541@26ae34b
+_NS3_SAFE = "[SAFE] 受管服务保持停止"
+_NS3_HOLD = "[HOLD] 无法确认受管服务已停止："
+_NS3_UNKNOWN_SHOW = ("show-unknown", 4, "", "PUBLIC_HTTP_ONLY_HOLD")
+_NS3_SHOW_APACHE = ("show", "--all", "--no-pager",
+                    "--property=LoadState,ActiveState,SubState,MainPID,ControlPID,Job", "apache2")
+
+
+class _NS3AptFailureManager(_I06HttpOnlyManager):
+    """The installer child fails as apt exit 100 does; Apache may become unknown after the attempt."""
+
+    def __init__(self, states, *, unknown_after_install=False, activate_at_prepare=False):
+        super().__init__(states, fault_point="installer", activate_at_prepare=activate_at_prepare)
+        self.unknown_after_install = unknown_after_install
+
+    def query(self, command, **kwargs):
+        argv = tuple(str(part) for part in command)
+        if (self.unknown_after_install and self.phase == "install-attempted"
+                and argv[1:] == _NS3_SHOW_APACHE):
+            self.events.append(("query", self.phase, "apache2", argv[1]))
+            self.query_argv.append(argv)
+            _label, code, raw, diagnostic = _NS3_UNKNOWN_SHOW
+            return SimpleNamespace(returncode=code, stdout=raw, stderr=diagnostic)
+        return super().query(command, **kwargs)
+
+    def external_run(self, command, **kwargs):
+        argv = tuple(str(part) for part in command)
+        if any(part.endswith("/infra-setup.py") for part in argv):
+            self.events.append(("infra-attempt", self.phase, argv))
+            self.phase = "install-attempted"
+            raise LOAD.LoadError(f"命令执行失败（exit=100）：{_NS3_PRIMARY}")
+        return super().external_run(command, **kwargs)
+
+
+class NS3PrimarySecondaryReportTests(unittest.TestCase):
+    """Main reports the infra failure first and each cleanup failure after it; [SAFE] only when stopped."""
+
+    _i03_main = NativePreinstallPresenceWorkflowTests._i03_main
+
+    def _hold_lines(self, stderr):
+        return [line for line in stderr.splitlines() if line.startswith(_NS3_HOLD)]
+
+    def test_apt_failure_with_absent_apache_reports_primary_then_hold_without_safe(self):
+        manager = _NS3AptFailureManager({"apache2": "absent", "isc-dhcp-server": "absent"})
+        result, _stdout, stderr = self._i03_main(manager, dhcp=False, explicit_http_only=True)
+        self.assertEqual(1, result, "the owned apt failure, not LOAD success")
+        self.assertEqual(1, sum(row[0] == "infra-attempt" for row in manager.events))
+        self.assertNotIn(_NS3_SAFE, stderr)
+        self.assertNotIn("[STATE]", stderr)
+        holds = self._hold_lines(stderr)
+        self.assertEqual(1, len(holds), stderr)
+        self.assertIn("cannot qualify explicit HTTP-only service presence", holds[0])  # guide :837
+        self.assertLess(stderr.index(_NS3_PRIMARY), stderr.index(_NS3_SECONDARY))
+        self.assertLess(stderr.index(_NS3_SECONDARY), stderr.index(_NS3_HOLD))
+        self.assertEqual([], manager.actions, "required missing Apache receives no control request")
+
+    def test_apt_failure_with_loaded_apache_stops_rechecks_and_keeps_safe(self):
+        # A partial install left Apache loaded and running before the apt failure.
+        manager = _NS3AptFailureManager({"apache2": "dead", "isc-dhcp-server": "absent"},
+                                        activate_at_prepare=True)
+        result, _stdout, stderr = self._i03_main(manager, dhcp=False, explicit_http_only=True)
+        self.assertEqual(1, result)
+        self.assertIn(_NS3_PRIMARY, stderr)
+        self.assertIn(_NS3_SAFE, stderr)
+        self.assertNotIn(_NS3_SECONDARY, stderr)
+        self.assertEqual([], self._hold_lines(stderr))
+        self.assertEqual([("install-attempted", "stop", "apache2")], manager.actions)
+        stop = manager.events.index(("action", "install-attempted", "apache2", "stop"))
+        self.assertTrue(any(i > stop and row == ("query", "install-attempted", "apache2", "show")
+                            for i, row in enumerate(manager.events)))
+
+    def test_apt_failure_with_unknown_apache_state_holds_without_safe(self):
+        manager = _NS3AptFailureManager({"apache2": "dead", "isc-dhcp-server": "absent"},
+                                        unknown_after_install=True)
+        result, _stdout, stderr = self._i03_main(manager, dhcp=False, explicit_http_only=True)
+        self.assertEqual(1, result)
+        self.assertNotIn(_NS3_SAFE, stderr)
+        self.assertNotIn("[STATE]", stderr)
+        self.assertEqual(1, len(self._hold_lines(stderr)), stderr)
+        self.assertLess(stderr.index(_NS3_PRIMARY), stderr.index(_NS3_SECONDARY))
+        self.assertEqual([], [action for action in manager.actions if action[1] in ("start", "restart")])
+
+
+# owner 2026-11-20 (第3条): real read-only dpkg-query output on a management server with Docker CE.
+_NS3_OWNER_CE_DPKG = ("containerd.io\tamd64\tinstall ok installed\n"
+                      "docker-ce\tamd64\tinstall ok installed\n"
+                      "docker-ce-cli\tamd64\tinstall ok installed\n"
+                      "docker.io\t\tunknown ok not-installed\n")
+_NS3_CE_SATISFIED = "docker.io 由已安装的 Docker CE 满足（docker-ce、docker-ce-cli、containerd.io），不安装"
+_NS3_CE_HOST = {"containerd.io": "1.7.0-1", "docker-ce": "5:27.0.0-1", "docker-ce-cli": "5:27.0.0-1"}
+_NS3_CACHE = ["wget", "lldpd", "tzdata", "ipmitool", "sshpass", "docker.io", "unzip", "nfs-common",
+              "arping", "jq", "python3", "python3-yaml", "python3-jinja2", "python3-openpyxl",
+              "python3-pandas", "python3-xlsxwriter", "openssh-client", "curl", "apache2",
+              "apache2-utils", "ssl-cert", "isc-dhcp-server"]
+_NS3_COMMON_WITHOUT_DOCKER = ["ipmitool", "sshpass", "unzip", "nfs-common", "arping", "jq"]
+_NS3_DOCKER_COMPONENTS = ("load-core", "http", "render-ib", "validate-xlsx", "docker",
+                          "init-dns", "init-ntp", "init-timezone", "init-lldp")
+_NS3_DOCKER_WIRE = "load-core,http,render-ib,validate-xlsx,docker,init-dns,init-ntp,init-timezone,init-lldp"
+_NS3_SELECTED_ZTP = ["python3", "python3-yaml", "openssh-client", "curl", "python3-openpyxl"]
+
+
+class _NS3RealInfraChain(_I06HttpOnlyManager):
+    """Real LOAD.run -> real deploy_infra.py --prepare-only and real infra-setup.py (guide :899).
+
+    Only external commands are fakes: systemctl through this manager, apt/dpkg-query/systemctl of the
+    infra child through the test_infra_setup_py sandbox (HOST_ROOT); deploy_infra runs its real argparse
+    in process with only its two network probes replaced, as test_infra_component_workflow does.
+    """
+
+    def __init__(self, states, box, deploy, real_run):
+        super().__init__(states, fault_point="installer")
+        self.box, self.deploy, self.real_run = box, deploy, real_run
+        self.children = []
+        self.setup_calls = []
+
+    def external_run(self, command, **kwargs):
+        argv = tuple(str(part) for part in command)
+        for suffix, event in (("/deploy_infra.py", "infra-prepare"), ("/infra-setup.py", "infra-attempt")):
+            if any(part.endswith(suffix) for part in argv):
+                self.events.append((event, self.phase, argv))
+                self.phase = "install-attempted"
+                return self.real_run(command, **kwargs)
+        return super().external_run(command, **kwargs)
+
+    def query(self, command, **kwargs):
+        argv = tuple(str(part) for part in command)
+        if any(part.endswith("/deploy_infra.py") for part in argv):
+            return self._deploy_child(argv)
+        if any(part.endswith("/infra-setup.py") for part in argv):
+            return self._setup_child(argv)
+        return super().query(command, **kwargs)
+
+    def _deploy_child(self, argv):
+        index = argv.index(str(LOAD.INFRA_DIR / "deploy_infra.py"))
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "argv", ["deploy_infra.py", *argv[index + 1:]]), \
+                mock.patch.object(self.deploy, "DEFAULT_SETUP", self.box.infra / "infra-setup.py"), \
+                mock.patch.object(self.deploy, "DEFAULT_TEARDOWN", self.box.infra / "infra-teardown.sh"), \
+                mock.patch.object(self.deploy, "_local_ipv4_addresses", return_value={"192.0.2.1"}), \
+                mock.patch.object(self.deploy, "http_service_works", return_value=False), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            code = self.deploy.main()
+        sys.stdout.write(stdout.getvalue())
+        sys.stderr.write(stderr.getvalue())
+        self.children.append(("deploy", code))
+        return subprocess.CompletedProcess(list(argv), code)
+
+    def _setup_child(self, argv):
+        index = argv.index(str(LOAD.INFRA_DIR / "infra-setup.py"))
+        result, calls, _spy, _chown = self.box.run(*argv[index + 1:], users=("_apt",))
+        sys.stdout.write(result.stdout)
+        sys.stderr.write(result.stderr)
+        self.setup_calls = calls
+        self.children.append(("setup", result.returncode))
+        if result.returncode == 0:
+            # The real child installed Apache in its sandbox; systemd now knows the unit.
+            self.states["apache2"] = "dead"
+        return subprocess.CompletedProcess(list(argv), result.returncode)
+
+
+class NS3RealInfraChainWorkflowTests(unittest.TestCase):
+    """Real main -> prepare_infra -> deploy_infra.py -> infra-setup.py -> cleanup and report (WP-NS3)."""
+
+    _i03_main = NativePreinstallPresenceWorkflowTests._i03_main
+
+    def setUp(self):
+        from test_cases.test_infra_setup_py import Sandbox
+        self.tmp = tempfile.TemporaryDirectory(prefix="ns3-real-infra-chain-")
+        self.box = Sandbox(Path(self.tmp.name) / "box", apache=True)
+        shutil.copy2(ROOT / "infra/infra-teardown.sh", self.box.infra / "infra-teardown.sh")
+        self.deploy = load_script("ns3_chain_deploy_infra", ROOT / "infra/deploy_infra.py")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _point_inputs_at_box(self, fixture):
+        fixture.inputs = LOAD.replace(fixture.inputs, global_file=self.box.infra / "01-global.yaml")
+
+    def _installs(self):
+        return [call["args"][call["args"].index("-y") + 1:] for call in self.manager.setup_calls
+                if call["tool"] == "apt-get" and "install" in call["args"]
+                and "--download-only" not in call["args"]]
+
+    def _downloads(self):
+        return [call["args"][call["args"].index("-y") + 1:] for call in self.manager.setup_calls
+                if call["tool"] == "apt-get" and "--download-only" in call["args"]]
+
+    def _main(self, states):
+        self.manager = _NS3RealInfraChain(states, self.box, self.deploy, LOAD.run)
+        return self._i03_main(self.manager, dhcp=False, explicit_http_only=True, expected_postinfra=True,
+                              fixture_hook=self._point_inputs_at_box)
+
+    def test_main_legacy_reuses_owner_ce_through_the_real_infra_child(self):
+        self.box.state["installed"].update(_NS3_CE_HOST)
+        self.box.state["docker_query"] = {"rc": 0, "stdout": _NS3_OWNER_CE_DPKG, "stderr": ""}
+        result, stdout, stderr = self._main({"apache2": "absent", "isc-dhcp-server": "absent"})
+        # Business RED: the old child lists docker.io next to CE and apt fails at 100 (L3).
+        self.assertEqual([("deploy", 0), ("setup", 0)], self.manager.children, stderr)
+        self.assertFalse([packages for packages in self._installs() if "docker.io" in packages])
+        self.assertIn(_NS3_COMMON_WITHOUT_DOCKER, self._installs())
+        self.assertIn(_NS3_CE_SATISFIED, stdout)
+        self.assertNotIn("docker.io", self.box.packages())
+        self.assertEqual([_NS3_CACHE], self._downloads())
+        setup = [row[2] for row in self.manager.events if row[0] == "infra-attempt"]
+        self.assertEqual(1, len(setup))
+        self.assertNotIn("--load-components-v1", setup[0], "explicit HTTP-only eth main stays legacy")
+        for flag in ("--mgmt", "--defer-services", "--apply", "--yes", "--install-apache"):
+            self.assertIn(flag, setup[0])
+        self.assertEqual(1, result)
+        self.assertIn("I06_OWNED_POSTINFRA_SENTINEL", stderr)
+        self.assertIn(_NS3_SAFE, stderr)
+        self.assertNotIn(_NS3_HOLD, stderr)
+        self.assertEqual([], [action for action in self.manager.actions
+                              if action[1] in ("start", "restart", "enable")])
+
+    def test_main_real_apt_failure_reports_primary_then_cleanup_hold(self):
+        self.box.state["apt_unavailable"] = ["jq"]
+        self.box.state["apt_fail_marker"] = _NS3_PRIMARY
+        result, _stdout, stderr = self._main({"apache2": "absent", "isc-dhcp-server": "absent"})
+        # apt exits 100; infra-setup.py reports it and exits 1 (its every-failure contract).
+        self.assertEqual([("deploy", 0), ("setup", 1)], self.manager.children, stderr)
+        self.assertEqual(1, result)
+        self.assertIn("(exit=100)", stderr)
+        self.assertIn("[ERROR] Full APT output is available in:", stderr)
+        self.assertLess(stderr.index(_NS3_PRIMARY), stderr.index("[FAILED] load 阶段失败"))
+        self.assertLess(stderr.index("[FAILED] load 阶段失败"), stderr.index(_NS3_SECONDARY))
+        self.assertNotIn(_NS3_SAFE, stderr)
+        self.assertNotIn("[STATE]", stderr)
+        self.assertEqual(1, sum(line.startswith(_NS3_HOLD) for line in stderr.splitlines()), stderr)
+        self.assertLess(stderr.index(_NS3_SECONDARY), stderr.index(_NS3_HOLD))
+        self.assertEqual([], self.manager.actions)
+
+    def test_prepare_infra_api_with_a_docker_packet_reuses_ce(self):
+        # API chain only: it does not claim main selects this packet, and no profile changes.
+        self.box.state["installed"].update(_NS3_CE_HOST)
+        self.box.state["docker_query"] = {"rc": 0, "stdout": _NS3_OWNER_CE_DPKG, "stderr": ""}
+        fixture = ReleaseTransactionTests(methodName="runTest")
+        fixture.setUp()
+        try:
+            settings = LOAD.replace(fixture.inputs.settings, dhcp_enabled=False, ztp_enabled=False,
+                                    http_address="192.0.2.1")
+            inputs = LOAD.replace(fixture.inputs, settings=settings,
+                                  global_file=self.box.infra / "01-global.yaml")
+            self.manager = _NS3RealInfraChain({"apache2": "absent", "isc-dhcp-server": "absent"},
+                                              self.box, self.deploy, LOAD.run)
+            stdout, stderr = io.StringIO(), io.StringIO()
+            error = None
+            with mock.patch.object(LOAD, "run", side_effect=self.manager.external_run), \
+                    mock.patch.object(LOAD, "_run_subprocess", side_effect=self.manager.query), \
+                    mock.patch.object(LOAD, "select_http_ip", return_value="192.0.2.1"), \
+                    redirect_stdout(stdout), redirect_stderr(stderr):
+                try:
+                    LOAD.prepare_infra(inputs, skip_doca=True, _load_components=_NS3_DOCKER_COMPONENTS)
+                except LOAD.LoadError as exc:
+                    error = exc
+        finally:
+            fixture.tearDown()
+        self.assertEqual([], self.manager.adapter_errors)
+        self.assertEqual([("deploy", 0), ("setup", 0)], self.manager.children, stderr.getvalue())
+        self.assertIsNone(error)
+        setup = [row[2] for row in self.manager.events if row[0] == "infra-attempt"]
+        self.assertEqual(_NS3_DOCKER_WIRE, setup[0][setup[0].index("--load-components-v1") + 1])
+        self.assertEqual([_NS3_SELECTED_ZTP],
+                         [packages for packages in self._installs()
+                          if set(packages) & set(_NS3_COMMON_WITHOUT_DOCKER + ["docker.io"] + _NS3_SELECTED_ZTP)])
+        self.assertIn(_NS3_CE_SATISFIED, stdout.getvalue())
+        self.assertNotIn("docker.io", self.box.packages())
+        self.assertEqual([_NS3_CACHE], self._downloads())
 
 
 class FixtureScandirTransferContractTests(unittest.TestCase):

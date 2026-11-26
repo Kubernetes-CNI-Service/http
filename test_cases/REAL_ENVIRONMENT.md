@@ -2880,6 +2880,50 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   `/run/http-ztp-monitor-decision.*`。
 - 清理与风险：恢复快照；删除测试日志与 client release 目录。未执行前状态为 NOT RUN，不得写 PASS。
 
+## TC-REAL-INFRA-SETUP-PY-002 — 已装 Docker CE 的管理服务器上 infra-setup.py 不再装 docker.io；load 失败主次错误（NS3）
+
+- Case ID：`TC-REAL-INFRA-SETUP-PY-002`；类型：real-environment / 包管理 / 服务切换；状态：**NOT RUN / REAL_ENV REQUIRED**。
+  扩展 `TC-REAL-INFRA-SETUP-PY-001`（v3.1.6 指导 WP-NS3 :908-:910、8.21.E2 :2459）。执行人：owner 或授权现场人员；验证 AI 只读核验
+  （分栏写执行人、核验人；没人执行的步骤标「未执行」，不算通过）。
+- 本机先决：`test_cases.test_infra_setup_py.InfraSetupPyDockerEngine`（direct，沙箱+假 dpkg-query/apt-get）与
+  `test_cases.test_load_release_transaction.NS3PrimarySecondaryReportTests`、`NS3RealInfraChainWorkflowTests`
+  （真 main → 真 prepare_infra → 真 deploy_infra.py → 真 infra-setup.py 子进程）全部通过。假命令只证明判定与报告，
+  不证明真实 apt solver、dpkg 数据库、Docker CE 版本/架构支持与现有容器不受影响。
+- 依据：需求 R-036、问题 P054；owner 2026-11-20 第 3 条在已装 Docker CE 的管理服务器上执行的只读
+  `LC_ALL=C dpkg-query -W -f='${binary:Package}\t${Architecture}\t${Status}\n' docker.io docker-ce docker-ce-cli containerd.io`
+  真实输出（CE 三件 `install ok installed`、docker.io `unknown ok not-installed`、rc=0）；问题文件 §32.9 登记的现场手改
+  `infra/infra-setup.py`（v3.1.4 原 sha256 `2926d6bb1b1ceed26b1d4cb20b5f3dae1de357013209cb388da8e1fac3943707`，
+  现场改后 `000d4f496d00c64989e2c12273466eb41eaa38fc0e57f7df5719bdf11bf3104f`）。
+- 前置条件：
+  - 第 0 步「在已装 CE 的管理服务器上采集真实 dpkg-query 输出」已由 owner 2026-11-20 完成，据此关闭（指导 :909）；
+    其它 Ubuntu 版本或架构的输出仍按本卡记录；
+  - 获准可快照回滚的 Ubuntu 24.04（或 22.04）管理服务器，已装受支持的 Docker CE（docker-ce、docker-ce-cli、containerd.io）；
+    另有一台无 CE 的离线客户端用于核对缓存；
+  - 包管理静默窗口：期间没有其它 apt/dpkg 写者；
+  - 记录前像：`dpkg -l docker.io docker-ce docker-ce-cli containerd.io`、`apt-mark showhold`、`/etc/apt/sources.list*`
+    与 keyring、`docker ps -a`、`systemctl is-active docker containerd`、`/var/lib/http-infra/installed-packages`。
+- 步骤与预期（每步括注出处与控制路径）：
+  1. 升级前记录现场 `infra/infra-setup.py` 的 sha256，应等于上面的手改值（R:B-ns-09，指导 :910）；sync 或升级后再算一次，
+     应等于发布版字节（`git show <发布 tag>:infra/infra-setup.py | sha256sum`）。
+  2. 先不加 `--apply`：`sudo python3 -B infra/infra-setup.py --mgmt --defer-services --install-apache --skip-doca`。
+     Step 6 打印「docker.io 由已安装的 Docker CE 满足（docker-ce、docker-ce-cli、containerd.io），不安装」，`WOULD APPLY`
+     里没有 docker.io（指导 :864；`infra-setup.py::InfraSetup.install_missing` 先经 `docker_engine_state` 再判 dpkg）。
+  3. 正式路径：在本机执行 load（legacy 列表），Step 6 不再请求 docker.io，apt 不因 containerd 冲突以 100 退出；
+     `installed-packages` 没有 docker.io（不记 ownership，指导 :864、:866）。
+  4. 核对 CE 与容器不变：第 0 步前像中的包版本、hold、软件源、keyring、`docker ps -a`、docker/containerd 服务状态
+     与执行后逐项相同（指导 :870：不卸载、不降级、不停止，不改源、keyring、hold）。
+  5. 离线缓存：`apps/ubuntu-<ver>/<arch>/` 仍含 docker.io 的 .deb（22 个顶层包不变，指导 :831、:870）；在无 CE 的离线
+     客户端经 `deploy_infra.py` 执行 `--client` 时照旧安装 docker.io 并记 ownership（指导 :866）。
+  6. （另一轮快照）主次错误：在快照上制造一次 common apt 失败（例如临时不可达的软件源）且 Apache 尚未安装、显式 HTTP-only，
+     load 输出先有 infra 的 apt 错误、`[FAILED] load 阶段失败` 与 `[ERROR] 命令执行失败（exit=1）…`，其后是
+     `[ERROR] 服务停止清理失败：…`，最后一行 `[HOLD] 无法确认受管服务已停止：…`；不出现
+     `[SAFE] 受管服务保持停止` 与 `[STATE]`（指导 :872-:873；`11-load.py::main` 的 BaseException 分支）。
+- 证伪条件：Step 6 仍请求 docker.io；任何 CE 包被替换、降级、卸载或停止；缓存缺 docker.io；清理失败时仍打印 `[SAFE]`
+  （指导 :864、:870、:873）。
+- 证据：第 1 步两次 sha256；第 2、3 步 infra 日志与 apt 日志全文；前像与后像对照表；第 6 步 load 的 stderr 全文。
+- 清理与风险：恢复快照；不手改 ownership、不自动移除 CE（指导 :2459）。真实 solver 与 Docker 运行态只有现场能证明，
+  本地假命令不证明。未执行前保持 NOT RUN，不得写 PASS。
+
 ## TC-REAL-UFM-HA-SETUP-001 — ufm-setup-upgrade 的 ha-setup 与 ha-post-config 在真实 UFM 对上运行
 
 - Case ID：`TC-REAL-UFM-HA-SETUP-001`；类型：real-environment / destructive / HA；状态：**OPEN / NOT RUN（工具未在真机运行）**。
