@@ -7898,6 +7898,121 @@ class SwitchWorkerProcessLifecycleTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     pass
 
+    # R-048（v3.1.6 指导 8.28 :2968-2970）：发最后一个组信号时组长还没被回收，回收后
+    # 不再按数字组号发任何信号；组长退出后先对组发 KILL，再 poll() 回收。
+    def _start_term_default_group(self) -> subprocess.Popen:
+        return subprocess.Popen(
+            [sys.executable, "-B", "-c", "import time\ntime.sleep(60)\n"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+
+    def _recorded_group_signals(self, process: subprocess.Popen):
+        """Forward os.killpg unchanged; record (pgid, signal, leader returncode)."""
+        calls = []
+        real_killpg = os.killpg
+
+        def killpg(pgid, sig):
+            calls.append((pgid, sig, process.returncode))
+            return real_killpg(pgid, sig)
+
+        return calls, mock.patch.object(self.worker.os, "killpg", side_effect=killpg)
+
+    def test_group_number_is_never_signalled_after_the_leader_is_reaped(self):
+        process = self._start_term_default_group()
+        try:
+            calls, recording = self._recorded_group_signals(process)
+            # Generous graces: the leader exits on TERM, no elapsed time is asserted.
+            with recording, mock.patch("sys.stderr", io.StringIO()):
+                stopped = self.worker.terminate_collector_process(
+                    process, term_grace_seconds=30.0, kill_grace_seconds=30.0,
+                )
+            self.assertTrue(stopped)
+            self.assertIsNotNone(process.returncode)
+            self.assertTrue(calls)
+            self.assertEqual({process.pid}, {pgid for pgid, _sig, _rc in calls})
+            self.assertEqual(
+                [], [call for call in calls if call[2] is not None],
+                "a reaped leader's group number was signalled (R-048)",
+            )
+        finally:
+            self._kill_group_for_cleanup(process.pid)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def test_group_kill_follows_leader_exit_and_precedes_the_reap(self):
+        process = self._start_term_default_group()
+        try:
+            calls, recording = self._recorded_group_signals(process)
+            with recording, mock.patch("sys.stderr", io.StringIO()):
+                stopped = self.worker.terminate_collector_process(
+                    process, term_grace_seconds=30.0, kill_grace_seconds=30.0,
+                )
+            self.assertTrue(stopped)
+            self.assertEqual(
+                [signal.SIGTERM, signal.SIGKILL],
+                [sig for _pgid, sig, _rc in calls if sig != 0],
+            )
+            self.assertTrue(all(rc is None for _pgid, _sig, rc in calls))
+            # The leader died of the TERM: the KILL came after it exited, before the reap.
+            self.assertEqual(-signal.SIGTERM, process.returncode)
+        finally:
+            self._kill_group_for_cleanup(process.pid)
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+
+    def test_linux_leader_wait_uses_waitid_without_reaping(self):
+        # 指导 8.28 :2970：Linux 用 os.waitid(P_PID, pid, WEXITED|WNOHANG|WNOWAIT) 轮询，
+        # 不回收地等组长退出。本机 Python 没有 waitid，用替身核参数和顺序（Linux 实跑见
+        # REAL_ENVIRONMENT 的 TC-REAL-W1-LINUX-GROUP-REAP-001）。
+        events = []
+        state = {"exited": False}
+        process = mock.Mock(spec=["pid", "returncode", "poll"])
+        process.pid = 424242
+        process.returncode = None
+
+        def poll():
+            if state["exited"] and process.returncode is None:
+                process.returncode = -signal.SIGTERM
+                events.append(("reap",))
+            return process.returncode
+
+        def killpg(pgid, sig):
+            events.append(("killpg", pgid, sig, process.returncode))
+            if sig == signal.SIGTERM:
+                state["exited"] = True
+            # After the reap the number may already name another group: it still answers.
+
+        def waitid(idtype, ident, options):
+            events.append(("waitid", idtype, ident, options, process.returncode))
+            return SimpleNamespace(si_pid=ident) if state["exited"] else None
+
+        process.poll.side_effect = poll
+        with mock.patch.object(self.worker.os, "killpg", side_effect=killpg), \
+                mock.patch.object(self.worker.os, "waitid", side_effect=waitid,
+                                  create=True):
+            stopped = self.worker.terminate_collector_process(
+                process, term_grace_seconds=1.0, kill_grace_seconds=1.0,
+            )
+
+        self.assertTrue(stopped)
+        waits = [event for event in events if event[0] == "waitid"]
+        self.assertTrue(waits, "the leader wait did not use waitid")
+        self.assertEqual(
+            {(os.P_PID, 424242, os.WEXITED | os.WNOHANG | os.WNOWAIT, None)},
+            {event[1:] for event in waits},
+        )
+        kinds = [event[0] for event in events]
+        self.assertEqual("reap", kinds[-1], events)
+        self.assertEqual(1, kinds.count("reap"))
+        signals = [event for event in events if event[0] == "killpg"]
+        self.assertEqual([signal.SIGTERM, signal.SIGKILL], [event[2] for event in signals])
+        self.assertLess(kinds.index("waitid"), events.index(signals[-1]))
+
     def test_supervisor_sigterm_workflow_stops_detached_collector_tree(self):
         supervisor = (ROOT / "infra/docker/supervisord.conf").read_text(
             encoding="utf-8",

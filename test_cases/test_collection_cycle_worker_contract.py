@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 from pathlib import Path
@@ -575,11 +577,12 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
         self.assertEqual(len(child), len(set(child)))
         self.assertEqual(len(outcomes), len(set(outcomes)))
         self.assertFalse(set(child) & set(outcomes))
+        # I-052 修法（v3.1.6 指导 :1508）：新结果 no_devices 进词表
         self.assertEqual({
             "accepted", "cancelled", "crashed", "worker_error",
             "missing_marker", "malformed_marker", "duplicate_marker",
             "extra_marker", "returncode_conflict", "artifact_mismatch",
-            "identity_mismatch",
+            "identity_mismatch", "no_devices",
         }, set(outcomes))
 
     def test_new_run_api_requires_existing_timeout_and_lock_wait_authorities(self):
@@ -929,6 +932,225 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
                 invalid, expected_slot="ethernet/prod",
                 expected_context=IDENTITY,
             )
+
+    # I-052（问题文档 I-052 修法；v3.1.6 指导 WP-9 :1479-1502）：worker 用冻结后的本 lane
+    # 清单字节判断，prod 的 slot 没有本 lane 的设备类型就记 no_devices、不跑 cron.sh。
+    HEADER = "hostname,type,eth0_ip\n"
+    RESOLVED_EMPTY_RUNTIME = {"air_dynamic_rows": [], "prod_runtime_rows": [],
+                              "runtime_input_hashes": {}}
+
+    def _run_slot_selection(self, inventories: dict, *, scope: str = "prod",
+                            runtime: dict | None = None):
+        """Run the real slot loop over a temporary tree; cron.sh itself is a stub.
+
+        ``runtime`` replaces the frozen Production runtime of the ethernet slot;
+        ``None`` keeps the real resolver with an absent lease file (unavailable).
+        Returns (outcomes by slot, areas whose cron.sh was started).
+        """
+        identity = {key: IDENTITY[key] for key in (
+            "project_key", "run_token", "sequence", "source")}
+        identity["scope"] = scope
+        identity["cycle_id"] = hashlib.sha256(json.dumps(
+            identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        started = []
+
+        def interruptible(command, cwd, timeout, **kwargs):
+            started.append(Path(cwd).parent.name)
+            return {"returncode": 1, "stdout": "", "stderr": "stub cron.sh"}, False
+
+        real_runtime = WORKER._collection_snapshot_runtime
+
+        def frozen_runtime(slot, bindings):
+            if runtime is not None and slot == "ethernet/prod":
+                return copy.deepcopy(runtime)
+            return real_runtime(slot, bindings)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = {}
+            for area, name in (("ethernet", "eth.csv"), ("infiniband", "ib.csv"),
+                               ("nvlink", "nvsw.csv")):
+                monitor = root / area / "monitor"
+                monitor.mkdir(parents=True)
+                (monitor / "cron.sh").write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+                (monitor / name).write_text(inventories[area], encoding="utf-8")
+                scripts[area] = monitor / "cron.sh"
+            bindings = {}
+            for slot in WORKER.collection_cycle_source_slots(scope):
+                stem = slot.replace("/", "-")
+                bindings[slot] = {
+                    "evidence": str(root / "cycle" / stem / "evidence-manifest.json"),
+                    "envelope": str(root / "cycle" / stem / "identity-envelope.json"),
+                    "input_inventory": str(root / "cycle/inputs" / f"{stem}.csv"),
+                }
+            with mock.patch.object(WORKER, "HTTP_ROOT", root), \
+                    mock.patch.dict(WORKER.SCRIPTS, scripts), \
+                    mock.patch.dict("os.environ", {
+                        "DHCP_LEASES_FILE": str(root / "absent.leases"),
+                    }), \
+                    mock.patch.object(WORKER, "_collection_snapshot_runtime",
+                                      side_effect=frozen_runtime), \
+                    mock.patch.object(WORKER, "run_interruptible",
+                                      side_effect=interruptible):
+                result = WORKER.run_collection_slots(
+                    identity, artifact_bindings=bindings, timeout=10, lock_wait=0,
+                )
+        return {item["source_slot"]: item for item in result["outcomes"]}, started
+
+    def test_prod_slot_without_its_device_type_is_not_run(self):
+        # 问题文档 I-052（B300：只有 IB 和 UFM 的项目）；指导 :1495
+        other = self.HEADER + "jump-a,eth_jump,192.0.2.20\nleaf-x,ib,192.0.2.21\n" \
+            "ufm-a,server_ufm,192.0.2.22\n"
+        outcomes, started = self._run_slot_selection({
+            "ethernet": other,
+            "infiniband": self.HEADER + "leaf-ib,ib,192.0.2.11\n",
+            "nvlink": other,
+        }, runtime=self.RESOLVED_EMPTY_RUNTIME)
+        for slot in ("ethernet/prod", "nvlink/prod"):
+            self.assertEqual("no_devices", outcomes[slot]["outcome"], slot)
+            self.assertIsNone(outcomes[slot]["child_result"])
+        self.assertEqual(["infiniband"], started)
+        self.assertNotEqual("no_devices", outcomes["infiniband/prod"]["outcome"])
+
+    def test_header_only_inventory_still_runs_and_fails_closed(self):
+        # CRON::parse_csv_hosts 的空 lane 注释：只有表头多半是链接或清单坏了，交给 cron.sh 判错
+        outcomes, started = self._run_slot_selection({
+            "ethernet": self.HEADER, "infiniband": self.HEADER, "nvlink": self.HEADER,
+        }, runtime=self.RESOLVED_EMPTY_RUNTIME)
+        self.assertEqual(["ethernet", "infiniband", "nvlink"], started)
+        self.assertEqual(["worker_error"] * 3, [
+            outcomes[slot]["outcome"]
+            for slot in ("ethernet/prod", "infiniband/prod", "nvlink/prod")
+        ])
+
+    def test_commented_rows_do_not_count_as_devices(self):
+        # cron.sh 的口径：主机名为空或以 # 开头的行不算
+        outcomes, started = self._run_slot_selection({
+            "ethernet": self.HEADER + "leaf-eth,eth,192.0.2.10\n",
+            "infiniband": self.HEADER + "leaf-ib,ib,192.0.2.11\n",
+            "nvlink": self.HEADER + "#leaf-nv,nvl,192.0.2.12\n ,nvl,192.0.2.13\n"
+            "jump-a,eth_jump,192.0.2.20\n",
+        }, runtime=self.RESOLVED_EMPTY_RUNTIME)
+        self.assertEqual("no_devices", outcomes["nvlink/prod"]["outcome"])
+        self.assertEqual(["ethernet", "infiniband"], started)
+
+    def test_server_ufm_keeps_the_infiniband_slot(self):
+        # CRON::parse_csv_hosts：同一 ib.csv 里的 server_ufm 也算这条 lane 的设备
+        outcomes, started = self._run_slot_selection({
+            "ethernet": self.HEADER + "leaf-eth,eth,192.0.2.10\n",
+            "infiniband": self.HEADER + "ufm-a,server_ufm,192.0.2.22\n",
+            "nvlink": self.HEADER + "leaf-nv,nvl,192.0.2.12\n",
+        }, runtime=self.RESOLVED_EMPTY_RUNTIME)
+        self.assertNotEqual("no_devices", outcomes["infiniband/prod"]["outcome"])
+        self.assertEqual(["ethernet", "infiniband", "nvlink"], started)
+
+    def test_ethernet_prod_runs_when_runtime_has_unbound_cumulus(self):
+        # C2-O5 (a)；CRON::append_unbound_prod_cumulus_hosts 追加 cumulus 且 active/observed 的行
+        no_eth = self.HEADER + "jump-a,eth_jump,192.0.2.20\n"
+        inventories = {
+            "ethernet": no_eth,
+            "infiniband": self.HEADER + "leaf-ib,ib,192.0.2.11\n",
+            "nvlink": self.HEADER + "leaf-nv,nvl,192.0.2.12\n",
+        }
+        for lease_state in ("active", "observed"):
+            with self.subTest(lease_state=lease_state):
+                runtime = dict(self.RESOLVED_EMPTY_RUNTIME, prod_runtime_rows=[
+                    f"02:00:00:00:00:31|192.0.2.31|cumulus|{lease_state}",
+                ])
+                outcomes, started = self._run_slot_selection(inventories, runtime=runtime)
+                self.assertNotEqual("no_devices", outcomes["ethernet/prod"]["outcome"])
+                self.assertEqual(["ethernet", "infiniband", "nvlink"], started)
+        # 不是 cumulus、或租约不是 active/observed 的行，cron.sh 也不会选
+        runtime = dict(self.RESOLVED_EMPTY_RUNTIME, prod_runtime_rows=[
+            "02:00:00:00:00:32|192.0.2.32|nvos|active",
+            "02:00:00:00:00:33|192.0.2.33|cumulus|expired",
+        ])
+        outcomes, started = self._run_slot_selection(inventories, runtime=runtime)
+        self.assertEqual("no_devices", outcomes["ethernet/prod"]["outcome"])
+        self.assertEqual(["infiniband", "nvlink"], started)
+
+    def test_ethernet_prod_runs_when_the_runtime_resolver_is_unavailable(self):
+        # C2-O5 (a)：运行期解析器不可用（冻结上下文带 v2_unavailable）不能当作没有设备
+        outcomes, started = self._run_slot_selection({
+            "ethernet": self.HEADER + "jump-a,eth_jump,192.0.2.20\n",
+            "infiniband": self.HEADER + "leaf-ib,ib,192.0.2.11\n",
+            "nvlink": self.HEADER + "leaf-nv,nvl,192.0.2.12\n",
+        }, runtime=None)
+        self.assertNotEqual("no_devices", outcomes["ethernet/prod"]["outcome"])
+        self.assertEqual(["ethernet", "infiniband", "nvlink"], started)
+
+    def test_air_slot_is_never_skipped(self):
+        # C2-O4 (a)：只 prod 三个 slot；AIR 由 cron.sh 自己判（含动态例外）
+        outcomes, started = self._run_slot_selection({
+            "ethernet": self.HEADER + "jump-a,eth_jump,192.0.2.20\n",
+            "infiniband": self.HEADER, "nvlink": self.HEADER,
+        }, scope="air", runtime=self.RESOLVED_EMPTY_RUNTIME)
+        self.assertEqual(["ethernet"], started)
+        self.assertEqual("worker_error", outcomes["ethernet/air"]["outcome"])
+
+    def test_collect_treats_no_devices_as_neither_error_nor_result(self):
+        # 问题文档 I-052 修法（跳过的 lane 不算失败）；指导 :1487、:1502
+        statuses = []
+        marked = []
+
+        class Gate:
+            cooldown_seconds = 600
+            decision = type("Decision", (), {"allowed": True, "reason": "allowed"})()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def mark_success(self):
+                marked.append(True)
+                return "2026-11-26T00:00:00+00:00"
+
+        planned_one = {
+            "schema_version": 1, "task": "switch_collection", "state": "success",
+            "planned": 1, "succeeded": 1, "failed_count": 0, "failed_devices": [],
+        }
+
+        def run(outcomes):
+            statuses.clear()
+            marked.clear()
+            cycle = {"identity": {}, "summary": None, "outcomes": [
+                {"source_slot": slot, "outcome": outcome,
+                 "child_result": dict(planned_one) if outcome == "accepted" else None,
+                 "evidence": {}}
+                for slot, outcome in zip(
+                    ("ethernet/prod", "infiniband/prod", "nvlink/prod"), outcomes)
+            ]}
+            log = io.StringIO()
+            with mock.patch.object(WORKER, "active_project_identity",
+                                   return_value="project-a"), \
+                    mock.patch.object(WORKER, "CollectionGate", return_value=Gate()), \
+                    mock.patch.object(WORKER, "run_collection_cycle_coordinator",
+                                      return_value=cycle), \
+                    mock.patch.object(WORKER.subprocess, "run", return_value=(
+                        WORKER.subprocess.CompletedProcess([], 0, "", ""))), \
+                    mock.patch.object(WORKER, "write_status", side_effect=(
+                        lambda state, **extra: statuses.append((state, extra)))), \
+                    contextlib.redirect_stdout(log):
+                returned = WORKER.collect("prod", 60, 7)
+            return returned, log.getvalue()
+
+        returned, log = run(("no_devices", "accepted", "no_devices"))
+        self.assertTrue(returned)
+        self.assertEqual("success", statuses[-1][0])
+        self.assertNotIn("worker_error", str(statuses[-1][1].get("reason", "")))
+        self.assertEqual([True], marked)
+        for slot in ("ethernet/prod", "nvlink/prod"):
+            self.assertIn(f"[SKIP] {slot}: 清单里没有这类设备", log)
+        self.assertNotIn("[SKIP] infiniband/prod", log)
+
+        returned, log = run(("no_devices", "no_devices", "no_devices"))
+        self.assertFalse(returned)
+        self.assertEqual("failed", statuses[-1][0])
+        self.assertEqual("no devices selected", statuses[-1][1]["reason"])
+        self.assertEqual([], marked)
 
 
 if __name__ == "__main__":

@@ -45,7 +45,7 @@
 - **目标筛选**：awk 过滤（:1002-1021）只保留 eth/eth_spx/spx/air、ib、nvl，`server_*` 行被静默丢弃。
 - **调用来源**：
   - `12-ztp-monitor.py` 的完成交接按类型组调用 `cron.sh`（:4968-4986）；
-  - `monitor/switch-collection-worker.py` 按固定槽位调用（`tools/project_contract.py:58-71` 的 `COLLECTION_CYCLE_SOURCE_SLOTS`）。
+  - `monitor/switch-collection-worker.py` 按固定槽位调用（`tools/project_contract.py` 的 `COLLECTION_CYCLE_SOURCE_SLOTS`）。v3.1.6 C2（I-052）起，Production 的槽位在冻结清单里没有本通道的设备类型时不调用 `cron.sh`，记 `no_devices`（IB 通道的 `server_ufm` 也算设备；ETH 通道另看冻结的运行期 Cumulus 行，运行期解析器不可用时照常调用）；槽位集合和证据合同不变，有槽位被跳过的周期不 qualifying。
   - worker 传给 `cron.sh` 的目标计划形状是封闭的 `{eth, spx, ib, nv, dynamic_identities}`（`cron.sh:1852`、worker :3006）。
 - **现有的 UFM 相关实现**：
   - D-70 采集合同 `tools/ufm_collection_contract.py:22-83`（2026-10-24 补注：模块保留，现在只有 F01 的 `infra/ufm_jump_transport.py::retrieve_collection_archive` 导入它；用它生产归档的 `tools/ufm_collection_agent.py`、`tools/ufm_remote_producer.py` 已在退役第 2 批删除，见第 16 节）：

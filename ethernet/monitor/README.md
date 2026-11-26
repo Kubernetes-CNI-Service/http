@@ -155,7 +155,7 @@ setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续�
 | 运行环境 | 交接方式 | 包含 |
 |---|---|---|
 | 本机（native） | `--collect-on-complete`：直接运行对应的 `cron.sh` | 采集；ETH 由 `post-collect.py` 做 LLDP 分析；IB 由 `infiniband/monitor/post-collect.py` 做链路校验（需要 CVT 和 UFM）；刷新页面 |
-| Docker | `--request-collection-on-complete`：向 switch-collection worker 写一个与页面「采集」按钮相同的请求，并等待这一轮结束 | worker 按自己的 scope 跑全部通道（ETH、IB 加 UFM、NVL），完成分析、刷新页面、Issue Tracker 发布 |
+| Docker | `--request-collection-on-complete`：向 switch-collection worker 写一个与页面「采集」按钮相同的请求，并等待这一轮结束 | worker 按自己的 scope 跑通道（ETH、IB 加 UFM、NVL）；Production 只跑清单里有设备的通道，没有这类设备的通道记 `no_devices`、worker 日志写一行 `[SKIP] <通道>: 清单里没有这类设备`，不算失败（I-052）；完成分析、刷新页面、Issue Tracker 发布 |
 
 - 交接成功的完成轮次会被记住，单独重启监控不会重复采集。**每次 load 成功都会清除这份记录**，
   所以重新 load 之后，已经达到 100% 的类型会立即再采集一轮，未达到的在达到时采集。

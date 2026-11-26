@@ -28,6 +28,7 @@ import time
 import traceback
 import uuid
 import re
+import select
 
 from switch_collection_gate import (
     CollectionGate,
@@ -115,6 +116,8 @@ COLLECTION_SLOT_TERMINAL_OUTCOMES = (
     "returncode_conflict",
     "artifact_mismatch",
     "identity_mismatch",
+    # I-052: a Production slot whose frozen inventory has none of its device types; not run.
+    "no_devices",
 )
 COLLECTION_CYCLE_COMPLETION_OUTCOMES = (
     "cycle_completed",
@@ -1180,21 +1183,68 @@ def _wait_for_collector_group_exit(
         time.sleep(min(COLLECTOR_EXIT_POLL_SECONDS, remaining))
 
 
+def _wait_for_collector_leader_exit(
+    process: subprocess.Popen, timeout: float,
+) -> bool:
+    """Wait for the group leader to exit without reaping it (R-048)."""
+    timeout = max(float(timeout), 0.0)
+    if hasattr(os, "waitid"):  # Linux
+        deadline = time.monotonic() + timeout
+        while os.waitid(os.P_PID, process.pid,
+                        os.WEXITED | os.WNOHANG | os.WNOWAIT) is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(COLLECTOR_EXIT_POLL_SECONDS, remaining))
+        return True
+    # macOS has no waitid and rejects waitpid(WNOWAIT).  A leader that is already
+    # exiting or a zombie answers the registration at once with an error event (ESRCH).
+    queue = select.kqueue()
+    try:
+        return bool(queue.control([select.kevent(
+            process.pid, filter=select.KQ_FILTER_PROC,
+            flags=select.KQ_EV_ADD | select.KQ_EV_ONESHOT, fflags=select.KQ_NOTE_EXIT,
+        )], 1, timeout))
+    finally:
+        queue.close()
+
+
 def terminate_collector_process(
     process: subprocess.Popen,
     *,
     term_grace_seconds: float = COLLECTOR_TERM_GRACE_SECONDS,
     kill_grace_seconds: float = COLLECTOR_KILL_GRACE_SECONDS,
 ) -> bool:
-    """Stop one collector session, escalating from TERM to KILL if needed."""
-    if _process_group_exists(process.pid):
-        _signal_collector_group(process, signal.SIGTERM)
-    stopped = _wait_for_collector_group_exit(process, term_grace_seconds)
-    if not stopped:
-        _signal_collector_group(process, signal.SIGKILL)
-        stopped = _wait_for_collector_group_exit(process, kill_grace_seconds)
-    process.poll()
-    return stopped
+    """Stop one collector session, escalating from TERM to KILL if needed.
+
+    R-048: every group signal is sent while the leader is unreaped, so the group
+    number is still this session's; once poll() reaps the leader the number is
+    never signalled again.  The last signal is one group KILL, sent when the
+    leader has exited or its TERM grace ran out, which also stops members that
+    outlived the leader.
+    """
+    if process.returncode is not None:
+        # The caller reaped the leader after a normal exit and found its group
+        # still present: the existing group-presence escalation applies.
+        if _process_group_exists(process.pid):
+            _signal_collector_group(process, signal.SIGTERM)
+        stopped = _wait_for_collector_group_exit(process, term_grace_seconds)
+        if not stopped:
+            _signal_collector_group(process, signal.SIGKILL)
+            stopped = _wait_for_collector_group_exit(process, kill_grace_seconds)
+        return stopped
+    _signal_collector_group(process, signal.SIGTERM)
+    _wait_for_collector_leader_exit(process, term_grace_seconds)
+    _signal_collector_group(process, signal.SIGKILL)
+    # macOS reports an exiting leader before it is reapable, so reap with poll()
+    # within the KILL grace; nothing is signalled after this point.
+    deadline = time.monotonic() + max(float(kill_grace_seconds), 0.0)
+    while process.poll() is None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(COLLECTOR_EXIT_POLL_SECONDS, remaining))
+    return True
 
 
 def _validate_lane(lane: str) -> str:
@@ -2706,6 +2756,40 @@ def run_collection_slots(
                     "input_inventory_sha256": hashlib.sha256(frozen).hexdigest(),
                     **_collection_snapshot_runtime(slot, bindings),
                 }
+                # I-052: a Production slot is not run when the frozen bytes cron.sh would read show
+                # rows (cron.sh's rule: hostname not empty, not starting with '#') and none of this
+                # lane's types.  Unreadable bytes, no hostname/type header, no row, or an unavailable
+                # runtime resolver for ethernet/prod still run cron.sh, which fails an empty lane.
+                lane_types = {"ethernet/prod": {"eth", "eth_spx", "spx"},
+                              "infiniband/prod": {"ib", "server_ufm"},
+                              "nvlink/prod": {"nvl"}}.get(slot)
+                if lane_types is not None:
+                    try:
+                        table = list(csv.reader(io.StringIO(frozen.decode("utf-8"))))
+                    except (UnicodeDecodeError, csv.Error):
+                        table = []
+                    header = ["".join(name.split()).lower() for name in table[0]] if table else []
+                    row_types = []
+                    if "hostname" in header and "type" in header:
+                        for row in table[1:]:
+                            cells = row + [""] * len(header)
+                            hostname = cells[header.index("hostname")].strip()
+                            if hostname and not hostname.startswith("#"):
+                                row_types.append(cells[header.index("type")].strip().lower())
+                    runtime_devices = "v2_unavailable" in context or any(
+                        platform == "cumulus" and lease_state in {"active", "observed"}
+                        for mac, _ip, platform, lease_state in (
+                            row.split("|", 3) for row in context["prod_runtime_rows"]
+                        ) if mac
+                    )
+                    if row_types and not lane_types & set(row_types) and not (
+                        slot == "ethernet/prod" and runtime_devices
+                    ):
+                        outcomes.append(_collection_slot_wrapper(
+                            slot, "no_devices", None,
+                            {"returncode": 0, "stdout": "", "stderr": ""}, validated_identity,
+                        ))
+                        continue
                 with tempfile.TemporaryFile(mode="w+b") as plan_context, \
                         tempfile.TemporaryFile(mode="w+b") as plan_file:
                     plan_context.write(_canonical_json_line(context))
@@ -3602,7 +3686,13 @@ def collect(scope: str, timeout: int, lock_wait: int) -> bool:
             errors = []
             task_results = []
             for outcome in run_result["outcomes"]:
-                if outcome["outcome"] == "accepted":
+                if outcome["outcome"] == "no_devices":
+                    # I-052: a skipped Production slot is neither an error nor a result.
+                    print(
+                        f"[{timestamp()}] [SKIP] {outcome['source_slot']}: 清单里没有这类设备",
+                        flush=True,
+                    )
+                elif outcome["outcome"] == "accepted":
                     task_results.append(outcome["child_result"])
                 else:
                     errors.append(

@@ -4578,3 +4578,58 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - 本机 direct 与 workflow：`test_initial_setup_linux_hostname_workflow`（`LinuxHostnameDirectTests`、`LinuxHostnameToUpgradeWorkflowTests`）、`test_initial_setup_config_mode`（replace 模式）。本机替身通过不代表现场通过；本卡 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-COLLECTION-SLOT-SELECTION-001 — Production 只跑清单里有设备的通道
+
+- 基本信息：real-environment / collection；I-052（v3.1.6 C2，指导 WP-9 :1467-1517、5.3）；状态 **OPEN / NOT RUN**。本卡只写验收条件，不授权连接设备、点按钮或写线上 Tracker。
+- 风险与目标：只有 `eth_jump`、`ib`、`server_ufm` 的项目（B300 类）里，worker 的 prod scope 不再因为 ETH、NVL 两条通道选出 0 台而整轮失败；IB、UFM 照常采集。要防止的是：IB 通道被跳过、清单读不出或运行期解析器不可用时被当作没有设备（问题文档 I-052；指导 :1481-1486）。
+- 本机先决：同版本的 `test_cases.test_collection_cycle_worker_contract`、`test_cases.test_collection_cycle_handoff_workflow` 通过，且是精确的发布版本。
+- 前置条件：Linux 管理服务器上一个只有 `eth_jump`、`ib`、`server_ufm` 的项目；执行人是 owner 或其明确授权的现场人员；记录 `sha256sum monitor/switch-collection-worker.py ethernet/monitor/cron.sh`。AIR 上 load 只许 `--switch eth`，prod scope 三个 slot 不一定能整套跑：做不到时只验证 AIR slot 行为不变（指导 :1700，C2-O4）。
+
+### 步骤
+
+1. C2 前后各点一次「信息收集」、开一轮持续收集（指导 5.3 本卡行；I-052 的验证方法，待确认问题 N21）。
+2. 每轮记录 `monitor/status/switch-collection.status.json`、`switch-collection.log` 本轮的行、页面截图（指导 :1639 本卡行「证据」）。
+
+### 预期结果
+
+- C2 后：状态文件不是 failed，`reason` 里没有 `worker_error`；`switch-collection.log` 有两行 `[SKIP] ethernet/prod: 清单里没有这类设备`、`[SKIP] nvlink/prod: 清单里没有这类设备`（指导 :1487，`WORKER::collect`）；IB、UFM 数据照常（指导 5.3 本卡行）。
+- 本轮不 qualifying，页面走 legacy 刷新照常刷新（指导 :1489，C2-O7；`WORKER::collect` 在 summary 为 None 时走 legacy 刷新分支）。
+- 不允许的副作用：IB slot 被跳过（指导 :1483，`server_ufm` 也算 IB 通道的设备）；AIR slot 行为变化（C2-O4）。
+- 证据：源码 sha256、状态文件、worker 日志行、页面截图；不外带清单正文（指导 :1639 本卡行「证据」）。
+
+### 故障注入与清理
+
+- 不制造故障；清理：无。
+- 风险：点「信息收集」会让 cron.sh 写交换机 `authorized_keys`；prod 上验证 AI 只读观察，是否点按钮由 owner 定（指导 5.3 本卡行）。
+
+### 自动化状态
+
+- 本机 direct：`test_collection_cycle_worker_contract`（`test_prod_slot_without_its_device_type_is_not_run` 等 8 条）；workflow：`test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_b300_layout_runs_only_the_infiniband_slot`（真实 worker 与真实 cron.sh）。现场仍为 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-W1-LINUX-GROUP-REAP-001 — Linux 上停采集进程组：最后一个组信号在回收组长之前
+
+- 基本信息：real-environment / process lifecycle；R-048（v3.1.6 C2/W1，指导 8.28 :2964-2977）；状态 **NOT RUN / REAL_ENV REQUIRED**。本卡只写验收条件，不授权在 prod 上停服务。
+- 风险与目标：Linux 管理服务器（原生或容器）上，worker 停采集进程时用 `os.waitid(P_PID, pid, WEXITED|WNOHANG|WNOWAIT)` 不回收地等组长退出，组长退出或宽限到时先对组发一次 KILL，再 `poll()` 回收，之后不再按组号发信号（指导 :2970，`WORKER::terminate_collector_process`）。本机 macOS 的 Python 没有 `os.waitid`，Linux 分支在本机只用替身核了调用参数（指导 :2973）。
+- 前置条件：Linux 测试服务器或隔离容器；与发布版本一致的 `monitor/switch-collection-worker.py`（记录 sha256）；`/usr/bin/python3` 版本；`strace` 可用；一个只为本卡准备的测试项目，不连真实交换机。
+
+### 步骤
+
+1. 在测试项目里把 `ethernet/monitor/cron.sh` 换成测试替身：起一个忽略 TERM 的子进程后 `sleep 600`（只在测试项目里）（指导 :2973 Linux 验证卡；组内残余见指导 :2970）。
+2. `strace -f -e trace=kill,waitid,wait4 -o <证据文件>` 跟踪 worker；点一次「信息收集」后在页面点「停止」（或给 worker 发 SIGTERM）（指导 :2970；`WORKER::run_interruptible` 取消时调用 `WORKER::terminate_collector_process`）。
+3. 另做一轮替身不忽略 TERM（组长随 TERM 退出）的同样操作（指导 :2970「组长退出或宽限到时」两种情形）。
+
+### 预期结果
+
+- 两轮都是：`kill(-<pgid>, SIGTERM)` → 若干次 `waitid(P_PID, <pid>, …, WEXITED|WNOHANG|WNOWAIT)` → 一次 `kill(-<pgid>, SIGKILL)` → `wait4(<pid>, …)` 回收；回收之后 `terminate_collector_process` 不再出现对该组号的 `kill(-<pgid>, …)`（指导 :2970，R-048 合同）。
+- TERM 宽限 5 秒、KILL 升级、0.2 秒取消上限、超时返回 124 不变（指导 :2970）；替身的子进程也被清掉（`ps -o pid,pgid` 无残留）。
+- 证据：worker sha256、Python 版本、strace 片段（只含本组号的 kill/waitid/wait4 行）、`ps` 前后输出（指导 :2973）。
+
+### 故障注入与清理
+
+- 只在测试项目里换替身；结束后恢复原 `cron.sh` 并核对 sha256，确认测试项目没有残留进程。
+- 风险：在 prod 上做会中断真实采集，所以只在测试服务器或隔离容器做。
+
+### 自动化状态
+
+- 本机 direct：`test_monitor_stack_review.SwitchWorkerProcessLifecycleTests` 的 `test_group_number_is_never_signalled_after_the_leader_is_reaped`、`test_group_kill_follows_leader_exit_and_precedes_the_reap`（macOS 分支真实子进程组）、`test_linux_leader_wait_uses_waitid_without_reaping`（Linux 分支替身）。Linux 实跑仍为 **NOT RUN / REAL_ENV REQUIRED**。

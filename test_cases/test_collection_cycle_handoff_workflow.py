@@ -1758,6 +1758,35 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
                 self.assertNotEqual("accepted", outcomes[slot]["outcome"])
                 self.assertIsNone(outcomes[slot]["child_result"])
 
+    def test_b300_layout_runs_only_the_infiniband_slot(self):
+        # 问题文档 I-052（B300：只有 IB 和 UFM 的项目）；v3.1.6 指导 :1506
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            for area, name in (("ethernet", "eth.csv"), ("nvlink", "nvsw.csv")):
+                (root / area / "monitor" / name).write_text(
+                    "hostname,type,eth0_ip\n"
+                    "jump-a,eth_jump,192.0.2.20\nleaf-ib,ib,192.0.2.11\n",
+                    encoding="utf-8",
+                )
+            completed, payload, traces = self.run_workflow(root, "prod")
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNotNone(payload, completed.stdout)
+        assert payload is not None
+        self.assertTrue(payload["returned"], payload)
+        outcomes = {
+            item["source_slot"]: item for item in payload["result"]["outcomes"]
+        }
+        self.assertEqual(list(EXPECTED_SLOTS["prod"]), list(outcomes))
+        for slot in ("ethernet/prod", "nvlink/prod"):
+            self.assertEqual("no_devices", outcomes[slot]["outcome"], slot)
+            self.assertIsNone(outcomes[slot]["child_result"])
+        self.assertEqual("accepted", outcomes["infiniband/prod"]["outcome"])
+        self.assertIsNone(payload["result"]["summary"])
+        self.assertEqual(
+            {"infiniband"}, {Path(item["invoked_path"]).parent.parent.name for item in traces},
+        )
+
     def test_all_scope_order_and_every_slot_echo_mutation_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)
