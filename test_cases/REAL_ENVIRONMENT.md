@@ -4479,3 +4479,32 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - 本机 direct：`test_initial_setup_pending_diff`（`OwnedPendingDetachTests`）、`test_initial_setup_base_and_subset`、`test_initial_setup_config_mode`；workflow：`test_initial_setup_bringup_results_workflow`（`OwnedPendingWorkflowTests`）、`test_initial_setup_main_caller_precommit`。本机模型通过不代表现场通过；本卡 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-D1D-LINUX-HOSTNAME-001 — NVUE 主机名已正确、Linux 主机名为默认名时一次受控补设
+
+- 基本信息：real-environment / scenario，R-026／U4（v3.1.6 D1d，指导 :2161-2181）；状态 **NOT RUN / REAL_ENV REQUIRED**。卡名按指导 :2181「默认新立拟名卡」，由 http dev 最终定是新立还是并入 `TC-REAL-D1-INITIAL-SETUP-MERGED-001`。本卡只写验收条件，不授权连接设备、写入或 prod 操作。
+- 风险与目标：故障态 NVOS（提示符带 `[System_Fatal_State]`）上 NVUE 主机名已正确，Linux `hostname` 仍是 `nvos`，升级身份核对因此跳过它（问题文件 12.2）。验证 initial-setup `--apply` 只在 Linux 名为默认名（`nvos` 或读回为空）时执行一次 `sudo -n hostnamectl hostname <CSV 完整名>` 并读回、主机名重登录后仍在；其它不同名只报告；`sudo: unable to resolve host` 只进报告（指导 :2176-2179；`initial-setup.py::_settle_linux_hostname`）。本机替身不能关闭本卡（指导 :2181）。
+- 前置条件与输入：另行批准的 AIR 隔离项目和写窗口；执行人为 owner 或其明确授权的现场人员（指导 :2181）；获准的一台故障态测试 IB（NVUE 主机名等于 CSV 完整名、Linux `hostname` 为 `nvos`）与可恢复控制台，另一台 Linux 名是其它非默认名的测试 IB；admin 默认可免口令 sudo（owner 2026-11-15，问题文件 :877）；绑定本轮源码、测试、manifest、平台与正式全量证明。缺任一条件的分项保持 NOT RUN。
+
+### 步骤
+
+1. 现场人员在两台测试 IB 上各记录 `hostname`、`cat /sys/class/net/eth0/address`、`nv config show -o commands` 中 `system hostname` 一行，以及 `getent hosts <CSV 完整名>` 的结果。
+2. 同一选择先跑一次只读检查：故障那台报告「NVUE 已配置，Linux 主机名未生效，--apply 时会补设」，`planned_changes` 含 `{"item": "linux hostname", …}`，不发 sudo（指导 :2179，`execute_ib_task` 只读分支）；另一台报告「Linux 主机名与 ib.csv 不同且不是默认名，不自动修改」（指导 :2176）。
+3. 在获准写窗口跑 `--apply`：故障那台在 IPv4 就绪之后、Infra Services 之前依次出现读 `hostname`、写前备份、`sudo -n hostnamectl hostname <CSV 完整名>` 恰一次、再读 `hostname` 等于 CSV 完整名（指导 :2175-2177）；另一台不发 sudo。
+4. 退出登录后重新登录故障那台，再读 `hostname`，确认补设仍在；记录登录时是否出现 `sudo: unable to resolve host`。
+5. 用升级脚本对故障那台做只读检查（`upgrade.py --inspect-only`），身份核对 `hostname; cat /sys/class/net/eth0/address` 通过；另一台仍按原规则 `DEVICE_IDENTITY_MISMATCH`（`tools/ibsw_upgrade_observer.py::_validate_identity`）。
+
+### 预期结果
+
+- 故障那台：`summary.json` 记录 `linux_hostname` 为 `{"observed": "nvos", "action": "SET", …}`；`metrics.nvue_write_commands` 计入 sudo；结果类别 `CHECKED_AND_CONFIGURED`；sudo 若输出 `sudo: unable to resolve host`，`warning` 记已知警告、不算失败、不改 `/etc/hosts`（指导 :2179）。
+- 另一台：`action` 为 `REFUSED`，无 sudo，Linux 名前后不变。
+- 不允许：sudo 要口令时送口令或重放；补设失败后仍进入 Infra Services；改 `/etc/hosts`；新增健康查询；放宽升级的主机名与 MAC 身份核对（指导 :2178、:2181）。
+- 证据：源码/测试/manifest/平台身份、两台读前/补设/回读的设备日志行、重登录后的 `hostname`、`getent hosts` 前后结果、两台 `summary.json` 记录、升级只读检查的身份结论、运行完整 END 与退出码；不保存配置正文、口令或私有标识。
+
+### 故障注入与清理
+
+- 只在获准的 AIR 测试设备上验证；不在 prod 制造故障态。sudo 要口令（`-n` 直接失败）一项只在现场人员明确同意时临时调整 sudoers 验证，结束后按记录恢复。补设后的 Linux 主机名即目标名，不回退；另一台由现场人员按第 1 步记录恢复原名。设备侧配置备份由 owner 决定保留或移除。
+
+### 自动化状态
+
+- 本机 direct 与 workflow：`test_initial_setup_linux_hostname_workflow`（`LinuxHostnameDirectTests`、`LinuxHostnameToUpgradeWorkflowTests`）、`test_initial_setup_config_mode`（replace 模式）。本机替身通过不代表现场通过；本卡 **NOT RUN / REAL_ENV REQUIRED**。

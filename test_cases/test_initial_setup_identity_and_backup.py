@@ -657,6 +657,9 @@ class IdentityAndBackupTests(unittest.TestCase):
                 return app.SessionResult("default via 203.0.113.1 dev eth0\n", 0)
             if command == ("nv", "show", "system", "ztp"):
                 return app.SessionResult("service disabled\nstate disabled\n", 0)
+            if command == ("hostname",):
+                # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                return app.SessionResult(HOST + "\n", 0)
             raise RuntimeError("FIXTURE HOLD: unexpected readonly task command")
 
         with mock.patch.object(app, "run_on_ib", new=boundary), \
@@ -673,8 +676,10 @@ class IdentityAndBackupTests(unittest.TestCase):
     def test_real_readonly_execute_consumes_login_identity_before_initial_stage(self):
         result, commands = self._wp4_readonly_execution()
         self.assertEqual("ALREADY_CONFIGURED", result["outcome"])
+        # U4 (v3.1.6 D1d, guide 8.11 steps 1-2): check-only reads the Linux hostname once after the
+        # NVUE hostname is verified; a matching name adds no write.
         self.assertEqual([tuple(READ), ("ip", "addr", "show", "eth0"),
-                          ("nv", "show", "system", "ztp")], commands)
+                          ("nv", "show", "system", "ztp"), ("hostname",)], commands)
         self.assertIs(False, result["writes_attempted"])
         self.assertEqual("CHECKED", result["stage_status"]["initial"])
         self.assertEqual("NO_KEYS_PROVIDED", result["stage_status"]["public_keys"])
@@ -782,6 +787,11 @@ class IdentityAndBackupTests(unittest.TestCase):
                 output = "service disabled\nstate disabled\n"
             elif command == ("nv", "config", "diff", "-o", "commands"):
                 output = ""
+            elif command == ("hostname",):
+                # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                names = [line.split()[-1] for line in state.splitlines()
+                         if line.startswith("nv set system hostname ")]
+                output = (names[-1] if names else "nvos") + "\n"
             elif command == ("sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", stamp):
                 status, output = backup_status, backup_output
             elif command in allowed_setters:
@@ -988,6 +998,11 @@ class IdentityAndBackupTests(unittest.TestCase):
                     output = "service disabled\nstate disabled\n"
                 elif command == ("nv", "config", "diff", "-o", "commands"):
                     output = ""
+                elif command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                    names = [line.split()[-1] for line in state.splitlines()
+                             if line.startswith("nv set system hostname ")]
+                    output = (names[-1] if names else "nvos") + "\n"
                 elif command == ("sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", stamp):
                     output = "path=/home/PUBLIC/current_" + stamp + ".yaml\nbytes=137\n"
                 elif command == ("sh", "-c", EXPECTED_LAUNCH_SCRIPT, "--", stamp):
@@ -1309,6 +1324,11 @@ class IdentityAndBackupTests(unittest.TestCase):
                     output = "service disabled\nstate disabled\n"
                 elif command == ("nv", "config", "diff", "-o", "commands"):
                     output = ""
+                elif command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                    names = [line.split()[-1] for line in world.wp4_states[host].splitlines()
+                             if line.startswith("nv set system hostname ")]
+                    output = (names[-1] if names else "nvos") + "\n"
                 elif command == ("sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", world.wp4_stamp):
                     output = "path=/home/PUBLIC-" + host + "/current_" + world.wp4_stamp + ".yaml\nbytes=137\n"
                     if host == IB1 and failure == "backup":
@@ -1706,6 +1726,9 @@ class IdentityAndBackupTests(unittest.TestCase):
                     output = "service disabled\nstate disabled\n"
                 elif command == ("true",):
                     output = ""
+                elif command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                    output = target.ib.hostname + "\n"
                 else:
                     raise RuntimeError("FIXTURE HOLD: direct credential case attempted an unrelated command")
                 return app.SessionResult("__HTTP_IB_BEGIN_" + nonce + "__\n" + output
@@ -2237,6 +2260,10 @@ class IdentityAndBackupTests(unittest.TestCase):
                 elif command == ("sh", "-c", EXPECTED_BACKUP_SCRIPT, "--", "20261117-040000"):
                     output = "path=/home/PUBLIC/current_20261117-040000.yaml\nbytes=137\n"
                 elif command == ("true",): output = ""
+                elif command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE hostname.
+                    output = [line.split()[-1] for line in world.wp4_body.splitlines()
+                              if line.startswith("nv set system hostname ")][-1] + "\n"
                 else: raise RuntimeError("FIXTURE HOLD: unrelated strict positive command")
                 return app.SessionResult("__HTTP_IB_BEGIN_" + nonce + "__\n" + output
                     + "__HTTP_IB_END_" + nonce + "__=0\n", 0)
@@ -4777,8 +4804,9 @@ class IdentityAndBackupTests(unittest.TestCase):
                 text = remote[2][len(prefix):-len(suffix)]
                 command = tuple(shlex.split(text))
                 self.assertEqual(text, shlex.join(command))
+                # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read is a modelled reply too.
                 if command not in (tuple(READ), ("true",), ("ip", "addr", "show", "eth0"),
-                                   ("ip", "route"), ("nv", "show", "system", "ztp")):
+                                   ("ip", "route"), ("nv", "show", "system", "ztp"), ("hostname",)):
                     forbidden()
                 scope = ("inspect" if depth["inspect_ib_device"] else
                          "final" if depth["verify_management_direct_ssh"] else "stage")
@@ -4800,8 +4828,9 @@ class IdentityAndBackupTests(unittest.TestCase):
                 output = {tuple(READ): body_a if role == "key" else body_b,
                     ("true",): "", ("ip", "addr", "show", "eth0"): IP_ADDR,
                     ("ip", "route"): "default via 203.0.113.1 dev eth0\n",
-                    ("nv", "show", "system", "ztp"): "service disabled\nstate disabled\n"}[command]
-                framed = "__HTTP_IB_BEGIN_" + nonce + "__\n" + output + "__HTTP_IB_END_" + nonce + "__=0\n"
+                    ("nv", "show", "system", "ztp"): "service disabled\nstate disabled\n",
+                    ("hostname",): "PUBLIC-IB01\n"}[command]
+                framed ="__HTTP_IB_BEGIN_" + nonce + "__\n" + output + "__HTTP_IB_END_" + nonce + "__=0\n"
                 result = app.SessionResult(framed, 0)
                 fresh = role == "project" and command == tuple(READ) and scope == "inspect"
                 if fresh:
@@ -4935,6 +4964,9 @@ class IdentityAndBackupTests(unittest.TestCase):
                 ("project", "ipv4", ("ip", "addr", "show", "eth0"), "stage"),
                 ("project", "ipv4", ("ip", "route"), "stage"),
                 ("project", "ipv4", tuple(READ), "stage"),
+                # U4 (v3.1.6 D1d, guide 8.11 steps 1-2): one Linux hostname read after readiness;
+                # it matches the NVUE name, so no sudo, permit or backup follows.
+                ("project", "ipv4", ("hostname",), "stage"),
                 ("project", "ipv4", tuple(READ), "final")], world.order)
             self.assertEqual(1, len(world.inspected))
             result, credential, _authorized = world.inspected[0]

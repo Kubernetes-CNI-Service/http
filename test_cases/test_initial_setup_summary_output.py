@@ -888,6 +888,10 @@ class SummaryOutputTests(unittest.TestCase):
                     body = "service disabled\nstate disabled\n"
                 elif command == ["nv", "config", "show", "-o", "commands"]:
                     body = current
+                elif command == ["hostname"]:
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    body = t.ib.hostname + "\n"
                 elif command == key_command:
                     self.assertEqual(5, len(command))
                     self.assertEqual(public_bytes, base64.b64decode(command[4], validate=True))

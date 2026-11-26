@@ -127,6 +127,10 @@ class ManagedInitialMergeContractTests(unittest.TestCase):
                 return self.initial.SessionResult("", 0)
             if command == req10b.STRICT_READ:
                 return self.initial.SessionResult(CONFIGURED_STATE, 0)
+            if command == ("hostname",):
+                # U4 (v3.1.6 D1d, guide 8.11 step 2): the closed Linux-hostname read; a healthy
+                # device answers its applied NVUE hostname.
+                return self.initial.SessionResult("EXAMPLE-IB01\n", 0)
             raise AssertionError(f"unexpected managed device command: {command!r}")
 
         stack.enter_context(mock.patch.object(self.initial, "run_on_ib", side_effect=device))

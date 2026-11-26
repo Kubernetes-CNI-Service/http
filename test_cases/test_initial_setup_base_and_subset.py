@@ -439,6 +439,9 @@ class BaseAndSubsetTests(unittest.TestCase):
             if command == ["ip", "addr", "show", "eth0"]:
                 return app.SessionResult("2: eth0: <UP> mtu 1500 state UP\n"
                                          "    link/ether 02:00:00:00:00:10\n", 0)
+            if command == ["hostname"]:
+                # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                return app.SessionResult(t.ib.hostname + "\n", 0)
             return app.SessionResult("service disabled\n" if command == ["nv", "show", "system", "ztp"] else "", 0)
         with patch.object(app, "inspect_ib_device",
                           return_value=(app.SessionResult(current, 0), secret("ib"), True)), \

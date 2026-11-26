@@ -443,6 +443,9 @@ class ManagedInitialOuterGuardWorkflowTests(unittest.TestCase):
                         return initial.SessionResult(
                             "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP\n"
                             "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n", 0)
+                    if command == ["hostname"]:
+                        # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                        return initial.SessionResult("EXAMPLE-IB01\n", 0)
                     self.assertEqual(command[:4], ["sh", "-c", initial._KEY_INSTALL_SCRIPT, "--"])
                     self.assertEqual(len(command), 5)
                     self.assertEqual(base64.b64decode(command[4]).decode(), "\n".join(expected_lines) + "\n")

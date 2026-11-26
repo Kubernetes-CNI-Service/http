@@ -564,7 +564,11 @@ class HostKeyRefreshWorkflowTests(unittest.TestCase):
                 else:
                     if not nested and local_conflict:
                         remember_new_key(local_path, "192.0.2.10")
-                    payload = (identity if identity is not None else
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    linux = re.findall(r"(?m)^nv set system hostname (\S+)$", body)
+                    payload = (linux[-1] + "\n" if identity is None and "; hostname; task_rc=" in text else
+                        identity if identity is not None else
                         "service disabled\nstatus aborted\nconfig-save enabled enabled\n" if "nv show system ztp" in text else body)
                 return app.SessionResult(f"__HTTP_IB_BEGIN_{marker}__\n{payload}__HTTP_IB_END_{marker}__=0\n", 0)
 

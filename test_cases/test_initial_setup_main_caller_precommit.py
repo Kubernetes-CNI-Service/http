@@ -318,7 +318,9 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
             born = error
         if born is not None:
             self.fixed_hold()
-        f["stub"].write_text((peer or peer_program)(), encoding="utf-8")
+        # U4 (v3.1.6 D1d, guide 8.11): the written stub also answers the Linux-hostname read;
+        # the pinned peer_program()/u3_peer_program() strings are unchanged.
+        f["stub"].write_text(base.u4_peer_program((peer or peer_program)()), encoding="utf-8")
         f["stub"].chmod(0o600)
         state = json.loads(f["state"].read_text())
         state.update(initial=facts == ("enabled", "enabled"), network=network,
@@ -858,7 +860,9 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                             (["ip", "addr", "show", "eth0"], ["ip", "route"])]
                 inner = [e for e in all_inner if e["command"] not in
                          (["ip", "addr", "show", "eth0"], ["ip", "route"])]
-                total = (3 if scene["case"] == "readonly-initial" else 2) + int(positive)
+                # U4 (v3.1.6 D1d, guide 8.11 steps 1-2): a check-only run whose NVUE hostname is
+                # verified reads the Linux hostname once (read-only, the selected credential).
+                total = (3 if scene["case"] == "readonly-initial" else 2) + int(positive) + int(positive)
                 self.assertEqual(total, len(inner))
                 auth = [e for e in inner if e["operation"] == "auth-probe-readonly"]
                 expected_auth_roles = ([(True, False, False)]
@@ -895,7 +899,8 @@ class MainCallerPrecommitDraftTests(unittest.TestCase):
                                     and w["selector"][0][expected_role],
                                     "one actual nonrequired selector result must establish selected CURRENT")
                     reads = [e for e in inner if e["operation"] is None]
-                    self.assertEqual([ZTP_SHOW, ["KEY-SHELL"]], [e["command"] for e in reads])
+                    # U4 (v3.1.6 D1d, guide 8.11): the Linux-hostname read sits between them.
+                    self.assertEqual([ZTP_SHOW, ["hostname"], ["KEY-SHELL"]], [e["command"] for e in reads])
                     self.assertTrue(all(not e["phase"] and e[expected_role] and not e["oob"] for e in reads),
                                     "both ordinary reads must use actual selected current, not a desired role")
                     self.assertLess(all_inner.index(metadata[0]), all_inner.index(reads[0]),

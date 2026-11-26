@@ -94,6 +94,10 @@ class PublicWorld(existing._World):
                         '    inet ' + address + '/24 scope global eth0\n')
             if framed_read('ip route') in text:
                 return 'default via 192.0.2.1 dev eth0\n'
+            if framed_read('hostname') in text:
+                # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                return device.hostname + '\n'
         if 'nv show system ztp' in text:
             return 'service disabled\nstatus aborted\nconfig-save enabled enabled\n'
         if 'nv config diff' in text or ('true' in text and 'nv ' not in text):

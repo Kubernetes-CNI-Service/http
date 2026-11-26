@@ -552,6 +552,9 @@ class _MainWorld:
                  "    link/ether 02:00:00:00:00:0a brd ff:ff:ff:ff:ff:ff\n"
                  "    inet 192.0.2.10/24 scope global eth0\n"),
                 ("ip route", "default via 192.0.2.1 dev eth0\n"),
+                # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                ("hostname", IB + "\n"),
             ):
                 program = ('printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; ' + command
                            + '; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce

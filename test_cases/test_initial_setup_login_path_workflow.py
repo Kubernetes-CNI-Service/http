@@ -330,6 +330,10 @@ class LoginPathCompletedReadonlyWorkflowTests(unittest.TestCase):
                             + " brd ff:ff:ff:ff:ff:ff\n    inet " + ip + "/24 scope global eth0\n")
                 elif command == ["ip", "route"]:
                     body = "default via " + gateway + " dev eth0\n"
+                elif command == ["hostname"]:
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    body = name + "\n"
                 else:
                     raise RuntimeError("FIXTURE HOLD: command outside the closed WP5 readonly model")
                 external_calls.append((name, argv[-2], tuple(command)))
@@ -650,6 +654,10 @@ class LoginPathCompletedJumpWorkflowTests(unittest.TestCase):
                             + " brd ff:ff:ff:ff:ff:ff\n    inet " + ip + "/24 scope global eth0\n")
                 elif command == ["ip", "route"]:
                     body = "default via 192.0.2.1 dev eth0\n"
+                elif command == ["hostname"]:
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    body = name + "\n"
                 else:
                     raise RuntimeError("FIXTURE HOLD: outside the closed S2 readonly IB command model")
                 ib_calls.append((name, tuple(command)))
@@ -1063,6 +1071,10 @@ class LoginPathCableAndReadonlyIdentityFinalWorkflowTests(unittest.TestCase):
                             + " brd ff:ff:ff:ff:ff:ff\n    inet " + ip + "/24 scope global eth0\n")
                 elif command == ["ip", "route"]:
                     body = "default via 192.0.2.1 dev eth0\n"
+                elif command == ["hostname"]:
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    body = hostname + "\n"
                 else:
                     return reject()
                 ib_calls.append((hostname, tuple(command)))
@@ -1507,6 +1519,10 @@ class LoginPathPlanCheckClassificationWorkflowTests(unittest.TestCase):
                         + " brd ff:ff:ff:ff:ff:ff\n    inet " + ip + "/24 scope global eth0\n")
                 elif not final and command == ["ip", "route"]:
                     body = "default via 192.0.2.1 dev eth0\n"
+                elif not final and command == ["hostname"]:
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    body = hostname + "\n"
                 else:
                     return reject()
                 ib_calls.append((hostname, "ipv4" if final else "ll", tuple(command)))

@@ -271,6 +271,9 @@ class Ipv4ReadinessTests(unittest.TestCase):
                             "    inet 192.0.2.10/24 scope global eth0\n", 0)
                     if command == ztp_read:
                         return app.SessionResult(ztp, 0)
+                    if command == ("hostname",):
+                        # U4 (v3.1.6 D1d, guide 8.11): the Linux name already equals the CSV name.
+                        return app.SessionResult("EXAMPLE-IB01\n", 0)
                     self.assertIn(command, (("nv", "config", "apply", "-y"),
                                             ("nv", "config", "save"),
                                             ("nv", "config", "show", "-o", "commands")))
@@ -310,6 +313,8 @@ class Ipv4ReadinessTests(unittest.TestCase):
                 if needs_network and apply:
                     expected += [("nv", "config", "apply", "-y"), ("nv", "config", "save"),
                                  ("nv", "config", "show", "-o", "commands")]
+                # U4 (v3.1.6 D1d, guide 8.11 step 2): one Linux hostname read once the NVUE name is verified.
+                expected += [("hostname",)]
                 self.assertEqual(expected, stage_calls)
                 self.assertEqual(len(expected), stage_boundary.call_count)
 

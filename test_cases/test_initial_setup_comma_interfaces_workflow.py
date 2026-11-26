@@ -80,6 +80,14 @@ def show_state(S):
     if tuple(lines[:5]) != _COMMA_ANCHOR:
         raise ValueError("comma peer anchor")
     return "\n".join(list(rows) + lines[5:]) + "\n"
+# U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE hostname is
+# verified; this healthy device's Linux name is its applied NVUE hostname.
+_comma_original_business = business
+def business(command, S):
+    if command == ["hostname"]:
+        names = re.findall(r"(?m)^nv set system hostname (\S+)$", show_state(S))
+        return (names[-1] if names else "nvos") + "\n", 0
+    return _comma_original_business(command, S)
 ''' % (ANCHOR,)
 
 

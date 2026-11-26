@@ -3511,10 +3511,13 @@ class ConfigModeTests(unittest.TestCase):
         backup_receipt = {"path": f"/devices/PUBLIC/current_{stamp}.yaml", "bytes": 137}
         inspect = ["INSPECT", "IP", "ROUTE", "ZTP"]
         initial = inspect + ["PROMPT", "PENDING", "BACKUP", "AUTO", "ZTP_SAVE", "APPLY", "SAVE", "READ", "ZTP"]
+        # U4 (v3.1.6 D1d, guide 8.11 step 1, :2175): after the final readiness and before REPLACED the
+        # Linux hostname is read once ("HOSTNAME"); this model's Linux name already equals the CSV name.
         for case, expected, verified in (
-                ("complete", initial + ["REPLACE_COMPLETE", "KEY", "D4", "EXTRA"], True),
-                ("initial-skip", inspect + ["PROMPT", "BACKUP", "REPLACE_COMPLETE", "KEY_SKIP", "D4", "EXTRA"], True),
-                ("excluded-extra", initial + ["REPLACE_COMPLETE", "KEY", "D4", "EXTRA"], False),
+                ("complete", initial + ["REPLACE_COMPLETE", "KEY", "D4", "HOSTNAME", "EXTRA"], True),
+                ("initial-skip", inspect + ["PROMPT", "BACKUP", "REPLACE_COMPLETE", "KEY_SKIP", "D4", "HOSTNAME",
+                                            "EXTRA"], True),
+                ("excluded-extra", initial + ["REPLACE_COMPLETE", "KEY", "D4", "HOSTNAME", "EXTRA"], False),
                 ("deny", inspect + ["PROMPT"], False),
                 ("backup-failed", inspect + ["PROMPT", "PENDING", "BACKUP"], False),
                 ("post-ztp-failed", initial + ["REPLACE_COMPLETE"], False),
@@ -3551,6 +3554,7 @@ class ConfigModeTests(unittest.TestCase):
                         tuple(auto.split()): ("AUTO", ""), tuple(ztp_save.split()): ("ZTP_SAVE", ""),
                         ("nv", "config", "apply", "-y"): ("APPLY", ""), ("nv", "config", "save"): ("SAVE", ""),
                         ("nv", "config", "show", "-o", "commands"): ("READ", ready),
+                        ("hostname",): ("HOSTNAME", "example-ib001"),  # U4: Linux name follows NVUE
                     }
                     if (len(command) == 5 and command[:2] == ("sh", "-c") and command[3:] == ("--", stamp)
                             and hashlib.sha256(command[2].encode()).hexdigest()
@@ -3722,6 +3726,7 @@ class ConfigModeTests(unittest.TestCase):
                 tuple(auto.split()): ("AUTO", ""), tuple(ztp_save.split()): ("ZTP_SAVE", ""),
                 ("nv", "config", "apply", "-y"): ("APPLY", ""), ("nv", "config", "save"): ("SAVE", ""),
                 ("nv", "config", "show", "-o", "commands"): ("READ", ready),
+                ("hostname",): ("HOSTNAME", "example-ib001"),  # U4: Linux name follows NVUE
             }
             if (len(command) == 5 and command[:2] == ("sh", "-c") and command[3:] == ("--", stamp)
                     and hashlib.sha256(command[2].encode()).hexdigest()
@@ -3780,9 +3785,134 @@ class ConfigModeTests(unittest.TestCase):
                 guards.enter_context(mock.patch.object(app, name, side_effect=effect))
             result = app.execute_ib_task(task, args, policy, "PUBLIC-INITIAL-MODEL", None, [], None)
             self.assertIs(previous, app._TASK_IB_CONFIG)
+        # U4 (v3.1.6 D1d, guide 8.11 step 1): one Linux hostname read after the final readiness.
         self.assertEqual(["INSPECT", "IP", "ROUTE", "ZTP", "PENDING", "BACKUP", "DETACH", "PENDING",
-                          "AUTO", "ZTP_SAVE", "APPLY", "SAVE", "READ", "ZTP", "REPLACE_COMPLETE", "D4"], calls)
+                          "AUTO", "ZTP_SAVE", "APPLY", "SAVE", "READ", "ZTP", "REPLACE_COMPLETE", "D4",
+                          "HOSTNAME"], calls)
         self.assertEqual("REPLACED", result["replace"]["verdict"])
         self.assertEqual([{"stage": "initial", "lines": [auto], "detached": True}], result.get("pending_detached"))
         self.assertEqual(backup_receipt, result["backup"])
         self.assertEqual([], self.effects)
+
+    def test_replace_mode_sets_a_default_linux_hostname_after_final_readiness_before_replaced(self):
+        # U4 (owner 2026-11-15, issue section 12; v3.1.6 guide 8.11 implementation step 1, :2175):
+        # replace mode reads the Linux hostname after _run_admitted_replace_through_readiness
+        # returns and before REPLACED is recorded; a default name gets one fixed
+        # `sudo -n hostnamectl hostname <CSV full name>` (an NVUE-class write after the backup and a
+        # real permit) and a real read back; a failed sudo stops the device without REPLACED (step 4).
+        app = self.app
+        route = app._import_tools("tools.login_path").Route(NAMES[0], "direct", "PUBLIC", None, None, None)
+        target = app.Target(self.target().ib, None, "", "eth0", route=route)
+        endpoint = app.DirectEndpoint("203.0.113.11")
+        task = app.PreparedIBTask(target, endpoint, "", False)
+        selected = self.release / "EXAMPLE-IB001.yaml"
+        global_file = self.project / "01-global.yaml"
+        global_file.write_text("switches:\n  - ib:\n      system:\n        aaa:\n          user:\n"
+                               "            admin:\n              password: '$6$PublicFixture$" + "A" * 86 + "'\n",
+                               encoding="ascii")
+        stamp = "20261126-091100"
+        nonce = "68686868686868686868686868686868"
+        prefix = 'printf "\\n__HTTP_IB_BEGIN_' + nonce + '__\\n"; '
+        suffix = '; task_rc=$?; printf "\\n__HTTP_IB_END_' + nonce + '__=%s\\n" "$task_rc"; exit "$task_rc"'
+        base = ("nv set system hostname example-ib001\n"
+                "nv set interface eth0 ipv4 address 203.0.113.11/24\n"
+                "nv set interface eth0 ipv4 gateway 203.0.113.1\n")
+        auto = "nv set system config auto-save state enabled"
+        ztp_save = "nv set system ztp config-save enabled"
+        ready = base + auto + "\n" + ztp_save + "\n"
+        sudo = ("sudo", "-n", "hostnamectl", "hostname", "EXAMPLE-IB001")
+        for case in ("set", "sudo-fails"):
+            policy = app.ProjectPasswordPolicy(global_file, "admin", interactive=False)
+            authority = app.RuntimeInputAuthority((global_file, selected))
+            args = SimpleNamespace(config_mode="replace", apply=True, yes=True, ib_user="admin", eth_user="admin",
+                execution_mode="management", connect_timeout=10, run_stamp=stamp, _on_management_server=True,
+                _replace_runtime_authority=authority, _replace_release=self.release, _replace_selected={
+                    "example-ib001": {"verdict": "WOULD_REPLACE", "file": str(selected),
+                    "sha256": "a596e8c95db198f49c2402dc80d4a4312f665519600ffce069cbf3476af23368", "reason": ""}})
+            coordinator = app.RuntimeCoordinator(args, policy, "PUBLIC-INITIAL-MODEL", [task], authority)
+            calls = []
+            linux = ["nvos"]
+
+            def captured(argv, responder, timeout):
+                self.assertEqual("admin@203.0.113.11", argv[-2])
+                program = shlex.split(argv[-1])
+                self.assertTrue(program[2].startswith(prefix) and program[2].endswith(suffix))
+                command = tuple(shlex.split(program[2][len(prefix):-len(suffix)]))
+                status = 0
+                effects = {
+                    ("ip", "addr", "show", "eth0"): ("IP",
+                        "2: eth0: <UP> mtu 1500\n    link/ether 02:00:00:00:00:11\n    inet 203.0.113.11/24\n"),
+                    ("ip", "route"): ("ROUTE", "default via 203.0.113.1 dev eth0\n"),
+                    ("nv", "show", "system", "ztp"): ("ZTP", "service disabled\nstatus aborted\n"),
+                    ("nv", "config", "diff", "-o", "commands"): ("PENDING", ""),
+                    tuple(auto.split()): ("AUTO", ""), tuple(ztp_save.split()): ("ZTP_SAVE", ""),
+                    ("nv", "config", "apply", "-y"): ("APPLY", ""), ("nv", "config", "save"): ("SAVE", ""),
+                    ("nv", "config", "show", "-o", "commands"): ("READ", ready),
+                    ("hostname",): ("HOSTNAME", linux[0]),
+                    sudo: ("SUDO", ""),
+                }
+                if (len(command) == 5 and command[:2] == ("sh", "-c") and command[3:] == ("--", stamp)
+                        and hashlib.sha256(command[2].encode()).hexdigest()
+                        == "7c1a6e279773a41477e0e7a061d8ecf828273157b785aca844361a14ff3344b6"):
+                    label, output = "BACKUP", f"path=/devices/PUBLIC/current_{stamp}.yaml\nbytes=137\n"
+                else:
+                    self.assertIn(command, effects, "model refuses any unlisted external operation")
+                    label, output = effects[command]
+                if label == "SUDO":
+                    if case == "sudo-fails":
+                        status, output = 1, "sudo: a password is required"
+                    else:
+                        linux[0] = "EXAMPLE-IB001"
+                calls.append(label)
+                return app.SessionResult(
+                    f"__HTTP_IB_BEGIN_{nonce}__\n{output}\n__HTTP_IB_END_{nonce}__={status}\n", status)
+
+            def inspect_model(device, point, *_ignored, **options):
+                calls.append("INSPECT")
+                result = app.SessionResult(base, 0)
+                result._direct_endpoint = endpoint
+                return result, "PUBLIC-VERIFIED-MODEL", False
+
+            def replace_model(state, supplied_args, services, *, timeout, authorized, strict, policy):
+                calls.append("REPLACE_COMPLETE")
+                app._ensure_ib_config_backup(target, endpoint, "", "", "admin", "PUBLIC-VERIFIED-MODEL", 10,
+                                             local=False)
+                app.obtain_write_permit("nvue")
+                return True, False, "service disabled\nstatus success\n"
+
+            def d4_model(device, account, credential, timeout, **options):
+                options["details"].update(identity={"ok": True, "via_ipv4": True}, endpoint=endpoint)
+                calls.append("D4")
+                return ready
+
+            with self.subTest(case=case), ExitStack() as guards:
+                guards.enter_context(redirect_stdout(io.StringIO()))
+                for name, value in (("_TASK_IB_CONFIG", None), ("_TASK_LOG_BUFFER", None), ("_TASK_DEADLINE", None),
+                                    ("REPORT_HANDLE", None), ("_WORKER_CONNECTION", None), ("_WORKER_STOP", None),
+                                    ("_ACTIVE_COORDINATOR", coordinator)):
+                    guards.enter_context(mock.patch.object(app, name, value))
+                guards.enter_context(mock.patch.object(app, "os", Facade(app.os, urandom=lambda count: b"\x68" * count)))
+                guards.enter_context(mock.patch.object(app.ProjectPasswordPolicy, "password", self.deny))
+                for name, effect in (("inspect_ib_device", inspect_model), ("interactive_run", captured),
+                    ("_run_admitted_replace_to_ztp", replace_model),
+                    ("run_key_stage", lambda *_a, **k: k["authorized"]),
+                    ("_wait_direct_ipv4_readback", d4_model), ("run_management_direct_checks", lambda *_a, **_k: []),
+                    ("refresh_ib_host_key", self.deny), ("verify_ipv4_login", self.deny)):
+                    guards.enter_context(mock.patch.object(app, name, side_effect=effect))
+                result = app.execute_ib_task(task, args, policy, "PUBLIC-INITIAL-MODEL", None, [], None)
+                head = ["INSPECT", "IP", "ROUTE", "ZTP", "PENDING", "BACKUP", "AUTO", "ZTP_SAVE", "APPLY", "SAVE",
+                        "READ", "ZTP", "REPLACE_COMPLETE", "D4", "HOSTNAME", "SUDO"]
+                if case == "set":
+                    self.assertEqual(head + ["HOSTNAME"], calls)
+                    self.assertEqual("REPLACED", result["replace"]["verdict"])
+                    self.assertEqual({"observed": "nvos", "action": "SET", "warning": None},
+                                     result.get("linux_hostname"))
+                    self.assertEqual("EXAMPLE-IB001", linux[0])
+                else:
+                    self.assertEqual(head, calls)
+                    self.assertNotEqual("REPLACED", result["replace"]["verdict"])
+                    self.assertEqual("FAILED", result["outcome"])
+                    self.assertEqual("day0", result.get("failed_stage"))
+                    self.assertTrue(result["reason"].startswith("Linux 主机名未生效，hostnamectl 补设失败"),
+                                    result["reason"])
+                self.assertEqual([], self.effects)

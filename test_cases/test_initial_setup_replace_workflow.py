@@ -438,6 +438,11 @@ class _ReplaceWorld:
                 self.replace_pending.discard(name)
                 self.pending[name].clear()
             return "", 7 if self.failure == "apply-detach" and name == NAMES[0] else 0
+        if command == ("hostname",):
+            # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE hostname
+            # is verified; a healthy device's Linux name is its applied NVUE hostname.
+            names = [row.split()[-1] for row in self.rows[name] if row.startswith("nv set system hostname ")]
+            return (names[-1] if names else "nvos") + "\n", 0
         return self.deny()
 
     def apply_pending(self, name):

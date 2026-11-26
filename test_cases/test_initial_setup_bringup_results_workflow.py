@@ -221,6 +221,10 @@ class _FiveDevices:
             return "", 0
         if command == ("true",):
             return "", 0
+        if command == ("hostname",):
+            # U4 (v3.1.6 D1d): read only after the NVUE hostname is verified; a healthy device's
+            # Linux name is that CSV name.
+            return name + "\n", 0
         if len(command) == 5 and command[:2] == ("sh", "-c") and command[3] == "--":
             if command[2] == EXPECTED_BACKUP_SCRIPT:
                 self.test.assertRegex(command[4], r"^[0-9]{8}-[0-9]{6}$")
@@ -854,6 +858,9 @@ class ManagedSelectionWorkflowTests(unittest.TestCase):
                         "    link/ether 02:00:00:00:00:01 brd ff:ff:ff:ff:ff:ff\n")
             elif command == ["sh", "-c", direct.EXPECTED_INSTALL_KEY_SCRIPT, "--", payload]:
                 body = "IBSW_PUBLIC_KEYS_UNCHANGED\n"
+            elif command == ["hostname"]:
+                # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                body = HOST + "\n"
             else:
                 raise AssertionError("PUBLIC managed model: unknown ordinary command")
             calls.append(("ib", HOST, tuple(command[:2])))

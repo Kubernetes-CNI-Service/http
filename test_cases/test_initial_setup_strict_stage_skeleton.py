@@ -385,6 +385,11 @@ class _World:
                 elif inner_command == "nv config save":
                     device.save()
                     payload = ""
+                elif inner_command == "hostname":
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy switch's Linux name is its NVUE hostname.
+                    names = [line.split()[-1] for line in device.lines
+                             if line.startswith("nv set system hostname ")]
+                    payload = (names[-1] if names else "nvos") + "\n"
                 else:
                     raise AssertionError(f"unexpected IB command {inner_command}")
         session.feed(f"\n__HTTP_IB_BEGIN_{marker}__\n{payload}__HTTP_IB_END_{marker}__=0\n")

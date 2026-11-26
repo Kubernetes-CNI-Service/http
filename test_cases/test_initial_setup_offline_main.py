@@ -407,6 +407,11 @@ class OfflineMainTests(unittest.TestCase):
                         payload = interface_receipt(last)
                     elif "ip route" in text:
                         payload = "default via 192.0.2.1 dev eth0\n"
+                    elif re.search(r"(?<![-\w])hostname(?![-\w])", text):
+                        # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                        # hostname is verified; a healthy device's Linux name is its NVUE hostname.
+                        named = re.findall(r"(?m)^nv set system hostname (\S+)$", body_for(last))
+                        payload = (named[-1] if named else "nvos") + "\n"
                     else:
                         raise AssertionError("Unexpected non-read command in check-only: " + text)
                     nonce = frame.group(1)
@@ -508,8 +513,9 @@ class OfflineMainTests(unittest.TestCase):
         self.assertFalse(any(row["metrics"].get("nvue_write_commands", 0)
                              for row in evidence["records"].values()))
         # Each device takes the old phase and ZTP reads, plus O5's LL identity read.
+        # U4 (v3.1.6 D1d, guide 8.11 step 5): plus one read-only Linux `hostname` read per device.
         self.assertEqual(sum(row["metrics"].get("ib_ssh_attempts", 0)
-                             for row in evidence["records"].values()), 17 * 3)
+                             for row in evidence["records"].values()), 17 * 4)
         self.assertEqual(sum(row["metrics"].get("direct_ssh_attempts", 0)
                              for row in evidence["records"].values()), 17)
 
@@ -656,7 +662,8 @@ class OfflineMainTests(unittest.TestCase):
             self.assertEqual(total(evidence), self.workflow_sessions[1])
         code, evidence, output = self.run_workflow(17, True)
         # Each device has one phase authentication read, O5 link-local identity, and one plain ZTP read.
-        self.assertEqual(self.workflow_sessions, (17, 17 * 3))
+        # U4 (v3.1.6 D1d, guide 8.11 step 5): plus one plain read-only Linux `hostname` read.
+        self.assertEqual(self.workflow_sessions, (17, 17 * 4))
         with self.subTest(case="seventeen-devices-sessions"):
             self.assertEqual(total(evidence), self.workflow_sessions[1])
 

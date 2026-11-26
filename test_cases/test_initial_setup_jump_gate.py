@@ -113,6 +113,9 @@ class JumpGateTests(unittest.TestCase):
                     "    link/ether 02:00:00:00:00:17 brd ff:ff:ff:ff:ff:ff\n", 0)
             if stage == "day0" and command == setter:
                 raise failure
+            if command == ["hostname"]:
+                # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                return app.SessionResult(_target.ib.hostname + "\n", 0)
             return app.SessionResult(READBACK, 0)
 
         models = {

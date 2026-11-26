@@ -495,6 +495,10 @@ class _U3Device:
             return "default via 192.0.2.1 dev eth0\n", 0
         if command == ("nv", "show", "system", "ztp"):
             return "service disabled\nstate disabled\n", 0
+        if command == ("hostname",):
+            # U4 (v3.1.6 D1d): a healthy device's Linux name is its applied NVUE hostname.
+            names = [row.split()[-1] for row in self.applied if row.startswith("nv set system hostname ")]
+            return (names[-1] if names else "nvos") + "\n", 0
         if command == U3_DIFF:
             self.diff_reads += 1
             if self.diff_reads == 1 and self.on_first_diff is not None:

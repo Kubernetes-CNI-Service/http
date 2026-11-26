@@ -862,6 +862,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                         return self.initial.SessionResult(state, 0)
                     if command == STRICT_DIFF:
                         return self.initial.SessionResult("", 0)
+                    if command == ("hostname",):
+                        # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                        return self.initial.SessionResult(args[0].ib.hostname + "\n", 0)
                     raise AssertionError("PUBLIC managed model: unknown IB command")
                 def batch_observer(target, user, key, timeout, services, keys):
                     if cycle == 3:
@@ -1293,6 +1296,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
                 }:
                     return self.initial.SessionResult("", 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                    return self.initial.SessionResult(args[0].ib.hostname + "\n", 0)
                 raise AssertionError("PUBLIC single-device model: unknown IB command")
 
             local_jump = {"example-jump01"} if "ethernet" in extra else set()
@@ -1666,6 +1672,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
                 }:
                     return self.initial.SessionResult("", 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                    return self.initial.SessionResult(args[0].ib.hostname + "\n", 0)
                 raise AssertionError("PUBLIC configured model: unknown IB command")
 
             with mock.patch.dict("os.environ", {"NVOS_INITIAL_PASSWORD": "initial-password"}), \
@@ -1769,6 +1778,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     # that these in-memory desired values were removed.
                     output = "\n".join(running) + "\n" if running else "nv set system hostname nvos\n"
                     return self.initial.SessionResult(output, 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its applied NVUE name.
+                    names = [line.split()[-1] for line in running if line.startswith("nv set system hostname ")]
+                    return self.initial.SessionResult((names[-1] if names else "nvos") + "\n", 0)
                 if command in service_argv or command in day0_argv:
                     pending.append(" ".join(command))
                 elif command == ("nv", "config", "apply", "-y"):
@@ -2031,6 +2044,10 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return self.initial.SessionResult(
                         ZTP_DISABLED if "nv set system ztp config-save enabled" in running
                         else ZTP_ENABLED, 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its applied NVUE name.
+                    names = [line.split()[-1] for line in running if line.startswith("nv set system hostname ")]
+                    return self.initial.SessionResult((names[-1] if names else "nvos") + "\n", 0)
                 if command in setters:
                     pending.append(" ".join(command))
                 elif command == apply:
@@ -2312,6 +2329,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     ("nv", "config", "apply", "-y"), ("nv", "config", "save"),
                 }:
                     return ""
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its NVUE name.
+                    return "EXAMPLE-IB01\n"
                 raise AssertionError("PUBLIC non-strict model: unknown IB command")
 
             def transport(command, responder, timeout, **_kwargs):
@@ -2696,6 +2716,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 if command == STRICT_DIFF:
                     return self.initial.SessionResult("", 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                    return self.initial.SessionResult(target.ib.hostname + "\n", 0)
                 if command != STRICT_READ:
                     raise AssertionError("PUBLIC key-failure model: unknown IB command")
                 output = state.replace("203.0.113.2/24", target.ib.eth0_prefix).replace(
@@ -2788,6 +2811,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                     return self.initial.SessionResult("IBSW_PUBLIC_KEYS_UPDATED\n", 0)
                 if command == STRICT_DIFF:
                     return self.initial.SessionResult("", 0)
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                    return self.initial.SessionResult(name + "\n", 0)
                 if command not in {
                     STRICT_READ,
                     ("nv", "set", "system", "dns", "server", "203.0.113.53"),
@@ -3020,6 +3046,9 @@ class Req10BServicesKeysWorkflowTests(unittest.TestCase):
                             except self.initial.SetupError as error:
                                 raw_failures.append(str(error))
                                 raise
+                if command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): a healthy device's Linux name is its CSV name.
+                    return self.initial.SessionResult(name + "\n", 0)
                 if command not in {
                     STRICT_READ, STRICT_DIFF,
                     ("nv", "set", "system", "dns", "server", "203.0.113.53"),

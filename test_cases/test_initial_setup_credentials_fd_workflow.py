@@ -172,6 +172,10 @@ class _World:
             return "service disabled\n"
         if "nv config diff" in text:
             return ""
+        if identity_read == ("hostname",):
+            # U4 (v3.1.6 D1d, guide 8.11 step 2): a healthy device's Linux hostname follows its
+            # applied NVUE hostname.
+            return (device.hostname if self.configured[device.hostname] else "nvos") + "\n"
         if identity_read == ("ip", "addr", "show", "eth0"):
             address = (f"    inet {device.login_ip}/24 scope global eth0\n"
                        if self.configured[device.hostname] else "")
@@ -251,7 +255,8 @@ class _World:
             payload = f"path=/home/PUBLIC/current_{backup[-1]}.yaml\nbytes=137\n"
         else:
             inner = tuple(shlex.split(owned_frame.group(1)))
-            identity_reads = {("ip", "addr", "show", "eth0"), ("ip", "route")}
+            # U4 (v3.1.6 D1d, guide 8.11 step 2): the closed Linux-hostname read is passed the same way.
+            identity_reads = {("ip", "addr", "show", "eth0"), ("ip", "route"), ("hostname",)}
             payload = self.ib_payload(device, text, identity_read=inner if inner in identity_reads else ())
         return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{payload}__HTTP_IB_END_{nonce}__=0\n", 0)
 

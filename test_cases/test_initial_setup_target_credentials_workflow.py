@@ -564,6 +564,33 @@ except BaseException as exc:
     result = 86
 raise SystemExit(result)
 '''
+# U4 (v3.1.6 D1d, guide 8.11 step 2): initial-setup now reads the Linux hostname with the closed
+# read ("hostname",) once the NVUE hostname is verified.  A healthy modeled IB answers with its
+# current NVUE hostname.  The layer is added only where a stub is written to disk, outside every
+# pinned program string (SSH_PROGRAM, PEER_EXTENSION, U3_PEER_LAYER and the summary derivations
+# keep their bytes and hashes).
+U4_PEER_LAYER = r'''
+_u4_public_command = public_command
+def public_command(command):
+    if command == ["hostname"]:
+        return command
+    return _u4_public_command(command)
+_u4_linux_business = business
+def business(command, S):
+    if command == ["hostname"]:
+        names = [line.split()[-1] for line in show_state(S).splitlines()
+                 if line.startswith("nv set system hostname ")]
+        return (names[-1] if names else "nvos") + "\n", 0
+    return _u4_linux_business(command, S)
+'''
+
+
+def u4_peer_program(program):
+    """The written stub: `program` plus the U4 Linux-hostname read, inserted before run()."""
+    marker = "def run():\n"
+    if type(program) is not str or program.count(marker) != 1:
+        raise RuntimeError("FIXTURE HOLD: inherited owned SSH boundary changed")
+    return program.replace(marker, U4_PEER_LAYER + "\n" + marker, 1)
 
 
 def emit_public_failure_summary(result, secrets):
@@ -785,7 +812,7 @@ class InitialTargetCredentialsMainAutoWorkflowDraftTests(unittest.TestCase):
         control.write_bytes(b"PUBLIC foreign control\n")
         control.chmod(0o600)
         stub = root / "owned-ssh.py"
-        stub.write_text(SSH_PROGRAM, encoding="utf-8")
+        stub.write_text(u4_peer_program(SSH_PROGRAM), encoding="utf-8")
         stub.chmod(0o600)
         config = root / "transport-config.json"
         config.write_text(json.dumps({

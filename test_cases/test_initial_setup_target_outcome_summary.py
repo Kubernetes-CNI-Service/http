@@ -1400,7 +1400,9 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertEqual([], w["consent"])
             # Owner Q-035 (a) item 1 (guide :438): ZTP state is read before Initial, on a
             # management task through the authorized helper (P3c map D32d :284).
-            self.assertEqual([("nv", "show", "system", "ztp")], w["helper"])
+            # U4 (v3.1.6 D1d, guide 8.11 steps 1-2): after readiness the --apply run reads the Linux
+            # hostname once through the same helper; it equals the CSV name, so nothing is written.
+            self.assertEqual([("nv", "show", "system", "ztp"), ("hostname",)], w["helper"])
             self.assertEqual([("ip", "addr", "show", "eth0")], w["helper_metadata"])
             self.assertEqual([True], w["metadata_gate"])
             self.assertEqual([SUMMARY_IDENTITY_FACTS["EXAMPLE-IB01"]["target"]],
@@ -1459,7 +1461,10 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             state02.write_text(json.dumps(second), encoding="ascii")
             state01.chmod(0o600)
             state02.chmod(0o600)
-            f["stub"].write_text(_summary_two_target_peer(self.caller), encoding="utf-8")
+            # U4 (v3.1.6 D1d, guide 8.11): the pinned two-target program is qualified first; the
+            # Linux-hostname read layer is added only to the written stub.
+            f["stub"].write_text(self.base.u4_peer_program(_summary_two_target_peer(self.caller)),
+                                 encoding="utf-8")
             f["stub"].chmod(0o600)
             cache = self.no_keys_before_real_p1(f)
             self.assertEqual(2, cache["ib_candidate_count"])
@@ -1563,9 +1568,11 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             # Owner Q-035 (a) item 1 (guide :438; P3c map D32d :284): each device reads ZTP
             # through the authorized helper before Initial; table 6-1 row 1: IB02 is reached.
             ztp = ("nv", "show", "system", "ztp")
+            # U4 (v3.1.6 D1d, guide 8.11 steps 1-2): IB02, past its IPv4 readiness, reads its Linux
+            # hostname once through the helper (equal to the CSV name: no write); IB01 never gets there.
             self.assertEqual([ztp, *NETWORK_SETTERS, ("nv", "config", "apply", "-y"),
-                              ("nv", "config", "save"), tuple(READ), ztp], w["helper"])
-            self.assertTrue(len(w["gate"]) == 10 and all(w["gate"]))
+                              ("nv", "config", "save"), tuple(READ), ztp, ("hostname",)], w["helper"])
+            self.assertTrue(len(w["gate"]) == 11 and all(w["gate"]))
             # O5 is separate metadata, not a changed business/native gate count.
             metadata = [row for row in w["helper_all"] if row["metadata"]]
             self.assertEqual([("ip", "addr", "show", "eth0")] * 2, w["helper_metadata"])
@@ -1576,7 +1583,7 @@ class TargetOutcomeSummaryMainWorkflowTests(unittest.TestCase):
             self.assertEqual([SUMMARY_IDENTITY_FACTS[name]["point"]
                               for name in ("EXAMPLE-IB01", "EXAMPLE-IB02")],
                              [row["point"] for row in metadata])
-            self.assertEqual(12, len(w["helper_all"]))
+            self.assertEqual(13, len(w["helper_all"]))  # U4 (v3.1.6 D1d, guide 8.11): + IB02's hostname read
             self.assertTrue(all(row["returned"] for row in w["helper_all"]))
             self.assertTrue(all(row["current_target"] and not row["current_initial"]
                                 and not row["current_oob"] and row["outer_oob"] for row in metadata))

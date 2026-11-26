@@ -1091,14 +1091,15 @@ class EthJumpTransportContractTests(unittest.TestCase):
         # enclosing caller with one top-level reader. D7 adds four bounded
         # replace consumers (restore/ZTP, synchronous, deferred, and cleanup).
         # v3.1.6 D1c (U3, guide 8.10 step 4) adds one consumer: the owned-pending detach that the
-        # three write stages share, routed like their other writes.
+        # three write stages share, routed like their other writes.  v3.1.6 D1d (U4, guide 8.11
+        # step 4) adds the Linux hostname read/set step, routed the same way.
         self.assertEqual({"_stage_ib_command"}, incoming("_run_authorized_ib_command"))
         self.assertEqual(
             {"execute_ib_task", "run_initial_stage", "run_key_stage", "run_service_stage",
              "inspect_ib_device", "_read_direct_ipv4_command",
              "_restore_replace_services_and_verify_ztp", "run_replace_stage",
              "_run_replace_deferred_stage", "_try_cleanup_deferred_apply_failure",
-             "_detach_owned_pending"},
+             "_detach_owned_pending", "_settle_linux_hostname", "_read_linux_hostname"},
             incoming("_stage_ib_command"),
         )
         real_enforcer = app.ib_command_argv

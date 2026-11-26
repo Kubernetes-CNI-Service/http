@@ -126,6 +126,29 @@ Initial、Network、Infra Services 三个写阶段在本阶段第一条写之前
 - 不变的：Keys 和改密阶段前不加这道检查；`--config-mode replace` 替换本体前后的空 pending 门照旧非空即拒；
   不提交、不接着用设备上原有的待提交。
 
+### Linux 主机名补设（U4，R-026）
+
+故障态的设备可能 NVUE 里的主机名已正确，Linux 主机名却还是 `nvos`，升级脚本的身份核对（`hostname` 与 eth0 MAC）因此跳过它。
+NVUE 主机名已核对等于 CSV 完整名之后读一次 Linux 主机名（只读命令 `hostname`，必须成功且至多一行）：
+
+- 位置：patch 模式在 IPv4 就绪和「Network SKIP」那一行之后、Infra Services 之前（跳板、直连延迟生效两种核对都已完成）；
+  `--config-mode replace` 在替换后的最终 IPv4 就绪之后、记 `REPLACED` 之前。
+- 等于 CSV 完整名（按名字规整后比较，不分大小写）：不做事。
+- 默认名（`nvos` 或读回为空）：`--apply` 时经原有的确认（还没确认过时原因写「补设 Linux 主机名」）、写前配置备份和写许可，
+  执行一次 `sudo -n hostnamectl hostname <CSV 完整名>`（`-n`：要口令就直接失败，脚本不送 sudo 口令、不重放），再读一次
+  `hostname`，必须等于 CSV 完整名。这一步不查健康。
+- 其它名字：不改；设备日志和逐台结果写「Linux 主机名与 ib.csv 不同且不是默认名，不自动修改」，这台照常做后面的阶段。
+- 读多行或读失败：这台失败，不猜、不补设。sudo 非零、读回不对或读不到：这台失败，原因「Linux 主机名未生效，hostnamectl
+  补设失败」，不进 Infra Services 和之后的阶段；`failed_stage` 记 `day0`（主机名属于 Network）。
+- sudo 输出 `sudo: unable to resolve host` 时只记已知警告（hostnamectl 只改主机名，不改 `/etc/hosts`），不算失败。
+- 逐台结果（`summary.json` 的 `records` 和 `<IB 主机名>.json`）加 `linux_hostname`：
+  `{"observed": <读到的名字>, "action": "NONE" | "SET" | "NEEDS_SET" | "REFUSED", "warning": <警告或 null>}`，没读时为 `null`。
+  sudo 计入 `metrics.nvue_write_commands`，补设过的设备结果类别是 `CHECKED_AND_CONFIGURED`。
+- 只读检查：同一位置只读一次，默认名时设备日志写「NVUE 已配置，Linux 主机名未生效，--apply 时会补设」，`planned_changes` 加
+  `{"item": "linux hostname", "value": <CSV 完整名>}`，`needs_change` 为 `true`，这台结果为 `CHECK_ONLY`
+  （`CHECKED_NEEDS_CONFIGURATION`）。NVUE 主机名还没配好时不读；只用公钥做的只读检查不读。
+- 不变的：不改 `/etc/hosts`，不加健康查询，不自动修健康，不放宽升级脚本的主机名和 MAC 身份核对。
+
 ## 输入文件
 
 ### ib.csv
@@ -504,6 +527,8 @@ SSH 的 `known_hosts` 也可能新增主机密钥（`StrictHostKeyChecking=accep
 - `--apply` 在第一台实际变更前确认；拒绝时整次停下、不改设备（以 1 退出）。`--apply --yes` 明确跳过交互确认。
 - patch 默认只补缺；`--force` 与默认相同。真实冲突在写入前拒绝该台，不覆盖原值。设备上有不认识的待提交改动时不写；全是本台自有的值时记录后 detach 再做（见「写阶段前的待提交改动」）。
 - 有公钥时只读核对一次，无公钥不读取；不回传 `authorized_keys`，也不写设备配置。
+- `sudo` 只有一种用法：NVUE 主机名已正确、Linux 主机名是默认名时，`--apply` 下执行一次 `sudo -n hostnamectl hostname <CSV 完整名>`；
+  其它不同名只报告（见「Linux 主机名补设」）。
 - 一台 IB 匹配多条管理链路、必填 CSV 输入无效或不能核对设备身份时，明确记录且不配置该台。线路检查根据本节前述 FDB 与已选入口判定。
 - 改密或写入结果不确定时停下这台、标为要人工核对，不自动重放。
 - 初始密码、目标密码、当前密码和 OOB 口令都不打印、不写进报告和 JSON。

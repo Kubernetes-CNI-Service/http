@@ -4304,6 +4304,7 @@ def ib_command_argv(argv: object) -> list[str]:
         return command
     if tokens in {
         ("true",),
+        ("hostname",),
         ("ip", "addr", "show", "eth0"),
         ("ip", "route"),
         ("nv", "config", "show"),
@@ -4351,6 +4352,13 @@ def ib_command_argv(argv: object) -> list[str]:
         and command[:4] == ["nv", "set", "system", "hostname"]
         and valid_hostname(command[4])
     ):
+        return command
+    if (
+        len(command) == 5
+        and command[:4] == ["sudo", "-n", "hostnamectl", "hostname"]
+        and valid_hostname(command[4])
+    ):
+        # U4 (R-026): shape only; the caller and the strict helper bind it to this CSV full name.
         return command
     if len(command) == 6 and command[:3] == ["nv", "set", "system"]:
         category, field, value = command[3:]
@@ -6173,6 +6181,87 @@ def _detach_owned_pending(target, neighbor, eth_user, eth_password, ib_user, ib_
     log("  PENDING DETACHED: the pending diff is empty; the stage continues")
 
 
+LINUX_HOSTNAME_REFUSED = "Linux 主机名与 ib.csv 不同且不是默认名，不自动修改"
+LINUX_HOSTNAME_FAILED = "Linux 主机名未生效，hostnamectl 补设失败"
+LINUX_HOSTNAME_UNREAD = "Linux 主机名读不到或不是一行，不猜、不补设"
+LINUX_HOSTNAME_RESOLVE_WARNING = ("sudo: unable to resolve host（hostnamectl 只改主机名、不改 /etc/hosts；"
+                                  "已知警告，不算失败）")
+
+
+def _read_linux_hostname(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                         *, local, strict, policy):
+    """U4: one closed `hostname` read on the stage route; at most one line, never guessed."""
+    lines = _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                              ["hostname"], local=local, strict=strict, policy=policy).output.splitlines()
+    if len(lines) > 1:
+        raise SetupError("Linux hostname readback is not one line")
+    return lines[0].strip() if lines else ""
+
+
+def _settle_linux_hostname(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                           *, local, strict, policy, apply, authorized, nvue_verified, record):
+    """U4 (R-026): once the NVUE hostname is verified, read the Linux hostname once.
+
+    Equal to the CSV full name: nothing.  A default name (DEFAULT_HOSTNAMES): --apply sends one
+    fixed `sudo -n hostnamectl hostname <CSV full name>` (an NVUE-class stage write: original
+    consent, backup, permit, input/cancel/deadline) and reads it back; check-only reports
+    NEEDS_SET.  Any other name is refused and reported, never changed.  record["linux_hostname"]
+    keeps {"observed", "action", "warning"}; returns the stage authorization.
+    """
+    if not nvue_verified or ib_password is None:
+        log("  LINUX HOSTNAME: not read; " + ("the NVUE hostname is not verified yet" if not nvue_verified
+                                             else "a key-only read-only check has no hostname reader"))
+        return authorized
+    name = target.ib.hostname
+    context = (target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout)
+    try:
+        observed = _read_linux_hostname(*context, local=local, strict=strict and apply, policy=policy)
+    except (ProjectInputChanged, BatchStopped):
+        raise
+    except SetupError as exc:
+        raise _retain_ssh_failure(SetupError(LINUX_HOSTNAME_UNREAD + ": " + _authorized_failure_text(exc)),
+                                  exc) from None
+    entry = record["linux_hostname"] = {"observed": observed, "action": "NONE", "warning": None}
+    if normalize_name(observed) == normalize_name(name):
+        log(f"  LINUX HOSTNAME OK: {observed}")
+        return authorized
+    if normalize_name(observed) not in DEFAULT_HOSTNAMES:
+        entry.update(action="REFUSED", warning=LINUX_HOSTNAME_REFUSED)
+        log(f"  LINUX HOSTNAME WARNING: observed={observed}; {LINUX_HOSTNAME_REFUSED}")
+        return authorized
+    entry["action"] = "NEEDS_SET"
+    command = ["sudo", "-n", "hostnamectl", "hostname", name]
+    log(f"  LINUX HOSTNAME {'PLAN' if apply else 'WOULD APPLY'}: observed={observed or 'empty'}; "
+        + shlex.join(command))
+    if not apply:
+        log("  LINUX HOSTNAME: NVUE 已配置，Linux 主机名未生效，--apply 时会补设")
+        record["planned_changes"].append({"item": "linux hostname", "value": name})
+        return authorized
+    if not authorized:
+        authorized = confirm_first_device_change(target, "补设 Linux 主机名")
+    if not authorized:
+        raise SetupError("补设 Linux 主机名未获授权；未做改动")
+    if policy is not None:
+        policy.assert_unchanged()
+    try:
+        output = _stage_ib_command(target, neighbor, eth_user, eth_password, ib_user, ib_password, timeout,
+                                   command, local=local, strict=strict, policy=policy).output
+        if "sudo: unable to resolve host" in output:
+            entry["warning"] = LINUX_HOSTNAME_RESOLVE_WARNING
+            log("  LINUX HOSTNAME WARNING: " + LINUX_HOSTNAME_RESOLVE_WARNING)
+        after = _read_linux_hostname(*context, local=local, strict=strict, policy=policy)
+    except (ProjectInputChanged, BatchStopped):
+        raise
+    except SetupError as exc:
+        raise _retain_ssh_failure(SetupError(LINUX_HOSTNAME_FAILED + ": " + _authorized_failure_text(exc)),
+                                  exc) from None
+    if normalize_name(after) != normalize_name(name):
+        raise SetupError(f"{LINUX_HOSTNAME_FAILED}: read back {after or 'empty'}")
+    entry["action"] = "SET"
+    log(f"  LINUX HOSTNAME SET: read back {after}")
+    return authorized
+
+
 # The latest authorized-helper failure as (weak reference to the helper's own
 # fixed safe error, product-written text of the known error it replaced).  The
 # helper's error keeps its fixed args and closed attribute set and the helper
@@ -6289,6 +6378,8 @@ def _run_authorized_ib_command_core(target, endpoint, eth_user, ethernet_passwor
                     or re.search(r"[\x00-\x1f\x7f-\x9f]", credential)):
                 raise SetupError("invalid authorized management credential")
         command = ib_command_argv(ib_command)
+        if command[:4] == ["sudo", "-n", "hostnamectl", "hostname"] and command[4] != target.ib.hostname:
+            raise SetupError("Linux hostname setter is not this target's CSV full name")
         # Target permission is separate from the selected, already authenticated
         # inner credential. This value must never replace current_password;
         # it is kept only to withhold it from a failure summary.
@@ -8312,7 +8403,8 @@ def _ib_write_category(ib_command):
         return None  # The only other admitted closed script reads its rc.
     if (command[:2] == ["nv", "set"]
             or command[:3] in (["nv", "config", "apply"], ["nv", "config", "save"],
-                                ["nv", "config", "replace"], ["nv", "config", "detach"])):
+                                ["nv", "config", "replace"], ["nv", "config", "detach"])
+            or command[:4] == ["sudo", "-n", "hostnamectl", "hostname"]):
         return "nvue"
     return None
 
@@ -9505,13 +9597,13 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                      "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
                      "existing_configuration": [], "planned_changes": [], "conflicts": [],
                      "needs_change": None, "verified_complete": False, "config_mode": config_mode,
-                     "attention_category": None, "pending_detached": [],
+                     "attention_category": None, "pending_detached": [], "linux_hostname": None,
                      "stage_status": {stage: "NOT_REACHED" for stage in
                          ("authentication", "initial", "day0", "ipv4_readiness", "services", "public_keys", "direct_ssh")}}
     stages = result_record["stage_status"]
     change_needs = {"network": None, "initial": None,
                     "services": False if services is None else None,
-                    "public_keys": False if not keys else None, "pending": False}
+                    "public_keys": False if not keys else None, "pending": False, "linux_hostname": False}
     stage = "authentication"
     credential = None
     readback = ""
@@ -9841,6 +9933,12 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 result_record["ztp"].update(service=ztp["service"], status=ztp["status"],
                     provisioned=ztp["status"] == "success")
                 stages["services"] = "ALREADY_PRESENT" if restored[1] else "VERIFIED"
+                # U4 (R-026): both replace routes verified the NVUE hostname against this CSV name.
+                stage = "day0"
+                authorized = _settle_linux_hostname(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user, credential,
+                    args.connect_timeout, local=task.local, strict=strict, policy=policy, apply=True,
+                    authorized=authorized, nvue_verified=True, record=result_record)
                 result_record["replace"]["verdict"] = "REPLACED"
                 result_record["needs_configuration"] = False
                 result_record["outcome"] = "CONFIGURED"
@@ -9971,6 +10069,15 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                     stages["ipv4_readiness"] = "NOT_REQUESTED"
                 if not needs_base:
                     log("  Network SKIP: all required CSV values are present; extra applied settings preserved.")
+                # U4 (R-026): the Linux hostname belongs to Network; both verification paths are done here.
+                stage = "day0"
+                authorized = _settle_linux_hostname(
+                    target, neighbor, ib_eth_user, task.ethernet_password, args.ib_user, credential,
+                    args.connect_timeout, local=task.local, strict=strict, policy=policy, apply=args.apply,
+                    authorized=authorized,
+                    nvue_verified=normalize_name(state.hostname) == normalize_name(target.ib.hostname),
+                    record=result_record)
+                change_needs["linux_hostname"] = (result_record["linux_hostname"] or {}).get("action") == "NEEDS_SET"
                 task_phase("Infra Services")
                 stage = "services"
                 stages[stage] = "RUNNING"
@@ -10016,7 +10123,8 @@ def execute_ib_task(task, args, policy, initial_password, services, keys,
                 # also needs configuration; --apply keeps the v15 formula.
                 result_record["needs_configuration"] = bool(
                     needs_base or (services is not None and not service_skipped)
-                    or (not args.apply and (initial_details.get("needed") is True or key_needed is True)))
+                    or (not args.apply and (initial_details.get("needed") is True or key_needed is True
+                                            or change_needs["linux_hostname"])))
                 result_record["outcome"] = ("CHECK_ONLY" if not args.apply and result_record["needs_configuration"]
                                             else "CONFIGURED" if needs_base else "ALREADY_CONFIGURED")
                 log("  Configuration-stage checks finished; final direct SSH verification follows.")
@@ -11124,6 +11232,7 @@ def _complete_result_fields(record):
     """Close the same result before persistence and before summary consumption."""
     for key, value in {"device_state": "unknown", "existing_configuration": [],
                        "planned_changes": [], "conflicts": [], "needs_change": None, "pending_detached": [],
+                       "linux_hostname": None,
                        "ztp": {"read": False, "service": None, "status": None, "provisioned": None},
                        "config_mode": "patch"}.items():
         record.setdefault(key, value)

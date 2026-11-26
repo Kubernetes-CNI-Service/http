@@ -669,6 +669,11 @@ class WorkerQueueTests(unittest.TestCase):
                 elif command == ("nv", "config", "show", "-o", "commands"):
                     self.assertIn(name, base_calls)
                     body = "".join(shlex.join(item) + "\n" for item in setters)
+                elif command == ("hostname",):
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    self.assertIn(name, base_calls)
+                    body = name + "\n"
                 else:
                     raise AssertionError("unexpected PUBLIC IB operation")
                 return app.SessionResult(f"__HTTP_IB_BEGIN_{nonce}__\n{body}__HTTP_IB_END_{nonce}__=0\n", 0)

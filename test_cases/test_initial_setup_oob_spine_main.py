@@ -479,6 +479,10 @@ class OobSpineMainTests(unittest.TestCase):
                     if "nv config save" in text:
                         configured[dev.hostname] = True
                     return ""
+                if re.search(r"; hostname; task_rc=", text):
+                    # U4 (v3.1.6 D1d, guide 8.11): the closed Linux hostname read after the NVUE
+                    # hostname is verified; this healthy device's Linux name is its NVUE hostname.
+                    return (dev.hostname if configured[dev.hostname] else "nvos") + "\n"
                 if "true" in text and "nv " not in text:
                     return ""
                 if "nv show system ztp" in text:
