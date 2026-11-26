@@ -8,8 +8,10 @@ temporary fixtures; no host key, deployment root, or service is touched.
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -903,6 +905,179 @@ class GenerationReportContract(unittest.TestCase):
         self.assertEqual(["current-release.json"], injected)
         self.assertIsNone(observed)
         self.assertIsNotNone(failure, "inspector accepted records through rebound output symlink")
+
+    # ---- R-035/P053 (v3.1.6 guide WP-NS2 改什么 6 :766-773, 先写的测试 :779-782) ----
+    # A Native management server without a laptop key publishes only the management key; its report
+    # then holds exactly that one record.  Every other state still needs the two ordered records.
+
+    def drop_laptop(self, *, empty: bool) -> None:
+        """No published laptop link, and the project laptop.pub missing or 0 bytes (guide :768)."""
+        (self.published / "laptop.pub").unlink()
+        leaf = self.project / "laptop.pub"
+        if empty:
+            leaf.write_bytes(b"")
+            leaf.chmod(0o644)
+        else:
+            leaf.unlink()
+
+    def restore_laptop(self) -> None:
+        leaf = self.project / "laptop.pub"
+        leaf.write_bytes(self.laptop)
+        leaf.chmod(0o644)
+        link = self.published / "laptop.pub"
+        if not link.is_symlink():
+            link.symlink_to(os.path.relpath(self.pointer / "laptop.pub", self.published))
+
+    def cli(self, helper):
+        """The tool's own inspect CLI; it checks a report by the report's own shape (guide :771)."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = helper.main([
+                    "inspect", str(self.project), "--published-dir", str(self.published),
+                ])
+        except SystemExit as exc:
+            code = exc.code
+        return code, stdout.getvalue() + stderr.getvalue()
+
+    def test_native_single_management_report_is_built_committed_and_inspected(self):
+        management_only = [{
+            "role": "management", "name": "mgmt-server.pub",
+            "algorithm": "ssh-ed25519", "fingerprint": MANAGEMENT_FINGERPRINT,
+        }]
+        for empty in (True, False):
+            with self.subTest(laptop="0-byte" if empty else "missing"):
+                if (self.published / "laptop.pub").is_symlink():
+                    self.drop_laptop(empty=empty)
+                else:
+                    (self.project / "laptop.pub").unlink()
+                helper = report_helper()
+                report = helper.build_report(
+                    self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+                )
+                self.assertEqual(REPORT_KEYS, set(report))
+                self.assertEqual(3, report["schema_version"])
+                self.assertEqual(management_only, report["public_keys"])
+                candidate = helper.prepare_generation_report(
+                    self.project, report, laptop_key_optional=True,
+                )
+                helper.commit_prepared_generation_report(candidate)
+                self.assertEqual(report, json.loads(
+                    (self.output / "generation-report.json").read_text(encoding="utf-8"),
+                ))
+                self.assertEqual(report, helper.inspect_generation_report(
+                    self.project, published_dir=self.published, laptop_key_optional=True,
+                ))
+                code, output = self.cli(helper)
+                self.assertEqual(0, code, output)
+                self.assertIn(f"management: ssh-ed25519 {MANAGEMENT_FINGERPRINT}", output)
+                self.assertNotIn("laptop:", output)
+
+    def test_cli_accepts_an_independent_single_management_report_only_without_a_laptop(self):
+        """The record is written from the guide's shape, not by the producer under test."""
+        helper = report_helper()
+        self.drop_laptop(empty=True)
+        record = {
+            "schema_version": 3, "record_type": "http-v3-public-key-generation-report",
+            "project": "demo", "release_id": self.parent["release_id"],
+            "generated_at": self.parent["generated_at"],
+            "public_keys": [{
+                "role": "management", "name": "mgmt-server.pub",
+                "algorithm": "ssh-ed25519", "fingerprint": MANAGEMENT_FINGERPRINT,
+            }],
+        }
+        (self.output / "generation-report.json").write_text(
+            json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8",
+        )
+        code, output = self.cli(helper)
+        self.assertEqual(0, code, output)
+        self.assertIn(f"management: ssh-ed25519 {MANAGEMENT_FINGERPRINT}", output)
+        # Once a laptop key is published again, the same single record is stale (guide :769).
+        self.restore_laptop()
+        code, output = self.cli(helper)
+        self.assertEqual(2, code, output)
+
+    def test_native_policy_still_requires_two_records_when_a_laptop_is_present(self):
+        helper = report_helper()
+        # (a) the laptop link is still published while the project key is 0 bytes
+        (self.project / "laptop.pub").write_bytes(b"")
+        with self.assertRaises(helper.GenerationReportError):
+            helper.build_report(
+                self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+            )
+        # (b) no link, but the project laptop.pub is non-empty
+        (self.project / "laptop.pub").write_bytes(self.laptop)
+        (self.published / "laptop.pub").unlink()
+        with self.assertRaises(helper.GenerationReportError):
+            helper.build_report(
+                self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+            )
+        # (c) both present: the original two ordered records
+        self.restore_laptop()
+        report = helper.build_report(
+            self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+        )
+        self.assertEqual(
+            [("laptop", LAPTOP_FINGERPRINT), ("management", MANAGEMENT_FINGERPRINT)],
+            [(entry["role"], entry["fingerprint"]) for entry in report["public_keys"]],
+        )
+        self.assertEqual(report, self.build())
+        # (d) a single record cannot pass inspection while the laptop is published
+        self.drop_laptop(empty=True)
+        single = helper.build_report(
+            self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+        )
+        helper.commit_prepared_generation_report(
+            helper.prepare_generation_report(self.project, single, laptop_key_optional=True),
+        )
+        self.restore_laptop()
+        with self.assertRaises(helper.GenerationReportError):
+            helper.inspect_generation_report(
+                self.project, published_dir=self.published, laptop_key_optional=True,
+            )
+
+    def test_policy_false_never_accepts_a_single_management_record(self):
+        helper = report_helper()
+        self.drop_laptop(empty=True)
+        for policy in ({}, {"laptop_key_optional": False}):
+            with self.subTest(policy=policy), self.assertRaises(helper.GenerationReportError):
+                helper.build_report(self.project, self.parent, published_dir=self.published, **policy)
+        single = helper.build_report(
+            self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+        )
+        with self.assertRaises(helper.GenerationReportError):
+            helper.prepare_generation_report(self.project, single)
+        helper.commit_prepared_generation_report(
+            helper.prepare_generation_report(self.project, single, laptop_key_optional=True),
+        )
+        for policy in ({}, {"laptop_key_optional": False}):
+            with self.subTest(inspect=policy), self.assertRaises(helper.GenerationReportError):
+                helper.inspect_generation_report(self.project, published_dir=self.published, **policy)
+
+    def test_native_single_record_is_replaced_once_the_laptop_returns(self):
+        """guide :809 后补有效 laptop 重跑: the old single record is a valid preimage under the policy."""
+        helper = report_helper()
+        self.drop_laptop(empty=False)
+        single = helper.build_report(
+            self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+        )
+        helper.commit_prepared_generation_report(
+            helper.prepare_generation_report(self.project, single, laptop_key_optional=True),
+        )
+        self.restore_laptop()
+        both = helper.build_report(
+            self.project, self.parent, published_dir=self.published, laptop_key_optional=True,
+        )
+        helper.commit_prepared_generation_report(
+            helper.prepare_generation_report(self.project, both, laptop_key_optional=True),
+        )
+        self.assertEqual(both, helper.inspect_generation_report(
+            self.project, published_dir=self.published, laptop_key_optional=True,
+        ))
+        self.assertEqual(2, len(both["public_keys"]))
+        code, output = self.cli(helper)
+        self.assertEqual(0, code, output)
+        self.assertIn(f"laptop: ssh-ed25519 {LAPTOP_FINGERPRINT}", output)
 
 
 if __name__ == "__main__":

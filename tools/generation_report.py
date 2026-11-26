@@ -11,6 +11,11 @@ reconstructs it before services may start.
 
 The report proves only local published public-key identity.  It does not read
 private keys, prove private-key possession, or prove installation on a device.
+
+A Native management server may publish no laptop key (R-035/P053, v3.1.6
+WP-NS2).  Under the caller's laptop_key_optional policy, a project laptop.pub
+that is missing or 0 bytes with no published laptop link yields exactly the
+management record; every other state still needs the two ordered records.
 """
 
 from __future__ import annotations
@@ -83,6 +88,7 @@ class PreparedGenerationReport:
     old_identity: tuple[int, ...] | None
     old_payload_sha256: str | None
     payload_sha256: str
+    laptop_key_optional: bool = False
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int]:
@@ -345,14 +351,23 @@ def _public_key(project: Path, published: Path, name: str) -> tuple[str, str]:
 
 def build_report(
     project: Path, parent: dict[str, Any], *, published_dir: Path,
+    laptop_key_optional: bool = False,
 ) -> dict[str, Any]:
     """Build a report from validated parent and actual same-project published links."""
     project, published = Path(project), Path(published_dir)
     _validate_parent(project, parent)
     _require_directory(published)
+    roles = ROLES
+    if laptop_key_optional and not os.path.lexists(published / ROLES[0][1]):
+        try:
+            laptop = os.lstat(project / ROLES[0][1])
+        except FileNotFoundError:
+            laptop = None
+        if laptop is None or (stat.S_ISREG(laptop.st_mode) and laptop.st_size == 0):
+            roles = ROLES[1:]
     keys = []
     seen: set[tuple[str, str]] = set()
-    for role, name in ROLES:
+    for role, name in roles:
         algorithm, fingerprint = _public_key(project, published, name)
         identity = algorithm, fingerprint
         if identity in seen:
@@ -369,7 +384,9 @@ def build_report(
     }
 
 
-def _validate_report_shape(report: dict[str, Any], project: Path) -> None:
+def _validate_report_shape(
+    report: dict[str, Any], project: Path, *, laptop_key_optional: bool = False,
+) -> None:
     if set(report) != REPORT_FIELDS or type(report.get("schema_version")) is not int:
         raise GenerationReportError("report has unknown or missing fields")
     if report["schema_version"] != 3 or report["record_type"] != RECORD_TYPE:
@@ -389,10 +406,11 @@ def _validate_report_shape(report: dict[str, Any], project: Path) -> None:
     if timestamp.tzinfo is None or timestamp.utcoffset() is None:
         raise GenerationReportError("report timestamp must include timezone")
     keys = report["public_keys"]
-    if not isinstance(keys, list) or len(keys) != 2:
+    roles = ROLES[1:] if laptop_key_optional and isinstance(keys, list) and len(keys) == 1 else ROLES
+    if not isinstance(keys, list) or len(keys) != len(roles):
         raise GenerationReportError("report requires two ordered public keys")
     seen_fingerprints: set[str] = set()
-    for record, (role, name) in zip(keys, ROLES):
+    for record, (role, name) in zip(keys, roles):
         if not isinstance(record, dict) or set(record) != KEY_FIELDS:
             raise GenerationReportError("invalid public key record")
         if record["role"] != role or record["name"] != name:
@@ -435,6 +453,7 @@ def _open_prepared_directory(output: Path, expected: tuple[int, int]) -> int:
 
 def _existing_report_preimage(
     destination: Path, project: Path, *, directory_fd: int | None = None,
+    laptop_key_optional: bool = False,
 ) -> tuple[tuple[int, ...] | None, str | None]:
     """Bind one bounded, validated old record to both its identity and bytes."""
     def named():
@@ -448,7 +467,7 @@ def _existing_report_preimage(
     payload = _read_regular(destination, REPORT_LIMIT, directory_fd=directory_fd)
     assert payload is not None
     old = _decode_record(payload, "existing governed report")
-    _validate_report_shape(old, project)
+    _validate_report_shape(old, project, laptop_key_optional=laptop_key_optional)
     identity = _report_preimage_identity(before)
     if identity != _report_preimage_identity(named()):
         raise GenerationReportError("existing report changed while validating preimage")
@@ -461,11 +480,11 @@ def _existing_report_identity(destination: Path, project: Path) -> tuple[int, ..
 
 
 def prepare_generation_report(
-    project: Path, report: dict[str, Any],
+    project: Path, report: dict[str, Any], *, laptop_key_optional: bool = False,
 ) -> PreparedGenerationReport:
     """Fsync a candidate without publishing it or touching the parent record."""
     project = Path(project)
-    _validate_report_shape(report, project)
+    _validate_report_shape(report, project, laptop_key_optional=laptop_key_optional)
     if not isinstance(report["release_id"], str) or not _RELEASE_RE.fullmatch(report["release_id"]):
         raise GenerationReportError("invalid report release ID")
     if not isinstance(report["generated_at"], str):
@@ -473,7 +492,9 @@ def prepare_generation_report(
     output = _output_directory(project)
     directory_identity = _require_directory(output, project=project)
     destination = output / REPORT_NAME
-    old_identity, old_payload_sha256 = _existing_report_preimage(destination, project)
+    old_identity, old_payload_sha256 = _existing_report_preimage(
+        destination, project, laptop_key_optional=laptop_key_optional,
+    )
     payload = (json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
     if len(payload) > REPORT_LIMIT:
         raise GenerationReportError("report exceeds bound")
@@ -513,6 +534,7 @@ def prepare_generation_report(
             temporary_identity=_report_preimage_identity(observed), old_identity=old_identity,
             old_payload_sha256=old_payload_sha256,
             payload_sha256=hashlib.sha256(payload).hexdigest(),
+            laptop_key_optional=laptop_key_optional,
         )
     except BaseException:
         if temporary_name is not None and temporary_identity is not None:
@@ -559,7 +581,9 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, re
     if _report_preimage_identity(os.lstat(candidate.temporary)) != candidate.temporary_identity:
         raise GenerationReportError("staged report identity changed")
     expected_old = candidate.old_identity, candidate.old_payload_sha256
-    if _existing_report_preimage(candidate.destination, project) != expected_old:
+    optional = candidate.laptop_key_optional
+    if _existing_report_preimage(
+            candidate.destination, project, laptop_key_optional=optional) != expected_old:
         raise GenerationReportError("existing report changed before commit")
     descriptor = _open_prepared_directory(output, candidate.directory_identity)
     try:
@@ -575,7 +599,8 @@ def commit_prepared_generation_report(candidate: PreparedGenerationReport, *, re
         # The last checks use the held parent and occur after the caller's
         # authority callback, not only before obtaining the directory FD.
         if _existing_report_preimage(
-                candidate.destination, project, directory_fd=descriptor) != expected_old:
+                candidate.destination, project, directory_fd=descriptor,
+                laptop_key_optional=optional) != expected_old:
             raise GenerationReportError("existing report changed before commit")
         _require_original_staged_report(candidate, descriptor)
         os.replace(
@@ -643,7 +668,65 @@ def discard_prepared_generation_report(
     return True
 
 
-def inspect_generation_report(project: Path, *, published_dir: Path) -> dict[str, Any]:
+def inspect_published_report_links(
+    project: Path, *, published_dir: Path, laptop_key_optional: bool = False,
+) -> dict[str, Any]:
+    """Check a selected report against its parent and the published link set, not current key bytes.
+
+    Q-106 (owner default (a)): load's freeze-A capture uses this.  The report must be bound to the
+    selected parent and name exactly the keys whose links are published, each through
+    DAY0-Prepare/activate-project to this project's same-name key.  The project key leaves are not read,
+    so a key returned, emptied or rotated since A does not block the rerun that publishes it.
+    """
+    project, published = Path(project), Path(published_dir)
+    output = _output_directory(project)
+    directory_identity = _require_directory(output, project=project)
+    directory_fd = _open_prepared_directory(output, directory_identity)
+    try:
+        parent_payload = _read_regular(
+            output / PARENT_NAME, PARENT_LIMIT, directory_fd=directory_fd,
+        )
+        assert parent_payload is not None
+        parent = _decode_record(parent_payload, "parent release")
+        _validate_parent(project, parent)
+        report_payload = _read_regular(
+            output / REPORT_NAME, REPORT_LIMIT, directory_fd=directory_fd,
+        )
+        assert report_payload is not None
+        report = _decode_record(report_payload, "governed report")
+        _validate_report_shape(report, project, laptop_key_optional=laptop_key_optional)
+        if (report["release_id"], report["generated_at"]) != (parent["release_id"], parent["generated_at"]):
+            raise GenerationReportError("report is stale relative to parent or published keys")
+        _require_directory(published)
+        try:
+            selected = active_project_dir(project.parent.parent)
+        except ActiveProjectPointerError as exc:
+            raise GenerationReportError(f"active project pointer is invalid: {exc}") from exc
+        reported = {record["name"] for record in report["public_keys"]}
+        for _role, name in ROLES:
+            link = published / name
+            if name not in reported:
+                if os.path.lexists(link):
+                    raise GenerationReportError(f"published key is not in the report: {name}")
+                continue
+            try:
+                target = os.readlink(link)
+            except OSError as exc:
+                raise GenerationReportError(f"published key missing or unreadable: {name}") from exc
+            target_path = Path(os.path.normpath(os.path.join(published, target)))
+            if (target_path != project.parent.absolute() / "activate-project" / name
+                    or selected != Path(os.path.realpath(project))):
+                raise GenerationReportError(f"published key targets another project or role: {name}")
+        if _identity(os.lstat(output)) != directory_identity:
+            raise GenerationReportError("report output directory rebound during inspection")
+        return report
+    finally:
+        os.close(directory_fd)
+
+
+def inspect_generation_report(
+    project: Path, *, published_dir: Path, laptop_key_optional: bool = False,
+) -> dict[str, Any]:
     """Read only the governed path and reject any parent/key/report mismatch."""
     project = Path(project)
     output = _output_directory(project)
@@ -661,8 +744,11 @@ def inspect_generation_report(project: Path, *, published_dir: Path) -> dict[str
         )
         assert report_payload is not None
         report = _decode_record(report_payload, "governed report")
-        _validate_report_shape(report, project)
-        expected = build_report(project, parent, published_dir=published_dir)
+        _validate_report_shape(report, project, laptop_key_optional=laptop_key_optional)
+        expected = build_report(
+            project, parent, published_dir=published_dir,
+            laptop_key_optional=laptop_key_optional,
+        )
         if report != expected:
             raise GenerationReportError("report is stale relative to parent or published keys")
         if _identity(os.lstat(output)) != directory_identity:
@@ -684,7 +770,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        report = inspect_generation_report(args.project, published_dir=args.published_dir)
+        # The CLI has no host role: it checks the report by its own shape.  The single management record
+        # passes only while no laptop key is published; otherwise the two ordered records are required.
+        report = inspect_generation_report(
+            args.project, published_dir=args.published_dir, laptop_key_optional=True,
+        )
     except GenerationReportError as exc:
         parser.exit(2, f"generation report invalid: {exc}\n")
     if args.json:

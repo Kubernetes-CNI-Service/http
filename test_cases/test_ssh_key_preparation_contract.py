@@ -1437,5 +1437,425 @@ class LPLinkedLaptopKeyConfigOnlyPreflightContract(unittest.TestCase):
                 self.assertEqual([], sorted(ssh.iterdir()))
 
 
+# R-035/P053 (v3.1.6 guide WP-NS2 :752-755): the exact operator line when a Native load has no laptop key.
+NATIVE_NO_LAPTOP_LOAD_LINE = (
+    "[KEY] 本项目没有电脑公钥 laptop.pub：本次只发布管理服务器公钥；"
+    "之后放入有效的电脑公钥并重跑 load 即会发布"
+)
+# R-035/P053 (guide :764): the strict-setup warning for a missing or 0-byte laptop.pub in the Native mode.
+NATIVE_NO_LAPTOP_SETUP_WARNING = "未提供电脑公钥，本次只发布管理服务器公钥"
+
+
+def disposable_server_pair(ssh: Path) -> bytes:
+    """A throwaway Ed25519 pair in a private ssh dir (the original fixture shape); returns its public line."""
+    ssh.mkdir(parents=True, mode=0o700)
+    subprocess.run(
+        ["/usr/bin/ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+         "-C", "root@management-server", "-f", str(ssh / "id_ed25519")],
+        check=True, capture_output=True,
+    )
+    (ssh / "id_ed25519.pub").chmod(0o644)
+    return (ssh / "id_ed25519.pub").read_bytes()
+
+
+def native_project(path: Path, *, laptop: bytes | None, management: bytes = b"") -> Path:
+    """Project keys as a management-server clone has them: marker, management placeholder, maybe laptop."""
+    path.mkdir(mode=0o700)
+    marker = path / ".management-pubkeys"
+    marker.write_bytes(b"mgmt-server.pub\n")
+    marker.chmod(0o644)
+    placeholder = path / "mgmt-server.pub"
+    placeholder.write_bytes(management)
+    placeholder.chmod(0o644)
+    if laptop is not None:
+        leaf = path / "laptop.pub"
+        leaf.write_bytes(laptop)
+        leaf.chmod(0o644)
+    return path
+
+
+class NativeLaptopOptionalLoadContract(unittest.TestCase):
+    """R-035/P053: only the explicit Native management policy may load without a laptop key.
+
+    Expectations: guide WP-NS2 改什么 1-2 (:743-755) and 先写的测试 (:770-774).  Missing, or a qualified
+    0-byte laptop.pub, publishes the management key alone; every other refusal stays as it was, and the
+    policy is False for every other caller.  Public keys are hand-made vectors; the management pair is
+    a disposable private fixture; no real HOME is read.
+    """
+
+    def run_prepare(self, loader, project: Path, ssh: Path, **policy):
+        narration = io.StringIO()
+        with redirect_stdout(narration):
+            result = loader.prepare_pubkeys(
+                project, ssh_dir=ssh, dry_run=False, inject_management_key=True,
+                allow_management_key_generation=False, **policy,
+            )
+        return result, narration.getvalue()
+
+    def test_missing_or_empty_laptop_publishes_only_the_management_key(self):
+        loader = load_module("ns2_native_policy_accept")
+        for label, payload in (("missing", None), ("empty", b"")):
+            with self.subTest(laptop=label), tempfile.TemporaryDirectory(prefix=f"ns2-{label}-") as temporary:
+                root = Path(temporary).resolve()
+                server = disposable_server_pair(root / "server-home/.ssh")
+                project = native_project(root / "project", laptop=payload)
+                laptop = project / "laptop.pub"
+                before = laptop.stat() if payload is not None else None
+                result, narration = self.run_prepare(
+                    loader, project, root / "server-home/.ssh", laptop_key_optional=True,
+                )
+                # guide :753 返回名单只含合格的非空 key（至少有 management）
+                self.assertEqual((project / "mgmt-server.pub",), result)
+                self.assertEqual(server, (project / "mgmt-server.pub").read_bytes())
+                # guide :755 the exact operator line
+                self.assertIn(NATIVE_NO_LAPTOP_LOAD_LINE, narration)
+                self.assertNotIn("设备只接受", narration)
+                if before is None:
+                    self.assertFalse(os.path.lexists(laptop))
+                else:
+                    after = laptop.stat()
+                    self.assertEqual(b"", laptop.read_bytes())
+                    self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+
+    def test_valid_distinct_laptop_still_publishes_both_keys(self):
+        loader = load_module("ns2_native_policy_two")
+        with tempfile.TemporaryDirectory(prefix="ns2-two-") as temporary:
+            root = Path(temporary).resolve()
+            disposable_server_pair(root / "server-home/.ssh")
+            laptop_key = public_line("ssh-ed25519", 121, "laptop")
+            project = native_project(root / "project", laptop=laptop_key)
+            result, narration = self.run_prepare(
+                loader, project, root / "server-home/.ssh", laptop_key_optional=True,
+            )
+            self.assertEqual((project / "laptop.pub", project / "mgmt-server.pub"), result)
+            self.assertEqual(laptop_key, (project / "laptop.pub").read_bytes())
+            self.assertNotIn(NATIVE_NO_LAPTOP_LOAD_LINE, narration)
+
+    def test_policy_keeps_every_other_refusal(self):
+        """guide :751-752, :771: bad laptop/other *.pub, management half/marker/placeholder, unsafe leaves."""
+        loader = load_module("ns2_native_policy_refusals")
+
+        def same_blob(root, project, server):
+            fields = server.split()
+            (project / "laptop.pub").write_bytes(fields[0] + b" " + fields[1] + b" another-comment\n")
+
+        def laptop_bytes(payload):
+            return lambda root, project, server: (project / "laptop.pub").write_bytes(payload)
+
+        def extra(payload):
+            return lambda root, project, server: (project / "extra.pub").write_bytes(payload)
+
+        def marker(root, project, server):
+            (project / ".management-pubkeys").write_bytes(b"other.pub\n")
+
+        def foreign_placeholder(root, project, server):
+            (project / "mgmt-server.pub").write_bytes(public_line("ssh-ed25519", 122, "other-server"))
+
+        def placeholder_mode(root, project, server):
+            (project / "mgmt-server.pub").chmod(0o600)
+
+        def half_pair(root, project, server):
+            (root / "server-home/.ssh/id_ed25519.pub").unlink()
+
+        def laptop_mode(root, project, server):
+            (project / "laptop.pub").write_bytes(b"")
+            (project / "laptop.pub").chmod(0o600)
+
+        def laptop_symlink(root, project, server):
+            (root / "elsewhere.pub").write_bytes(b"")
+            (project / "laptop.pub").symlink_to(root / "elsewhere.pub")
+
+        def laptop_hardlink(root, project, server):
+            (project / "laptop.pub").write_bytes(b"")
+            (project / "laptop.pub").chmod(0o644)
+            os.link(project / "laptop.pub", root / "second-name")
+
+        def laptop_fifo(root, project, server):
+            os.mkfifo(project / "laptop.pub", 0o644)
+
+        def laptop_directory(root, project, server):
+            (project / "laptop.pub").mkdir(mode=0o755)
+
+        cases = {
+            "same-blob-other-comment": same_blob,
+            "malformed-nonempty": laptop_bytes(b"ssh-ed25519 invalid!!!\n"),
+            "whitespace-only": laptop_bytes(b" \n"),
+            "other-pub-malformed": extra(b"ssh-ed25519 invalid!!!\n"),
+            "other-pub-empty": extra(b""),
+            "management-marker": marker,
+            "management-placeholder-foreign": foreign_placeholder,
+            "management-placeholder-mode": placeholder_mode,
+            "management-half-pair": half_pair,
+            "laptop-mode": laptop_mode,
+            "laptop-symlink": laptop_symlink,
+            "laptop-hardlink": laptop_hardlink,
+            "laptop-fifo": laptop_fifo,
+            "laptop-directory": laptop_directory,
+        }
+        for label, mutate in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix=f"ns2-{label}-") as temporary:
+                root = Path(temporary).resolve()
+                server = disposable_server_pair(root / "server-home/.ssh")
+                project = native_project(root / "project", laptop=None)
+                mutate(root, project, server)
+                for leaf in project.glob("*.pub"):
+                    if leaf.is_file() and not leaf.is_symlink() and label not in (
+                            "laptop-mode", "management-placeholder-mode"):
+                        leaf.chmod(0o644)
+                placeholder_before = (project / "mgmt-server.pub").read_bytes()
+                with self.assertRaises(loader.LoadError):
+                    self.run_prepare(loader, project, root / "server-home/.ssh", laptop_key_optional=True)
+                # zero publication: the management placeholder is never written on a refusal
+                self.assertEqual(placeholder_before, (project / "mgmt-server.pub").read_bytes())
+
+    def test_policy_false_callers_keep_the_original_missing_or_empty_refusal(self):
+        """guide :745: workstation, configuration preflight, Supervisor and direct callers default to False."""
+        loader = load_module("ns2_native_policy_false")
+        for label, payload in (("missing", None), ("empty", b"")):
+            for policy in ({}, {"laptop_key_optional": False}):
+                with self.subTest(laptop=label, policy=policy), \
+                        tempfile.TemporaryDirectory(prefix=f"ns2-false-{label}-") as temporary:
+                    root = Path(temporary).resolve()
+                    disposable_server_pair(root / "server-home/.ssh")
+                    project = native_project(root / "project", laptop=payload)
+                    with self.assertRaises(loader.LoadError):
+                        self.run_prepare(loader, project, root / "server-home/.ssh", **policy)
+                    self.assertEqual(b"", (project / "mgmt-server.pub").read_bytes())
+        # The configuration-only preflight keeps its own rule (guide :745 _prepare_pubkeys_without_management_
+        # injection): a missing laptop.pub with an empty management placeholder stays refused, policy or not.
+        with self.subTest(path="configuration-only"), \
+                tempfile.TemporaryDirectory(prefix="ns2-config-missing-") as temporary:
+            root = Path(temporary).resolve()
+            project = native_project(root / "project", laptop=None)
+            with redirect_stdout(io.StringIO()), self.assertRaises(loader.LoadError):
+                loader.prepare_pubkeys(
+                    project, ssh_dir=root / "absent", dry_run=False, inject_management_key=False,
+                    allow_management_key_generation=False, laptop_key_optional=True,
+                )
+
+    def test_native_validate_inputs_hands_the_policy_to_the_key_gate(self):
+        """guide :743-744: validate_inputs carries the policy to prepare_pubkeys; the key gate is not mocked."""
+        loader = load_module("ns2_native_validate_inputs")
+        with tempfile.TemporaryDirectory(prefix="ns2-validate-inputs-") as temporary:
+            root = Path(temporary).resolve()
+            ssh = root / "server-home/.ssh"
+            server = disposable_server_pair(ssh)
+            project = native_project(root / "project", laptop=b"")
+            for name in ("01-global.yaml", "02-devices_config.csv", "02-dhcp-subnet_config.csv", "p2p.xlsx"):
+                (project / name).write_bytes(name.encode("ascii") + b"\n")
+            settings = SimpleNamespace(schema_version=1, http_enabled=False)
+            args = SimpleNamespace(
+                mini=None, no_upgrade=True, p2p_file=None, deployment_scope="all", switch_scope="all",
+                ssh_dir=ssh, dry_run=False,
+            )
+            outcomes = {}
+            for policy in ({"laptop_key_optional": True}, {}):
+                with mock.patch.object(loader, "_load_global_document", return_value={}), \
+                     mock.patch.object(loader, "load_global", return_value=settings), \
+                     mock.patch.object(loader, "find_placeholder_password_sections", return_value=()), \
+                     mock.patch.object(loader, "apply_subnet_service_ips", return_value=settings), \
+                     mock.patch.object(loader, "load_device_types", return_value=frozenset()), \
+                     mock.patch.object(loader, "select_p2p", return_value=project / "p2p.xlsx"), \
+                     mock.patch.object(loader, "validate_subnet_file"), \
+                     mock.patch.object(loader, "project_air_topology_policy", return_value=None), \
+                     mock.patch.object(loader, "project_mini_air_devices", return_value=(None, None)), \
+                     mock.patch.object(loader, "validate_shared_artifact_receipts"), \
+                     mock.patch.object(loader, "runtime_os", return_value="Linux"), \
+                     redirect_stdout(io.StringIO()):
+                    try:
+                        inputs, _images = loader.validate_inputs(
+                            project, args, allow_management_key_generation=False,
+                            host_role="management-server", **policy,
+                        )
+                    except loader.LoadError as exc:
+                        outcomes[bool(policy)] = exc
+                    else:
+                        outcomes[bool(policy)] = inputs.pubkeys
+            self.assertEqual((project / "mgmt-server.pub",), outcomes[True])
+            self.assertEqual(server, (project / "mgmt-server.pub").read_bytes())
+            self.assertIsInstance(outcomes[False], loader.LoadError)
+
+
+class NativeDelegatedSetupContract(unittest.TestCase):
+    """R-035/P053 setup side (guide WP-NS2 改什么 3-4 :756-764, 先写的测试 :775-778).
+
+    A new exact HTTP_SETUP_KEY_MODE value ``server-delegated-native`` lets load's Native child go on
+    without a laptop key; ``server-delegated`` stays as it is; an unknown value, a contradicting role or
+    no inherited lock is refused as before.  Every HOME, project and lock is private.
+    """
+
+    def invoke(self, setup, root: Path, project: Path, home: Path, *, key_mode: str | None,
+               role: str = "management-server", inherited_fd: bool = True,
+               strict_inputs: bool = False) -> tuple[str, int, str]:
+        """Real setup.main; the first P2P selection is the sentinel unless strict_inputs lets step 1 run."""
+        class BeforeP2p(Exception):
+            pass
+
+        def select(_project, *, plan_only=False):
+            if strict_inputs and plan_only:
+                return str(project / "p2p.xlsx")
+            raise BeforeP2p()
+
+        lock_path = root / ".deployment.lock"
+        lock_path.touch(mode=0o600)
+        parent_fd = child_fd = None
+        if inherited_fd:
+            parent_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+            fcntl.flock(parent_fd, fcntl.LOCK_EX)
+            child_fd = os.dup(parent_fd)
+        environment = {"HOME": str(home)}
+        if key_mode is not None:
+            environment["HTTP_SETUP_KEY_MODE"] = key_mode
+        if child_fd is not None:
+            environment["HTTP_DEPLOYMENT_LOCK_FD"] = str(child_fd)
+        narration = io.StringIO()
+        try:
+            with mock.patch.dict(os.environ, environment), \
+                 mock.patch("platform.system", return_value="Linux"), \
+                 mock.patch.object(setup, "HTTP_BASE", str(root)), \
+                 mock.patch.object(setup, "HERE", str(root)), \
+                 mock.patch.object(setup, "stop_native_ztp_monitors"), \
+                 mock.patch.object(setup, "_initialize_project_from_template"), \
+                 mock.patch.object(setup, "_prepare_laptop_public_key",
+                                   side_effect=AssertionError("a delegated child never reads its own HOME key")), \
+                 mock.patch.object(setup, "_select_p2p_source", side_effect=select) as p2p, \
+                 mock.patch.object(setup, "_validate_xlsx", return_value=([], [])), \
+                 mock.patch.dict(setup.deployment_lock.__globals__, {"assert_writer_allowed": lambda **_kw: None}), \
+                 redirect_stdout(narration):
+                if child_fd is None:
+                    os.environ.pop("HTTP_DEPLOYMENT_LOCK_FD", None)
+                if key_mode is None:
+                    os.environ.pop("HTTP_SETUP_KEY_MODE", None)
+                try:
+                    result = setup.main(["-y", "--strict", "--no-upgrade", "--confirm-project-switch",
+                                         f"--host-role={role}", str(project)])
+                except BeforeP2p:
+                    outcome = "before-p2p"
+                except SystemExit as exc:
+                    outcome = f"exit:{exc.code}"
+                else:
+                    outcome = f"return:{result}"
+            calls = [call for call in p2p.call_args_list if not (strict_inputs and call.kwargs.get("plan_only"))]
+            return outcome, len(calls), narration.getvalue()
+        finally:
+            if child_fd is not None:
+                try:
+                    os.close(child_fd)
+                except OSError:
+                    pass  # A real child closes its own copy of the lock FD.
+            if parent_fd is not None:
+                fcntl.flock(parent_fd, fcntl.LOCK_UN)
+                os.close(parent_fd)
+
+    def fixture(self, root: Path, *, laptop: bytes | None):
+        (root / "infra").mkdir()
+        home = root / "server-home"
+        (home / ".ssh").mkdir(parents=True, mode=0o700)
+        server = public_line("ssh-ed25519", 82, "server")
+        project = root / "project"
+        project.mkdir(mode=0o700)
+        # strict step 1 also checks the common section, so the URL prefix is declared (template shape)
+        (project / "01-global.yaml").write_text(
+            "common:\n  mgmt:\n    dhcp-server:\n      status: disabled\n"
+            "    ztp:\n      status: disabled\n      ztp_url_prefix: /ztp\n", encoding="utf-8",
+        )
+        (project / "02-dhcp-subnet_config.csv").write_text(
+            "shared_network,subnet,netmask,range_start,range_end,routers,"
+            "ztp_service_ip,cumulus_profile,nvos_ztp\n", encoding="utf-8",
+        )
+        (project / "p2p.xlsx").write_bytes(b"synthetic workbook placeholder\n")
+        (project / ".management-pubkeys").write_bytes(b"mgmt-server.pub\n")
+        (project / "mgmt-server.pub").write_bytes(server)
+        if laptop is not None:
+            (project / "laptop.pub").write_bytes(laptop)
+        return home, project, server
+
+    def test_native_mode_reaches_p2p_once_without_a_laptop_key(self):
+        setup = setup_module("ns2_native_setup_accept")
+        for label, payload in (("missing", None), ("empty", b""),
+                               ("valid-distinct", public_line("ssh-ed25519", 81, "laptop"))):
+            with self.subTest(laptop=label), tempfile.TemporaryDirectory(prefix=f"ns2-setup-{label}-") as temporary:
+                root = Path(temporary).resolve()
+                home, project, server = self.fixture(root, laptop=payload)
+                outcome, p2p_calls, _narration = self.invoke(
+                    setup, root, project, home, key_mode="server-delegated-native",
+                )
+                self.assertEqual("before-p2p", outcome)
+                self.assertEqual(1, p2p_calls)
+                self.assertEqual(payload, (project / "laptop.pub").read_bytes()
+                                 if (project / "laptop.pub").exists() else None)
+                self.assertEqual(server, (project / "mgmt-server.pub").read_bytes())
+
+    def test_native_mode_keeps_management_and_nonempty_laptop_checks(self):
+        setup = setup_module("ns2_native_setup_refuse")
+        cases = {
+            "malformed": (b"ssh-ed25519 invalid!!!\n", None),
+            "whitespace-only": (b" \n", None),
+            "same-as-management": (public_line("ssh-ed25519", 82, "server"), None),
+            "management-missing": (None, "missing"),
+            "management-malformed": (None, b"ssh-ed25519 invalid!!!\n"),
+        }
+        for label, (laptop, management) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory(prefix=f"ns2-setup-{label}-") as temporary:
+                root = Path(temporary).resolve()
+                home, project, _server = self.fixture(root, laptop=laptop)
+                if management == "missing":
+                    (project / "mgmt-server.pub").unlink()
+                elif management is not None:
+                    (project / "mgmt-server.pub").write_bytes(management)
+                outcome, p2p_calls, _narration = self.invoke(
+                    setup, root, project, home, key_mode="server-delegated-native",
+                )
+                self.assertIn(outcome, ("exit:1", "return:1"))
+                self.assertEqual(0, p2p_calls)
+
+    def test_original_mode_unchanged_and_new_mode_needs_role_and_lock(self):
+        setup = setup_module("ns2_native_setup_modes")
+        cases = (
+            ("server-delegated", "management-server", True, b""),
+            ("server-delegated", "management-server", True, None),
+            ("server-delegated-native", "workstation", True, b""),
+            ("server-delegated-native", "management-server", False, b""),
+            ("server-delegated-nativ", "management-server", True, b""),
+            ("SERVER-DELEGATED-NATIVE", "management-server", True, b""),
+        )
+        for key_mode, role, inherited_fd, laptop in cases:
+            with self.subTest(mode=key_mode, role=role, lock=inherited_fd, laptop=laptop), \
+                    tempfile.TemporaryDirectory(prefix="ns2-setup-mode-") as temporary:
+                root = Path(temporary).resolve()
+                home, project, _server = self.fixture(root, laptop=laptop)
+                outcome, p2p_calls, _narration = self.invoke(
+                    setup, root, project, home, key_mode=key_mode, role=role, inherited_fd=inherited_fd,
+                )
+                self.assertIn(outcome, ("exit:1", "return:1"))
+                self.assertEqual(0, p2p_calls)
+
+    def test_native_strict_step_one_warns_instead_of_counting_an_error(self):
+        """guide :764: strict records the missing/0-byte laptop.pub as a warning, not an error."""
+        setup = setup_module("ns2_native_setup_strict")
+        for label, payload in (("missing", None), ("empty", b"")):
+            with self.subTest(laptop=label), tempfile.TemporaryDirectory(prefix=f"ns2-strict-{label}-") as temporary:
+                root = Path(temporary).resolve()
+                home, project, _server = self.fixture(root, laptop=payload)
+                outcome, p2p_calls, narration = self.invoke(
+                    setup, root, project, home, key_mode="server-delegated-native", strict_inputs=True,
+                )
+                # step 1 passed strict validation and reached step 2's real P2P selection
+                self.assertEqual("before-p2p", outcome, narration)
+                self.assertEqual(1, p2p_calls)
+                self.assertIn(NATIVE_NO_LAPTOP_SETUP_WARNING, narration)
+                self.assertNotIn("laptop.pub 大小为 0（占位文件）", narration)
+        with tempfile.TemporaryDirectory(prefix="ns2-strict-other-empty-") as temporary:
+            root = Path(temporary).resolve()
+            home, project, _server = self.fixture(root, laptop=b"")
+            (project / "extra.pub").write_bytes(b"")
+            outcome, p2p_calls, narration = self.invoke(
+                setup, root, project, home, key_mode="server-delegated-native", strict_inputs=True,
+            )
+            # other empty *.pub keep the original strict rule (guide :764 其它空 *.pub 的规则不变)
+            self.assertEqual("exit:2", outcome, narration)
+            self.assertIn("extra.pub 大小为 0（占位文件）", narration)
+
+
 if __name__ == "__main__":
     unittest.main()

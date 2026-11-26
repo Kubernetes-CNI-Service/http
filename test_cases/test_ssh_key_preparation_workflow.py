@@ -20,7 +20,8 @@ import unittest
 from unittest import mock
 
 from test_cases.test_ssh_key_preparation_contract import (
-    extended_public_line, fingerprint, public_line,
+    NATIVE_NO_LAPTOP_LOAD_LINE, disposable_server_pair, extended_public_line, fingerprint,
+    native_project, public_line,
 )
 
 
@@ -1392,6 +1393,104 @@ class SshKeyPreparationWorkflow(unittest.TestCase):
             self.assertIn("project-placeholder-held", stages)
             self.assertEqual(old, outside.read_bytes())
             self.assertTrue(target.is_symlink())
+
+
+class NativeNoLaptopKeyLifecycleWorkflow(unittest.TestCase):
+    """R-035/P053 lifecycle (v3.1.6 guide WP-NS2 workflow 2 :790-792): real load key gate, real setup links.
+
+    two keys -> laptop.pub becomes 0 bytes -> rerun: the tool's old laptop links go, the management links stay,
+    a laptop link this tool did not make (its text is not the pointer target) stays with a WARN -> a valid
+    laptop key returns -> rerun restores all four directories -> a third rerun changes nothing.
+    """
+
+    DIRECTORIES = ("ztp/config/publickey", "ethernet/publickey", "infiniband/publickey", "nvlink/publickey")
+
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory(prefix="ns2-key-lifecycle-")
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name).resolve()
+        (self.root / "DAY0-Prepare").mkdir()
+        self.laptop_key = public_line("ssh-ed25519", 131, "laptop")
+        self.project = native_project(self.root / "DAY0-Prepare/demo", laptop=self.laptop_key)
+        self.pointer = self.root / "DAY0-Prepare/activate-project"
+        self.pointer.symlink_to("demo")
+        self.ssh = self.root / "server-home/.ssh"
+        self.server = disposable_server_pair(self.ssh)
+        self.loader = load_script("ns2_lifecycle_load", LOAD_PATH)
+        self.setup = load_script("ns2_lifecycle_setup", SETUP_PATH)
+
+    def rerun(self) -> tuple[tuple[Path, ...], str]:
+        """One load key gate (Native policy) followed by setup's real four-directory publication."""
+        narration = io.StringIO()
+        with redirect_stdout(narration):
+            pubkeys = self.loader.prepare_pubkeys(
+                self.project, ssh_dir=self.ssh, dry_run=False, inject_management_key=True,
+                allow_management_key_generation=False, laptop_key_optional=True,
+            )
+            with mock.patch.multiple(self.setup, HTTP_BASE=str(self.root), ZTP=str(self.root / "ztp"),
+                                     _DRY_RUN=False, _AUTO_YES=True, _LINK_ERRORS=0):
+                self.setup._process_pubkeys(str(self.project))
+        return pubkeys, narration.getvalue()
+
+    def links(self) -> dict[str, tuple[str, int]]:
+        found = {}
+        for directory in self.DIRECTORIES:
+            for item in sorted((self.root / directory).iterdir()):
+                found[f"{directory}/{item.name}"] = (os.readlink(item), os.lstat(item).st_ino)
+        return found
+
+    def canonical(self, directory: str, name: str) -> str:
+        # R-016 §3.2: relpath(DAY0-Prepare/activate-project/<key>, the key directory)
+        return os.path.relpath(self.pointer / name, self.root / directory)
+
+    def test_laptop_key_removed_then_restored_across_reruns(self):
+        pubkeys, _ = self.rerun()
+        self.assertEqual((self.project / "laptop.pub", self.project / "mgmt-server.pub"), pubkeys)
+        first = self.links()
+        self.assertEqual(
+            {f"{directory}/{name}" for directory in self.DIRECTORIES for name in ("laptop.pub", "mgmt-server.pub")},
+            set(first),
+        )
+        for key, (text, _inode) in first.items():
+            directory, name = key.rsplit("/", 1)
+            self.assertEqual(self.canonical(directory, name), text)
+
+        # laptop.pub becomes 0 bytes; one directory holds a laptop link this tool did not make
+        (self.project / "laptop.pub").write_bytes(b"")
+        foreign = self.root / "ethernet/publickey/laptop.pub"
+        foreign.unlink()
+        foreign.symlink_to("../../operator-keys/laptop.pub")
+        pubkeys, narration = self.rerun()
+        self.assertEqual((self.project / "mgmt-server.pub",), pubkeys)
+        self.assertIn(NATIVE_NO_LAPTOP_LOAD_LINE, narration)
+        second = self.links()
+        for directory in self.DIRECTORIES:
+            management = f"{directory}/mgmt-server.pub"
+            self.assertEqual(first[management], second[management], "the management link is untouched")
+        self.assertEqual(
+            {"ethernet/publickey/laptop.pub"},
+            {key for key in second if key.endswith("/laptop.pub")},
+            "only the foreign laptop link survives",
+        )
+        self.assertEqual("../../operator-keys/laptop.pub", os.readlink(foreign))
+        warned = [line for line in narration.splitlines() if "ethernet/publickey/laptop.pub" in line]
+        self.assertTrue(any("WARN" in line for line in warned), narration)
+
+        # a valid laptop key returns: the four directories are restored, then a rerun changes nothing
+        (self.project / "laptop.pub").write_bytes(self.laptop_key)
+        pubkeys, _ = self.rerun()
+        self.assertEqual((self.project / "laptop.pub", self.project / "mgmt-server.pub"), pubkeys)
+        third = self.links()
+        self.assertEqual(set(first), set(third))
+        for key, (text, _inode) in third.items():
+            directory, name = key.rsplit("/", 1)
+            self.assertEqual(self.canonical(directory, name), text)
+        for directory in self.DIRECTORIES:
+            management = f"{directory}/mgmt-server.pub"
+            self.assertEqual(first[management], third[management])
+        self.rerun()
+        self.assertEqual(third, self.links(), "the third rerun is a no-op")
+        self.assertEqual(self.server, (self.project / "mgmt-server.pub").read_bytes())
 
 
 if __name__ == "__main__":

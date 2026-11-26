@@ -65,6 +65,10 @@ Native 管理服务器上的实际 load 以 root 运行（普通用户加 `sudo`
   实际和期望的 uid:gid，并给出 `sudo chown` 命令。
 - 本次 load 从模板新建的项目条目（含新项目目录和 `laptop.pub` 空占位）交给操作员；root 私有状态
   （如 `99-output-backup`、`99-output-ztp/generations`、`99-output-ztp/rollback-receipts`）保持 root。
+- 直接在管理服务器上 clone 后 load（v3.1.6 R-035）：项目 `laptop.pub` 可以缺失或为 0 字节，load 打印
+  `[KEY] 本项目没有电脑公钥 laptop.pub：…`，本次只发布管理服务器公钥，公钥报告只记 management 一条；
+  非空的 `laptop.pub` 仍须是有效公钥且与管理服务器公钥不同；以后放入有效的电脑公钥并重跑 load 即会发布。
+  设备上原有的 authorized_keys 不受影响。Docker/Supervisor 与 workstation 不变。
 - `~/.ssh` 是共用目录：load 准备公钥期间别的用户在里面新建文件或 touch 它，load 不再中止；
   key 文件内容变化或目录被换掉仍会中止（I-014）。
 - 加锁失败分四类报：被另一个 load 或人工操作占用、打不开锁（如没有权限）、锁文件异常、finish 事务未完成。

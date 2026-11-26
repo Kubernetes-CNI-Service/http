@@ -1297,6 +1297,7 @@ def run(
     inherited_lock_descriptor: int | None = None,
     setup_key_context: bool | None = None,
     expected_global_sha256: str | None = None,
+    laptop_key_optional: bool = False,
 ) -> None:
     display = " ".join(shlex_quote(item) for item in command)
     if dry_run:
@@ -1318,7 +1319,11 @@ def run(
         if setup_key_context:
             if inherited_lock_descriptor is None:
                 raise LoadError("server-delegated setup requires the deployment lock FD")
-            child_env["HTTP_SETUP_KEY_MODE"] = "server-delegated"
+            # R-035/P053 (v3.1.6 WP-NS2): only the Native management load's child may go on without a
+            # laptop key; it is a separate exact value, so the original mode keeps its meaning.
+            child_env["HTTP_SETUP_KEY_MODE"] = (
+                "server-delegated-native" if laptop_key_optional else "server-delegated"
+            )
         child_kwargs["env"] = child_env
     result = _run_subprocess(command, cwd=cwd, **child_kwargs)
     if result.returncode != 0:
@@ -3336,12 +3341,18 @@ def prepare_pubkeys(
     inject_management_key: bool = True,
     allow_management_key_generation: bool,
     identity: operator_identity.Resolution | None = None,
+    laptop_key_optional: bool = False,
 ) -> tuple[Path, ...]:
     """Inject the management public key into the held project placeholder.
 
     identity: the load's operator (I-006 WP-5).  The project directory, its key leaves and the operator's
     ~/.ssh compare with the operator's (uid, pw_gid) (问题文档 I-006 方案第 2 条; O9).  None keeps the
     euid/egid authority (the Docker supervisor and direct callers, Docker frozen).
+
+    laptop_key_optional: True only for a Native management-server load (main decides it; R-035/P053,
+    v3.1.6 WP-NS2).  A missing laptop.pub, or one that passes the same leaf qualification and holds exactly
+    0 bytes, is then "no laptop key": it is not returned and only the management key is published.  Every
+    other key keeps its strict checks.  The configuration-only path never reads it.
     """
     if type(allow_management_key_generation) is not bool:
         raise LoadError("allow_management_key_generation 必须是 literal bool")
@@ -3381,7 +3392,7 @@ def prepare_pubkeys(
             name for name in os.listdir(project_directory.descriptor)
             if name.endswith(".pub") and name != MANAGEMENT_PUBKEY_NAME
         )
-        if not pub_names:
+        if not pub_names and not laptop_key_optional:
             raise LoadError("项目必须至少包含一个非空 *.pub（例如模板中的电脑公钥）")
         for name in pub_names:
             static_leaves.append(_open_management_leaf(
@@ -3390,11 +3401,25 @@ def prepare_pubkeys(
                 label=f"项目公钥 {name}",
                 mode=0o644,
             ))
-        static = [project / leaf.name for leaf in static_leaves]
+        # A held 0-byte laptop leaf stays in static_leaves, so it is revalidated like every other leaf.
+        no_laptop_key = laptop_key_optional and not any(
+            leaf.name == LAPTOP_PUBKEY_NAME and leaf.payload for leaf in static_leaves
+        )
+        keyed_leaves = [
+            leaf for leaf in static_leaves
+            if not (no_laptop_key and leaf.name == LAPTOP_PUBKEY_NAME)
+        ]
+        static = [project / leaf.name for leaf in keyed_leaves]
         static_identities = {
             _parse_held_project_public_identity(leaf.payload, leaf.label)
-            for leaf in static_leaves
+            for leaf in keyed_leaves
         }
+        if no_laptop_key:
+            # Devices may keep other authorized_keys: this names what is published, not what they accept.
+            print(
+                f"[KEY] 本项目没有电脑公钥 {LAPTOP_PUBKEY_NAME}：本次只发布管理服务器公钥；"
+                "之后放入有效的电脑公钥并重跑 load 即会发布"
+            )
 
         ensure_management_key(
             ssh_dir,
@@ -4207,6 +4232,7 @@ def activate_project(
     host_role: str | None = None,
     switch_scope: str = "all",
     no_upgrade: bool = False,
+    laptop_key_optional: bool = False,
 ) -> None:
     host_role = resolve_host_role(host_role)
     try:
@@ -4257,6 +4283,7 @@ def activate_project(
         command, cwd=HERE, dry_run=dry_run,
         inherited_lock_descriptor=deployment_lock_descriptor,
         setup_key_context=server_delegated_setup,
+        laptop_key_optional=laptop_key_optional,
     )
     if not dry_run and active_project() != project:
         raise LoadError("01-a-setup.py 返回成功，但 DAY0-Prepare/activate-project 未指向目标项目")
@@ -6069,7 +6096,9 @@ def _read_runtime_key_source(source: Path) -> tuple[bytes, int, dict[str, int]]:
     if opened is None or _runtime_key_identity(before) != _runtime_key_identity(after):
         raise LoadError("rollback public key source changed while reading")
     payload, mode = opened
-    if not payload:
+    # Q-106 (a): a laptop.pub emptied after A was published is recorded as it is (R-035 allows a Native
+    # project without a laptop key); every other empty published source stays refused.
+    if not payload and source.name != LAPTOP_PUBKEY_NAME:
         raise LoadError("rollback public key source is empty")
     return payload, mode, _runtime_key_identity(after)
 
@@ -6379,6 +6408,7 @@ def _verify_active_selected_dhcp(project, receipt):
 
 def prepare_runtime_rollback_receipt(
     project: Path, generation: Path, *, capture_selected_dhcp: bool = False,
+    laptop_key_optional: bool = False,
 ) -> Path:
     """Persist every flat surface needed to recover A after B generation fails.
 
@@ -6411,8 +6441,11 @@ def prepare_runtime_rollback_receipt(
     report_path = output / generation_report.REPORT_NAME
     if os.path.lexists(report_path):
         try:
-            report = generation_report.inspect_generation_report(
+            # Q-106 (a): A's report against A's published links only; current key bytes may already
+            # hold the key this rerun is about to publish.
+            report = generation_report.inspect_published_report_links(
                 canonical_project, published_dir=ZTP_DIR / "config/publickey",
+                laptop_key_optional=laptop_key_optional,
             )
         except generation_report.GenerationReportError as exc:
             raise LoadError(f"A generation report is invalid: {exc}") from exc
@@ -6650,7 +6683,9 @@ def _load_runtime_rollback_receipt(
                         or any(isinstance(value, bool) or not isinstance(value, int) for value in identity.values())
                         or not stat.S_ISREG(identity["st_mode"]) or identity["st_nlink"] != 1
                         or stat.S_IMODE(identity["st_mode"]) != record.get("mode")
-                        or not 0 < identity["st_size"] <= _ROLLBACK_PAYLOAD_LIMIT
+                        # Q-106 (a): only an emptied laptop.pub source may be recorded with 0 bytes.
+                        or not (0 if name == LAPTOP_PUBKEY_NAME else 1)
+                        <= identity["st_size"] <= _ROLLBACK_PAYLOAD_LIMIT
                         or not isinstance(parent, dict) or set(parent) != {"path", "dev", "ino"}
                         or not isinstance(parent.get("path"), str)
                         or any(isinstance(parent.get(field), bool) or not isinstance(parent.get(field), int)
@@ -6984,7 +7019,7 @@ def _verify_active_runtime_receipt(
 
 
 def prepare_active_runtime_rollback_receipt(
-    project: Path, selector_target: str,
+    project: Path, selector_target: str, *, laptop_key_optional: bool = False,
 ) -> Path | None:
     """Prepare/reuse A only when this project's A is the active Linux runtime.
 
@@ -7028,6 +7063,7 @@ def prepare_active_runtime_rollback_receipt(
         return receipt_path
     receipt_path = prepare_runtime_rollback_receipt(
         canonical_project, generation, capture_selected_dhcp=True,
+        laptop_key_optional=laptop_key_optional,
     )
     receipt = _load_runtime_rollback_receipt(canonical_project, receipt_path)
     _verify_active_runtime_receipt(canonical_project, receipt_path, receipt)
@@ -12576,6 +12612,7 @@ def validate_inputs(
     allow_management_key_generation: bool,
     host_role: str | None = None,
     identity: operator_identity.Resolution | None = None,
+    laptop_key_optional: bool = False,
 ) -> tuple[ProjectInputs, dict[str, Path]]:
     host_role = resolve_host_role(host_role or getattr(args, "host_role", None))
     global_file = project / "01-global.yaml"
@@ -12734,6 +12771,7 @@ def validate_inputs(
         inject_management_key=host_role == "management-server",
         allow_management_key_generation=allow_management_key_generation,
         identity=identity,
+        laptop_key_optional=laptop_key_optional,
     )
     if args.no_upgrade:
         images: dict[str, Path] = {}
@@ -13080,6 +13118,9 @@ def main(
     prefix_publication_snapshot: ZtpPrefixPublicationSnapshot | None = None
     dhcp_runtime_plan: DhcpRuntimePlan | None = None
     runtime_backend_instance: ServiceRuntimeBackend | None = None
+    # R-035/P053 (v3.1.6 WP-NS2): set only for a Native management server.  Every other caller keeps its
+    # original call shape (and the policy's False default): workstation, Supervisor/Docker, dry runs too.
+    native_key_policy: dict[str, bool] = {}
     http_service_available = False
     dhcp_service_available = False
     services_must_remain_stopped = False
@@ -13145,6 +13186,9 @@ def main(
             allow_management_key_generation = (
                 runtime_backend_instance.name != "supervisor"
             )
+            if (type(runtime_backend_instance) is SystemdRuntimeBackend
+                    and host_role == "management-server"):
+                native_key_policy = {"laptop_key_optional": True}
             if runtime_backend_instance.name == "supervisor" and getattr(args, "ssh_dir", None) is None:
                 args.ssh_dir = _default_ssh_dir()   # Docker frozen: v3.1.1's default, checked below
             if (
@@ -13320,7 +13364,7 @@ def main(
                     )
                 else:
                     runtime_rollback_receipt = prepare_active_runtime_rollback_receipt(
-                        project, previous_selector_target,
+                        project, previous_selector_target, **native_key_policy,
                     )
 
         if (
@@ -13362,6 +13406,7 @@ def main(
             allow_management_key_generation=allow_management_key_generation,
             host_role=host_role,
             identity=load_identity,
+            **native_key_policy,
         )
         if (host_role == "management-server" and local_services_supported
                 and not args.dry_run
@@ -13531,6 +13576,7 @@ def main(
             host_role=host_role,
             switch_scope=switch_scope,
             no_upgrade=args.no_upgrade,
+            **native_key_policy,
         )
         if not args.dry_run and (project / "p2p.xlsx").is_symlink():
             selected_runtime_p2p = project / os.readlink(project / "p2p.xlsx")
@@ -13737,9 +13783,10 @@ def main(
             actual_key_report = generation_report.build_report(
                 project, parent_release,
                 published_dir=ZTP_DIR / "config/publickey",
+                **native_key_policy,
             )
             report_candidate = generation_report.prepare_generation_report(
-                project, actual_key_report,
+                project, actual_key_report, **native_key_policy,
             )
         failure_phase = "统一 release 一致性与 DHCP 事务安装"
         if import_snapshot is not None:

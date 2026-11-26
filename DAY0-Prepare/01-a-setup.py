@@ -164,6 +164,10 @@ _P2P_SOURCE = None # 本次 setup 选定的唯一 P2P 源
 _LINK_ERRORS = 0   # 本次 setup 中所有固定/动态链接错误数
 _INFRA_LOG_MIGRATION = None  # 待 manifest 成功后清理的原目录备份
 _CONFIRM_PROJECT_SWITCH = False  # --confirm-project-switch：-y/--yes 的跨项目切换确认，load 使用
+# R-035/P053 (v3.1.6 WP-NS2)：load 的 Native 管理服务器子进程（HTTP_SETUP_KEY_MODE=server-delegated-native）
+# 可以没有电脑公钥：缺失或 0 字节的 laptop.pub 不挡 setup，只发布管理服务器公钥
+_LAPTOP_KEY_OPTIONAL = False
+NATIVE_NO_LAPTOP_KEY = "未提供电脑公钥，本次只发布管理服务器公钥"
 _OPERATOR = None  # root 代表项目属主时 _setup_operator 的 Resolution（I-006）；其余 None，load 进程内也是 None
 
 MANIFEST_FILE = os.path.join(ZTP, ".setup_manifest")  # setup 创建的链接清单
@@ -740,11 +744,15 @@ def _require_delegated_laptop_public_key(proj_dir):
             raise ssh_keys.SshKeyPreparationError("project root changed while opening")
         laptop = ssh_keys._read_project_leaf(directory_fd, "laptop.pub")
         management = ssh_keys._read_project_leaf(directory_fd, "mgmt-server.pub")
-        if laptop is None or management is None:
+        # The Native child needs no laptop key (missing or exactly 0 bytes); management stays required and a
+        # non-empty laptop key is still checked and must differ from it.
+        no_laptop_key = _LAPTOP_KEY_OPTIONAL and (laptop is None or laptop[0] == b"")
+        if (laptop is None and not no_laptop_key) or management is None:
             raise ssh_keys.SshKeyPreparationError("server-delegated setup requires both project public keys")
-        laptop_identity = ssh_keys.public_key_identity_bytes(laptop[0])
+        if not no_laptop_key:
+            laptop_identity = ssh_keys.public_key_identity_bytes(laptop[0])
         management_identity = ssh_keys.public_key_identity_bytes(management[0])
-        if laptop_identity == management_identity:
+        if not no_laptop_key and laptop_identity == management_identity:
             raise ssh_keys.SshKeyPreparationError("management and laptop public keys must be distinct")
         rebound = project.lstat()
         if (rebound.st_dev, rebound.st_ino) != (held.st_dev, held.st_ino):
@@ -828,6 +836,12 @@ def _process_pubkeys(proj_dir):
         # but never touch an operator-managed regular file.
         for old in sorted(glob.glob(os.path.join(key_dir, "*.pub"))):
             if not os.path.islink(old) or os.path.basename(old) in expected_names:
+                continue
+            # R-035/P053: an old laptop.pub link goes only when its text is this tool's pointer target.
+            if (os.path.basename(old) == "laptop.pub"
+                    and os.readlink(old) != pointer_link_target(directory + "/laptop.pub", "laptop.pub")):
+                print(_c(YELLOW, f"  [WARN] 保留不是本工具建立的公钥链接 {os.path.relpath(old, HTTP_BASE)}"
+                                 f" → {os.readlink(old)}"))
                 continue
             if _DRY_RUN:
                 print(_c(CYAN, f"  [DRY] 删除旧公钥链接 {os.path.relpath(old, HTTP_BASE)}"))
@@ -3222,11 +3236,19 @@ def _validate_project(proj_dir, *, expected_r22_source=None):
 
     # SSH 公钥
     unused_empty_pubkeys = _unused_empty_pubkeys(proj_dir)
+    if _LAPTOP_KEY_OPTIONAL and not os.path.lexists(os.path.join(proj_dir, "laptop.pub")):
+        message = f"laptop.pub：{NATIVE_NO_LAPTOP_KEY}"
+        all_warnings.append(message)
+        print(_c(YELLOW, f"  [WRN] {message}"))
     for pub in sorted(glob.glob(os.path.join(proj_dir, "*.pub"))):
         label = os.path.basename(pub)
         if os.path.getsize(pub) == 0:
             if pub in unused_empty_pubkeys:
                 message = f"{label} 大小为 0（未使用的旧占位文件，跳过发布）"
+                all_warnings.append(message)
+                print(_c(YELLOW, f"  [WRN] {message}"))
+            elif _LAPTOP_KEY_OPTIONAL and label == "laptop.pub":
+                message = f"{label}：{NATIVE_NO_LAPTOP_KEY}"
                 all_warnings.append(message)
                 print(_c(YELLOW, f"  [WRN] {message}"))
             else:
@@ -4196,6 +4218,10 @@ def _print_next_steps(proj_dir):
     need_edit  = []   # 01*.yaml / 02*.csv
     need_fill  = []   # 其他 size-0 文件
     unused_empty_pubkeys = _unused_empty_pubkeys(proj_dir)
+    laptop_pub = os.path.join(proj_dir, "laptop.pub")
+    no_laptop_key = _LAPTOP_KEY_OPTIONAL and (
+        not os.path.lexists(laptop_pub) or os.path.getsize(laptop_pub) == 0
+    )
 
     for fname in sorted(os.listdir(proj_dir)):
         fpath = os.path.join(proj_dir, fname)
@@ -4214,9 +4240,12 @@ def _print_next_steps(proj_dir):
         elif fl.endswith(".xlsx") and _P2P_SOURCE and \
                 os.path.realpath(fpath) != os.path.realpath(_P2P_SOURCE):
             continue  # 非选定 XLSX 不参与当前运行时流程，不提示填写。
-        elif os.path.getsize(fpath) == 0 and fpath not in unused_empty_pubkeys:
+        elif (os.path.getsize(fpath) == 0 and fpath not in unused_empty_pubkeys
+              and not (no_laptop_key and fname == "laptop.pub")):
             need_fill.append(fname)
 
+    if no_laptop_key:
+        print(_c(YELLOW, f"\n  [KEY] {NATIVE_NO_LAPTOP_KEY}；之后放入有效的电脑公钥 laptop.pub 并重跑 load 即会发布"))
     if not need_edit and not need_fill:
         return
 
@@ -4873,7 +4902,7 @@ def _main_locked(args):
 
 def main(argv=None):
     global _AUTO_YES, _DRY_RUN, _FORCE, _STRICT, _CONFIRM_PROJECT_SWITCH
-    global _SWITCH_SCOPE, _NO_UPGRADE
+    global _SWITCH_SCOPE, _NO_UPGRADE, _LAPTOP_KEY_OPTIONAL
 
     args = _parse_args(argv)
     if getattr(args, "check_template", False):
@@ -4913,19 +4942,23 @@ def main(argv=None):
         frozenset({args.switch_scope}) if getattr(args, "switch_scope", None) else None
     )
     key_mode = os.environ.get("HTTP_SETUP_KEY_MODE", "")
-    if key_mode not in ("", "server-delegated"):
+    if key_mode not in ("", "server-delegated", "server-delegated-native"):
         print(_c(RED, "[ERROR] invalid private setup key-preparation mode"))
         return 1
-    if key_mode == "server-delegated" and (
+    # R-035/P053: server-delegated-native is load's Native management child; both delegated values share
+    # every check below and differ only in _LAPTOP_KEY_OPTIONAL.
+    delegated = key_mode != ""
+    _LAPTOP_KEY_OPTIONAL = key_mode == "server-delegated-native"
+    if delegated and (
         args.create or args.dry_run or not args.confirm_project_switch
         or not os.environ.get(LOCK_FD_ENV)
     ):
         print(_c(RED, "[ERROR] server-delegated setup requires the inherited deployment lock and load confirmation"))
         return 1
-    if (key_mode == "server-delegated") != (args.host_role == "management-server"):
+    if delegated != (args.host_role == "management-server"):
         print(_c(RED, "[ERROR] host role contradicts delegated setup key mode"))
         return 1
-    args._server_delegated = key_mode == "server-delegated"
+    args._server_delegated = delegated
     try:
         with deployment_lock(HTTP_BASE, dry_run=_DRY_RUN):
             return _main_locked(args)

@@ -28,6 +28,7 @@ if os.fspath(TOOLS) not in sys.path:
     sys.path.insert(0, os.fspath(TOOLS))
 from deployment_lock import DeploymentLockError
 from test_cases.ns1_monitor_stop_source_layer import restore_ns1_runtime_tree
+from test_cases.ns2_load_report_source_layer import restore_ns2_load_report_trees
 
 
 def load_module(name: str, relative: str):
@@ -959,6 +960,12 @@ def _source_bound_load_report_path(
     source edit. This is a narrow path certificate, not WDISC completeness or
     a general permission to discharge unknown destinations in either module.
     """
+    # v3.1.6 NS2 (http dev 2026-11-26 03:4x, NS2 pending point 3): the two pins below are not re-pinned.
+    # The exact generated NS2 DATA layer is restored on private copies first; a refused layer withdraws.
+    restored = restore_ns2_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
+    if restored is None:
+        return {}
+    load_reviewed, report_reviewed = restored
     # 2026-10-23 fixlist #9: 11-load.py changed with the UFM integration (was d9c67b110d7a…); _load_report_structural_path holds on the current file.
     reviewed = (
         # 2026-10-23 owner load->collection handoff: 11-load.py changed (was e3ef9185a8f0…); its structural path still holds.
@@ -973,12 +980,12 @@ def _source_bound_load_report_path(
         # 2026-11-08 v3.1.1 RV5+RV6: 11-load.py changed with RV5 (review 4 B1: candidate B accepts R-014's two user-link inputs by their target's bytes) and RV6 (splitter inventory binding of a user-linked 02) (was 9a5e054a8956150e67bab0effe3b6546c4817870eb27ae4a668338b2b6e1c2d5); the structural path was checked on the current files before re-pinning.
         # 2026-11-09 v3.1.2 WP-14: 11-load.py changed with v3.1.2: M3 49c0b59, W9 2157f3e, L57 9deceb9, W9 D4 d25f867, W6 2376d74, BF-9 38826e4 (I-048 restore-pending marker), c-16 bd92eea (plain-user dry-run listing); guide 1231: re-pinned once after c-7 and BF-9 (was e37ffdb9a38cca3abf9094bf4d402025037268f7e21ba776c17b9318b8a723b4); the structural path was checked on the current files before re-pinning.
         # 2026-11-11 v3.1.3 WP-13 (written by m1a/repin_quiesce_load.py): 11-load.py changed only in the --validation-only help string (06 D1b-J, WP-6 bcdcfef041b529fb9cad9442659707f7e4fa71ba, integrated in D1core cc42c6b5e6e2e5d9241a2020b7e8aa5370f07643; arguments and pass-through unchanged; with the v3.1.2 help text put back the file is byte-equal to v3.1.2 and gives the old pin) (was 1301807668e5076e6c1e8e45cbdd94c1bfa5125bf62b0407022a75e96efeda2b); the structural path was checked on the current files before re-pinning.
-        (load_tree, "c46a9a9b913f00dc06b4ac74343ff05ce99360fb2ba6f7c7492717b11de4e4e7"),
+        (load_reviewed, "c46a9a9b913f00dc06b4ac74343ff05ce99360fb2ba6f7c7492717b11de4e4e7"),
         # 2026-11-07 M1a: tools/generation_report.py became TEST f384f73's file (batch P3 4fbbde4) (was d2b79619b2ace8c4ea96edcf0ad599001d8f78af6a569168bc4971770e0bca05); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 WP-17: tools/generation_report.py changed with WP-9b (610e348: _public_key accepts a published key only through DAY0-Prepare/activate-project, R-016 3.2) (was bd0d15a4d4378c8c8ba4c9e5fcaeba5d12a7f28b0bf58a4cebb303a4afdd7585); the structural path was checked on the current files before re-pinning.
         # 2026-11-08 v3.1.1 RV3: tools/generation_report.py changed with RV3 (review 3 A3: _public_key names a missing DAY0-Prepare/activate-project before the old 'another project or role' text) (was 0e1a49f0a3cc0f784ac4d2eaee2362bef572d18ed9a87b8c91cc061f6fea9819); the structural path was checked on the current files before re-pinning.
         # 2026-11-09 v3.1.2 WP-14: tools/generation_report.py changed with v3.1.2: L57 9deceb9 (operator owner comparison), c-7 65d00a1 (owner refusal names uid:gid and quotes chown); guide 1231 (was f665b7ef1f8ed2cdf951a152d90255eea60b5fd1c6f4e505ae12ece2ed82841f); the structural path was checked on the current files before re-pinning.
-        (report_tree, "0c07c81f5a8fd288ed1b3909101c5c02f51dce7f8923344bca56244fac46d0c4"),
+        (report_reviewed, "0c07c81f5a8fd288ed1b3909101c5c02f51dce7f8923344bca56244fac46d0c4"),
     )
     if any(_reviewed_source_ast_sha256(tree)
            != expected for tree, expected in reviewed):
@@ -987,6 +994,49 @@ def _source_bound_load_report_path(
 
 
 def _load_report_structural_path(
+    load_tree: ast.AST, report_tree: ast.AST,
+) -> dict[str, ast.AST]:
+    """The reviewed structure on the exact NS2 inverse, proving nodes of the original modules.
+
+    v3.1.6 NS2 (http dev 2026-11-26 03:4x): the unchanged structural check below runs on the restored
+    reviewed copies.  Each proved role is then the unique node with the same text in the original
+    module's same function (main, or the report commit), so a proof never references a private copy.
+    """
+    restored = restore_ns2_load_report_trees(load_tree, report_tree, _reviewed_source_ast_sha256)
+    if restored is None:
+        return {}
+    proven = _reviewed_load_report_structural_path(*restored)
+    if not proven or (restored[0] is load_tree and restored[1] is report_tree):
+        return proven
+
+    def local_nodes(tree: ast.AST, function: str) -> list[ast.AST]:
+        definitions = [item for item in tree.body
+                       if isinstance(item, ast.FunctionDef) and item.name == function]
+        return list(_walk_local_scope(definitions[0])) if len(definitions) == 1 else []
+
+    def unique(nodes: list[ast.AST], node: ast.AST) -> ast.AST | None:
+        text = ast.unparse(node)
+        found = [item for item in nodes if type(item) is type(node) and ast.unparse(item) == text]
+        return found[0] if len(found) == 1 else None
+
+    main_nodes = local_nodes(load_tree, "main")
+    commit_nodes = local_nodes(report_tree, "commit_prepared_generation_report")
+    original = {
+        "quiesce": unique(main_nodes, proven["quiesce"]),
+        "handoff": unique(main_nodes, proven["handoff"]),
+        "mutation": unique(commit_nodes, proven["mutation"]),
+    }
+    guard_text = ast.unparse(proven["native_guard"])
+    guards = [item for item in main_nodes
+              if isinstance(item, ast.If) and ast.unparse(item.test) == guard_text
+              and original["quiesce"] is not None and original["quiesce"] in ast.walk(item)]
+    original["native_guard"] = guards[0].test if len(guards) == 1 else None
+    if any(node is None for node in original.values()):
+        return {}
+    return {role: original[role] for role in proven}
+
+
+def _reviewed_load_report_structural_path(
     load_tree: ast.AST, report_tree: ast.AST,
 ) -> dict[str, ast.AST]:
     """Independently check the reviewed path's import, order and held writer.
@@ -8845,6 +8895,51 @@ class MonitorWriterQuiesceWorkflowTests(unittest.TestCase):
             with self.subTest(variant=label):
                 self.assertNotEqual(runtime, changed)
                 self.assertEqual({}, proof(changed))
+
+    def test_ns2_reviewed_load_report_layer_is_exact_for_the_load_report_pin(self) -> None:
+        """Only the exact reviewed NS2 layer keeps the unchanged load->report pins and structure.
+
+        http dev 2026-11-26 03:4x (NS2 pending point 3): the pins are not re-pinned; an exact DATA
+        inverse of the NS2 layer restores the reviewed statements first.  Missing, duplicated or
+        reordered layer statements, a changed layer hunk and any change outside the layer withdraw
+        the proof; the proved nodes belong to the original modules.
+        """
+        load = (ROOT / "DAY0-Prepare/11-load.py").read_text(encoding="utf-8")
+        report = (ROOT / "tools/generation_report.py").read_text(encoding="utf-8")
+        expected = {
+            "native_guard": "local_services_supported and runtime_backend_instance.name == 'systemd' and (not args.dry_run)",
+            "quiesce": "stop_native_ztp_monitors(HTTP_ROOT)",
+            "handoff": "generation_report.commit_prepared_generation_report(report_candidate)",
+            "mutation": "os.replace(candidate.temporary.name, REPORT_NAME, src_dir_fd=descriptor, dst_dir_fd=descriptor)",
+        }
+
+        def proof(load_text, report_text):
+            load_tree, report_tree = ast.parse(load_text), ast.parse(report_text)
+            proven = _source_bound_load_report_path(load_tree, report_tree)
+            originals = {id(node) for node in ast.walk(load_tree)} | {id(node) for node in ast.walk(report_tree)}
+            self.assertTrue(all(id(node) in originals for node in proven.values()))
+            return {role: ast.unparse(node) for role, node in proven.items()}
+
+        self.assertEqual(expected, proof(load, report))
+        start = report.index("def inspect_published_report_links(")
+        end = report.index("def inspect_generation_report(")
+        helper = report[start:end]
+        self.assertEqual(1, report.count(helper))
+        hunk = "        native_key_policy = {\"laptop_key_optional\": True}\n"
+        self.assertEqual(1, load.count(hunk))
+        outside = 'LAPTOP_PUBKEY_NAME = "laptop.pub"\n'
+        self.assertEqual(1, load.count(outside))
+        variants = {
+            "missing_layer_statement": (load, report.replace(helper, "", 1)),
+            "duplicated_layer_statement": (load, report.replace(helper, helper + helper, 1)),
+            "reordered_layer_statement": (load, report.replace(helper, "", 1) + "\n\n" + helper),
+            "changed_layer_hunk": (load.replace(hunk, hunk.replace("True", "False"), 1), report),
+            "change_outside_layer": (load.replace(outside, 'LAPTOP_PUBKEY_NAME = "other.pub"\n', 1), report),
+        }
+        for label, (load_text, report_text) in variants.items():
+            with self.subTest(variant=label):
+                self.assertNotEqual((load, report), (load_text, report_text))
+                self.assertEqual({}, proof(load_text, report_text))
 
 
 if __name__ == "__main__":

@@ -2548,12 +2548,18 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   实际发布链接、两文件故障窗口与 Linux 笔记本/管理服务器角色事实，不得据此宣告验收。
 - 正向步骤与预期：在每种后端的隔离项目完成获准的正式 load，再在**同一运行时**用显式
   published-dir 执行 `tools/generation_report.py inspect PROJECT --json`；分别对两条发布链接落到的
-  项目公钥叶子用固定 `/usr/bin/ssh-keygen -lf` 独立取得 OpenSSH SHA256 指纹，不读取私钥。
+  项目公钥叶子用固定 `/usr/bin/ssh-keygen -lf` 独立取得 OpenSSH SHA256 指纹，不读取私钥（REQ16 R16-9）。
   父记录必须是已验证 schema 2，其 release_id 可由既定 release basis 重算；报告只在
   `project/99-output-ztp/generation-report.json`，具有 schema 3、固定 record_type、相同的
-  project/release_id/generated_at 与按 laptop、management 排序的两条 type + SSH wire-blob 指纹。
-  检查器成功输出必须与报告记录一致；项目根旧 ad-hoc schema-2 同名文件保持逐字节不变。
-  独立 macOS/config-only 与 `--dry-run` 隔离对照不得声称或生成两把实际管理/笔记本公钥报告。
+  project/release_id/generated_at 与按 laptop、management 排序的两条 type + SSH wire-blob 指纹
+  （REQ16 R16-9，`tools/generation_report.py::build_report`）。
+  Native 管理服务器且项目没有电脑公钥（`laptop.pub` 缺失或 0 字节、没有 laptop 发布链接）时报告只有
+  management 一条（R-035/P053，v3.1.6 WP-NS2，指导 :811；`tools/generation_report.py::build_report`），
+  另见 `TC-REAL-NS2-NATIVE-NO-LAPTOP-001`；Supervisor/Docker 仍为两条。
+  检查器成功输出必须与报告记录一致；项目根旧 ad-hoc schema-2 同名文件保持逐字节不变
+  （`tools/generation_report.py::inspect_generation_report`）。
+  独立 macOS/config-only 与 `--dry-run` 隔离对照不得声称或生成两把实际管理/笔记本公钥报告
+  （`DAY0-Prepare/11-load.py::main` 只在本机服务、非 dry-run 时准备报告）。
 - 拒绝、故障注入与重复执行：只在可回滚 VM/项目副本中分别制造空管理公钥占位、跨项目/错角色/
   回弹的发布链接、单把公钥轮换、父 release 身份改变、缺失或畸形/未知版本报告、symlink/FIFO/
   hardlink 目的地；检查器须非零，不能回退读项目根 ad-hoc 文件，外部哨兵不变。分别在报告
@@ -2568,6 +2574,44 @@ Ubuntu、Docker、adapter、网络隔离或真实设备上取得的证据。
   测试服务，逐项核对前像；不删除/覆盖真实健康密钥，也不以人工写报告代替正式 load。
   公钥指纹、项目名、release_id、时间是可经 HTTP 暴露的运维元数据，需实测访问边界并按 owner
   的披露策略处置；任一后端未测、故障拒绝或清理证据缺失均保持 OPEN/BLOCKED。
+
+## TC-REAL-NS2-NATIVE-NO-LAPTOP-001 — Native 管理服务器没有电脑公钥时只发布管理服务器公钥
+
+- 类型：real-environment / workflow。对应需求：R-035（问题 P053），v3.1.6 WP-NS2（指导 :727-:820，卡见指导 8.21.E2 :2458）。
+- 自动化：`test_cases/test_ssh_key_preparation_contract.py` 的 `NativeLaptopOptionalLoadContract`、
+  `NativeDelegatedSetupContract`，`test_cases/test_ssh_key_preparation_workflow.py` 的
+  `NativeNoLaptopKeyLifecycleWorkflow`，`test_cases/test_generation_report_contract.py` 的 `test_native_*`、
+  `test_cli_accepts_an_independent_single_management_report_only_without_a_laptop`、
+  `test_policy_false_never_accepts_a_single_management_record`，`test_cases/test_generation_report_workflow.py` 的
+  `NativeNoLaptopLoadMainWorkflow` 与 `test_native_no_laptop_http_source_gate_and_probes_name_only_management`。
+  自动化用假 systemd backend、一次性公钥对和私有目录，未以 root 运行、未起真实服务或设备，不得当作真机证据。
+- 状态：**NOT RUN / REAL_ENV REQUIRED**。
+- 前置条件：由 owner 或授权现场人员执行，验证 AI 只读（指导 :1713）。获准的一次性 Ubuntu 24.04 Native 管理 VM
+  与隔离测试项目，不服务真实交换机；项目 `laptop.pub` 为 0 字节或不存在，管理服务器公钥对合格；VM 快照可回退。
+  记录四个公钥目录、项目公钥叶子、`99-output-ztp/{current-release,generation-report}.json` 的链接文字、inode、
+  SHA-256 前像；只取公钥指纹，不读私钥、不遍历真实 HOME（指导 :2458）。
+- 步骤与预期：
+  1. 执行正式 load：load 打印 `[KEY] 本项目没有电脑公钥 laptop.pub：本次只发布管理服务器公钥；…` 后继续；setup
+     子进程的 `HTTP_SETUP_KEY_MODE` 是 `server-delegated-native`，strict 第 1 步把缺失或 0 字节的 laptop.pub 记为警告
+     （R-035，指导 :743-:764；`11-load.py::main` 先选定 backend 再判 Native 管理角色，`11-load.py::run` 设模式值）。
+  2. 四个公钥目录只有 `mgmt-server.pub` 链接；`tools/generation_report.py inspect PROJECT --json` 只有 management
+     一条，指纹等于 `/usr/bin/ssh-keygen -lf` 对管理服务器公钥的独立结果（指导 :766-:770）。
+  3. 同一棵树上，ZTP bootstrap 的 `PUBKEY_PATHS` 只有 management；IB initial-setup 与 UFM 读公钥目录只得到
+     management、没有错误；HTTP 发布探测不访问 laptop 的 URL（HEAD 只证明可达，指导 :794-:795）。
+  4. 放入有效且与管理服务器不同的电脑公钥并重跑 load：四个目录恢复 laptop 链接，报告两条；再跑一次不改变链接
+     （指导 :790-:792、:809）。本项目已有成功 load 的 A 时，这次重跑先检查 A 的公钥报告
+     （`11-load.py::prepare_runtime_rollback_receipt`），记录这一步的实际结果（WP-NS2 落地报告待决点）。
+  5. 反向：非空但畸形、只有空白、与管理服务器同 blob 的 laptop.pub，坏的其它 *.pub，坏的管理 marker 或占位，
+     都按原错误失败、零发布；目录里链接文字不是 activate-project 目标的 laptop.pub 链接保留并打印 WARN
+     （指导 :751-:752、:766、:771）。
+  6. 打包与同步：`tools/_package_common.py::managed_pubkey_paths` 排除运行时管理 key，远端保留原 key
+     （指导 :797、:2458）。
+- 证据：脱敏 argv、exit code、四个目录的链接文字与 stat、报告的指纹字段、两把公钥的独立指纹、设备侧
+  authorized_keys 的指纹摘要。设备上原有的 authorized_keys 不被本次删除：提示只说本次发布了哪把公钥，
+  不是设备只接受这一把（指导 :755、:1661）。
+- 故障注入与清理：管理 key 坏 → load 失败、零发布；报告提交失败 → 主错误与次错误都在输出，服务保持停止
+  （指导 :796）。只恢复本卡自己的 VM 快照与项目副本；失败时 HOLD 交现场，不删真实健康 key。
+- 风险：错误公钥、半发布、权限、设备失联；只在一次性 VM 执行。
 
 ## TC-REAL-REQ16-HOST-ROLE-001 — Linux 工作站、管理服务器与 Service IP 暂缺
 

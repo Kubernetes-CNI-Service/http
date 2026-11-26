@@ -51,7 +51,8 @@ setup 激活项目分 6 步，每一步都能重复执行；不回滚、不加�
   1. 校验目标项目，什么都不写。项目参数只接受 DAY0-Prepare 的直接子目录（真实目录，不能是
      template、链接或以 . 开头的名字）；global、CSV、P2P、公钥按现有规则校验。不通过以 2 退出。
      加 --force 时，输入校验的错误降为警告，照样准备和切换。
-  2. 准备目标项目，只写这个项目：按本模板补齐、准备 laptop.pub、选 P2P 并建 p2p.xlsx 指针、
+  2. 准备目标项目，只写这个项目：按本模板补齐、准备 laptop.pub（load 委托的 setup 不准备，
+     见下文 laptop.pub；Native 管理服务器可以没有电脑公钥）、选 P2P 并建 p2p.xlsx 指针、
      建 99-output-* 目录和预先存在的输出文件。出错以 1 退出，不切换，原来的项目照常可用。
   3. 核对链接规格表（tools/project_contract.py 的 SETUP_LINK_SPECS）：不存在就建，原文不对就
      原子替换并打印旧目标 → 新目标，同名真实文件或目录只报错、不删。错误只计数。
@@ -334,6 +335,9 @@ laptop.pub
   作用：项目电脑 SSH 公钥。本机 setup 从本机 ~/.ssh 选取或必要时生成公钥，
         安全准备真实项目的 laptop.pub；server-delegated setup 不读取服务器 HOME，
         而是校验项目中已有的两把不同、非空的电脑和管理服务器公钥。
+        Native 管理服务器上的 load（R-035）允许 laptop.pub 缺失或为 0 字节：本次只发布
+        管理服务器公钥，公钥报告只记 management 一条；非空的 laptop.pub 仍须是有效公钥且与
+        mgmt-server.pub 不同；以后放入有效的电脑公钥并重跑 load 即会发布。
   setup 在 4 个公钥目录里各建一条同名链接；这 4 个目录都是真实目录，不是链接：
   可能创建的连接：
     ztp/config/publickey/laptop.pub   -----> DAY0-Prepare/<项目>/laptop.pub
