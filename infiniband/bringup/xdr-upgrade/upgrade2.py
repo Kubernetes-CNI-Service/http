@@ -13,6 +13,8 @@ again, three attempts in all (field 2026-10-24).
 
   upgrade2.py --project <dir>                  plan only: precheck, link, groups (no writes)
   upgrade2.py --project <dir> --upgrade -y     upgrade
+  ... --push                                   the ztp-server pushes, switches forward (v3.1.6 U10)
+  ... --pin-unknown-host-keys                  first registration of never-pinned host keys (v3.1.6 U7)
 """
 from __future__ import annotations
 
@@ -192,8 +194,14 @@ def parser():
     auth.add_argument("--identity", help="management private key (with --management-public-key)")
     auth.add_argument("--management-public-key", help="management public key")
     auth.add_argument("--password", action="store_true", help="--plan: also ask for the switch password")
-    pull = p.add_argument_group("how switches pull packages from the ztp-server")
-    pull.add_argument("--method", choices=("http", "scp"), default="http",
+    auth.add_argument("--pin-unknown-host-keys", action="store_true",
+                      help="add the host key of a switch that has no known_hosts entry at all, after its hostname and "
+                           "eth0 MAC match the inventory (--known-hosts must be your ~/.ssh/known_hosts)")
+    pull = p.add_argument_group("how packages reach the switches")
+    pull.add_argument("--push", action="store_true",
+                      help="the ztp-server pushes each package over SSH and the switches forward it between "
+                           "themselves; no switch connects to the server (--method is then ignored)")
+    pull.add_argument("--method", choices=("http", "scp"),
                       help="how a switch fetches its packages from the ztp-server (default: http)")
     pull.add_argument("--mgmt-server", help="scp: ztp-server address")
     pull.add_argument("--mgmt-user", help="scp: ztp-server account")
@@ -301,12 +309,14 @@ def _run_directory(args, paths, run_id):
 
 
 def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_factory=None, sysfs_root=Path("/sys"),
-        link_run=None, timings=None):
-    """The CLI; keyword arguments exist for tests (simulated switches, short probe timings)."""
+        link_run=None, timings=None, home=None, presented_connector=None):
+    """The CLI; keyword arguments exist for tests (simulated switches, short probe timings, an owned home and a
+    connect_presented stand-in for --pin-unknown-host-keys)."""
     import fleet_ssh as ssh
     try:
         return _run(argv, out=out, password_reader=password_reader, ops_factory=ops_factory,
-                    sysfs_root=sysfs_root, link_run=link_run, timings=timings)
+                    sysfs_root=sysfs_root, link_run=link_run, timings=timings, home=home,
+                    presented_connector=presented_connector)
     except OSError as error:
         print("ERROR: input file unreadable: " + str(error.filename or "input") + " ("
               + str(error.strerror or "read failed") + ")", file=out)
@@ -317,14 +327,75 @@ def run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_facto
     return EXIT_BAD_INPUT
 
 
+def _pin_unknown_host_keys(args, devices, credentials, *, editor, run_id, connect, out):
+    """v3.1.6 U7 (问题文件 §36.3; owner 11-20 P-06 (a)): before the run reads known_hosts, add the host key of
+    each selected switch that has no entry at all (a pinned or @-marked address is never touched and never
+    connected). The trust basis is the login: the presented key is written only after `hostname` and the eth0
+    MAC read over that session match the inventory; --plan only lists it. Returns (rows for
+    host-key-pins.json, {hostname: reason} for the summary)."""
+    import fleet_ssh as ssh
+    import ibsw_v2_device as ib
+    import login_path
+    pins = ssh.HostPins.load(args.known_hosts)
+    rows, review = [], {}
+    for device in devices:
+        try:
+            if pins.keys(device.address):
+                continue
+        except ssh.SshError:                    # a marker line: never an unknown key
+            continue
+        row = dict(hostname=device.hostname, address=device.address, fingerprint=None)
+        try:
+            session, (key_type, blob, fingerprint) = connect(device, credentials)
+            row["fingerprint"] = fingerprint
+            with session:
+                identity = session.run("hostname; cat /sys/class/net/eth0/address")
+                ib.check_identity({"identity": (identity.rc, identity.stdout, identity.stderr)}, device)
+        except ssh.SshError as error:
+            row.update(state="NOT_PINNED", reason="CONNECT_" + error.code)
+        except ib.DeviceError as error:
+            row.update(state="NOT_PINNED", reason=error.code)
+            if error.code == "DEVICE_IDENTITY_MISMATCH":
+                review[device.hostname] = error.code
+        else:
+            row.update(key_type=key_type, basis="hostname+MAC")
+            if args.upgrade:                    # --upgrade --yes is the authorization
+                record = login_path.pin_unknown_host_key(device.address, key_type, blob, fingerprint, editor,
+                                                         before_write=lambda: None, hostname=device.hostname,
+                                                         run_id=run_id)
+                if fingerprint not in ssh.HostPins.load(args.known_hosts).fingerprints(device.address):
+                    raise ValueError("pinned host key not read back")
+                row.update(state="PINNED", backup=record.backup)
+            else:
+                row["state"] = "WOULD_PIN"
+        verb = {"PINNED": "pinned", "WOULD_PIN": "would pin"}.get(row["state"], "not pinned")
+        tail = "basis=hostname+MAC" if row["state"] != "NOT_PINNED" else row["reason"]
+        print(f"[HOSTKEY] {verb} {device.hostname} {device.address} {row['fingerprint'] or '-'} {tail}", file=out)
+        rows.append(row)
+    return rows, review
+
+
 def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_factory=None, sysfs_root=Path("/sys"),
-         link_run=None, timings=None):
+         link_run=None, timings=None, home=None, presented_connector=None):
     args = parser().parse_args(argv)
+    method_ignored = args.push and args.method is not None     # U10: --push wins, said after the link line
+    args.method = "push" if args.push else args.method or "http"
     problems = _validate(args)
     if problems:
         for problem in problems:
             print("ERROR: " + problem, file=out)
         return EXIT_BAD_INPUT
+    editor = None
+    if args.pin_unknown_host_keys:          # U7: only the operator's own file, checked before anything connects
+        import pwd
+        import login_path
+        try:
+            editor = login_path.LocalKnownHostsEditor(Path(args.known_hosts), home=Path(
+                home if home is not None else pwd.getpwuid(os.getuid()).pw_dir))
+        except ValueError:
+            print(f"ERROR: --pin-unknown-host-keys needs --known-hosts to be your own ~/.ssh/known_hosts (not a "
+                  f"link): {args.known_hosts}", file=out)
+            return EXIT_BAD_INPUT
     from ibsw_upgrade_contract import (load_global_text, normalize_upgrade, plan_input_paths, select_inventory_devices,
                                        snapshot_inventory)
     import fleet_distribution as dist
@@ -379,17 +450,18 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
         return EXIT_BAD_INPUT
     endpoints, listed = [], False
     policy_document = document
-    if args.method == "http":
+    if args.method in ("http", "push"):     # push: the same server addresses decide the link
         try:
             endpoints, listed = _http_endpoints(document)
         except ValueError:
             print(f"ERROR: invalid HTTP service configuration: {paths.global_path}", file=out)
             return EXIT_BAD_INPUT
-        if listed:                          # the v1 policy reader takes one address: build URLs with the first
+        if listed and args.method == "http":   # the v1 policy reader takes one address: build URLs with the first
             policy_document = copy.deepcopy(document)
             policy_document["common"]["mgmt"]["http"]["address"] = endpoints[0].host
     try:
-        policy = normalize_upgrade(policy_document, selected=selected, method=args.method, package_dir=args.package_dir)
+        policy = normalize_upgrade(policy_document, selected=selected, method="local" if args.method == "push" else
+                                   args.method, package_dir=args.package_dir)
     except ValueError:
         print(f"ERROR: invalid upgrade configuration: {paths.global_path}", file=out)
         return EXIT_BAD_INPUT
@@ -412,10 +484,15 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
                     + (f" ({', '.join(service.candidates)})" if service.candidates else ""))
         decision = fleet_link.detect(addresses, [endpoint.host for endpoint in endpoints], sysfs_root=sysfs_root,
                                      override=args.server_link, services=services, **kwargs)
+    elif args.method == "push":
+        decision = fleet_link.detect(addresses, [endpoint.host for endpoint in endpoints], sysfs_root=sysfs_root,
+                                     override=args.server_link, **kwargs)
     else:
         decision = fleet_link.detect(addresses, str(args.mgmt_server), sysfs_root=sysfs_root,
                                      override=args.server_link, **kwargs)
     print(decision.line(), file=out)
+    if method_ignored:
+        print("--method ignored with --push", file=out)
     for warning in decision.warnings:
         print("[LINK] WARN " + warning, file=out)
     if args.method == "http":
@@ -485,6 +562,16 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
             return EXIT_BAD_INPUT
         scp_server = ib.ScpServer(args.mgmt_server, args.mgmt_user, args.mgmt_port, keys, scp_password)
     credentials = ssh.Credentials(args.user, key, key_fingerprint, password)
+    pin_rows, pin_review = None, {}
+    if editor is not None:                  # U7: before the snapshot below, so the run uses the new entries
+        try:
+            pin_rows, pin_review = _pin_unknown_host_keys(
+                args, devices, credentials, editor=editor, run_id=run_id, out=out,
+                connect=presented_connector or (lambda device, creds: ssh.connect_presented(device.address, creds,
+                                                                                             method="any")))
+        except ValueError:
+            print(f"ERROR: invalid known_hosts: {args.known_hosts}", file=out)
+            return EXIT_BAD_INPUT
     watched_inputs = [fleet_engine.LockedFile.read("known hosts", args.known_hosts)]
     if args.method == "scp":
         watched_inputs.append(server_watch)
@@ -497,7 +584,8 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
                          run_id=run_id, switch_dir=args.local_dir, force_health=args.force,
                          management_line=Path(public).read_bytes().splitlines()[0] + b"\n",
                          method=args.method, scp_server=scp_server,
-                         **({"http_origins": origins, "http_base": endpoints[0].origin} if endpoints else {}))
+                         **({"http_origins": origins, "http_base": endpoints[0].origin}
+                            if endpoints and args.method == "http" else {}))
     make_ops = ops_factory or ib.LiveOps
     ops = make_ops(**ops_arguments)
     password_check = None
@@ -543,6 +631,8 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
                                                   src=services[device.address].src,
                                                   reason=services[device.address].reason)
                             for device in devices} if services else {})))
+    if pin_rows is not None:
+        evidence.write("host-key-pins.json", pin_rows)
     options = fleet_engine.Options(
         run_id=run_id, selected=selected, upgrade=bool(args.upgrade),
         link=decision, groups=groups, skip_canary=args.skip_canary, check_workers=args.check_workers,
@@ -550,9 +640,10 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
         relay_fanout=args.relay_fanout, relay_transfers=args.relay_transfers, method=args.method,
         progress_seconds=args.progress_seconds, password_given=password is not None,
         **({"timings": timings} if timings is not None else {}))
-    engine = fleet_engine.Engine(devices, ib.IbFamily(policy), ops, options, evidence, out=out,
+    engine = fleet_engine.Engine(devices, ib.IbFamily(policy, push=args.method == "push"), ops, options, evidence,
+                                 out=out,
                                  blocked_inputs=snapshot.blocked_devices, service_issues=service_issues,
-                                 locked_inputs=locked_inputs, watched_inputs=watched_inputs,
+                                 locked_inputs=locked_inputs, watched_inputs=watched_inputs, review_inputs=pin_review,
             packages_ready=ops.bind_available_packages, routes_path=run_dir.parent / 'canary-routes.jsonl')
     interrupts = []
 
@@ -569,6 +660,10 @@ def _run(argv=None, *, out=sys.stderr, password_reader=getpass.getpass, ops_fact
         if previous is not None:
             signal.signal(signal.SIGINT, previous)
     print(fleet_engine.render_summary(report, management_key=str(public), user=args.user), file=out)
+    unknown = sum(1 for row in report["devices"] if row["reason"] == "HOST_KEY_UNKNOWN")
+    if unknown:                             # U7 (问题文件 :2366): the one line added to the summary
+        print(f"{unknown} switch(es) HOST_KEY_UNKNOWN: --pin-unknown-host-keys pins them after the hostname and "
+              "eth0 MAC check", file=out)
     print(f"evidence: {run_dir}", file=out)
     return fleet_engine.exit_code(report)
 

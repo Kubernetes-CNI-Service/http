@@ -352,6 +352,138 @@ switches:
         self.untouched(before)
 
 
+    # ------------------------------------------------------------ --push (owner 11-20 第7条; 指导 8.25.5)
+    def plan_json(self):
+        import json
+        return json.loads((self.run_dir() / "plan.json").read_text())
+
+    def test_push_needs_no_scp_arguments_and_records_push(self):
+        out = io.StringIO()
+        code = self.entry(self.common + ["--push"], out=out, password_reader=lambda prompt: SENTINEL,
+                          ops_factory=self.ops_factory)
+        text = out.getvalue()
+        self.assertEqual(code, 3, text)
+        self.assertNotIn("--method scp needs", text)
+        self.assertNotIn("--method ignored", text)
+        self.assertEqual(self.plan_json()["method"], "push")
+
+    def test_push_with_method_says_the_method_is_ignored_after_the_link_line(self):
+        out = io.StringIO()
+        code = self.entry(self.common + ["--push", "--method", "scp"], out=out, password_reader=lambda prompt: SENTINEL,
+                          ops_factory=self.ops_factory)
+        text = out.getvalue()
+        self.assertEqual(code, 3, text)
+        lines = text.splitlines()
+        link = next(index for index, line in enumerate(lines) if line.startswith("[LINK]"))
+        self.assertEqual(lines[link + 1], "--method ignored with --push", text)
+        self.assertEqual(self.plan_json()["method"], "push")
+
+    def test_without_push_the_plan_is_unchanged(self):
+        out = io.StringIO()
+        self.entry(self.common, out=out, password_reader=lambda prompt: SENTINEL, ops_factory=self.ops_factory)
+        self.assertEqual(self.plan_json()["method"], "http")
+        self.assertNotIn("[PUSH]", out.getvalue())
+        self.assertIn("how packages reach the switches", load_entry().parser().format_help())
+
+    # ------------------------------------------------------------ --pin-unknown-host-keys (v3.1.6 U7; 问题文件 §36.3)
+    HINT = ("switch(es) HOST_KEY_UNKNOWN: --pin-unknown-host-keys pins them after the hostname and eth0 MAC "
+            "check")
+
+    def own_known_hosts(self, *, unpinned=("sw03",), extra=""):
+        """known_hosts in an owned HOME pinning the simulated switches' run-time host keys except `unpinned`."""
+        home = Path(self.tmp.name) / "home"
+        (home / ".ssh").mkdir(parents=True, exist_ok=True)
+        path = home / ".ssh" / "known_hosts"
+        lines = "".join(f"{switch.address} {self.fleet.host_key(switch.hostname).get_name()} "
+                        f"{self.fleet.host_key(switch.hostname).get_base64()}\n"
+                        for switch in self.switches if switch.hostname not in unpinned)
+        path.write_text(lines + extra)
+        self.common[self.common.index("--known-hosts") + 1] = str(path)
+        self.home = home
+        return path
+
+    def pinned_ops(self, **kwargs):
+        return ib.LiveOps(**kwargs, connector=self.fleet.pinned_connector(kwargs["credentials"], kwargs["pins"]),
+                          ping_run=self.fleet.ping_run, tcp_probe=self.fleet.tcp, dir_for=self.fleet.dir_for)
+
+    def run_pin(self, *extra):
+        out = io.StringIO()
+        try:
+            code = self.entry(self.common + list(extra), out=out, password_reader=lambda prompt: SENTINEL,
+                              ops_factory=self.pinned_ops, timings=FAST, home=getattr(self, "home", None),
+                              presented_connector=self.fleet.presented)
+        except (SystemExit, TypeError) as error:
+            self.fail(f"upgrade2.py has no --pin-unknown-host-keys entry seam: {error!r}")
+        return code, out.getvalue()
+
+    def test_an_unknown_switch_with_its_inventory_identity_is_pinned_then_checked(self):
+        path = self.own_known_hosts()
+        before = path.read_bytes()
+        code, text = self.run_pin("--upgrade", "-y", "--pin-unknown-host-keys", "--devices", "sw03")
+        fingerprint = ssh.fingerprint(self.fleet.host_key("sw03").asbytes())
+        self.assertIn(f"[HOSTKEY] pinned sw03 192.0.2.43 {fingerprint} basis=hostname+MAC", text)
+        self.assertEqual(ssh.HostPins.load(path).fingerprints("192.0.2.43"), {fingerprint}, "read back")
+        self.assertTrue(path.read_bytes().startswith(before))
+        self.assertEqual(len(path.read_bytes().splitlines()), len(before.splitlines()) + 1)
+        self.assertRegex(text, r"AT_TARGET \(1\)[^\n]*\n  sw03\n", "then checked like any pinned switch")
+        self.assertNotIn("[KNOWN_HOSTS]", text, "the run starts from the registered file")
+        self.assertTrue(list((self.home / ".ssh").glob("known_hosts.pin-*")), "backup before the write")
+
+    def test_an_identity_mismatch_writes_nothing_and_lists_the_fingerprint(self):
+        path = self.own_known_hosts()
+        before = path.read_bytes()
+        (self.switches[2].sysroot / "sys/class/net/eth0/address").write_text("02:00:00:00:00:99\n")
+        code, text = self.run_pin("--upgrade", "-y", "--pin-unknown-host-keys", "--devices", "sw03")
+        fingerprint = ssh.fingerprint(self.fleet.host_key("sw03").asbytes())
+        self.assertEqual(path.read_bytes(), before, "nothing written")
+        self.assertIn(f"[HOSTKEY] not pinned sw03 192.0.2.43 {fingerprint} DEVICE_IDENTITY_MISMATCH", text)
+        self.assertRegex(text, r"REVIEW_REQUIRED \(1\)[^\n]*\n  sw03  DEVICE_IDENTITY_MISMATCH\n")
+        self.assertEqual(code, 3, text)
+
+    def test_plan_lists_what_it_would_pin_and_never_connects_pinned_or_mac_less_rows(self):
+        keys = self.switches[2].home / ".ssh/authorized_keys"      # --plan asks no password: the key logs in
+        keys.write_text(keys.read_text() + f"{self.key.get_name()} {self.key.get_base64()} mgmt\n")
+        path = self.own_known_hosts()
+        before = path.read_bytes()
+        code, text = self.run_pin("--pin-unknown-host-keys")
+        fingerprint = ssh.fingerprint(self.fleet.host_key("sw03").asbytes())
+        self.assertIn(f"[HOSTKEY] would pin sw03 192.0.2.43 {fingerprint} basis=hostname+MAC", text)
+        self.assertEqual(path.read_bytes(), before, "--plan writes nothing")
+        self.assertEqual(self.fleet.presented_to, ["sw03"],
+                         "pinned switches are not touched; sw09 has no eth0_mac, so it is SKIPPED, not a candidate")
+        self.assertRegex(text, r"SKIPPED \(1\)[^\n]*\n  sw09  ETH0_MAC_MISSING")
+        self.assertEqual(code, 3, text)
+
+    def test_a_marker_line_is_never_touched(self):
+        key = self.fleet.host_key("sw03")
+        path = self.own_known_hosts(extra=f"@revoked 192.0.2.43 {key.get_name()} {key.get_base64()}\n")
+        before = path.read_bytes()
+        code, text = self.run_pin("--pin-unknown-host-keys", "--devices", "sw03")
+        self.assertEqual(self.fleet.presented_to, [], "a @revoked entry is not an unknown key")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertNotIn("[HOSTKEY]", text)
+        self.assertRegex(text, r"REVIEW_REQUIRED \(1\)[^\n]*\n  sw03  HOST_KEY_MISMATCH\n")
+
+    def test_without_the_option_only_one_hint_line_is_added(self):
+        path = self.own_known_hosts()
+        before = path.read_bytes()
+        code, text = self.run_pin()
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(self.fleet.presented_to, [])
+        self.assertNotIn("[HOSTKEY]", text)
+        self.assertEqual(text.count(self.HINT), 1, text)
+        self.assertIn("1 " + self.HINT, text)
+        self.assertRegex(text, r"REVIEW_REQUIRED \(1\)[^\n]*\n  sw03  HOST_KEY_UNKNOWN\n")
+        self.assertEqual(code, 3, text)
+
+    def test_another_known_hosts_file_is_a_usage_error_before_any_connection(self):
+        self.own_known_hosts()
+        self.common[self.common.index("--known-hosts") + 1] = str(self.known_hosts)   # not <home>/.ssh/known_hosts
+        code, text = self.run_pin("--upgrade", "-y", "--pin-unknown-host-keys")
+        self.assertEqual(code, 2, text)
+        self.assertIn("--pin-unknown-host-keys", text)
+        self.assertEqual((self.fleet.presented_to, self.fleet.commands, self.fleet.password_logins), ([], [], []))
+
     # ------------------------------------------------------------ several HTTP addresses (owner 2026-10-24)
     def second_network(self, address, *, device, server_address, configured):
         """sw04 at `address`, reached through `device` whose address is `server_address`; the project lists

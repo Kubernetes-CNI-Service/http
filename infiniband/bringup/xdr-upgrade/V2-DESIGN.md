@@ -240,6 +240,23 @@ BIOS/CPLD 单代表；AT_TARGET 不形成下发证明，真实 VERIFIED 段才�
 记录九字段/两镜像 SHA、无过期、O_APPEND+fsync、不可读警告/坏行忽略和写失败沿 EvidenceError 的规则见 README，不另造授权或锁。
 SDK 精确基类断开按连接中断回探测；认证/主机密钥类仍拒绝，REQUESTED 后确认不明不误记未下发，修复上传失败不重发。
 
+### v3.1.6 增量（指导 8.25）
+
+- **G1 组件挡法**：`Family.held_alone` 列出「判定出错只挡自己」的组件（IB：bios、cpld）。预检的 `issues` 全在其中时，
+  引擎把它们记进 `dev.held`，该台继续走健康、空间、备份准入，组件阶段跳过被挡组件，结尾记
+  `REVIEW_REQUIRED <第一个问题码> (partly upgraded: ...)`；含其他组件（IB：os）的问题照旧整台 REVIEW_REQUIRED。
+  IB 预检在「需要的组件去掉被挡组件后非空」时照常做 access bootstrap。
+- **G6 下发前密码复核**：`LiveOps.dispatch` 在复核全部通过后、上传和 write-ahead 之前调一次 `password_login`；
+  `PASSWORD_REJECTED` 记 `FAILED PASSWORD_PREWRITE_REJECTED`（只这一台），其他连接错误照旧 `NOT_DISPATCHED_<码>`。
+- **`--push` 分发**：调度不变，「从服务器」变成「服务器推」：`LiveOps._push` 写临时名、交换机上读大小和 sha256、
+  一致才 `posix_rename`；`ServerGate` 的 `gap` 与 scp 相同（0.25 秒）；空间判定在任何传输之前，`push` 时原因带
+  `need=`、`free=`；汇总在 `[LINK]` 下加 `[PUSH]` 一行（服务器推送台数、交换机转发台数）。
+- **G7**：验证答 `HEALTH_PENDING` 时引擎按 `health_recheck_seconds`（15）用主循环定时器重新提交，从第一次起最多
+  `health_wait_seconds`（120），不占 worker。**G9**：预检判 AT_TARGET 前读本项目 v2 证据根里最近一次写过该设备
+  `dispatch.json` 的其他运行（只读），无最终结论时用其步骤、配置备份、access 备份和健康原文补做验证。
+- **U7**：`upgrade2.py` 在读 known_hosts 快照之前做首次登记；连接用 `fleet_ssh.connect_presented`（只给这一步用，
+  不比对任何记录），写入用 `tools/login_path.py` 的 `pin_unknown_host_key`（只追加）。
+
 ## 10. 测试
 
 以下九个模块是 2026-10-23 的原始测试域基线；v3.1.4 的新增布局、入口/清单/锁、连接中断及路线 direct/workflow 随最终 manifest 一并登记，当前准确清单以该 manifest 的 `fleet-upgrade-v2` 为准。本段不是新源码全量通过声明，本机模型不连真机：

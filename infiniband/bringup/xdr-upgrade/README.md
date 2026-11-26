@@ -82,6 +82,35 @@ python3 -B upgrade2.py --project <项目目录> --devices 'spine*' --upgrade -y
 - **汇总里的「MANAGEMENT KEY REJECTED」**：预检时管理公钥被拒的设备单独列出，只报告。不需要安装的设备公钥不会被改，
   带 `--upgrade` 重跑也补不上，汇总给出 `ssh-copy-id -i <管理公钥> admin@<地址>`；`--plan` 没带 `--password` 时说明没有尝试密码。
 - **Ctrl-C**：第一次停止新的分发和下发，继续跟踪在途设备直到有结果；第二次立即退出，在途设备记 UNKNOWN。
+- **v3.1.6 增量**（指导 8.25）：
+  - **组件判定出错只挡该组件**（G1）：BIOS/CPLD 的固件查询或版本判定出错，只挡这一个组件，OS 和其他组件照升；
+    该台结尾 `REVIEW_REQUIRED <第一个问题码> (partly upgraded: <做了的组件>)`，什么都没做时不加括号。OS 的问题
+    （路线不可用、OS 未达最终版）仍挡整台。
+  - **下发前密码复核**（G6）：每次下发前（复核全部通过后、上传步骤和写 `dispatch.json` 之前）只用密码登录一次、只执行
+    `true`；被拒记该台 `FAILED PASSWORD_PREWRITE_REJECTED`，什么都没写，可安全重跑。
+  - **SSD 提示性比对**（U8、G5）：配置了 `packages.ssd.version` 时，OS 已在目标的设备在预检用同一份
+    `nv show platform firmware` 比对（不加登录、不加命令），升级过 OS 的设备在升级后比对；汇总加一节
+    `SSD (informational): passed=N warnings=M`，每台只列一行（有升级后结果就用升级后的），逐台列 MISMATCH/UNAVAILABLE；
+    SSD 固件随 OS 安装，不一致不影响本次结果和退出码。没有配置时没有这一节。
+  - **`--push`**（U10）：管理服务器用自己的密钥会话把包写到交换机的临时文件，交换机上 `sha256sum` 核对通过才改成正式名；
+    OOB leaf 队列的第一份由服务器推，其余由已核对的交换机按 `--relay-fanout` 用 scp 转发，交换机不需要连回服务器。
+    不再需要 `--method` 和 scp 参数，同时给了 `--method` 会提示 `--method ignored with --push`。推送前先查空间，不够记
+    `FAILED NO_SPACE need=<字节> free=<字节>`（OS 镜像两倍，加本台要推的 BIOS/CPLD 包各一倍），在任何传输之前。
+    注意：v2 预检仍要求 ICMP 可达，管理网封 ICMP 的现场 `--push` 也会整批 `PING_UNREACHABLE`；`--push` 仍要交换机密码（转发用）。
+  - **`--pin-unknown-host-keys`**（U7，默认关闭）：只在 `--known-hosts` 就是本用户 `~/.ssh/known_hosts` 时可用，否则退出 2、
+    什么都不连。对 known_hosts 里完全没有记录的选中设备，登录后核对主机名和 eth0 MAC 与清单一致，才把它报的主机密钥
+    按 IP 追加一行（先备份为同目录 `known_hosts.pin-<运行编号>`），读回一致后本次运行照常核对；已有记录、`@` 标记行的设备
+    不碰也不连。身份不符记 `REVIEW_REQUIRED DEVICE_IDENTITY_MISMATCH` 并列指纹；`--plan` 只列 `would pin`。结果写进证据
+    `host-key-pins.json`，每台打印 `[HOSTKEY] ...`。信任依据是登录后的身份核对，不是带外指纹（owner 11-20 P-06 (a)）。
+    不加选项时汇总只多一行 `N switch(es) HOST_KEY_UNKNOWN: --pin-unknown-host-keys ...` 提示。
+  - **启动命令不占住 SSH 通道**（G8）：`cd` 在前台，只有 runner 进后台，`launch.record` 里的 PID 就是 runner。
+  - **升级后健康 N/A 有界重查**（G7）：验证读到 `status N/A` 时，每 15 秒重新验证一次，从第一次 N/A 起最多 2 分钟，
+    每次写 `health-wait-<n>.json`；拿到结果按原规则判，到时仍 N/A 记 `UNKNOWN HEALTH_STATUS_UNAVAILABLE`。`--force` 时
+    N/A 按 FORCED 放行，不重查；NOT OK 等其他结果不重查。
+  - **上次无最终结论的补核**（G9）：已在目标的设备，若本项目最近一次写过它 `dispatch.json` 的 `--upgrade` 运行对它是
+    UNKNOWN 或没有结果，`--upgrade` 用那次的证据（只读）补做升级后核对，通过记 `UPGRADED RECHECKED_AFTER_INTERRUPTION run=<编号>`；
+    缺证据记 `REVIEW_REQUIRED RECHECK_EVIDENCE_MISSING: ...`；`--plan` 列为 `RECHECK_NEEDED`。`dispatch.json` 现在保存下发前的健康原文；
+    旧证据没有时只认当前健康正常，否则 `REVIEW_REQUIRED HEALTH_BASELINE_MISSING`。
 - **证据**在 `<项目>/99-output-ib_nvl/bringup/xdr-upgrade-v2-logs/<运行编号>/`，与 v1 的运行目录分开；目录创建后立即打印 `[RUN] evidence: <绝对路径>`，结束仍保留 `evidence:` 行。
 - **退出码**：0 全部完成，3 有未完成的设备，2 输入/运行时错误、HOLD 或密码 3 次都被拒；75 只表示 `ALREADY_RUNNING`，守卫文件不安全等其他守卫错误是 2；130 中止。
 - **root 运行时切到项目属主**（v3.1.2，I-006）：规则与 `upgrade.py` 相同，见下文「root 运行时切换到项目属主」；`upgrade2.py` 直接用 `tools/operator_identity.py`，切换在运行锁之前。

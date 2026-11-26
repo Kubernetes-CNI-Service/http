@@ -200,6 +200,27 @@ class SshTest(unittest.TestCase):
             revoked.keys(ADDRESS)
         self.assertEqual(caught.exception.code, "HOST_KEY_MISMATCH")
 
+    def test_connect_presented_returns_the_switch_host_key_and_authenticates_without_any_pin(self):
+        """v3.1.6 U7 (问题文件 §36.3; 指导 8.25.6 改法 3): for the explicit first registration only, the session
+        reports the key the switch presented and compares it with nothing; the key is tried first and the
+        password only after an explicit rejection; connect() itself is unchanged (test above)."""
+        self.assertTrue(hasattr(ssh, "connect_presented"), "v3.1.6 U7 connect_presented required")
+        expected = (self.switch.host_key.get_name(), self.switch.host_key.get_base64(),
+                    ssh.fingerprint(self.switch.host_key.asbytes()))
+        session, presented = ssh.connect_presented(ADDRESS, self.creds, method="any", sock_factory=self.switch.socket)
+        with session:
+            self.assertEqual(presented, expected)
+            self.assertEqual((session.authentication, session.run("x").rc), ("key", 0))
+        refusing = FakeSwitch(accept_key=False)
+        session, presented = ssh.connect_presented(ADDRESS, self.creds, method="any", sock_factory=refusing.socket)
+        with session:
+            self.assertEqual(presented[2], ssh.fingerprint(refusing.host_key.asbytes()))
+            self.assertEqual((session.authentication, session.run("x").rc), ("password", 0))
+        wrong = ssh.Credentials("admin", self.switch.client_key, None, "not-the-password")
+        with self.assertRaises(ssh.SshError) as caught:
+            ssh.connect_presented(ADDRESS, wrong, method="password", sock_factory=self.switch.socket)
+        self.assertEqual(caught.exception.code, "PASSWORD_REJECTED")
+
     def test_a_hanging_command_times_out_from_when_it_was_sent(self):
         with self.connect() as session:
             started = time.monotonic()

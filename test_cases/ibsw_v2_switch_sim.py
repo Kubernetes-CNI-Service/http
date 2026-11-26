@@ -11,6 +11,12 @@ makes the n-th matching command raise an SshError (a timed-out query) instead of
 `connector_for(credentials)` also checks the typed password like the switch's sshd and
 refuses a wrong one with PASSWORD_REJECTED (what tools/fleet_ssh.py raises); every
 password login is recorded in `password_logins`.
+
+v3.1.6 A4c seams (test support): the state files `firmware_fail` (fail `nv show platform firmware`
+that many times), `bios` / `bios_offer` (reported BIOS; the version a BIOS install brings, applied at the
+reboot), `ssd` (an SSD firmware row) and `free_kib` (what `df` reports); `fail_sftp("write", ...)` fails
+one SFTP write; each switch has a host key generated at run time (`host_key`), `pinned_connector` checks
+it against known_hosts pins like fleet_ssh.connect, and `presented` stands in for connect_presented.
 """
 import json
 import os
@@ -54,12 +60,19 @@ NV = '''
         print("                operational\\n--------------  -----------\\nkernel          5.10.0-nvos\\n"
               "build-date      2026-01-01\\nimage           nvos-%s\\nonie            2023.05" % read("version").strip())
     elif args == ["show", "platform", "firmware"]:
-        if read("cpld"):
+        failures = read("firmware_fail").strip()
+        if failures and int(failures) > 0:
+            write("firmware_fail", str(int(failures) - 1))
+            sys.stderr.write("Error: platform firmware query failed\\n"); sys.exit(1)
+        if read("cpld") or read("bios") or read("ssd"):
             row = "%-7s%-24s%-13s%s"
             print(row % ("Name", "Actual FW", "Part Number", "FW Source"))
             print(row % ("-----", "----------------------", "-----------", "---------"))
-            print(row % ("BIOS", "0ACQF_06.01.003", "N/A", "default"))
-            print(row % ("CPLD1", read("cpld").strip(), "N/A", "default"))
+            print(row % ("BIOS", read("bios").strip() or "0ACQF_06.01.003", "N/A", "default"))
+            if read("cpld"):
+                print(row % ("CPLD1", read("cpld").strip(), "N/A", "default"))
+            if read("ssd"):
+                print(row % ("SSD", read("ssd").strip(), "N/A", "default"))
         else:
             print("Name   Actual FW        Part Number  FW Source\\n-----  ---------------  -----------  ---------\\n"
                   "BIOS   0ACQF_06.01.003  N/A          default")
@@ -91,6 +104,9 @@ NV = '''
         print("Action succeeded")
     elif args[:4] == ["action", "install", "platform", "firmware"]:
         write("cpld-installs", read("cpld-installs") + args[6] + "\\n")
+        if args[4] == "BIOS" and read("bios_offer"):
+            write("bios_target", read("bios_offer"))
+            write("install_target", read("version"))
         if "_REFRESH_" in args[6]:
             write("cpld_target", re.search(r"(CPLD[0-9]+_REV[0-9]+)", args[6])[1])
             write("install_target", read("version"))
@@ -154,6 +170,14 @@ class LocalSwitch:
             print("ActiveState=active\\nSubState=running" if state == "running" else "ActiveState=activating\\nSubState=start")
         """)
         _stub(self.bin, "pgrep", "import sys\nsys.exit(1)\n")
+        _stub(self.bin, "df", """
+            import os, sys
+            kib = os.path.join(os.environ["FAKE_STATE"], "free_kib")
+            if not os.path.exists(kib):
+                os.execv("/bin/df", ["df"] + sys.argv[1:])
+            print("Filesystem 1024-blocks Used Available Capacity Mounted on")
+            print("fake 1048576 0 %s 1%% /" % open(kib).read().strip())
+        """)
         _stub(self.bin, "curl", """
             import os, sys, shutil
             argv = sys.argv[1:]
@@ -236,6 +260,10 @@ class LocalSwitch:
                 if cpld_target.exists():
                     (self.state / "cpld").write_text(cpld_target.read_text())
                     cpld_target.unlink()
+                bios_target = self.state / "bios_target"
+                if bios_target.exists():
+                    (self.state / "bios").write_text(bios_target.read_text())
+                    bios_target.unlink()
                 (self.state / "nvued").write_text("starting")
                 self.nvue_at = now + self.nvue
                 if self.drop_keys_on_reboot:
@@ -259,8 +287,8 @@ class Result(ssh.Result):
 
 
 class LocalFile:
-    def __init__(self, handle):
-        self.handle = handle
+    def __init__(self, handle, fault=None):
+        self.handle, self.fault = handle, fault
 
     def __enter__(self):
         return self
@@ -269,6 +297,8 @@ class LocalFile:
         self.close()
 
     def write(self, data):
+        if self.fault is not None:
+            self.fault()
         self.handle.write(data)
 
     def read(self, size=-1):
@@ -303,7 +333,7 @@ class LocalSftp:
 
     def open(self, path, mode="r"):
         self.fault("open", path)
-        return LocalFile(open(path, self.MODES[mode]))
+        return LocalFile(open(path, self.MODES[mode]), lambda: self.fault("write", path))
 
     def mkdir(self, path, mode=0o777):
         os.mkdir(path, mode)
@@ -391,6 +421,7 @@ class SimFleet:
         self.http_root, self.key_base64 = http_root, key_base64
         self.commands, self.contexts = [], []
         self.password_logins = []                               # (hostname, accepted) per checked password login
+        self.host_keys, self.presented_to = {}, []              # U7: run-time host keys; connect_presented calls
 
     def connector(self, device, method, *, password=None):
         """password=None: the password is not checked (older tests); otherwise a wrong one is refused."""
@@ -409,6 +440,37 @@ class SimFleet:
     def connector_for(self, credentials):
         """A connector(device, method) for LiveOps that checks the credentials' password."""
         return lambda device, method: self.connector(device, method, password=credentials.password)
+
+    def host_key(self, hostname):
+        """The switch's SSH host key, generated once per run (no key material in any file)."""
+        if hostname not in self.host_keys:
+            self.host_keys[hostname] = ssh._sdk().ECDSAKey.generate()
+        return self.host_keys[hostname]
+
+    def pinned_connector(self, credentials, pins):
+        """connector_for() that first checks the switch's host key against `pins` like fleet_ssh.connect:
+        no entry HOST_KEY_UNKNOWN, a marker line or another key HOST_KEY_MISMATCH."""
+        def connect(device, method):
+            expected = pins.fingerprints(device.address)
+            if not expected:
+                raise ssh.SshError("HOST_KEY_UNKNOWN")
+            if ssh.fingerprint(self.host_key(device.hostname).asbytes()) not in expected:
+                raise ssh.SshError("HOST_KEY_MISMATCH")
+            return self.connector(device, method, password=credentials.password)
+        return connect
+
+    def presented(self, device, credentials):
+        """connect_presented() stand-in: key first, the password after a rejection; returns the session and
+        the switch's host key (type, base64, fingerprint), compared with nothing."""
+        self.presented_to.append(device.hostname)
+        try:
+            session = self.connector(device, "key", password=credentials.password)
+        except ssh.SshError as error:
+            if error.code != "AUTH_REJECTED" or not credentials.password:
+                raise
+            session = self.connector(device, "password", password=credentials.password)
+        key = self.host_key(device.hostname)
+        return session, (key.get_name(), key.get_base64(), ssh.fingerprint(key.asbytes()))
 
     def ping_run(self, argv, **_kwargs):
         switch = self.by_address[argv[-1]]

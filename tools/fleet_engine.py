@@ -20,11 +20,18 @@ time only; time spent queued here is recorded, never charged.
 A verification that loses a query to COMMAND_TIMEOUT or CHANNEL_FAILED runs once more per
 step after `verify_retry_seconds`, kept as a main-loop timer (no worker waits), but only when
 the ops said that attempt had not requested a configuration repair: ops.verify sets
-`repair_requested` on the SshError it raises, and an error without it is not retried.
+`repair_requested` on the SshError it raises, and an error without it is not retried. A verification that
+answers HEALTH_PENDING (the health read N/A, v3.1.6 G7) is asked again every `health_recheck_seconds`, as a
+main-loop timer, for at most `health_wait_seconds` from the first N/A, then UNKNOWN.
 
 A switch named in `service_issues` (e.g. no HTTP address on its network, owner 2026-10-24)
 is prechecked read-only (no access bootstrap) and, when it needs an upgrade, ends FAILED
 with that reason before anything is written to it.
+
+A precheck issue on a component the family lists in `held_alone` (IB: a BIOS/CPLD version that
+cannot be judged, v3.1.6 G1) holds only that component: the switch goes on through the other
+admission checks, the other components it needs are upgraded, and it ends REVIEW_REQUIRED with
+`<first issue> (partly upgraded: <components done>)`. Any other issue (IB: the OS) holds the switch.
 
 A precheck that raises SshError PASSWORD_REJECTED holds the batch (field 2026-10-24): no
 precheck starts after it (one already running finishes), the switches not prechecked yet
@@ -90,6 +97,8 @@ class Options:
     later_hop_batch_seconds: float = 60.0
     stall_fraction: float = 2 / 3
     verify_retry_seconds: float = 30.0
+    health_recheck_seconds: float = 15.0     # G7 (R-046): a post-upgrade health of N/A is asked again this often
+    health_wait_seconds: float = 120.0       # ... for at most this long from the first N/A, then UNKNOWN
     password_given: bool | None = None   # a switch password was typed; None: assume one exactly when upgrading
 
 
@@ -218,6 +227,7 @@ class Family:
     name = "switch"
     components = ()                    # in upgrade order
     required_programs = ()             # missing on a switch -> FAILED CAPABILITY_MISSING
+    held_alone = ()                    # a precheck issue on one of these holds only that component (G1)
 
     def packages(self, selected):      # objects with .file, .path, .url
         raise NotImplementedError
@@ -389,6 +399,15 @@ class StepPlan:
         return (self.component,) + tuple(package.path for package in self.packages)
 
 
+@dataclass(frozen=True)
+class StepRecord:
+    """G9: the step an earlier run dispatched, as its dispatch.json recorded it."""
+    component: str
+    stage: str
+    target_version: str
+    remote_dir: str
+
+
 @dataclass
 class Dev:
     device: object
@@ -413,11 +432,17 @@ class Dev:
     completed: set = field(default_factory=set)
     holds_slot: bool = False
     verify_retried: bool = False       # this step already used its one verification retry
+    health_wait_since: float | None = None   # G7: first HEALTH_PENDING answer of this step
+    health_waits: int = 0              # G7: HEALTH_PENDING answers so far (health-wait-<n>.json)
     need_since: float | None = None
     state_since: float = 0.0
     session: object = None
     key_rejected: bool = False         # the management key was rejected in precheck (O3 2026-10-24)
     password_not_tried: bool = False   # ... and no password was there to fall back to
+    held: dict = field(default_factory=dict)   # component -> precheck issue code; only that component waits (G1)
+    ssd_preflight: dict | None = None  # the family's informational precheck SSD row (U8)
+    ssd_post: dict | None = None       # the last post-upgrade SSD row (G5)
+    recheck: str | None = None         # G9: the earlier run whose missing result this run verifies
 
     @property
     def host(self):
@@ -438,7 +463,7 @@ class Session:
 class Engine:
     def __init__(self, devices, family, ops, options, evidence, *, out=sys.stderr, clock=time.monotonic,
                  blocked_inputs=(), service_issues=None, locked_inputs=(), watched_inputs=(), packages_ready=None,
-                 routes_path=None):
+                 routes_path=None, review_inputs=None):
         self.family, self.ops, self.options, self.evidence = family, ops, options, evidence
         self.out, self.clock = out, clock
         self.routes = CanaryRoutes(routes_path if routes_path is not None
@@ -446,6 +471,7 @@ class Engine:
         self.devs = {device.hostname: Dev(device, index) for index, device in enumerate(devices)}
         self.blocked_inputs = tuple(blocked_inputs)
         self.service_issues = dict(service_issues or {})    # hostname -> reason: read-only precheck, then FAILED
+        self.review_inputs = dict(review_inputs or {})      # hostname -> reason: REVIEW_REQUIRED, never contacted
         self.locked_inputs, self.watched_inputs = tuple(locked_inputs), tuple(watched_inputs)
         self.packages_ready = packages_ready
         self.warned_watches = set()
@@ -463,7 +489,8 @@ class Engine:
         mode = options.link.mode
         speed = options.link.speed_mbps
         server_cap = (options.link.cap if mode == "direct" else max(1, (speed or 1000) // 1000))
-        self.gate = dist.ServerGate(cap=server_cap, gap=0.25 if options.method == "scp" else 0.0)
+        self.gate = dist.ServerGate(cap=server_cap, gap=0.25 if options.method in ("scp", "push") else 0.0)
+        self.received = {"server": set(), "switches": set()}   # push: who got a package from where (U10)
         self.pools = {}
 
     # ------------------------------------------------------------ helpers
@@ -523,18 +550,22 @@ class Engine:
             if self.packages_ready is not None:
                 self.packages_ready(frozenset(self.packages))
             for dev in self.devs.values():
+                if dev.host in self.review_inputs:     # e.g. U7: the entry's identity check already failed
+                    self._final(dev, "REVIEW_REQUIRED", self.review_inputs[dev.host])
+                    continue
                 self._set(dev, "PRECHECKING")
                 self._submit("check", dev, "precheck", self._precheck_task(dev), priority=2)
-            self._pump(lambda: self.outstanding == 0)
+            self._pump(lambda: self.outstanding == 0 and not self.timers)   # G9: a recheck may wait on a timer
             self._print_progress(force=True)
             if plan_only or not self.options.upgrade:
                 for component in self.options.selected:
                     members = [dev for dev in self.devs.values() if dev.category is None
-                               and self._steps_for(dev, component)]
+                               and component not in dev.held and self._steps_for(dev, component)]
                     self._print_route_plan(component, members)
                 for dev in self.devs.values():
                     if dev.category is None:
-                        dev.category, dev.reason = "NOT_EXECUTED", "PLAN_ONLY"
+                        dev.category, dev.reason = (("REVIEW_REQUIRED", next(iter(dev.held.values()))) if dev.held
+                                                    else ("NOT_EXECUTED", "PLAN_ONLY"))
                 return self._summary()
             for component in self.family.components:
                 if component in self.options.selected:
@@ -542,11 +573,17 @@ class Engine:
             for dev in self.devs.values():
                 if dev.category is None:
                     remaining = [component for component in dev.plan.needed
-                                 if component in self.options.selected and component not in dev.completed]
+                                 if component in self.options.selected and component not in dev.completed
+                                 and component not in dev.held]
                     if remaining:
                         dev.category = "NOT_EXECUTED"
                         dev.reason = (self.hold or ("STOPPED" if self.stopping else "NOT_REACHED")) + \
                             ": " + ",".join(remaining) + (" (partly upgraded)" if dev.performed else "")
+                    elif dev.held:                 # G1: the other components were done; the held ones need review
+                        done = list(dict.fromkeys(row["component"] for row in dev.performed))
+                        dev.category = "REVIEW_REQUIRED"
+                        dev.reason = next(iter(dev.held.values())) + (
+                            f" (partly upgraded: {', '.join(done)})" if done else "")
                     else:
                         dev.category = "UPGRADED" if dev.performed else "AT_TARGET"
             return self._summary()
@@ -670,20 +707,31 @@ class Engine:
         result = event.result
         dev.facts, dev.plan, dev.backup, dev.health = result["facts"], result["plan"], result["backup"], result["health"]
         dev.key_rejected = bool(result["key_rejected"])
+        dev.ssd_preflight = result.get("ssd")             # U8: opaque informational row, never admission
         self.evidence.journal(dev.host)("precheck.json", dict(
             os_version=dev.facts.os_version, boot_id=dev.facts.boot_id, ping=result["ping"],
             plan=[dict(row) for row in dev.plan.rows], issues=list(dev.plan.issues), health=dev.health,
             guard=list(result["guard"]), staged={k: list(v) for k, v in dev.facts.staged.items()},
             free_bytes=dev.facts.free_bytes, capability_missing=list(dev.facts.capability_missing),
-            key_rejected=result["key_rejected"], queued_seconds=round(event.waited, 3)))
+            key_rejected=result["key_rejected"], queued_seconds=round(event.waited, 3), ssd=dev.ssd_preflight,
+            **({"space_needed": self.family.space_needed(dev.plan, self.packages)} if self.options.method == "push"
+               else {})))
         if result["ping"] != "reply":
             return self._final(dev, "FAILED", "PING_UNREACHABLE")
         if dev.plan.issues:
-            return self._final(dev, "REVIEW_REQUIRED", dev.plan.issues[0][1])
+            if not all(component in self.family.held_alone for component, _code in dev.plan.issues):
+                return self._final(dev, "REVIEW_REQUIRED", dev.plan.issues[0][1])
+            for component, code in dev.plan.issues:        # G1: only these components wait for review
+                dev.held.setdefault(component, code)
         guard, where = result["guard"]
         if guard:
             return self._final(dev, "REVIEW_REQUIRED", guard)
-        if not dev.plan.needed:
+        if not [component for component in dev.plan.needed if component not in dev.held]:
+            if dev.held:
+                return self._final(dev, "REVIEW_REQUIRED", next(iter(dev.held.values())))
+            previous = self._previous_run(dev.host)
+            if previous is not None and previous["category"] in (None, "UNKNOWN"):
+                return self._recheck(dev, previous)
             return self._final(dev, "AT_TARGET")
         if dev.host in self.service_issues:
             return self._final(dev, "FAILED", self.service_issues[dev.host])
@@ -693,10 +741,60 @@ class Engine:
             return self._final(dev, "FAILED", "CAPABILITY_MISSING")
         needed = self.family.space_needed(dev.plan, self.packages)
         if dev.facts.free_bytes is not None and dev.facts.free_bytes < needed:
-            return self._final(dev, "FAILED", "NO_SPACE")
+            return self._final(dev, "FAILED", "NO_SPACE" if self.options.method != "push"
+                               else f"NO_SPACE need={needed} free={dev.facts.free_bytes}")   # U10: before any push
         if self.options.upgrade and dev.backup is None:
             return self._final(dev, "FAILED", "ACCESS_BACKUP_MISSING")
         self._set(dev, "READY")
+
+    def _previous_run(self, host):
+        """G9 (R-049): the latest other run in this evidence root that wrote host's dispatch.json (only an
+        --upgrade run that dispatched does; --plan runs and runs that stopped in precheck do not) and the
+        switch's final category there: run-report.json, else its last DONE event, else None. Read only."""
+        found = []
+        for run in self.evidence.root.parent.iterdir():
+            dispatch = run / "devices" / host / "dispatch.json"
+            if run != self.evidence.root and run.is_dir() and dispatch.is_file():
+                found.append((dispatch.stat().st_mtime_ns, run.name, run))
+        if not found:
+            return None
+        run = max(found)[2]
+        category = None
+        try:
+            rows = json.loads((run / "run-report.json").read_text(encoding="utf-8"))["devices"]
+            category = next(row["category"] for row in rows if row["hostname"] == host)
+        except (OSError, ValueError, KeyError, StopIteration):
+            try:
+                for line in (run / "events.jsonl").read_text(encoding="utf-8").splitlines():
+                    record = json.loads(line)
+                    if record.get("host") == host and record.get("state") == "DONE":
+                        category = record.get("category")
+            except (OSError, ValueError):
+                pass
+        return dict(run=run.name, directory=run / "devices" / host, category=category,
+                    dispatch=json.loads((run / "devices" / host / "dispatch.json").read_text(encoding="utf-8")))
+
+    def _recheck(self, dev, previous):
+        """G9: the switch is at target but its last run left no final result. --plan lists it; --upgrade runs
+        the post-upgrade verification with that run's step, configuration backup, access backup and saved
+        health (read only); missing evidence is REVIEW_REQUIRED naming it."""
+        run, record = previous["run"], previous["dispatch"]
+        if not self.options.upgrade:
+            return self._final(dev, "NOT_EXECUTED", f"RECHECK_NEEDED: last run {run} has no final result")
+        name = f"before-{record['stage']}.commands"
+        try:
+            before = (previous["directory"] / name).read_bytes()
+        except OSError:
+            return self._final(dev, "REVIEW_REQUIRED", f"RECHECK_EVIDENCE_MISSING: {name}")
+        backup = self.ops.previous_backup(previous["directory"])
+        if backup is None:
+            return self._final(dev, "REVIEW_REQUIRED", "RECHECK_EVIDENCE_MISSING: access backup")
+        dev.recheck, dev.backup, dev.boot_after = run, backup, dev.facts.boot_id
+        dev.step = StepRecord(record["component"], record["stage"], record["target_version"], record["remote_dir"])
+        dev.dispatch = dict(before_commands=before, health_record=record.get("health"), dispatched_at=self.clock(),
+                            boot_before=record.get("boot_before"))
+        self._set(dev, "VERIFYING", recheck=run, stage=record["stage"])
+        self._submit_verify(dev)
 
     # ------------------------------------------------------------ component phase
     def _steps_for(self, dev, component):
@@ -808,7 +906,8 @@ class Engine:
             return
         self.phase = component
         members = [dev for dev in sorted(self.devs.values(), key=lambda item: item.order)
-                   if dev.category is None and dev.state == "READY" and self._steps_for(dev, component)]
+                   if dev.category is None and dev.state == "READY" and component not in dev.held
+                   and self._steps_for(dev, component)]
         if not members:
             return
         for dev in members:
@@ -987,6 +1086,8 @@ class Engine:
         self.evidence.journal(dev.host)(f"distribution-{dev.current.component}-{dev.step_index}.json", dict(
             source=source, ok=ok, results=results, failure=failure, queued_seconds=round(event.waited, 3),
             seconds=round(event.seconds, 3)))
+        if ok:
+            self.received["server" if source == dist.SERVER else "switches"].add(dev.host)
         if session is None:                              # canary pull
             self.gate.finish()
             if ok:
@@ -1140,6 +1241,8 @@ class Engine:
         self._later(delay, again)
 
     def _on_verify(self, dev, event):
+        if dev.recheck is not None:
+            return self._on_recheck(dev, event)
         if event.error is not None:
             error = event.error
             if isinstance(error, SshError) and error.reboot_like:
@@ -1154,14 +1257,69 @@ class Engine:
         self.evidence.journal(dev.host)(f"verify-{dev.step.stage}.json", dict(
             state=result["state"], reason=result.get("reason"), os_version=result.get("os_version"),
             repaired=result.get("repaired"), ssd=result.get("ssd"), queued_seconds=round(event.waited, 3)))
+        if result.get("ssd") is not None:
+            dev.ssd_post = result["ssd"]                 # G5: the last post-upgrade row wins in the summary
         if result["state"] == "REBOOTED":
             return self._requeue(dev, "BOOT_CHANGED_DURING_VERIFY")
+        if result["state"] == "HEALTH_PENDING":
+            return self._health_recheck(dev, result)
         if result["state"] != "VERIFIED":
+            self._performed_at_target(dev, result, "UNKNOWN")
             self._final(dev, "UNKNOWN", result.get("reason") or "VERIFY_FAILED")
             return self._canary_failed(dev) if dev.canary else None
         dev.performed.append(dict(component=dev.step.component, stage=dev.step.stage,
                                   target=dev.step.target_version, warnings=list(dev.warnings)))
         self._step_done(dev, performed=True)
+
+    def _performed_at_target(self, dev, result, verdict):
+        """04 Q-113 (owner 2026-11-26): a step whose read-back version is exactly its target was performed, even
+        when the verification is not VERIFIED; the row carries that verdict. The category is not changed here."""
+        if result.get("version_at_target") is True:
+            dev.performed.append(dict(component=dev.step.component, stage=dev.step.stage, target=dev.step.target_version,
+                                      warnings=list(dev.warnings), verdict=verdict, reason=result.get("reason")))
+
+    def _health_recheck(self, dev, result):
+        """G7 (R-046, owner 11-24): the health read N/A after the upgrade. Ask the whole verification again every
+        health_recheck_seconds as a main-loop timer (the switch keeps its slot, no worker waits), at most
+        health_wait_seconds from the first N/A; then UNKNOWN with the original reason."""
+        now = self.clock()
+        if dev.health_wait_since is None:
+            dev.health_wait_since = now
+        dev.health_waits += 1
+        waited = now - dev.health_wait_since
+        self.evidence.journal(dev.host)(f"health-wait-{dev.health_waits}.json", dict(
+            n=dev.health_waits, stage=dev.step.stage, reason=result.get("reason"), waited_seconds=round(waited, 3),
+            health=result.get("health")))           # the family's raw health output, opaque here
+        if waited >= self.options.health_wait_seconds:
+            self._performed_at_target(dev, result, "UNKNOWN")
+            self._final(dev, "UNKNOWN", result.get("reason") or "HEALTH_STATUS_UNAVAILABLE")
+            return self._canary_failed(dev) if dev.canary else None
+        self._set(dev, "VERIFYING", health_wait=dict(n=dev.health_waits, waited_seconds=round(waited, 3)))
+        step = dev.step
+
+        def again():
+            if dev.category is None and dev.state == "VERIFYING" and dev.step is step:
+                self._submit_verify(dev)
+        self._later(self.options.health_recheck_seconds, again)
+
+    def _on_recheck(self, dev, event):
+        """G9: VERIFIED is UPGRADED with the source run; any other answer keeps its category, run named."""
+        source = f"run={dev.recheck}"
+        if event.error is not None:
+            code = getattr(event.error, "code", None) or type(event.error).__name__
+            return self._final(dev, "UNKNOWN", f"VERIFY_{code} (recheck of {source})")
+        result = event.result
+        self.evidence.journal(dev.host)("verify-recheck.json", dict(
+            state=result["state"], reason=result.get("reason"), source_run=dev.recheck, os_version=result.get("os_version"),
+            repaired=result.get("repaired"), ssd=result.get("ssd"), queued_seconds=round(event.waited, 3)))
+        if result.get("ssd") is not None:
+            dev.ssd_post = result["ssd"]
+        if result["state"] == "HEALTH_PENDING":
+            return self._health_recheck(dev, result)
+        if result["state"] == "VERIFIED":
+            return self._final(dev, "UPGRADED", f"RECHECKED_AFTER_INTERRUPTION {source}")
+        category = "REVIEW_REQUIRED" if result["state"] == "REVIEW" else "UNKNOWN"
+        self._final(dev, category, f"{result.get('reason') or 'VERIFY_FAILED'} (recheck of {source})")
 
     def _requeue(self, dev, why):
         dev.warnings.append(why)
@@ -1178,7 +1336,7 @@ class Engine:
             if dev.canary and canary_component_verified(required, dev.verified_steps):
                 self.proven_segments.update(self.canary_segments[dev.host])
         dev.step_index += 1
-        dev.dispatch, dev.step, dev.verify_retried = None, None, False
+        dev.dispatch, dev.step, dev.verify_retried, dev.health_wait_since = None, None, False, None
         if dev.current is not None:
             dev.need_since = self.clock()
             self._set(dev, "NEED_STAGE", step=dev.current.key[1:])
@@ -1318,10 +1476,14 @@ class Engine:
                          group="PASSWORD_NOT_TRIED" if dev.password_not_tried else
                          "NO_INSTALLATION" if dev.category == "AT_TARGET" else "OTHER")
                     for dev in sorted(self.devs.values(), key=lambda item: item.order) if dev.key_rejected]
+        ssd = [dict(dev.ssd_post or dev.ssd_preflight, hostname=dev.host)      # G5: one row per switch
+               for dev in sorted(self.devs.values(), key=lambda item: item.order) if dev.ssd_post or dev.ssd_preflight]
         report = dict(family=self.family.name, run_id=self.options.run_id, hold=self.hold, stopped=self.stopping,
                       aborted=self.aborted, password_rejected_by=list(self.password_rejected_by),
                       key_rejected=key_rows, link=self.options.link.line(), counts=counts, devices=rows,
-                      seconds=round(self.clock() - self.started, 1))
+                      seconds=round(self.clock() - self.started, 1), ssd=ssd)
+        if self.options.method == "push":
+            report["push"] = {name: len(hosts) for name, hosts in self.received.items()}
         self.evidence.write("run-report.json", report)
         return report
 
@@ -1337,6 +1499,9 @@ def exit_code(report):
 
 def render_summary(report, *, management_key=None, user=None):
     lines = ["", f"== {report.get('family', 'switch')} upgrade summary ==", report["link"]]
+    if report.get("push"):
+        lines.append(f"[PUSH] the server pushed to {report['push']['server']} switch(es); switches forwarded to "
+                     f"{report['push']['switches']} switch(es)")
     for category, label in CATEGORIES:
         names = [row for row in report["devices"] if row["category"] == category]
         if not names:
@@ -1346,6 +1511,15 @@ def render_summary(report, *, management_key=None, user=None):
             extra = (f"  {row['reason']}" if row.get("reason") else "") + (
                 f"  [{', '.join(row['warnings'])}]" if row.get("warnings") else "")
             lines.append(f"  {row['hostname']}{extra}")
+    ssd = report.get("ssd") or []
+    if ssd:                                    # G5: informational, never part of the result or exit code
+        lines.append(f"SSD (informational): passed={sum(row['state'] == 'PASS' for row in ssd)} "
+                     f"warnings={sum(row['state'] == 'WARNING' for row in ssd)}")
+        for row in ssd:
+            if row.get("status") in ("MISMATCH", "UNAVAILABLE"):
+                lines.append(f"  {row['hostname']}  {row['status']} observed={row.get('observed_version') or '-'} "
+                             f"target={row.get('expected_version')} basis={row.get('verification_basis')}")
+        lines.append("  Next: SSD firmware comes with the OS install; a mismatch does not change this run's result")
     if report.get("hold"):
         lines.append(f"HOLD: {report['hold']}")
     if report.get("password_rejected_by"):

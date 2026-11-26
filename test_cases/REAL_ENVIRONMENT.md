@@ -3150,6 +3150,48 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 执行人 owner 或授权现场人员，验证 AI 只读。证据：每台 `timeline.jsonl` 的 VERIFYING（boot_id）时刻与
   `verify-*.json` 写入时刻、`events.jsonl`、原始 health 输出。清理与风险同本卡；30 秒不保证健康可用。
 
+### v3.1.6 A4c 扩展（G1、G6、U8/G5、G8、G7、G9，仍 OPEN / NOT RUN）
+
+- 前置：同本卡；同版 `test_fleet_engine`、`test_ibsw_v2_device`、`test_ibsw_v2_entry`、`test_ibsw_v2_workflow` 通过（模拟交换机，不代表现场）。
+  只在 prod（AIR 没有 IB-SW，owner 2026-11-20 第4条）；执行人 owner 或授权现场人员，验证 AI 只读。
+- 观察项（步骤/预期，现场出现才记，不为验证制造故障）：
+  1. 配置 `packages.ssd.version` 时汇总有 `SSD (informational): passed=N warnings=M` 一节，每台一行，逐台与
+     `nv show platform firmware` 的 SSD 行比对一致；不一致不改变结果和退出码（U8/G5）。
+  2. 每次下发前多一次只用密码的登录（只执行 `true`），在会话日志或 `report` 可见；被拒记 `FAILED PASSWORD_PREWRITE_REJECTED`（G6）。
+  3. 有组件判定问题时 OS 照升，该台 `REVIEW_REQUIRED <码> (partly upgraded: os)`（G1）。
+  4. 启动命令立即返回，`launch.record` 的 PID 是 runner，`dispatch.json` 后 `confirmed` 为 true（G8，对照 prod 11-24 的 `"confirmed": null`）。
+  5. 升级后健康 `status N/A` 时出现 `health-wait-<n>.json`，最多 2 分钟后有结论（G7）。
+  6. 上次中断（UNKNOWN）的设备重跑时记 `UPGRADED RECHECKED_AFTER_INTERRUPTION run=<编号>`，旧证据不被改写（G9）。
+- 证据：汇总全文、`run-report.json` 的 `ssd`、各台 `precheck.json`、`dispatch.json`（含 `health`）、`verify-*.json`、
+  `health-wait-*.json`、`verify-recheck.json`、`launch.record`。清理与风险同本卡；未执行前 OPEN / NOT RUN。
+
+## TC-REAL-IBSW-V2-HOSTKEY-PIN-001 — upgrade2.py --pin-unknown-host-keys 首次登记未登记的交换机主机密钥
+
+- Case ID：`TC-REAL-IBSW-V2-HOSTKEY-PIN-001`；状态 **OPEN / NOT RUN**；类型：real-environment / known_hosts 写入。
+- 依据：问题文件 §36（U7）、指导 8.25.6、owner 11-20 P-06 (a)（信任依据是登录后的主机名＋eth0 MAC 核对，指纹记进证据）。
+- 前置：同版 `test_login_path`、`test_fleet_ssh`、`test_ibsw_v2_entry`、`test_ibsw_v2_workflow` 通过；现场有若干台按 IP
+  未登记的 IB 交换机；只在 prod，执行人 owner 或授权现场人员，验证 AI 只读。
+- 步骤：① 只读 `ssh-keygen -F <IP>` 列出未登记清单；② `upgrade2.py --plan --pin-unknown-host-keys` 只列 `would pin` 和指纹，
+  known_hosts 字节不变；③ `--upgrade --yes --pin-unknown-host-keys`（可只选 OS 已在目标的设备，不触发升级）。
+- 预期：身份一致的设备追加一行 `<IP> <类型> <base64>`，原有字节不变，读回一致后照常核对；身份不符记
+  `REVIEW_REQUIRED DEVICE_IDENTITY_MISMATCH` 并列指纹，不写；已登记或 `@` 标记行的设备不连接。
+- 证据：登记台数、指纹清单、`host-key-pins.json`、备份文件名 `known_hosts.pin-<运行编号>`、前后 `known_hosts` 行数。
+- 清理：如需撤销按备份还原（owner 决定）。
+- 风险：信任依据是身份核对而不是带外指纹；未执行前保持 OPEN / NOT RUN。
+
+## TC-REAL-IBSW-V2-PUSH-001 — upgrade2.py --push：管理服务器推送、交换机之间转发
+
+- Case ID：`TC-REAL-IBSW-V2-PUSH-001`；状态 **OPEN / NOT RUN**；类型：real-environment / destructive / reboot。
+- 依据：问题文件 §41（U10）、owner 11-20 第7条、指导 8.25.5。
+- 前置：同版 `test_fleet_engine`、`test_ibsw_v2_device`、`test_ibsw_v2_entry`、`test_ibsw_v2_workflow` 通过；交换机连不回
+  服务器的现场（问题文件 :2496-2498 那一类）；owner 书面授权维护窗口；只在 prod，执行人 owner 或授权现场人员，验证 AI 只读。
+- 步骤：`--push` 做一次 OS 升级，先 canary 一台，再一个 OOB leaf。
+- 预期：每队第一份由服务器推送（临时名、交换机上 sha256 一致才改名），其余由交换机之间 scp 转发；没有交换机连回服务器；
+  空间不够的设备在任何传输之前记 `FAILED NO_SPACE need=… free=…`；汇总有 `[PUSH]` 一行。
+- 证据：推送和转发路径、耗时、各台 sha256、`distribution-*.json`（`pushed`、`sha256`）、汇总全文。
+- 清理：交换机 `/home/admin` 上暂存的镜像和遗留的 `.<文件>.push-<运行编号>` 临时文件按需手工清理。
+- 风险：升级重启；管理网封 ICMP 时 v2 预检整批 `PING_UNREACHABLE`（I2，本版不改）；未执行前保持 OPEN / NOT RUN。
+
 ## TC-REAL-DEPS-ENGINE-IMAGE-001 — 重建镜像，在容器和原生 venv 里验证 CableTracker 引擎依赖
 
 ### 基本信息

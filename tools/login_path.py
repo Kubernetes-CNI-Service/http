@@ -142,6 +142,51 @@ class LocalKnownHostsEditor:
         return RemovalReceipt(tuple(row[0] for row in rows), self.path.with_name(self.path.name + ".old").is_file(),
                               before.st_ino, after.st_ino, stat.S_IMODE(before.st_mode), stat.S_IMODE(after.st_mode))
 
+    def append(self, address: str, key_type: str, blob: str) -> None:
+        """Append one literal `<address> <type> <base64>` line; the existing bytes stay as they are (U7)."""
+        if not _host_key_address(address):
+            raise ValueError("invalid host-key address")
+        if not re.fullmatch(r"[A-Za-z0-9@.-]{1,64}", key_type) or not re.fullmatch(r"[A-Za-z0-9+/]+={0,3}", blob):
+            raise ValueError("invalid host key")
+        with self.path.open("rb") as current:
+            data = current.read()
+        separator = b"\n" if data and not data.endswith(b"\n") else b""
+        with self.path.open("ab") as output:          # O_APPEND: nothing before the end is rewritten
+            output.write(separator + f"{address} {key_type} {blob}\n".encode("ascii"))
+
+
+@dataclass(frozen=True)
+class HostKeyPinRecord:
+    address: str
+    hostname: str
+    key_type: str
+    fingerprint: str
+    basis: str
+    backup: str
+
+
+def pin_unknown_host_key(address: str, key_type: str, blob: str, fingerprint: str,
+                         editor: LocalKnownHostsEditor, *, before_write: Callable[[], object], hostname: str,
+                         run_id: str) -> HostKeyPinRecord:
+    """First registration of a never-pinned switch host key (v3.1.6 U7, 问题文件 §36.3).
+
+    The caller has already matched the authenticated device's hostname and eth0 MAC with the inventory;
+    this only appends: the address must have no entry, the caller authorizes the write, the original file
+    is copied once per run to known_hosts.pin-<run_id> (0600), and the read-back must be exactly this key."""
+    if not re.fullmatch(r"SHA256:[A-Za-z0-9+/]{43}", fingerprint):
+        raise ValueError("invalid host-key fingerprint")
+    if editor.fingerprints(address):
+        raise ValueError("host key already registered for this address; nothing written")
+    before_write()  # Caller owns permission; the library owns no device/credential authority.
+    backup = editor.path.with_name("known_hosts.pin-" + run_id)
+    if not backup.exists():
+        backup.touch(mode=0o600, exist_ok=False)
+        backup.write_bytes(editor.path.read_bytes())
+    editor.append(address, key_type, blob)
+    if [row[2] for row in editor.fingerprints(address)] != [fingerprint]:
+        raise ValueError("pinned host key differs on read-back")
+    return HostKeyPinRecord(address, hostname, key_type, fingerprint, "hostname+MAC", str(backup))
+
 
 @dataclass(frozen=True)
 class HostKeyRefreshRecord:

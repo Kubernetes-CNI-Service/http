@@ -302,6 +302,17 @@ def health_state(record, *, complete, force):
     return observed, code, (not code) or force
 
 
+def version_at_target(policy, step, facts):
+    """04 Q-113: whether the version read back for the step's component is exactly the step's target."""
+    try:
+        _assess_component_versions(policy, types.SimpleNamespace(component=step.component,
+                                                                 target_version=step.target_version),
+                                   facts.os_record, facts.firmware_record)
+    except (ValueError, KeyError):
+        return False
+    return True
+
+
 def ssd_row(policy, facts, basis):
     if policy.ssd_version is None or _version(facts.os_version) != policy.final_os:
         return None
@@ -474,8 +485,10 @@ def upload_step(session, step, *, uid, run_id, hostname, switch_dir):
 
 
 def launch_command(remote_dir):
+    """`cd` stays in the foreground (v3.1.6 G8, R-047): only the runner goes to the background with its own
+    redirections, so nothing holds the SSH channel and `$!` is the runner's PID."""
     quoted = shlex.quote(remote_dir)
-    return (f"cd {quoted} && /usr/bin/nohup /bin/bash runner.sh >>execution.stdout 2>>execution.stderr "
+    return (f"cd {quoted} || exit 1; /usr/bin/nohup /bin/bash runner.sh >>execution.stdout 2>>execution.stderr "
             f"</dev/null & printf '%s %s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" \"$!\" > "
             f"{quoted}/launch.record; printf 'IBSW_LAUNCH_REQUESTED\\n'")
 
@@ -683,8 +696,8 @@ class LiveOps:
                  management_line=None, method="http", scp_server=None, sock_factory=None,
                  ping_run=subprocess.run, tcp_probe=tcp22, relay_timeout=1200, connector=None, dir_for=None,
                  http_origins=None, http_base=None):
-        if method not in ("http", "scp") or (method == "scp" and scp_server is None):
-            raise ValueError("--method http, or scp with the ztp-server account")
+        if method not in ("http", "scp", "push") or (method == "scp" and scp_server is None):
+            raise ValueError("--method http, scp with the ztp-server account, or push")
         if http_origins is not None and not http_base:
             raise ValueError("http_origins needs the http_base the package URLs were built with")
         self.pins, self.creds, self.policy, self.selected = pins, credentials, policy, tuple(selected)
@@ -737,7 +750,8 @@ class LiveOps:
 
     def precheck(self, device, *, upgrade, staged_names=(), journal):
         """Read-only check, then (upgrade) the access bootstrap. A refused password raises SshError
-        PASSWORD_REJECTED before anything is written; the engine then holds the other prechecks."""
+        PASSWORD_REJECTED before anything is written; the engine then holds the other prechecks. `ssd` is the
+        informational SSD row of a final OS from the same firmware output (v3.1.6 U8; None otherwise)."""
         session, key_rejected = self._connect(device)
         with session:
             items = run_check(session, "precheck", self.dir_for(device), *staged_names)
@@ -747,7 +761,8 @@ class LiveOps:
                                                 force=self.force_health)
         guard = facts.guard()
         backup = None
-        if upgrade and plan.needed and not plan.issues and guard[0] is None:
+        held = {component for component, _code in plan.issues}   # G1: a BIOS/CPLD issue holds only itself
+        if upgrade and set(plan.needed) - held and held <= set(IbFamily.held_alone) and guard[0] is None:
             def record_import(current, desired):
                 journal("access-bootstrap.json", dict(state="MANAGEMENT_KEY_IMPORT_REQUESTED",
                                                       original_base64=base64.b64encode(current).decode(),
@@ -760,10 +775,14 @@ class LiveOps:
             journal("authorized_keys.before", backup.payload)
             journal("access-backup.json", backup.document(device, self.creds.key_fingerprint))
         return dict(facts=facts, plan=plan, health=dict(observed=observed, reason=code, admitted=admitted),
-                    guard=guard, backup=backup, key_rejected=key_rejected)
+                    guard=guard, backup=backup, key_rejected=key_rejected,
+                    ssd=ssd_row(self.policy, facts, "PREFLIGHT_OS_AT_TARGET"))   # U8: same firmware output
 
     def fetch(self, device, package, *, size, sha256, holder=None, url=None):
-        """Pull one package into the switch: from a holder switch (scp + password) or the ztp-server."""
+        """Pull one package into the switch: from a holder switch (scp + password) or the ztp-server;
+        with method push the ztp-server writes it instead (v3.1.6 U10)."""
+        if holder is None and self.method == "push":
+            return self._push(device, package, size=size, sha256=sha256)
         context = dict(dest_dir=self.dir_for(device), name=package.file, size=size, sha256=sha256)
         if holder is not None:
             context.update(method="scp", host=holder.address, user=self.creds.user, port=22,
@@ -784,9 +803,51 @@ class LiveOps:
         with session:
             return fetch(session, context, timeout=budget)
 
+    def _push(self, device, package, *, size, sha256):
+        """U10 (owner 11-20 第7条): the ztp-server writes the package over its own key session (pinned host
+        key) to a temporary name, the switch reads size and sha256 of that file like the check script's
+        `staged`, and only a match is renamed to the real name; otherwise the temporary file is removed. No
+        switch connects back to the server. Same result shape as fetch(), plus `pushed` and the sha256."""
+        directory = self.dir_for(device)
+        temporary = posixpath.join(directory, f".{package.file}.push-{self.run_id}")
+        session, _rejected = self._connect(device)
+        with session:
+            sftp = session.sftp()
+
+            def discard():
+                try:
+                    sftp.remove(temporary)
+                except Exception:            # the session may be gone; the next run's name differs
+                    pass
+            try:
+                with open(package.path, "rb") as source:
+                    target = sftp.open(temporary, "wx")
+                    try:
+                        for block in iter(lambda: source.read(1024 * 1024), b""):
+                            target.write(block)
+                    finally:
+                        target.close()
+            except Exception as error:
+                if not isinstance(error, OSError) and type(error) is not ssh._sdk().SSHException:
+                    raise
+                discard()
+                return {"ok": False, "class": "receiver", "code": "PUSH_WRITE_FAILED", "pushed": True}
+            quoted = shlex.quote(temporary)
+            result = session.run(f"stat -c %s -- {quoted} && sha256sum -- {quoted}", timeout=CHECK_SECONDS)
+            words = result.stdout.decode("ascii", "replace").split()
+            observed = words[1] if result.ok and len(words) == 3 else None
+            if observed is None or words[0] != str(size) or observed != sha256:
+                discard()
+                return {"ok": False, "class": "unknown", "code": "PUSH_SHA256_MISMATCH", "pushed": True,
+                        "sha256": observed}
+            sftp.posix_rename(temporary, posixpath.join(directory, package.file))
+        return {"ok": True, "class": "none", "code": "OK", "pushed": True, "sha256": observed}
+
     def dispatch(self, device, step, *, backup, staged, journal):
         """Re-check, upload and launch. Raises before the write-ahead record (nothing started);
-        returns confirmed None when the launch outcome is unknown (treat as started)."""
+        returns confirmed None when the launch outcome is unknown (treat as started). Once every re-check
+        passed, one password-only login (like v1's VERIFY_RECOVERY_PASSWORD) runs before anything is
+        uploaded; a refusal is FAILED PASSWORD_PREWRITE_REJECTED, nothing written (v3.1.6 G6)."""
         session, _rejected = self._connect(device, password_fallback=False)
         with session:
             items = run_check(session, "dispatch", self.dir_for(device), *staged)
@@ -821,12 +882,19 @@ class LiveOps:
                     return dict(state="FAILED", reason="STAGED_PACKAGE_CHANGED", detail=name)
             access_unchanged(session, backup, self.creds.user)
             uid, _home = account(session, self.creds.user)
+            try:                                   # G6: the recovery password still works before any write
+                self.password_login(device)
+            except ssh.SshError as error:
+                if error.code != "PASSWORD_REJECTED":
+                    raise
+                return dict(state="FAILED", reason="PASSWORD_PREWRITE_REJECTED")
             remote_dir = upload_step(session, step, uid=uid, run_id=self.run_id, hostname=device.hostname,
                                      switch_dir=self.dir_for(device))
             journal("dispatch.json", dict(state="REQUESTED", component=step.component, stage=step.stage,
                                           target_version=step.target_version, remote_dir=remote_dir,
                                           boot_before=facts.boot_id,
-                                          script_sha256=hashlib.sha256(step.script).hexdigest()))
+                                          script_sha256=hashlib.sha256(step.script).hexdigest(),
+                                          health=raw_row("nv show system health", facts.raw["health"])))   # G9
             try:
                 confirmed = launch(session, remote_dir)
             except ssh.SshError:
@@ -889,7 +957,8 @@ class LiveOps:
         return result
 
     def verify(self, device, step, *, boot_after, before, baseline_health, backup, journal):
-        """VERIFIED / UNKNOWN / REBOOTED. Repairs only missing configuration, after a durable request.
+        """VERIFIED / UNKNOWN / REBOOTED, or HEALTH_PENDING when the health read `status N/A` (the engine asks
+        again, v3.1.6 G7). Repairs only missing configuration, after a durable request.
 
         An SshError leaving here carries `repair_requested`: whether this attempt had already asked for
         repair-requested.json to be written. The engine retries a timed-out verification only when it had
@@ -915,6 +984,15 @@ class LiveOps:
             facts = facts_from(items, device)
             if facts.boot_id != boot_after:
                 return dict(state="REBOOTED", boot_id=facts.boot_id)
+            if isinstance(baseline_health, dict):          # G9: saved in an earlier run's dispatch.json
+                baseline_health = record_readonly_query(
+                    HEALTH_ARGV, base64.b64decode(baseline_health["stdout_base64"]),
+                    base64.b64decode(baseline_health["stderr_base64"]), baseline_health["returncode"])
+            elif baseline_health is None:                   # G9: old evidence without it: the current health alone
+                if health_state(facts.health_record, complete=facts.health_complete, force=False)[0] != "PASS":
+                    return dict(state="REVIEW", reason="HEALTH_BASELINE_MISSING", facts=facts,
+                                version_at_target=version_at_target(self.policy, step, facts))
+                baseline_health = facts.health_record
             state, reason, difference = assess(self.policy, step, facts, before=before,
                                                baseline_health=baseline_health, force_health=self.force_health)
             if state == "REPAIR":
@@ -930,7 +1008,8 @@ class LiveOps:
                 except (DeviceError, ssh.SshError) as error:
                     journal("repair-result.json", dict(state="UNKNOWN", reason=getattr(error, "code", "FAILED"),
                                                        commands=rows))
-                    return dict(state="UNKNOWN", reason="CONFIG_REPAIR_FAILED", facts=facts)
+                    return dict(state="UNKNOWN", reason="CONFIG_REPAIR_FAILED", facts=facts,
+                                version_at_target=version_at_target(self.policy, step, facts))
                 journal("repair-result.json", dict(state="REPAIRED", commands=rows))
                 repaired = True
                 items = run_check(session, "verify", timeout=VERIFY_SECONDS)
@@ -938,13 +1017,30 @@ class LiveOps:
                 state, reason, _difference = assess(self.policy, step, facts, before=before,
                                                     baseline_health=baseline_health, force_health=self.force_health)
             if state != "VERIFIED":
-                return dict(state="UNKNOWN", reason=reason, facts=facts, repaired=repaired)
+                if reason == "HEALTH_STATUS_UNAVAILABLE":     # G7: `status N/A`; the engine asks again
+                    return dict(state="HEALTH_PENDING", reason=reason, facts=facts, repaired=repaired,
+                                version_at_target=version_at_target(self.policy, step, facts),
+                                health=raw_row("nv show system health", facts.raw["health"]))
+                return dict(state="UNKNOWN", reason=reason, facts=facts, repaired=repaired,
+                            version_at_target=version_at_target(self.policy, step, facts))
         with self._connect(device, password_fallback=False)[0] as key_session:   # FINAL_KEY_ACCESS_CHECK
             result = key_session.run("cat /proc/sys/kernel/random/boot_id")
             if not result.ok or result.stdout.decode("ascii", "replace").strip() != boot_after:
                 return dict(state="REBOOTED", boot_id=result.stdout.decode("ascii", "replace").strip())
         return dict(state="VERIFIED", os_version=facts.os_version, repaired=repaired, facts=facts,
                     ssd=ssd_row(self.policy, facts, "POST_UPGRADE"))
+
+    def previous_backup(self, directory):
+        """G9: the access backup an earlier run saved for this switch (access-backup.json and
+        authorized_keys.before, sha256-bound), None when missing or inconsistent. Read only."""
+        try:
+            document = json.loads((Path(directory) / "access-backup.json").read_text(encoding="utf-8"))
+            payload = (Path(directory) / "authorized_keys.before").read_bytes()
+        except (OSError, ValueError):
+            return None
+        if hashlib.sha256(payload).hexdigest() != document.get("authorized_keys_sha256"):
+            return None
+        return AccessBackup(document["uid"], document["home"], payload)
 
     def ping(self, device):
         return ping(device.address, run=self.ping_run)
@@ -961,9 +1057,10 @@ class IbFamily(fleet_engine.Family):
     components = ("os", "bios", "cpld")
     required_programs = ("/bin/bash", "/usr/bin/nohup", "/usr/bin/python3", "/usr/bin/curl", "/usr/bin/scp",
                          "/usr/bin/sha256sum")
+    held_alone = ("bios", "cpld")      # a BIOS/CPLD judgement error holds only that component, like v1 (G1)
 
-    def __init__(self, policy):
-        self.policy = policy
+    def __init__(self, policy, *, push=False):
+        self.policy, self.push = policy, push
 
     def packages(self, selected):
         policy, wanted = self.policy, []
@@ -1021,5 +1118,10 @@ class IbFamily(fleet_engine.Family):
         return component == "os"
 
     def space_needed(self, plan, infos):
-        """Room for one OS image twice (`nv action fetch` copies it); BIOS/CPLD are small."""
-        return 2 * max((infos[package.path].size for package in plan.os_path if package.path in infos), default=0)
+        """Room for one OS image twice (`nv action fetch` copies it); BIOS/CPLD are small. With --push the
+        BIOS/CPLD packages this switch gets are counted too, once each (v3.1.6 U10, 问题文件 :2510)."""
+        need = 2 * max((infos[package.path].size for package in plan.os_path if package.path in infos), default=0)
+        if self.push:
+            need += sum(info.size for component in ("bios", "cpld") for step in self.steps(plan, component, infos)
+                        for info in step.packages)
+        return need

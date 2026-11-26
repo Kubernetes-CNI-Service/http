@@ -8,7 +8,9 @@ management key first and the switch password only when the key is rejected, comm
 bounded from the moment they are sent. Passwords and private keys never appear in a
 repr, an error or a result. A rejected key is AUTH_REJECTED (the cue for the password
 fallback); a password the switch refuses is PASSWORD_REJECTED, so a mistyped password
-can stop a run before it is tried on other switches (field 2026-10-24).
+can stop a run before it is tried on other switches (field 2026-10-24). connect_presented() is the one
+session that does not check a pin: it serves only the explicit first registration of a never-pinned host
+key (v3.1.6 U7), and its caller trusts the key only after the hostname and eth0 MAC check.
 """
 from __future__ import annotations
 
@@ -343,6 +345,75 @@ def connect(address, pins, credentials, *, method="key", sock_factory=None):
         raise
 
 
+def connect_presented(address, credentials, *, method="any", sock_factory=None):
+    """v3.1.6 U7: one session to a switch whose host key is not pinned yet, for the explicit first
+    registration only (`upgrade2.py --pin-unknown-host-keys`). The key the switch presents is returned and
+    compared with nothing here: the caller trusts it only after the hostname and eth0 MAC read over this
+    session match the inventory. method 'key' / 'password' as connect(); 'any' tries the key first and the
+    password only after an explicit rejection (connect_any). Returns (session, (type, base64, fingerprint))."""
+    sdk = _sdk()
+    sock = (sock_factory or _connect_socket)(address, CONNECT_SECONDS)
+    transport = None
+    try:
+        transport = sdk.Transport(sock)
+        transport.banner_timeout = HANDSHAKE_SECONDS
+        transport.handshake_timeout = HANDSHAKE_SECONDS
+        try:
+            transport.start_client(timeout=HANDSHAKE_SECONDS)
+        except Exception:
+            raise SshError("HANDSHAKE_FAILED") from None
+        key = transport.get_remote_server_key()
+        presented = (key.get_name(), key.get_base64(), fingerprint(key.asbytes()))
+        transport.auth_timeout = HANDSHAKE_SECONDS
+        tried = ("key", "password") if method == "any" else (method,)
+        used = None
+        for attempt in tried:
+            try:
+                if attempt == "key":
+                    if credentials.key is None:
+                        raise SshError("AUTH_REJECTED")
+                    transport.auth_publickey(credentials.user, credentials.key)
+                elif attempt == "password":
+                    if not credentials.password:
+                        raise SshError("AUTH_REJECTED")
+                    transport.auth_password(credentials.user, credentials.password, fallback=False)
+                else:
+                    raise ValueError("authentication method must be key, password or any")
+                used = attempt
+                break
+            except sdk.AuthenticationException as error:
+                message = str(error)
+                if message == "Authentication timeout.":
+                    raise SshError("AUTH_TIMEOUT") from None
+                if message == "Authentication failed: transport shut down or saw EOF":
+                    raise SshError("AUTH_TRANSPORT_LOST") from None
+                if message != "Authentication failed." or not transport.is_active():
+                    raise SshError("AUTH_UNKNOWN") from None
+                if attempt == "password":
+                    raise SshError("PASSWORD_REJECTED") from None
+                if attempt == tried[-1] or not credentials.password:
+                    raise SshError("AUTH_REJECTED") from None
+            except SshError as error:
+                if error.code != "AUTH_REJECTED" or attempt == tried[-1] or not credentials.password:
+                    raise
+            except (OSError, EOFError):
+                raise SshError("AUTH_TRANSPORT_LOST") from None
+            except sdk.SSHException:
+                raise SshError("AUTH_UNKNOWN") from None
+        if not transport.is_authenticated() or transport.get_username() != credentials.user:
+            raise SshError("AUTH_REJECTED")
+        transport.set_keepalive(30)
+        return Session(transport, sock, address, used, presented[2]), presented
+    except BaseException:
+        for owned in (transport, sock):
+            try:
+                if owned is not None:
+                    owned.close()
+            except Exception:
+                pass
+        raise
+
+
 def connect_any(address, pins, credentials, *, sock_factory=None):
     """Key first; the password only after the key is explicitly rejected. Returns (session, key_rejected)."""
     try:
@@ -354,4 +425,4 @@ def connect_any(address, pins, credentials, *, sock_factory=None):
 
 
 __all__ = ["SSH_RUNTIME_PINS", "Credentials", "HostPins", "Result", "Session", "SshError", "connect",
-           "connect_any", "fingerprint", "load_private_key"]
+           "connect_any", "connect_presented", "fingerprint", "load_private_key"]

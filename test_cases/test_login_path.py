@@ -602,6 +602,60 @@ class LocalHostKeyRefreshTests(unittest.TestCase):
                 self.assertIs(error, caught.exception)
                 self.assertEqual(self.before, self.path.read_text())
 
+    # ------------------------------------------------------------ v3.1.6 U7 (问题文件 §36.3; 指导 8.25.6 改法 4)
+    def pin(self, address="192.0.2.13", *, before_write=None):
+        self.assertTrue(hasattr(self.api, "pin_unknown_host_key"), "v3.1.6 U7 first registration required")
+        kind, blob = self.keys["new"][0].split()
+        return self.api.pin_unknown_host_key(address, kind, blob, self.keys["new"][1], self.editor(),
+                                             before_write=before_write or (lambda: None), hostname="sw13",
+                                             run_id="r1")
+
+    def test_pin_appends_one_literal_line_and_keeps_every_original_byte(self):
+        record = self.pin()
+        text = self.path.read_text()
+        self.assertTrue(text.startswith(self.before), "the original bytes are unchanged")
+        self.assertEqual(text[len(self.before):], "192.0.2.13 " + self.keys["new"][0] + "\n", "one line more")
+        self.assertEqual([row[2] for row in self.editor().fingerprints("192.0.2.13")], [self.keys["new"][1]])
+        backup = self.home / ".ssh" / "known_hosts.pin-r1"
+        self.assertEqual(backup.read_text(), self.before)
+        self.assertEqual(stat.S_IMODE(backup.stat().st_mode) & 0o077, 0, "the backup is private")
+        self.assertEqual((record.address, record.hostname, record.key_type, record.fingerprint, record.basis,
+                          record.backup),
+                         ("192.0.2.13", "sw13", self.keys["new"][0].split()[0], self.keys["new"][1], "hostname+MAC",
+                          str(backup)))
+
+    def test_pin_refuses_an_address_that_already_has_an_entry(self):
+        permit = mock.Mock()
+        with self.assertRaises(ValueError):
+            self.pin("192.0.2.10", before_write=permit)
+        permit.assert_not_called()
+        self.assertEqual(self.before, self.path.read_text())
+        self.assertFalse((self.home / ".ssh" / "known_hosts.pin-r1").exists())
+
+    def test_pin_into_a_hashed_file_is_read_by_fleet_ssh_and_ssh_keygen(self):
+        import sys
+        subprocess.run(["ssh-keygen", "-H", "-f", str(self.path)], check=True, capture_output=True, timeout=10)
+        hashed = self.path.read_bytes()
+        self.pin()
+        self.assertTrue(self.path.read_bytes().startswith(hashed), "hashed lines stay; a literal line is added")
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+        import fleet_ssh
+        self.assertEqual(fleet_ssh.HostPins.load(self.path).fingerprints("192.0.2.13"), {self.keys["new"][1]})
+        found = subprocess.run(["ssh-keygen", "-F", "192.0.2.13", "-f", str(self.path)], capture_output=True,
+                               text=True, timeout=10)
+        self.assertEqual(found.returncode, 0, found.stdout)
+
+    def test_a_refused_write_permission_writes_nothing(self):
+        error = PermissionError("operator declined")
+
+        def refuse():
+            raise error
+        with self.assertRaises(PermissionError) as caught:
+            self.pin(before_write=refuse)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(self.before, self.path.read_text())
+        self.assertFalse((self.home / ".ssh" / "known_hosts.pin-r1").exists())
+
     def test_module_imports_and_subprocess_are_closed(self):
         self.editor()
         tree = ast.parse(Path(self.api.__file__).read_text())

@@ -84,8 +84,11 @@ class FakeFamily(engine.Family):
     components = ("os", "fw")
     required_programs = ("/usr/bin/python3",)
 
-    def __init__(self, packages):
+    def __init__(self, packages, components=None, held_alone=()):
         self.by_name = packages
+        if components is not None:
+            self.components = components
+        self.held_alone = held_alone
 
     def packages(self, selected):
         return [package for package in self.by_name.values()]
@@ -114,6 +117,11 @@ class FakeFamily(engine.Family):
     def relay(self, component):
         return component == "os"
 
+    space = 0                                          # U10: bytes the switch needs (default: nothing)
+
+    def space_needed(self, plan, infos):
+        return self.space
+
 
 class Sim:
     def __init__(self, version):
@@ -133,9 +141,13 @@ class FakeOps:
         self.install, self.down, self.nvue = install, down, nvue
         self.log = []                         # (time, kind, host, detail)
         self.precheck_behaviour, self.verify_behaviour, self.fetch_fail = {}, {}, set()
+        self.free = {}                         # U10: host -> free bytes reported by the precheck
+        self.health_pending = {}               # G7: host -> how many verifications answer HEALTH_PENDING
+        self.verify_version = {}               # Q-113: host -> version_at_target in a non-VERIFIED answer
         self.verify_errors = {}               # host -> [exception], one raised per verify call
         self.dispatch_journal_error = set()
         self.plans = {}
+        self.ssd_rows, self.verify_ssd = {}, {}     # U8/G5: host -> SSD row from precheck / verification
 
     def note(self, kind, host, detail=None):
         with self.lock:
@@ -172,9 +184,11 @@ class FakeOps:
         sim = self.sims[device.hostname]
         plan = self.plans[device.hostname]
         guard = ("PREVIOUS_INSTALL_PENDING", ".ibsw-x") if behaviour == "pending" else (None, None)
-        return dict(facts=Facts(sim.version, sim.boot, dict(sim.files)), plan=plan,
+        return dict(facts=Facts(sim.version, sim.boot, dict(sim.files), self.free.get(device.hostname, 10 ** 12)),
+                    plan=plan,
                     health=dict(observed="PASS", reason=None, admitted=behaviour != "unhealthy"),
-                    guard=guard, backup=object() if upgrade else None, key_rejected=behaviour == "key-rejected")
+                    guard=guard, backup=object() if upgrade else None, key_rejected=behaviour == "key-rejected",
+                    **({"ssd": self.ssd_rows[device.hostname]} if device.hostname in self.ssd_rows else {}))
 
     def fetch(self, device, info, *, size, sha256, holder=None, url=None):
         source = holder.hostname if holder else "@server"
@@ -212,6 +226,10 @@ class FakeOps:
         return dict(state="DISPATCHED", remote_dir="/home/admin/.ibsw-x", boot_before=boot_before, confirmed=True,
                     before_commands=b"nv set system hostname x\n", health_record=None, facts=None)
 
+    def previous_backup(self, directory):
+        """G9: the access backup an earlier run saved for this switch (opaque here), None when missing."""
+        return object() if (directory / "access-backup.json").is_file() else None
+
     def status(self, device, step, boot_before):
         sim = self._refresh(self.sims[device.hostname])
         if sim.state == "down":
@@ -236,12 +254,21 @@ class FakeOps:
             error = errors.pop(0)
             self.note("verify-error", device.hostname, error.code)
             raise error
+        version = ({"version_at_target": self.verify_version[device.hostname]}    # Q-113: the read-back verdict
+                   if device.hostname in self.verify_version else {})
         if self.verify_behaviour.get(device.hostname) == "unknown":
-            return dict(state="UNKNOWN", reason="COMPONENT_VERSION_NOT_VERIFIED")
+            return dict(state="UNKNOWN", reason="COMPONENT_VERSION_NOT_VERIFIED", **version)
+        if self.verify_behaviour.get(device.hostname) == "degraded":
+            return dict(state="UNKNOWN", reason="HEALTH_DEGRADED", **version)
+        if self.health_pending.get(device.hostname, 0) > 0:      # G7: the health record read status N/A
+            self.health_pending[device.hostname] -= 1
+            return dict(state="HEALTH_PENDING", reason="HEALTH_STATUS_UNAVAILABLE",
+                        health=dict(command="health", stdout_base64="c3RhdHVzIE4vQQo="), **version)
         sim = self._refresh(self.sims[device.hostname])
         if sim.version != step.target_version:
             return dict(state="UNKNOWN", reason="COMPONENT_VERSION_NOT_VERIFIED")
-        return dict(state="VERIFIED", os_version=sim.version, repaired=False)
+        return dict(state="VERIFIED", os_version=sim.version, repaired=False,
+                    **({"ssd": self.verify_ssd[device.hostname]} if device.hostname in self.verify_ssd else {}))
 
 
 class QuickLink(link.LinkDecision):
@@ -259,30 +286,38 @@ class QuickLink(link.LinkDecision):
 class World:
     def __init__(self, test, hosts, *, speed=1000, groups=None, needs=None, in_flight=32, versions=None,
                  upgrade=True, selected=("os", "fw"), verify_retry_seconds=None, check_workers=None,
-                 service_issues=None, **ops):
+                 service_issues=None, components=None, held_alone=(), issues=None, method="http",
+                 health_recheck_seconds=None, health_wait_seconds=None, **ops):
         self.tmp = tempfile.TemporaryDirectory()
         test.addCleanup(self.tmp.cleanup)
         base = Path(self.tmp.name)
         packages = {}
-        for name, version in (("os-2.bin", "2.0"), ("os-3.bin", "3.0"), ("fw.bin", "fw2"), ("cfg.txt", "cfg")):
+        names = (("os-2.bin", "2.0"), ("os-3.bin", "3.0"), ("fw.bin", "fw2"), ("cfg.txt", "cfg"))
+        if components is not None:                      # G1: a three-component family (os -> bios -> cpld)
+            names += (("bios.bin", "b2"), ("cpld.bin", "c2"))
+        for name, version in names:
             path = base / name
             path.write_bytes(name.encode() * 100)
             packages[name] = Package(name, str(path), "http://192.0.2.10/" + name, version)
-        self.family = FakeFamily(packages)
+        self.family = FakeFamily(packages, components, held_alone)
         self.devices = [Device(host, f"198.51.100.{index + 1}") for index, host in enumerate(hosts)]
         self.ops = FakeOps(self.devices, versions=versions, **ops)
         for device in self.devices:
             self.ops.plans[device.hostname] = Plan(dict((needs or {}).get(device.hostname,
-                                                                          {"os": [["os-2.bin"]], "fw": [["fw.bin"]]})))
+                                                                          {"os": [["os-2.bin"]], "fw": [["fw.bin"]]})),
+                                                   issues=tuple((issues or {}).get(device.hostname, ())))
         base_decision = link.decide(speed, source="override")
         decision = QuickLink(**{name: getattr(base_decision, name) for name in base_decision.__dataclass_fields__})
         self.out = io.StringIO()
         self.options = engine.Options(run_id="r1", selected=selected, upgrade=upgrade, link=decision,
                                       groups=groups or {}, in_flight=in_flight, timings=FAST,
-                                      progress_seconds=0.2, later_hop_batch_seconds=0.05,
+                                      progress_seconds=0.2, later_hop_batch_seconds=0.05, method=method,
                                       **({} if verify_retry_seconds is None
                                          else {"verify_retry_seconds": verify_retry_seconds}),
-                                      **({} if check_workers is None else {"check_workers": check_workers}))
+                                      **({} if check_workers is None else {"check_workers": check_workers}),
+                                      **({} if health_recheck_seconds is None else
+                                         {"health_recheck_seconds": health_recheck_seconds,
+                                          "health_wait_seconds": health_wait_seconds}))
         self.engine = engine.Engine(self.devices, self.family, self.ops, self.options,
                                     engine.Evidence(base / "run"), out=self.out,
                                     **({} if service_issues is None else {"service_issues": service_issues}))
@@ -681,6 +716,397 @@ class VerifyRetryTest(unittest.TestCase):
                               "the rebooting queue's SSH step ran again before the second verification")
                 self.assertEqual([record for record in timeline if "verify_retry" in record], [])
 
+
+class ComponentIssueHoldTest(unittest.TestCase):
+    """G1 (需求 R-043; 指导 8.25.1; owner 11-20 第6条): a judgement error on one firmware component holds
+    only that component, like v1 (observer.py: such a component goes to component_issues, not needed, and
+    the others go on). The switch keeps going through the other admission checks and upgrades the other
+    components it needs, including those after the held one; at the end it is REVIEW_REQUIRED with
+    `<first issue code> (partly upgraded: <components done>)`, without the brackets when nothing was done;
+    exit code 3. An issue on the OS (route unavailable, final OS not reached) still holds the whole switch
+    exactly as before. The family names the components whose own issue holds only themselves."""
+
+    THREE = ("os", "bios", "cpld")
+
+    def world(self, needs, issues, hosts=("s0",)):
+        return World(self, list(hosts), components=self.THREE, held_alone=("bios", "cpld"), selected=self.THREE,
+                     needs={host: needs for host in hosts}, issues={host: issues for host in hosts})
+
+    @staticmethod
+    def stages(world, host="s0"):
+        return [stage for _t, name, stage in world.events("dispatch") if name == host]
+
+    @staticmethod
+    def fetched(world, host="s0"):
+        return [detail[0] for _t, name, detail in world.events("fetch-start") if name == host]
+
+    ALL = {"os": [["os-2.bin"]], "bios": [["bios.bin"]], "cpld": [["cpld.bin"]]}
+
+    def test_a_bios_issue_holds_only_bios(self):
+        world = self.world(self.ALL, (("bios", "BIOS_VERSION_CHECK_FAILED"),))
+        results = world.run()
+        self.assertEqual(results["s0"], ("REVIEW_REQUIRED", "BIOS_VERSION_CHECK_FAILED (partly upgraded: os, cpld)"),
+                         world.out.getvalue())
+        self.assertEqual(self.stages(world), ["os-0", "cpld-0"], "BIOS: nothing dispatched")
+        self.assertNotIn("bios.bin", self.fetched(world), "BIOS: nothing transferred")
+        self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_a_cpld_issue_holds_only_cpld(self):
+        world = self.world(self.ALL, (("cpld", "CPLD_VERSION_CHECK_FAILED"),))
+        results = world.run()
+        self.assertEqual(results["s0"], ("REVIEW_REQUIRED", "CPLD_VERSION_CHECK_FAILED (partly upgraded: os, bios)"))
+        self.assertEqual(self.stages(world), ["os-0", "bios-0"])
+        self.assertNotIn("cpld.bin", self.fetched(world))
+        self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_an_os_issue_still_holds_the_whole_switch(self):
+        world = self.world(self.ALL, (("os", "OS_UPGRADE_PATH_REJECTED"), ("bios", "BIOS_VERSION_CHECK_FAILED")))
+        results = world.run()
+        self.assertEqual(results["s0"], ("REVIEW_REQUIRED", "OS_UPGRADE_PATH_REJECTED"))
+        self.assertEqual(self.stages(world) + self.fetched(world), [], "nothing transferred or dispatched")
+        self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_a_bios_issue_with_os_at_target_still_does_cpld(self):
+        needs = {"os": [], "bios": [["bios.bin"]], "cpld": [["cpld.bin"]]}
+        world = self.world(needs, (("bios", "BIOS_VERSION_CHECK_FAILED"),))
+        results = world.run()
+        self.assertEqual(results["s0"], ("REVIEW_REQUIRED", "BIOS_VERSION_CHECK_FAILED (partly upgraded: cpld)"))
+        self.assertEqual(self.stages(world), ["cpld-0"])
+
+    def test_a_held_component_with_nothing_else_to_do_has_no_brackets(self):
+        needs = {"os": [], "bios": [["bios.bin"]], "cpld": []}
+        world = self.world(needs, (("bios", "FIRMWARE_QUERY_FAILED"),))
+        results = world.run()
+        self.assertEqual(results["s0"], ("REVIEW_REQUIRED", "FIRMWARE_QUERY_FAILED"))
+        self.assertEqual(self.stages(world), [])
+
+
+def ssd_row(state, status, observed, basis, reason=None):
+    """An SSD row as ibsw_upgrade_contract.ssd_check_from_firmware returns it (expected SSD-1.2)."""
+    return dict(state=state, status=status, expected_version="SSD-1.2", observed_version=observed,
+                reason_code=reason, informational_only=True, verification_basis=basis)
+
+
+class SsdPrecheckTest(unittest.TestCase):
+    """U8 (问题文件 §38 :2406-2431; 指导 8.25.3): the precheck SSD row of a switch whose OS is already at
+    target is kept in precheck.json (key `ssd`) as an opaque informational row; it never changes admission,
+    the AT_TARGET category or the exit code."""
+
+    def test_a_precheck_row_keeps_at_target_and_goes_to_precheck_json(self):
+        world = World(self, ["s0", "s1"], needs={"s0": {"os": []}, "s1": {"os": []}}, selected=("os",))
+        mismatch = ssd_row("WARNING", "MISMATCH", "SSD-0.9", "PREFLIGHT_OS_AT_TARGET", "SSD_VERSION_MISMATCH")
+        world.ops.ssd_rows["s0"] = mismatch
+        results = world.run()
+        self.assertEqual(results, {"s0": ("AT_TARGET", None), "s1": ("AT_TARGET", None)})
+        self.assertEqual(engine.exit_code(world.report), 0, "informational only")
+        precheck = json.loads((world.engine.evidence.directory("s0") / "precheck.json").read_text())
+        self.assertIn("ssd", precheck, "precheck.json keeps the SSD row")
+        self.assertEqual(precheck["ssd"], mismatch)
+        other = json.loads((world.engine.evidence.directory("s1") / "precheck.json").read_text())
+        self.assertIn("ssd", other)
+        self.assertIsNone(other["ssd"], "a family that gives no row has none")
+
+
+class SsdSummaryTest(unittest.TestCase):
+    """G5 (问题文件 §40 G5, :2425; 指导 8.25.4): the summary takes per switch the last post-upgrade SSD row,
+    else the U8 precheck row (one row per switch, never listed twice), counts passed/warnings, lists
+    MISMATCH/UNAVAILABLE with host, observed, target and basis, and says the next step; with no SSD row at all
+    (no packages.ssd.version) there is no SSD section. The exit code never changes."""
+
+    def test_only_a_precheck_row_is_listed(self):
+        world = World(self, ["s0", "s1"], needs={"s0": {"os": []}, "s1": {"os": []}}, selected=("os",))
+        mismatch = ssd_row("WARNING", "MISMATCH", "SSD-0.9", "PREFLIGHT_OS_AT_TARGET", "SSD_VERSION_MISMATCH")
+        world.ops.ssd_rows["s0"] = mismatch
+        world.run()
+        summary = engine.render_summary(world.report)
+        self.assertIn("SSD (informational): passed=0 warnings=1", summary)
+        self.assertEqual(world.report.get("ssd"), [dict(mismatch, hostname="s0")])
+        self.assertIn("  s0  MISMATCH observed=SSD-0.9 target=SSD-1.2 basis=PREFLIGHT_OS_AT_TARGET", summary)
+        self.assertIn("SSD firmware comes with the OS install; a mismatch does not change this run's result",
+                      summary)
+        self.assertEqual(engine.exit_code(world.report), 0)
+
+    def test_a_post_upgrade_row_replaces_the_precheck_row(self):
+        world = World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",))
+        world.ops.ssd_rows["s0"] = ssd_row("WARNING", "UNAVAILABLE", None, "PREFLIGHT_OS_AT_TARGET",
+                                           "SSD_VERSION_UNAVAILABLE")
+        post = ssd_row("PASS", "MATCH", "SSD-1.2", "POST_UPGRADE")
+        world.ops.verify_ssd["s0"] = post
+        results = world.run()
+        self.assertEqual(results["s0"], ("UPGRADED", None))
+        summary = engine.render_summary(world.report)
+        self.assertIn("SSD (informational): passed=1 warnings=0", summary)
+        self.assertEqual(world.report.get("ssd"), [dict(post, hostname="s0")], "one row per switch: the last one")
+        self.assertNotIn("UNAVAILABLE", summary)
+        self.assertEqual(engine.exit_code(world.report), 0)
+
+    def test_without_any_ssd_row_there_is_no_ssd_section(self):
+        world = World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",))
+        results = world.run()
+        self.assertEqual(results["s0"], ("UPGRADED", None))
+        self.assertEqual(world.report.get("ssd"), [], "the report always has the (empty) SSD list")
+        self.assertNotIn("SSD", engine.render_summary(world.report))
+        self.assertEqual(engine.exit_code(world.report), 0)
+
+
+class PushTest(unittest.TestCase):
+    """U10 (owner 11-20 第7条「1. 先检查空间大小，够放image才推送 2. 使用分布式方式在各个ib-sw之间分发image」;
+    问题文件 §41; 指导 8.25.5): with method push the schedule is unchanged (a relay queue's first copy comes
+    from the server, the rest from switches; small packages from the server; a verified staged copy is not
+    sent again), server transfers are spaced like scp, the space check runs before any transfer with
+    `NO_SPACE need=<bytes> free=<bytes>` (only with push; enough space passes, equal passes), and the summary
+    counts the server pushes and the switch forwards."""
+
+    def test_push_spaces_server_transfers_like_scp(self):
+        self.assertEqual(World(self, ["s0"], method="push").engine.gate.gap, 0.25)
+        self.assertEqual(World(self, ["s0"]).engine.gate.gap, 0.0, "http unchanged")
+
+    def test_space_is_checked_before_any_transfer(self):
+        hosts = ["s0", "s1", "s2"]
+        world = World(self, hosts, method="push", needs={host: {"os": [["os-2.bin"]]} for host in hosts},
+                      selected=("os",))
+        world.family.space = 1000
+        world.ops.free.update(s0=999, s1=1000, s2=4000)
+        results = world.run()
+        self.assertEqual(results, {"s0": ("FAILED", "NO_SPACE need=1000 free=999"), "s1": ("UPGRADED", None),
+                                   "s2": ("UPGRADED", None)})
+        self.assertEqual([host for _t, host, _d in world.events("fetch-start") + world.events("dispatch")
+                          if host == "s0"], [], "nothing transferred to it")
+
+    def test_without_push_the_space_reason_is_unchanged(self):
+        world = World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",))
+        world.family.space = 1000
+        world.ops.free["s0"] = 999
+        self.assertEqual(world.run()["s0"], ("FAILED", "NO_SPACE"))
+
+    def test_a_verified_staged_copy_is_not_pushed_again(self):
+        hosts = ["s0", "s1", "s2"]
+        world = World(self, hosts, speed=10000, method="push", needs={host: {"os": [["os-2.bin"]]} for host in hosts},
+                      selected=("os",))
+        info = engine.PackageInfo.read(world.family.by_name["os-2.bin"])
+        world.ops.sims["s1"].files["os-2.bin"] = (info.size, info.sha256)
+        world.ops.sims["s2"].files["os-2.bin"] = (info.size, "0" * 64)
+        results = world.run()
+        self.assertEqual(set(results.values()), {("UPGRADED", None)})
+        fetched = {host for _t, host, (name, _source) in world.events("fetch-start") if name == "os-2.bin"}
+        self.assertNotIn("s1", fetched, "size and sha256 match: PRE_STAGED")
+        self.assertIn("s2", fetched, "a wrong sha256 is sent again")
+
+    def test_relay_first_copies_come_from_the_server_and_the_rest_from_switches(self):
+        hosts = [f"a{i}" for i in range(3)] + [f"b{i}" for i in range(3)]
+        groups = {host: ("leaf-a" if host.startswith("a") else "leaf-b") for host in hosts}
+        world = World(self, hosts, groups=groups, method="push")
+        results = world.run()
+        self.assertEqual(set(results.values()), {("UPGRADED", None)}, results)
+        os_sources = {host: source for _t, host, (name, source) in world.events("fetch-start") if name == "os-2.bin"}
+        for leaf in ("a", "b"):
+            members = [host for host in os_sources if host.startswith(leaf) and host != "a0"]
+            self.assertEqual(len([host for host in members if os_sources[host] == "@server"]), 1, os_sources)
+        self.assertTrue(all(source == "@server" for _t, _h, (name, source) in world.events("fetch-start")
+                            if name == "fw.bin"), "small packages: from the server")
+        starts = [(host, source) for _t, host, (_name, source) in world.events("fetch-start")]
+        server = len({host for host, source in starts if source == "@server"})
+        forwarded = len({host for host, source in starts if source != "@server"})
+        self.assertEqual((server, forwarded), (6, 3), starts)
+        self.assertEqual(world.report.get("push"), dict(server=server, switches=forwarded))
+        self.assertIn("[PUSH] the server pushed to 6 switch(es); switches forwarded to 3 switch(es)",
+                      engine.render_summary(world.report))
+
+
+class HealthRecheckTest(unittest.TestCase):
+    """G7 (R-046; OWNER-DECISIONS 第20条; 指导 8.25.8 with review F07/F18): a verification whose health
+    record reads `status N/A` comes back as HEALTH_PENDING; the engine re-submits the verification as a
+    main-loop timer every 15 s (no worker waits), from the first N/A for at most 2 minutes, writing
+    health-wait-<n>.json for each N/A answer; a later answer is judged as usual; still N/A at the end is
+    UNKNOWN with the original HEALTH_STATUS_UNAVAILABLE. Other health results are never re-checked."""
+
+    def world(self, **kwargs):
+        return World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",), **kwargs)
+
+    @staticmethod
+    def verifies(world):
+        return [t for t, host, _stage in world.events("verify") if host == "s0"]
+
+    @staticmethod
+    def waits(world):
+        return sorted(path.name for path in world.engine.evidence.directory("s0").glob("health-wait-*.json"))
+
+    def test_the_defaults_are_fifteen_seconds_and_two_minutes(self):
+        options = engine.Options(run_id="r1", selected=("os",), upgrade=True, link=None, groups={})
+        self.assertEqual((options.health_recheck_seconds, options.health_wait_seconds), (15.0, 120.0))
+
+    def test_an_na_health_is_checked_again_and_then_judged(self):
+        world = self.world(health_recheck_seconds=0.2, health_wait_seconds=2.0)
+        world.ops.health_pending["s0"] = 1
+        results = world.run()
+        self.assertEqual(results["s0"], ("UPGRADED", None), world.out.getvalue())
+        verifies = self.verifies(world)
+        self.assertEqual(len(verifies), 2)
+        self.assertGreaterEqual(verifies[1] - verifies[0], 0.2, "the recheck waits for its interval")
+        self.assertEqual(self.waits(world), ["health-wait-1.json"], "one record per N/A answer")
+        record = json.loads((world.engine.evidence.directory("s0") / "health-wait-1.json").read_text())
+        self.assertEqual(record["reason"], "HEALTH_STATUS_UNAVAILABLE")
+        self.assertEqual(record.get("health"), dict(command="health", stdout_base64="c3RhdHVzIE4vQQo="),
+                         "R-046: each answer's health output is kept as the family gave it")
+        self.assertEqual(record.get("n"), 1)
+
+    def test_a_health_still_na_at_the_end_of_the_window_is_unknown(self):
+        world = self.world(health_recheck_seconds=0.1, health_wait_seconds=0.5)
+        world.ops.health_pending["s0"] = 1000
+        results = world.run()
+        self.assertEqual(results["s0"], ("UNKNOWN", "HEALTH_STATUS_UNAVAILABLE"))
+        verifies = self.verifies(world)
+        self.assertGreaterEqual(verifies[-1] - verifies[0], 0.5, "the window counts from the first N/A")
+        self.assertLessEqual(len(verifies), 0.5 / 0.1 + 2, "bounded")
+        self.assertEqual(len(self.waits(world)), len(verifies), "one evidence record per recheck answer")
+        self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_other_health_results_are_not_rechecked(self):
+        world = self.world(health_recheck_seconds=0.1, health_wait_seconds=1.0)
+        world.ops.verify_behaviour["s0"] = "degraded"
+        results = world.run()
+        self.assertEqual(results["s0"], ("UNKNOWN", "HEALTH_DEGRADED"))
+        self.assertEqual(len(self.verifies(world)), 1)
+        self.assertEqual(self.waits(world), [])
+
+
+class InterruptedRunRecheckTest(unittest.TestCase):
+    """G9 (R-049; 04 Q-097; OWNER-DECISIONS 第22条; 指导 8.25.9 with review F02/F04/F05/F06): a switch already
+    at target whose latest other --upgrade run (the newest run directory in this project's v2 evidence that
+    wrote its dispatch.json; plan runs and runs that failed in precheck have none) ended without a final
+    result (UNKNOWN, or a dispatch.json without any result) gets the post-upgrade verification in an
+    --upgrade run instead of AT_TARGET, from that run's evidence (dispatch.json, before-<stage>.commands,
+    access backup), read only; missing evidence is REVIEW_REQUIRED naming it. --plan only lists it. A
+    verified switch is UPGRADED with the source run named. Earlier evidence is never written."""
+
+    PREV = "20261101_000000Z_upgrade-v2_prev"
+
+    def world(self, **kwargs):
+        return World(self, ["s0"], needs={"s0": {"os": []}}, versions={"s0": "2.0"}, selected=("os",), **kwargs)
+
+    def previous(self, world, name=PREV, *, category="UNKNOWN", dispatch=True, before=True, backup=True,
+                 report=False):
+        run = world.engine.evidence.root.parent / name
+        device = run / "devices" / "s0"
+        device.mkdir(parents=True)
+        (run / "plan.json").write_text("{}\n")
+        if dispatch:
+            (device / "dispatch.json").write_text(json.dumps(dict(
+                state="REQUESTED", component="os", stage="os-0", target_version="2.0", remote_dir="/home/admin/.ibsw-x",
+                boot_before="b0", script_sha256="0" * 64)))
+        if before:
+            (device / "before-os-0.commands").write_bytes(b"nv set system hostname s0\n")
+        if backup:
+            (device / "access-backup.json").write_text("{}\n")
+        events = [dict(host="s0", state="DISPATCHING", t=1.0)]
+        if category:
+            events.append(dict(host="s0", state="DONE", category=category, reason="VERIFY_COMMAND_TIMEOUT", t=2.0))
+        (run / "events.jsonl").write_text("".join(json.dumps(item) + "\n" for item in events))
+        if report:
+            (run / "run-report.json").write_text(json.dumps(dict(devices=[dict(hostname="s0", category=report)])))
+        return run
+
+    def snapshot(self, run):
+        return {path: path.read_bytes() for path in sorted(run.rglob("*")) if path.is_file()}
+
+    def verifies(self, world):
+        return [stage for _t, host, stage in world.events("verify") if host == "s0"]
+
+    def test_an_unknown_previous_result_is_verified_again_and_reported_upgraded(self):
+        world = self.world()
+        run = self.previous(world)
+        before = self.snapshot(run)
+        results = world.run()
+        self.assertEqual(results["s0"], ("UPGRADED", f"RECHECKED_AFTER_INTERRUPTION run={self.PREV}"),
+                         world.out.getvalue())
+        self.assertEqual(self.verifies(world), ["os-0"])
+        self.assertEqual(world.events("dispatch") + world.events("fetch-start"), [], "nothing installed again")
+        self.assertEqual(self.snapshot(run), before, "earlier evidence is read only")
+        self.assertEqual(engine.exit_code(world.report), 0)
+
+    def test_a_dispatch_without_any_result_is_verified_again(self):
+        world = self.world()
+        self.previous(world, category=None)
+        self.assertEqual(world.run()["s0"][0], "UPGRADED")
+        self.assertEqual(self.verifies(world), ["os-0"])
+
+    def test_plan_only_lists_it(self):
+        world = self.world(upgrade=False)
+        self.previous(world)
+        results = world.run()
+        self.assertEqual(results["s0"], ("NOT_EXECUTED", f"RECHECK_NEEDED: last run {self.PREV} has no final result"))
+        self.assertEqual(self.verifies(world), [])
+
+    def test_a_previous_final_result_or_no_previous_run_keeps_at_target(self):
+        for case in ("conclusive", "report", "none"):
+            with self.subTest(case=case):
+                world = self.world()
+                if case == "conclusive":
+                    self.previous(world, category="FAILED")
+                elif case == "report":
+                    self.previous(world, category=None, report="UPGRADED")
+                self.assertEqual(world.run()["s0"], ("AT_TARGET", None))
+                self.assertEqual(self.verifies(world), [])
+
+    def test_plan_and_precheck_failed_runs_in_between_are_skipped(self):
+        world = self.world()
+        self.previous(world)
+        self.previous(world, "20261102_000000Z_upgrade-v2_plan", category=None, dispatch=False)
+        self.previous(world, "20261103_000000Z_upgrade-v2_failed", category="FAILED", dispatch=False)
+        self.assertEqual(world.run()["s0"], ("UPGRADED", f"RECHECKED_AFTER_INTERRUPTION run={self.PREV}"))
+
+    def test_missing_earlier_evidence_is_review_required(self):
+        for missing, reason in (("before", "RECHECK_EVIDENCE_MISSING: before-os-0.commands"),
+                                ("backup", "RECHECK_EVIDENCE_MISSING: access backup")):
+            with self.subTest(missing=missing):
+                world = self.world()
+                self.previous(world, **{missing: False})
+                self.assertEqual(world.run()["s0"], ("REVIEW_REQUIRED", reason))
+                self.assertEqual(self.verifies(world), [])
+
+
+class PerformedAtTargetVersionTest(unittest.TestCase):
+    """G7 / 04 Q-113 (owner 2026-11-26 12:1x「只要版本确实是目标版本就是已执行，至于健康检查有问题就如实返回即
+    可」): a step whose post-upgrade read-back shows exactly its target version is recorded in `performed` with
+    its verdict even when the verification ends UNKNOWN (e.g. health still N/A after the 2-minute recheck);
+    a version that cannot be read or differs from the target is not. Category, reason and exit code are
+    unchanged; a VERIFIED step is recorded exactly as before."""
+
+    def world(self):
+        return World(self, ["s0"], needs={"s0": {"os": [["os-2.bin"]]}}, selected=("os",),
+                     health_recheck_seconds=0.1, health_wait_seconds=0.3)
+
+    @staticmethod
+    def row(world):
+        return next(row for row in world.report["devices"] if row["hostname"] == "s0")
+
+    def test_the_target_version_with_a_health_still_na_is_unknown_and_performed(self):
+        world = self.world()
+        world.ops.health_pending["s0"] = 1000
+        world.ops.verify_version["s0"] = True
+        results = world.run()
+        self.assertEqual(results["s0"], ("UNKNOWN", "HEALTH_STATUS_UNAVAILABLE"), "health is reported as it is")
+        performed = self.row(world)["performed"]
+        self.assertEqual([(item["component"], item["stage"], item["target"], item.get("verdict"), item.get("reason"))
+                          for item in performed],
+                         [("os", "os-0", "2.0", "UNKNOWN", "HEALTH_STATUS_UNAVAILABLE")])
+        self.assertEqual(engine.exit_code(world.report), 3)
+
+    def test_an_unreadable_or_different_version_is_not_performed(self):
+        for value in (None, False):
+            with self.subTest(version_at_target=value):
+                world = self.world()
+                world.ops.verify_behaviour["s0"] = "unknown"
+                world.ops.verify_version["s0"] = value
+                results = world.run()
+                self.assertEqual(results["s0"], ("UNKNOWN", "COMPONENT_VERSION_NOT_VERIFIED"))
+                self.assertEqual(self.row(world)["performed"], [])
+
+    def test_a_verified_step_is_recorded_as_before(self):
+        world = self.world()
+        results = world.run()
+        self.assertEqual(results["s0"], ("UPGRADED", None))
+        self.assertEqual(self.row(world)["performed"], [dict(component="os", stage="os-0", target="2.0", warnings=[])])
 
 
 class PostReadySettleTest(unittest.TestCase):
