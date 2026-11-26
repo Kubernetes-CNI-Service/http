@@ -158,7 +158,8 @@ BASE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 #     2026-11-07 已定 2; O13);
 #   - root kept (the marker, or a root crontab: no SUDO_USER and stdin not a terminal): log in with the
 #     operator's key first, root's own keys stay the fallback (O12 ①);
-#   - not root: collect only; the page in the root-owned code tree stays with the root side (O14).
+#   - not root: collect only; the page in the root-owned code tree stays with the root side (O14), which since
+#     R-038 this run reaches through sudo (run_root_step).
 # No pointer: no operator, nothing is checked.  The container (HTTP_ZTP_RUNTIME_BACKEND=supervisor or
 # HTTP_ZTP_ASKPASS_TMPDIR, the signals create_ssh_askpass_helper uses) keeps v3.1.1's behaviour: root
 # with /root/.ssh, never stopped because the project owner's uid is missing from the container's passwd
@@ -2817,13 +2818,82 @@ if hosts_file_has_entries "$IB"; then collect_ib_link || collection_failed=1; fi
 if hosts_file_has_entries "$NV"; then collect_nv_info || collection_failed=1; fi
 if hosts_file_has_entries "$NV"; then collect_nv_link || collection_failed=1; fi
 
+# R-038 (owner「我觉得这种情况下应该自动用 sudo 命令来跑，需要密码的话就提示用户输入」; v3.1.6 guide 8.24): an
+# operator run that only collects (CRON_COLLECT_ONLY: the operator directly, or root / sudo re-run as the operator)
+# hands the root side's step to sudo: the Ethernet lane's post-collect (it refreshes the page itself) or the page
+# generator.  The program must resolve inside the code tree and outside the project directory, so project content
+# never decides what root runs.  `sudo -n` runs it (no -E: sudo resets the environment; no root-parent marker).
+# Only sudo's own password failure (exit 1, stderr "sudo: ...") asks for the password with `sudo -v` on a terminal
+# and runs it once more; without a terminal nothing waits and the command to run is printed.  Returns 0 done,
+# 1 the step failed (reported as on the root path, never run twice), 3 not run (the collection result stays).
+run_root_step() {   # run_root_step <label> <program> [arguments...]
+    local label=$1 program shown err rc
+    if ! program=$(python3 - "${BASE}/../.." "$2" <<'ROOT_STEP_PY'
+import os
+import sys
+
+tree, program = os.path.realpath(sys.argv[1]), os.path.realpath(sys.argv[2])
+project = os.path.realpath(os.path.join(tree, "DAY0-Prepare", "activate-project"))
+
+
+def inside(path, top):
+    return os.path.commonpath([path, top]) == top
+
+
+if not os.path.isfile(program):
+    print(f"{program} 不存在")
+    raise SystemExit(1)
+if not inside(program, tree) or inside(program, project):
+    print(f"{program} 不在代码树 {tree} 里，或在项目目录 {project} 里")
+    raise SystemExit(1)
+print(program)
+ROOT_STEP_PY
+    ); then
+        log "[ROOT-STEP] ${label}：拒绝经 sudo 执行：${program}；monitor.html 未刷新"
+        return 3
+    fi
+    shift 2
+    local command=(python3 -B "$program" "$@")
+    printf -v shown '%q ' "${command[@]}"
+    shown="sudo ${shown% }"
+    log "[ROOT-STEP] ${label}：普通账号运行，经 sudo 执行：${shown}"
+    { err=$(sudo -n -- "${command[@]}" 2>&1 1>&3 3>&-); rc=$?; } 3>&1
+    [[ -n "$err" ]] && printf '%s\n' "$err" >&2
+    if (( rc == 1 )) && [[ $err == sudo:* ]]; then
+        if [[ ! -t 0 && ! -t 1 && ! -t 2 ]]; then
+            log "[ROOT-STEP] 需要 sudo 密码但没有终端：monitor.html 未刷新；请执行：${shown}"
+            return 3
+        fi
+        if ! sudo -v; then
+            log "[ROOT-STEP] ${label}：monitor.html 未刷新（sudo 未通过）；请执行：${shown}"
+            return 3
+        fi
+        { err=$(sudo -n -- "${command[@]}" 2>&1 1>&3 3>&-); rc=$?; } 3>&1
+        [[ -n "$err" ]] && printf '%s\n' "$err" >&2
+        if (( rc == 1 )) && [[ $err == sudo:* ]]; then
+            log "[ROOT-STEP] ${label}：monitor.html 未刷新（sudo 未通过）；请执行：${shown}"
+            return 3
+        fi
+    fi
+    (( rc == 0 )) || return 1
+}
+
 # Close the Ethernet data path with the exact archive produced by this run.
 # Never discover "latest" here: AIR and Production archives can coexist and
 # another collector may publish a newer file while this process is running.
 if [[ -n "$ETH_ARCHIVE" ]]; then
+    # its report goes into the shared 99-output-p2p (through the lldp tool's setup link)
+    eth_reports="${BASE}/../../tools/lldp-analyze-tool/99-output-p2p"
     if (( CRON_COLLECT_ONLY )); then
-        # O14: post-collect also refreshes monitor.html, which belongs to the root side before K4
-        log "[ETH-CLOSED-LOOP] 非 root 运行只采集：LLDP 分析和 monitor.html 刷新由 root 侧（worker、12-ztp-monitor）负责"
+        # O14: post-collect also refreshes monitor.html, which belongs to the root side before K4; R-038: so the
+        # operator run hands it to sudo, still under the shared report lock
+        post_rc=0
+        with_report_writer "$eth_reports" run_root_step ETH-CLOSED-LOOP "$POST_COLLECT" \
+            --archive "$ETH_ARCHIVE" --environment "${COLLECTION_ENV:-prod}" || post_rc=$?
+        if (( post_rc == 1 )); then
+            log "[ETH-CLOSED-LOOP] ERROR: validation report or monitor.html refresh failed"
+            collection_failed=1
+        fi
     elif [[ ! -f "$POST_COLLECT" ]]; then
         log "[ETH-CLOSED-LOOP] ERROR: missing post-collection script: $POST_COLLECT"
         collection_failed=1
@@ -2844,8 +2914,6 @@ ACTIVITY_CONTEXT_PY
             activity_context=1
         fi
         post_rc=0
-        # its report goes into the shared 99-output-p2p (through the lldp tool's setup link)
-        eth_reports="${BASE}/../../tools/lldp-analyze-tool/99-output-p2p"
         if (( activity_context )); then
             with_report_writer "$eth_reports" python3 "$POST_COLLECT" "${post_args[@]}" <&"$WORKER_CONTEXT_FD" \
                 || post_rc=$?
@@ -2879,7 +2947,15 @@ elif [[ -n "$INFO_ARCHIVE$LINK_ARCHIVE" ]] || (( UFM_COLLECTED )); then
         fi
     fi
     if (( CRON_COLLECT_ONLY )); then
-        log "[MONITOR-HTML] 非 root 运行只采集：monitor.html 由 root 侧（worker、12-ztp-monitor）刷新"
+        # O14: monitor.html belongs to the root side before K4; R-038: the operator run refreshes it through sudo
+        page_rc=0
+        run_root_step MONITOR-HTML "$HTML_GENERATOR" --type "${COLLECTION_ENV:-prod}" || page_rc=$?
+        if (( page_rc == 1 )); then
+            log "[MONITOR-HTML] ERROR: monitor.html refresh failed"
+            collection_failed=1
+        elif (( page_rc == 0 )); then
+            log "[MONITOR-HTML] refreshed scope=${COLLECTION_ENV:-prod}"
+        fi
     elif [[ ! -f "$HTML_GENERATOR" ]]; then
         log "[MONITOR-HTML] ERROR: missing generator: $HTML_GENERATOR"
         collection_failed=1

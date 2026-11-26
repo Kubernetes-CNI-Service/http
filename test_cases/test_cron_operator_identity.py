@@ -7,8 +7,16 @@ Expectations come from the requirement texts, never from cron.sh:
 - guide 3.2 (owner 2026-11-07「同意你在v3.1.2里的默认建议」, http dev 转述): O13 - sudo is handled like the
   interactive root (re-run), a root crontab (no SUDO_USER, stdin not a terminal) is not re-run; O12 ① - a root run
   that is not re-run logs in with -i <operator home>/.ssh/id_ed25519 and no IdentitiesOnly; O14 - a non-root run only
-  collects (no monitor.html refresh, neither cron.sh's own nor the one inside post-collect) and a code-tree log the
-  runner cannot write is skipped while the terminal still gets every line;
+  collects (no monitor.html refresh, neither cron.sh's own nor the one inside post-collect; R-038 之后：有 sudo 时经
+  sudo 刷新) and a code-tree log the runner cannot write is skipped while the terminal still gets every line;
+- R-038 (需求文档 R-038, 05 P-056; owner「我觉得这种情况下应该自动用 sudo 命令来跑，需要密码的话就提示用户输入」,
+  http dev 记录第 29 节 :1944; v3.1.6 guide 8.24 :2690-2714): only an operator run that collects only (the operator
+  directly, or root / sudo re-run as the operator) hands the two root-side steps to sudo - the Ethernet lane's
+  post-collect (it refreshes the page itself) and the page generator - as `sudo -n -- python3 -B <program> <fixed
+  arguments>`; only sudo's own "password required" failure leads to `sudo -v` on a terminal, without a terminal
+  nothing waits and the complete command is printed; a refused password keeps the collection and its result; a
+  failing step is reported as on the root path and never run twice; root parents, root crontab, no pointer and the
+  container never call sudo; a program outside the code tree or inside the project directory is never run;
 - design `设计/I-006与R-005实现计划.md` §4.3 (:97): root re-runs itself with `runuser -u <operator> --` before doing
   anything, with a whitelisted environment and HOME = the operator's home taken from passwd (§4.2); another ordinary
   user is refused; §4.6: a refusal names who owns the project and who is running;
@@ -27,7 +35,9 @@ Expectations come from the requirement texts, never from cron.sh:
 No uid switch happens here (guide 2.2 item 6).  A staged copy of the real cron.sh puts recorders in front of its
 pinned PATH (the test_ufm_monitor_cron_workflow precedent): `id -u` answers the euid a case plays while the process
 stays the test user; `runuser` records its argv and what already exists when it is reached; ssh/scp record their
-options and hand back fixture files; the page generator and the Ethernet post-collect record that they ran.
+options and hand back fixture files; the page generator and the Ethernet post-collect record that they ran; `sudo`
+records its argv and plays the sudoers answer named by FAKE_SUDO (the default asks for a password), running the
+command as the test user when it lets it through.
 """
 from __future__ import annotations
 
@@ -64,7 +74,7 @@ INVENTORY = (
 ME = pwd.getpwuid(os.getuid())
 OPERATOR_KEY = os.path.join(ME.pw_dir, ".ssh", "id_ed25519")
 CLEARED = ("SUDO_USER", "SUDO_UID", "SUDO_GID", "SUDO_COMMAND", ROOT_PARENT_MARKER, "HTTP_ZTP_RUNTIME_BACKEND",
-           "HTTP_ZTP_ASKPASS_TMPDIR", "FAKE_EUID", "PYTHONPATH")
+           "HTTP_ZTP_ASKPASS_TMPDIR", "FAKE_EUID", "PYTHONPATH", "FAKE_SUDO", "FAKE_STEP_RC")
 
 ID_STUB = f'''#!/bin/sh
 if [ "$1" = "-u" ] && [ -n "${{FAKE_EUID:-}}" ]; then
@@ -96,6 +106,33 @@ if tool == "scp" and ":" not in destination and destination.endswith((".info", "
 RECORDER = '''import json, os, sys
 with open(os.path.join(os.environ["FAKE_LOG_DIR"], {name!r}), "a", encoding="utf-8") as stream:
     stream.write(json.dumps(sys.argv[1:]) + "\\n")
+raise SystemExit(int(os.environ.get("FAKE_STEP_RC", "0")))
+'''
+# sudo (R-038 guide 8.24: a recorder first on PATH, so the developer machine's real sudo is never reached): record
+# the argv; FAKE_SUDO plays the sudoers answer - "nopasswd" lets `-n --` through, "password" (the default) wants a
+# password first, which `sudo -v` (a terminal prompt) gives, "refuse" rejects that password.  A command let through
+# runs as the test user (no uid switch here, guide 2.2 item 6).
+SUDO_STUB = '''#!{python}
+import json, os, sys
+logs = os.environ["FAKE_LOG_DIR"]
+arguments = sys.argv[1:]
+with open(os.path.join(logs, "sudo.jsonl"), "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(arguments) + "\\n")
+mode = os.environ.get("FAKE_SUDO", "password")
+validated = os.path.join(logs, "sudo.validated")
+if arguments == ["-v"]:
+    if mode == "refuse":
+        print("sudo: 1 incorrect password attempt", file=sys.stderr)
+        sys.exit(1)
+    open(validated, "w").close()
+    sys.exit(0)
+if arguments[:2] != ["-n", "--"] or len(arguments) < 3:
+    print("sudo: fixture: unexpected arguments", file=sys.stderr)
+    sys.exit(2)
+if mode != "nopasswd" and not os.path.exists(validated):
+    print("sudo: a password is required", file=sys.stderr)
+    sys.exit(1)
+os.execvp(arguments[2], arguments[2:])
 '''
 # flock(1) on the inherited descriptor, as util-linux reports a descriptor that is not open.
 FLOCK_STUB = '''#!/bin/sh
@@ -148,6 +185,7 @@ def stage_tree(root: Path, *, pointer: bool) -> None:
     for tool in ("ssh", "scp"):
         write_exec(bin_dir / tool, REMOTE_STUB.format(python=sys.executable))
     write_exec(bin_dir / "flock", FLOCK_STUB)
+    write_exec(bin_dir / "sudo", SUDO_STUB.format(python=sys.executable))
     write_exec(bin_dir / "sleep", "#!/bin/sh\nexit 0\n")
     write_exec(root / "monitor/generate-monitor-html.py", RECORDER.format(name="generator.jsonl"))
     write_exec(root / "ethernet/monitor/post-collect.py", RECORDER.format(name="post-collect.jsonl"))
@@ -324,18 +362,25 @@ class CronOperatorIdentityTests(CronIdentityCase):
                              completed.stdout + completed.stderr)
 
     def test_non_root_run_skips_page_refresh(self):
+        # R-038 (guide 8.24「要改的现有断言」, 8.21.M3): O14 now holds for the branch without a terminal where sudo
+        # wants a password (the fixture sudo's default); the zero-run assertions stay, and the log carries the
+        # complete command to run
         root = self.stage()
         completed = self.run_cron(root, FAKE_EUID=str(ME.pw_uid))
         self.assertTrue(list((root / "infiniband/monitor/ib-info").glob("*.tar.gz")),
                         completed.stdout + completed.stderr)   # it still collects
         self.assertEqual([], records(root, "generator.jsonl"))
+        self.assertIn(f"sudo python3 -B {root / 'monitor/generate-monitor-html.py'} --type prod",
+                      completed.stdout + completed.stderr)
         root = self.stage()
         completed = self.run_cron(root, "--air", area="ethernet", FAKE_EUID=str(ME.pw_uid))
-        self.assertTrue(list((root / "ethernet/monitor/eth-info").glob("*.tar.gz")),
-                        completed.stdout + completed.stderr)
+        archives = list((root / "ethernet/monitor/eth-info").glob("*.tar.gz"))
+        self.assertTrue(archives, completed.stdout + completed.stderr)
         # the Ethernet page refresh runs inside post-collect, so post-collect is not started either
         self.assertEqual([], records(root, "post-collect.jsonl"))
         self.assertEqual([], records(root, "generator.jsonl"))
+        self.assertIn(f"sudo python3 -B {root / 'ethernet/monitor/post-collect.py'} --archive {archives[0]} "
+                      "--environment air", completed.stdout + completed.stderr)
 
     def test_lock_open_failure_reports_cause_not_previous_round(self):
         root = self.stage(pointer=False)
@@ -467,6 +512,148 @@ class CronOperatorIdentityTests(CronIdentityCase):
                 literals = {node.value for node in ast.walk(tree)
                             if isinstance(node, ast.Constant) and isinstance(node.value, str)}
                 self.assertNotIn(ROOT_PARENT_MARKER, literals)
+
+
+LANES = ("ethernet", "infiniband")
+
+
+class CronOperatorSudoRefreshTests(CronIdentityCase):
+    """R-038: an operator run that only collects hands the root-side step to sudo (guide 8.24 先写的测试)."""
+
+    def operator_run(self, area: str, *, tty: bool = False, **extra: str):
+        root = self.stage()
+        arguments = ("--air",) if area == "ethernet" else ()
+        completed = self.run_cron(root, *arguments, area=area, tty=tty, FAKE_EUID=str(ME.pw_uid), **extra)
+        return root, completed, completed.stdout + completed.stderr
+
+    def root_step(self, root: Path, area: str) -> tuple:
+        """This lane's root-side program with its fixed arguments, and the recorder that notes it ran (8.24 第 2 条:
+        the Ethernet lane's post-collect with this run's archive and environment; the page generator)."""
+        if area == "ethernet":
+            archives = sorted((root / "ethernet/monitor/eth-info").glob("*.tar.gz"))
+            self.assertEqual(1, len(archives), archives)
+            return ([str(root / "ethernet/monitor/post-collect.py"), "--archive", str(archives[0]),
+                     "--environment", "air"], "post-collect.jsonl")
+        self.assertTrue(list((root / "infiniband/monitor/ib-info").glob("*.tar.gz")))   # it collected
+        return [str(root / "monitor/generate-monitor-html.py"), "--type", "prod"], "generator.jsonl"
+
+    def assert_ran(self, root: Path, step: list, record: str, times: int) -> None:
+        expected = {"post-collect.jsonl": [], "generator.jsonl": []}
+        expected[record] = [step[1:]] * times
+        for name, value in expected.items():
+            self.assertEqual(value, records(root, name), name)
+
+    def test_operator_run_refreshes_through_passwordless_sudo(self):
+        # owner :1944「我觉得这种情况下应该自动用 sudo 命令来跑」; R-038; guide 8.24 第 2 条 (sudo -n --, python3 -B,
+        # no -E); the Ethernet page is refreshed inside post-collect, so nothing refreshes it a second time
+        for area in LANES:
+            with self.subTest(area=area):
+                root, completed, output = self.operator_run(area, FAKE_SUDO="nopasswd")
+                step, record = self.root_step(root, area)
+                self.assertEqual([["-n", "--", "python3", "-B", *step]], records(root, "sudo.jsonl"), output)
+                self.assert_ran(root, step, record, 1)
+                self.assertEqual(0, completed.returncode, output)
+
+    def test_operator_run_asks_for_the_password_on_a_terminal(self):
+        # owner :1944「需要密码的话就提示用户输入」; guide 8.24 第 2 条: only sudo's own password failure leads to
+        # `sudo -v` on a terminal, then one more `sudo -n --`
+        for area in LANES:
+            with self.subTest(area=area):
+                root, completed, output = self.operator_run(area, tty=True, FAKE_SUDO="password")
+                step, record = self.root_step(root, area)
+                command = ["-n", "--", "python3", "-B", *step]
+                self.assertEqual([command, ["-v"], command], records(root, "sudo.jsonl"), output)
+                self.assert_ran(root, step, record, 1)
+                self.assertEqual(0, completed.returncode, output)
+
+    def test_without_a_terminal_it_does_not_wait_and_prints_the_command(self):
+        # R-038「无TTY不挂起」; guide 8.24 第 2 条「没有终端 → 不等待，打 … 请执行：sudo python3 -B <程序> <参数>」,
+        # collection products and the exit code as before (an operator run that only collects exits 0)
+        for area in LANES:
+            with self.subTest(area=area):
+                root, completed, output = self.operator_run(area, FAKE_SUDO="password")
+                step, record = self.root_step(root, area)
+                self.assertEqual([["-n", "--", "python3", "-B", *step]], records(root, "sudo.jsonl"), output)
+                self.assert_ran(root, step, record, 0)
+                self.assertIn("[ROOT-STEP]", output)
+                self.assertIn("没有终端", output)
+                self.assertIn("monitor.html 未刷新", output)
+                self.assertIn(f"sudo python3 -B {' '.join(step)}", output)
+                self.assertEqual(0, completed.returncode, output)
+
+    def test_a_refused_or_cancelled_password_keeps_the_collection(self):
+        # R-038「拒绝取消保采集」; guide 8.24 第 2 条「密码被拒或取消 → 打「未刷新（sudo 未通过）」… 不置
+        # collection_failed」, 第 3 条「没有权限时按「未通过」处理并打出命令」
+        for area in LANES:
+            with self.subTest(area=area):
+                root, completed, output = self.operator_run(area, tty=True, FAKE_SUDO="refuse")
+                step, record = self.root_step(root, area)
+                self.assertEqual([["-n", "--", "python3", "-B", *step], ["-v"]], records(root, "sudo.jsonl"), output)
+                self.assert_ran(root, step, record, 0)
+                self.assertIn("未刷新（sudo 未通过）", output)
+                self.assertIn(f"sudo python3 -B {' '.join(step)}", output)
+                self.assertNotIn("refresh failed", output)
+                self.assertEqual(0, completed.returncode, output)
+
+    def test_a_failing_refresh_is_not_retried(self):
+        # R-038「认证失败与child失败分开且不二跑」; guide 8.24 第 2 条「执行失败 → 与 root 路径同语义 … 不重试」
+        # (the root path's lines: ETH :2809-2812 and IB/NV :2841-2842 at 26ae34b)
+        for mode, tty in (("nopasswd", False), ("password", True)):
+            for area in LANES:
+                with self.subTest(sudo=mode, area=area):
+                    root, completed, output = self.operator_run(area, tty=tty, FAKE_SUDO=mode, FAKE_STEP_RC="1")
+                    step, record = self.root_step(root, area)
+                    self.assert_ran(root, step, record, 1)
+                    self.assertIn("refresh failed", output)
+                    self.assertNotIn("sudo 未通过", output)
+                    self.assertNotEqual(0, completed.returncode, output)
+
+    def test_root_parent_and_root_crontab_never_call_sudo(self):
+        # R-038「root/无人worker不变」; guide 8.24 第 1 条: root, the root-parent marker, root crontab, no pointer and
+        # the container stay as before and never call sudo (the fixture sudo would let everything through)
+        cases = {
+            "root parent marker": ({"FAKE_EUID": "0", ROOT_PARENT_MARKER: ROOT_PARENT_MARKER_VALUE}, True),
+            "root crontab": ({"FAKE_EUID": "0"}, True),
+            "no pointer, ordinary user": ({"FAKE_EUID": str(ME.pw_uid)}, False),
+            "container": ({"FAKE_EUID": "0", "HTTP_ZTP_RUNTIME_BACKEND": "supervisor"}, True),
+        }
+        for label, (extra, pointer) in cases.items():
+            for area in LANES:
+                with self.subTest(run=label, area=area):
+                    root = self.stage(pointer=pointer)
+                    arguments = ("--air",) if area == "ethernet" else ()
+                    completed = self.run_cron(root, *arguments, area=area, FAKE_SUDO="nopasswd", **extra)
+                    output = completed.stdout + completed.stderr
+                    self.assertEqual([], records(root, "sudo.jsonl"), output)
+                    step, record = self.root_step(root, area)
+                    self.assert_ran(root, step, record, 1)   # the root side runs the step itself, as before
+                    self.assertNotIn("[ROOT-STEP]", output)
+
+    def test_the_root_step_only_runs_the_two_code_tree_programs(self):
+        # R-038「项目可写内容不得控制root执行」; guide 8.24 第 2 条: the program's realpath stays under the code tree
+        # and outside the project directory DAY0-Prepare/activate-project selects
+        outside = tempfile.TemporaryDirectory(prefix="cron-root-step-outside-")
+        self.addCleanup(outside.cleanup)
+        for label, area, relative in (("post-collect in the project", "ethernet", "ethernet/monitor/post-collect.py"),
+                                      ("generator in the project", "infiniband", "monitor/generate-monitor-html.py"),
+                                      ("post-collect outside the tree", "ethernet", "ethernet/monitor/post-collect.py")):
+            with self.subTest(case=label):
+                root = self.stage()
+                record = "post-collect.jsonl" if "post-collect" in relative else "generator.jsonl"
+                place = (Path(outside.name).resolve() / f"{area}-{Path(relative).name}" if "outside" in label
+                         else root / "DAY0-Prepare" / PROJECT / Path(relative).name)
+                write_exec(place, RECORDER.format(name=record))
+                (root / relative).unlink()
+                (root / relative).symlink_to(place)
+                arguments = ("--air",) if area == "ethernet" else ()
+                completed = self.run_cron(root, *arguments, area=area, FAKE_EUID=str(ME.pw_uid),
+                                          FAKE_SUDO="nopasswd")
+                output = completed.stdout + completed.stderr
+                self.assertEqual([], records(root, "sudo.jsonl"), output)
+                self.assertEqual([], records(root, record))
+                refusal = [line for line in output.splitlines() if "[ROOT-STEP]" in line]
+                self.assertTrue(refusal, output)
+                self.assertIn(str(place), "\n".join(refusal))
 
 
 if __name__ == "__main__":

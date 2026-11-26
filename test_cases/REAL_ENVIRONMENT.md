@@ -3799,15 +3799,19 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 8. cron.sh（WP-11；agentW11 报告第 6 节的 9 条，本卡第 8.1～8.9 步）：
    1. 交互 root（方式 A，项目属于 `U`）：root 在终端执行 `bash /var/www/html/infiniband/monitor/cron.sh --type ib`。
       证据：stderr 有 `[IDENTITY] 操作员：U…；当前：root 直接运行 → …`；`ps -o user,pid,ppid,args` 显示 cron.sh 以 `U` 运行，
-      没有残留的 root 进程；`/proc/<pid>/environ` 里只有白名单里的变量名；出现「非 root 运行只采集」；`monitor.html` 的 mtime 不变（v3.1.2 指导 WP-11）。
-   2. sudo：`U` 执行 `sudo bash …/cron.sh`，结果同第 8.1 步；`V` 执行同一命令被拒绝，提示项目属于 `U`、当前是
+      没有残留的 root 进程；`/proc/<pid>/environ` 里只有白名单里的变量名（v3.1.2 指导 WP-11）。降权后的那次运行（R-038，v3.1.6 起，
+      v3.1.6 指导 8.24；原预期「出现「非 root 运行只采集」；`monitor.html` 的 mtime 不变」由此替代）：`U` 有 sudo 权限时出现
+      `[ROOT-STEP]` 经 sudo 执行的行，`monitor.html` 的 mtime 变化；没有权限时打出「未刷新（sudo 未通过）」和
+      `请执行：sudo python3 -B …`，`monitor.html` 的 mtime 不变。sudo 的各种情形另见 `TC-REAL-CRON-OPERATOR-SUDO-REFRESH-001`。
+   2. sudo：`U` 执行 `sudo bash …/cron.sh`，结果同第 8.1 步（含 R-038 的经 sudo 刷新预期）；`V` 执行同一命令被拒绝，提示项目属于 `U`、当前是
       `root 经 sudo（发起人 V）`，退出码非 0，`cron.lock` 不变（v3.1.2 指导 WP-11）。
    3. root crontab：在 root 的 crontab 里临时加一行 `bash …/cron.sh >> …/cronjob.log 2>&1`。证据：以 root 运行；ssh 命令行带
       `-i /home/U/.ssh/id_ed25519`；页面刷新。清理：删掉这一行（v3.1.2 指导 WP-11）。
    4. worker（页面「采集」）：cron.sh 的 `/proc/<pid>/environ` 里有 `HTTP_ZTP_ROOT_PARENT=1`；`/proc/<pid>/fd` 里能看到 worker
       交过来的 fd；以 root 运行；用操作员的 key；采集结果 accepted（v3.1.2 指导 WP-11）。
    5. 12-ztp-monitor 交接（native）：cronjob.log 的 `[ZTP-HANDOFF]` 段里，`[IDENTITY]` 行显示 root 父进程或 sudo 发起人（v3.1.2 指导 WP-11）。
-   6. 操作员直接运行：只采集。load 预建过 `cron.lock` 时能拿到锁，没预建时报「无法打开采集锁…Permission denied」；
+   6. 操作员直接运行：采集照常；ETH post-collect 和页面刷新经 sudo 完成（R-038，v3.1.6 指导 8.24；原预期「只采集」由此替代：
+      免密 sudo 时刷新，有终端要密码时提示，没有终端时只采集并打出要执行的命令）。load 预建过 `cron.lock` 时能拿到锁，没预建时报「无法打开采集锁…Permission denied」；
       终端输出里没有 `tee` 报错（v3.1.2 指导 WP-11）。
    7. 方式 B（项目属于 root）：root 运行不降权，页面照常刷新（本机测不了；v3.1.2 指导 WP-11）。
    8. 迁移期：交换机只认 root 的 key 时，worker 和 crontab 仍能登录（root 的 key 作后备）；只认 `U` 的 key 时也能登录（v3.1.2 指导 WP-11）。
@@ -3872,6 +3876,80 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - [x] 修复前能够稳定失败（实现前红在预期断言上）。
 - [x] 修复后通过。
 - [x] 已纳入全量 discovery（模块已登记 manifest、已分到车道，2026-11-09 在 `81bb842` 上核对）。
+- [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
+
+## TC-REAL-CRON-OPERATOR-SUDO-REFRESH-001 — 普通账号手工执行 cron.sh 时，ETH post-collect 和页面刷新经 sudo 完成
+
+### 基本信息
+
+- Case ID：`TC-REAL-CRON-OPERATOR-SUDO-REFRESH-001`。
+- 名称：操作员（项目目录属主）手工或在自己的 crontab 里运行 `cron.sh`，只采集的那次运行把 Ethernet 的 `post-collect.py`
+  或页面生成器交给 sudo：免密、要密码有终端、没有终端、取消密码，以及与 worker 同时刷新。
+- 类型：real-environment / scenario（真实 sudoers、PAM、终端、root 写 `monitor.html`）。状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 对应需求或缺陷：需求文档 R-038；05 P-056；owner 原话「我觉得这种情况下应该自动用 sudo 命令来跑，需要密码的话就提示用户输入」
+  （http dev 记录第 29 节 :1944）；v3.1.6 详细工作指导 8.24（REAL_ENV 段）。
+- 自动化文件与测试方法：`test_cases/test_cron_operator_identity.py`（`CronOperatorSudoRefreshTests`，以及
+  `CronOperatorIdentityTests.test_non_root_run_skips_page_refresh`）、`test_cases/test_cron_operator_identity_workflow.py`
+  （`CronOperatorSudoRefreshWorkflowTests`）。本机不能切换 uid、不改 sudoers：这些测试的 `sudo` 是记录替身，按环境变量模拟免密、
+  要密码、拒绝，放行时以当前用户执行。
+- 适用平台：22.04（AIR 管理服务器）全部做；24.04 prod 由现场人员执行，验证 AI 只读核对；26.04 pending（sudo-rs 的
+  `-n`、`-v` 行为留给 M7）。
+
+### 风险与目标
+
+- 要防止的故障：普通账号手工采集后页面不刷新；没有终端时等密码挂住；密码被拒或取消时丢掉本轮采集产物或把采集判为失败；
+  刷新失败被当成认证失败、或者跑两次；root、worker、`12-ztp-monitor`、root crontab 意外调用 sudo；项目里可写的内容决定 root 执行什么。
+- 涉及的模块和状态边界：`ethernet/monitor/cron.sh` 的 `run_root_step` 与两处调用（ETH 闭环、IB/NV 页面）；
+  `ethernet/monitor/post-collect.py`；`monitor/generate-monitor-html.py` 的 `generation_lock`；sudoers、`/var/log/auth.log`。
+- 成功标准：只采集的操作员运行恰好一次经 `sudo -n -- python3 -B <代码树里的程序> <固定参数>` 刷新，或按下面的预期不刷新并打出命令；
+  采集产物与退出码不因 sudo 未通过而改变。
+
+### 前置条件与输入
+
+- 同版 direct／workflow 通过（上面两个模块）；当前源码的正式 full proof。
+- owner 授权的 AIR 管理服务器（22.04）；项目经 `DAY0-Prepare/activate-project` 选中、属于操作员 `U`；有 Ethernet 与 IB 清单。
+- 执行人：owner。**密码由 owner 本人输入，AI 不经手。** 验证 AI 只读证据。
+- 第 0 步（开工核对 ①，v3.1.6 指导 8.24）：`U` 执行 `sudo -l`，记录 sudoers 形态（全部命令要密码、全部免密，或只给特定命令
+  NOPASSWD——这时 `sudo -v` 会要密码而 `sudo -n -- <命令>` 能成功）。
+- 初始状态：记录 `ls -l --time-style=full-iso /var/www/html/monitor/monitor.html`、`id U`、`sudo -l` 输出。
+
+### 步骤
+
+1. 免密（只在 sudoers 已经给 `U` 免密时做，不为此改 sudoers）：`U` 在终端执行 `bash /var/www/html/ethernet/monitor/cron.sh --air`。
+   证据：日志 `[ROOT-STEP] ETH-CLOSED-LOOP：普通账号运行，经 sudo 执行：sudo python3 -B …/post-collect.py --archive <本轮> --environment air`，
+   没有密码提示；post-collect 的「closed loop complete」；`monitor.html` 的 mtime 变化一次。
+2. 要密码、有终端：`U` 在终端执行 `bash /var/www/html/infiniband/monitor/cron.sh`。证据：出现一次 sudo 的密码提示（owner 输入），
+   之后页面生成恰好一次，`[MONITOR-HTML] refreshed scope=prod`，`monitor.html` 的 mtime 变化。
+3. 操作员 crontab、没有终端：在 `U` 的 crontab 里临时加一行 `bash …/ethernet/monitor/cron.sh --air >> <日志> 2>&1`。证据：日志有
+   `[ROOT-STEP] 需要 sudo 密码但没有终端：monitor.html 未刷新；请执行：sudo python3 -B …`（免密的 sudoers 下改为刷新一次）；
+   本轮归档在；退出码与只采集时相同；没有挂住的进程。清理：删掉这一行。
+4. 故意取消密码：同第 2 步，在密码提示处按 Ctrl-C 或输错三次。证据：「未刷新（sudo 未通过）」和要执行的命令；本轮归档在；
+   不出现 `refresh failed`；`monitor.html` 的 mtime 不变。
+5. 与 worker 同时刷新：页面上点一次「采集」，同时 `U` 在终端按第 2 步运行一次。证据：两个页面生成依次完成（`generate-monitor.log`
+   两段完整的 `=== generate-monitor-html end ===`，没有交错），`monitor.html` 完整可打开。
+
+### 预期结果
+
+- 正向结果：第 1、2 步各刷新一次；第 5 步先后各刷新一次、页面完整。
+- 拒绝/失败结果：第 3、4 步不刷新，打出完整命令，采集产物与退出码不变；程序本身失败时（不在本卡人为制造）与 root 运行同样报错、
+  算本轮失败、不重试。
+- 不允许发生的副作用：root、worker、`12-ztp-monitor`、root crontab 调用 sudo；sudo 带 `-E`；同一步执行两次；没有终端时等待。
+- 需要保存的证据：cron 日志的 `[ROOT-STEP]` 行；每步前后 `monitor.html` 的 mtime；`/var/log/auth.log` 中对应 sudo 行（只摘命令部分，
+  不摘其他内容）；`sudo -l` 输出。不记录任何密码。
+
+### 故障注入与清理
+
+- 并发、超时、异常、重启或输入篡改：第 4 步取消密码；第 5 步与 worker 并发。不在 prod 上人为制造刷新失败。
+- 清理/回滚验证：删掉第 3 步临时加的 crontab 行；为测试临时改的 sudoers 由 owner 还原（`visudo -c` 通过）。
+- 重复执行与幂等性：同一步重复运行，每次至多刷新一次页面。
+- 风险：sudoers 改动；页面生成与 worker 同时运行（由 `generation_lock` 串行）。
+
+### 自动化状态
+
+- [x] 已加入 `test_cases/test_cron_operator_identity.py` 与 `test_cases/test_cron_operator_identity_workflow.py`。
+- [x] 修复前能够稳定失败（实现前红在预期断言上）。
+- [x] 修复后通过。
+- [ ] 已纳入全量 discovery（两个模块已登记；workflow 成员在 v3.1.6 manifest 统一收尾时加入）。
 - [x] 需要真机的部分已加入 `REAL_ENVIRONMENT.md`（本卡，NOT RUN）。
 
 ## TC-REAL-I006-OPERATOR-LOAD-001 — 两种运行方式下的 load、unload 与操作员身份

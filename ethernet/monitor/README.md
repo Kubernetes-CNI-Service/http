@@ -122,9 +122,9 @@ setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续�
 
 | 谁在运行 | 怎么处理 |
 |---|---|
-| 操作员本人（不加 sudo） | 照常采集，但**只采集**：代码树属于 root，`monitor.html` 的刷新（含 Ethernet 的 `post-collect.py`，它分析之后刷新页面）留给 root 侧的 worker 和 `12-ztp-monitor` |
+| 操作员本人（不加 sudo） | 采集照常；ETH post-collect 和页面刷新经 sudo 完成，需要密码时在终端提示，没有终端时打出要执行的命令（R-038，v3.1.6 起；代码树属于 root，`monitor.html` 的刷新含 Ethernet 的 `post-collect.py`，它分析之后刷新页面） |
 | 其他普通用户 | 拒绝，提示项目属于谁、当前是谁 |
-| root 在终端里直接运行；`sudo bash cron.sh` | 建临时文件和加锁之前，用 `runuser -u <操作员>` 以操作员身份重新执行（环境只保留 `PATH`、`LANG`、`LC_ALL`、`TERM`，`HOME` 取操作员的家目录），之后同第一行 |
+| root 在终端里直接运行；`sudo bash cron.sh` | 建临时文件和加锁之前，用 `runuser -u <操作员>` 以操作员身份重新执行（环境只保留 `PATH`、`LANG`、`LC_ALL`、`TERM`，`HOME` 取操作员的家目录），之后同第一行：ETH post-collect 和页面刷新经 sudo 完成（同一终端的 sudo 时效内通常不再要密码；没有 sudo 权限时按「未通过」处理并打出命令） |
 | switch-collection worker、`12-ztp-monitor` 起的（load 以 root 启动它们，它们设置「由 root 父进程启动」标记 `HTTP_ZTP_ROOT_PARENT`）；root 的 crontab（没有 `SUDO_USER`、标准输入不是终端） | 仍以 root 运行；登录交换机时先用操作员的 `~/.ssh/id_ed25519`，root 自己的 key 作后备 |
 
 - 每次运行在 stderr 打印一行 `[IDENTITY] 操作员：…；当前：…`。
@@ -136,7 +136,15 @@ setup 和 load 都**不安装 crontab**。周期采集由页面上的「持续�
 - 采集锁 `cron.lock` 在代码树里，由 load 预先建好并交给操作员；打不开时提示「无法打开采集锁 <路径>：<原因>」，
   不再说「上一轮采集仍在运行」。
 - 代码树里的 `cron.sh-<时间>.log` 写不了时只输出到终端。
-- 上面的 crontab 示例放进操作员自己的 crontab 时只采集；放进 root 的 crontab 时以 root 运行，并刷新页面。
+- 上面的 crontab 示例放进操作员自己的 crontab 时：操作员有免密 sudo 时刷新页面，否则只采集并在日志里留要执行的命令；
+  放进 root 的 crontab 时以 root 运行，并刷新页面。
+- 经 sudo 的那一步（R-038，v3.1.6 指导 8.24）：只在上表第一、三行（操作员身份只采集）时发生，root、worker、
+  `12-ztp-monitor`、root 的 crontab、没有当前项目和 Docker 容器都不调用 sudo。只运行代码树里的两个程序（Ethernet 的
+  `post-collect.py`、`monitor/generate-monitor-html.py`），参数只有本轮的归档和环境；程序的真实路径在项目目录里或代码树之外时
+  拒绝。命令是 `sudo -n -- python3 -B <程序> <参数>`；只有 sudo 自己说要密码时才在终端用 `sudo -v` 提示一次，再执行一次；
+  没有终端时不等待，日志打出 `[ROOT-STEP] 需要 sudo 密码但没有终端：monitor.html 未刷新；请执行：sudo python3 -B …`；
+  密码被拒或取消时打出「未刷新（sudo 未通过）」。这两种都不影响采集产物和退出码；程序本身失败时与 root 运行同样报错、
+  算本轮失败，不重试。
 
 ### load 之后的自动链路（owner 2026-10-23）
 
