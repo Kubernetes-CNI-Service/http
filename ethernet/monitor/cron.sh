@@ -481,17 +481,23 @@ detect_eth_environment() {
         eth|eth_spx|spx|ethernet) COLLECTION_ENV="prod"; return 0 ;;
         auto) TYPE_FILTER="" ;;
     esac
+    # I-067 (owner Q-058): only this manual automatic entry turns the single-environment policy on; the
+    # helper then answers "<environment> <basis>". Explicit choices and the worker's --prod/--air return above.
     result=$(python3 "${BASE}/../../ztp/environment_probe.py" \
-        --inventory "$prod_csv" --user "$ETH_SSH_USER") || {
+        --inventory "$prod_csv" --user "$ETH_SSH_USER" --allow-single-environment) || {
         log "[ENV] ERROR: cannot auto-detect reachable environment; verify key SSH or use --type prod/air"
         return 1
     }
     case "$result" in
-        air) TYPE_FILTER="air"; COLLECTION_ENV="air" ;;
-        prod) TYPE_FILTER="ethernet"; COLLECTION_ENV="prod" ;;
+        "air single-valid-inventory"|"air identity-probe") TYPE_FILTER="air"; COLLECTION_ENV="air" ;;
+        "prod single-valid-inventory"|"prod identity-probe") TYPE_FILTER="ethernet"; COLLECTION_ENV="prod" ;;
         *) log "[ENV] ERROR: invalid probe result: $result"; return 1 ;;
     esac
-    log "[ENV] auto-detected reachable environment: $COLLECTION_ENV"
+    if [[ "$result" == *" single-valid-inventory" ]]; then
+        log "[ENV] single valid inventory selected: ${COLLECTION_ENV} (单一有效清单选择; device identity is still checked at login)"
+    else
+        log "[ENV] auto-detected reachable environment: $COLLECTION_ENV"
+    fi
 }
 
 # hosts_file_has_entries <file>  — true if file exists and has ≥1 non-blank non-comment line

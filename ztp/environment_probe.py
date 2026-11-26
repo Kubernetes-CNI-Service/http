@@ -187,11 +187,25 @@ def detect_environment(
     timeout: int = 5,
     max_probes: int = 10,
     probe: Callable[[str, str, int], tuple[str, str] | None] = ssh_identity,
+    *,
+    allow_single_environment: bool = False,
 ):
-    pairs = overlapping_pairs(
-        load_inventory(inventory_path, "prod"),
-        load_inventory(inventory_path, "air"),
-    )
+    """Return (environment, details).
+
+    allow_single_environment is off by default and only the manual cron.sh automatic entry turns it on
+    (I-067, owner Q-058): when exactly one side has valid rows, that side is chosen without probing.
+    Choosing it is no identity check; the caller's normal login still checks each device.  An empty type
+    counts on both sides, so it never makes an inventory single-environment.
+    """
+    prod = load_inventory(inventory_path, "prod")
+    air = load_inventory(inventory_path, "air")
+    pairs = overlapping_pairs(prod, air)
+    if allow_single_environment and bool(prod) != bool(air):
+        environment = "prod" if prod else "air"
+        return environment, [{
+            "result": "single-valid-inventory", "environment": environment,
+            "rows": len(prod or air),
+        }]
     if not pairs:
         raise RuntimeError("Production/AIR inventories have no overlapping eth0 IP to probe")
     votes: list[str] = []
@@ -237,6 +251,11 @@ def main(argv=None):
     parser.add_argument("--timeout", type=int, default=5)
     parser.add_argument("--max-probes", type=int, default=10)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--allow-single-environment", action="store_true",
+        help=("internal (I-067): only ethernet/monitor/cron.sh's automatic entry passes it; choose the "
+              "environment whose side alone has valid rows and print '<environment> <basis>'"),
+    )
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--type", choices=("auto", "prod", "air"), dest="expected")
     selection.add_argument("--air", action="store_const", const="air", dest="expected")
@@ -246,6 +265,7 @@ def main(argv=None):
     try:
         environment, details = detect_environment(
             os.path.abspath(args.inventory), args.user, args.timeout, args.max_probes,
+            allow_single_environment=args.allow_single_environment,
         )
         if args.expected != "auto" and environment != args.expected:
             raise RuntimeError(
@@ -256,6 +276,9 @@ def main(argv=None):
         return 1
     if args.json:
         print(json.dumps({"environment": environment, "probes": details}, ensure_ascii=False))
+    elif args.allow_single_environment:
+        single = details[0].get("result") == "single-valid-inventory"
+        print(f"{environment} {'single-valid-inventory' if single else 'identity-probe'}")
     else:
         print(environment)
     return 0

@@ -4271,7 +4271,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 - 基本信息：real-environment / collection；I-018（v3.1.6 C1，WP-8）；状态 **NOT RUN / REAL_ENV REQUIRED**。本卡只是验收条件，不授权连接设备或改项目清单。
 - 风险与目标：cron.sh 在 Ubuntu 上用的 awk（mawk）可能不支持正则区间 `{n}`，改动前的 `load_inventory_macs` 在那台机器上可能一个 MAC 都读不出（指导 :1412、:1976）；本卡在真实管理服务器上确认新的 MAC 写法规则、具体原因、结尾和 scp 输出。
-- 本机先决：`test_cases.test_cron_inventory_identity`、`test_cases.test_cron_mac_rule_workflow`、`test_cases.test_ufm_monitor_cron_workflow` 通过。
+- 本机先决：`test_cases.test_cron_inventory_identity`、`test_cases.test_cron_mac_rule_workflow`、`test_cases.test_ufm_monitor_cron_workflow` 通过；第 4 步（I-067，指导 8.5 第 5 条）另要 `test_cases.test_cron_single_environment_workflow` 通过。
 - 前置条件：AIR 上隔离的项目副本；记录 `sha256sum ethernet/monitor/cron.sh` 和 `git status --short`，看是否有现场手改（指导 :1638，E-collection-05）。
 
 ### 步骤
@@ -4280,6 +4280,7 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 1. 一台交换机行把 `eth0_mac` 改成大写短横线写法，另造一行认不出的 MAC（如少一组），在终端手工执行 `bash ethernet/monitor/cron.sh`（指导 :1638）。
 2. 看结果 JSON 的 `failed_devices[].reason`（指导 :1638）。
 3. AIR 有 UFM 时，UFM 行同样做一次（指导 :1638）。
+4. （I-067，现场需要时）隔离副本的 `eth.csv` 只有一边有有效行（例如只有 `air` 行，没有 Production 行、没有 `type` 为空的行）时，在终端手工执行 `bash ethernet/monitor/cron.sh`，不带 `--prod`／`--air`／`--type`；只核这次的终端输出和 `cronjob.log`，不为此改设备写入许可（指导 8.5 第 5 条）。
 
 ### 预期结果
 
@@ -4287,7 +4288,8 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 - 第 1 步：大写短横线那台按 MAC 通过；认不出的那台打 `[KEY][ETH0-MAC-INVALID]` 并且没有任何 ssh（问题文档 I-018 期望 2；`ethernet/monitor/cron.sh::prepare_ssh_host_resilient` 先判 `invalid` 再 ssh）。终端没有 scp 进度条，scp 失败时有错误行（C1-O6 (b)；下发模板 `2>&1 >/dev/null` 只丢 stdout）。两种警告都有时最后一行是 `cron finish with device warnings and UFM warnings`，退出码与改前相同（C1-O7；主流程结尾）。
 - 第 2 步：`failed_devices[].reason` 是具体原因（如 `eth0_mac not recognised`），不是 `SSH authentication or transport unavailable`（C1-O5 (a)，问题文档 I-018 期望 4；`ethernet/monitor/cron.sh::deploy_ssh_keys` 按行取原因）。
 - 第 3 步：UFM 同样按 MAC 通过或以具体原因被拒；全部被拒时 `ufm-ibdiagnet/` 下有 `skipped` 运行记录，`reason` 写各台原因（C1-O8 (a)；`ufm_run_record_write`）。
-- 不允许的副作用：认不出 MAC 的那台被登录（问题文档 I-018 期望 2）。
+- 第 4 步：日志有 `[ENV] single valid inventory selected: air (单一有效清单选择; …)`，本轮归档名以 `-air` 结尾；之后每台仍按原登录核对 hostname／eth0 MAC，不符的那台打 `[KEY][IDENTITY-MISMATCH]` 被拒（问题文档 I-067 合同；指导 8.3 第 1 条；`ethernet/monitor/cron.sh::detect_eth_environment` 只在无环境参数时带 `--allow-single-environment` 调 `ztp/environment_probe.py`，再由 `prepare_ssh_host_resilient` 核身份）。
+- 不允许的副作用：认不出 MAC 的那台被登录（问题文档 I-018 期望 2）；第 4 步因选了环境而跳过身份核对，或清单两边都有行时被当成单环境（指导 8.3 第 2 条）。
 - 证据：终端输出、`cronjob.log` 片段、结果 JSON、运行记录（指导 :1638）。
 
 ### 故障注入与清理

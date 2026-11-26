@@ -84,6 +84,8 @@ python3 yaml-collect.py --air -y
 但凭据相同不会合并 host-key pin 身份。密码只用于当前进程，不应记录到 CSV、命令行、环境、状态或日志。
 默认模式要求至少一个重叠 IP 可通过 SSH 公钥读取实际 hostname
 和 eth0 MAC；无法自动识别时必须明确使用 `--type prod` 或 `--type air`。
+清单只有 Production 或只有 AIR 一边时，备份默认模式同样拒绝；手工 `cron.sh` 的单一有效清单选择
+（I-067）只用于状态采集，不改变备份的默认判断。
 `--prod`/`--air` 分别是这两种 `--type` 写法的短参数；冲突组合会直接拒绝执行。
 
 Switch Status 的“配置备份”按钮会弹出共享密码输入框；“信息收集”不需要密码。收集与备份

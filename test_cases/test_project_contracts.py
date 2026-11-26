@@ -8361,6 +8361,166 @@ class EnvironmentProbeContractTests(unittest.TestCase):
             self.probe.classify_identity("", "02:00:00:00:00:02", prod, air),
         )
 
+    # I-067 (问题文档 I-067 合同; 04 Q-058; v3.1.6 guide 8.3 :2052-2056): only the manual cron.sh automatic
+    # entry may select the one environment whose valid inventory side is non-empty.  The shared function keeps
+    # its default (YAML backup calls it without the policy) and the policy never guesses.
+    SINGLE_ENVIRONMENT_INVENTORIES = {
+        "prod-only": (
+            "hostname,type,eth0_ip,netmask,eth0_mac\n"
+            "EXAMPLE-Leaf01,eth,192.0.2.11,24,02:00:00:00:00:11\n"
+            "EXAMPLE-Spine01,eth_spx,192.0.2.12,24,02:00:00:00:00:12\n"
+            "EXAMPLE-Oob01,spx,192.0.2.13,24,02:00:00:00:00:13\n"
+            "EXAMPLE-IB01,ib,192.0.2.14,24,02:00:00:00:00:14\n",
+            "prod",
+        ),
+        "air-only": (
+            "hostname,type,eth0_ip,netmask,eth0_mac\n"
+            "AIR-EXAMPLE-Leaf01,air,192.0.2.21,24,02:00:00:00:00:21\n"
+            "AIR-EXAMPLE-Leaf02,AIR,192.0.2.22,24,\n"
+            "EXAMPLE-IB01,ib,192.0.2.14,24,02:00:00:00:00:14\n",
+            "air",
+        ),
+    }
+
+    def write_inventory(self, directory: str, text: str) -> str:
+        inventory = Path(directory) / "devices.csv"
+        inventory.write_text(text, encoding="utf-8")
+        return str(inventory)
+
+    def test_default_call_still_rejects_a_single_environment(self):
+        # guide 8.3 :2052「共享函数原有未传参行为和 CLI 默认都不变」; 8.4 C5 direct「默认调用仍拒绝原单环境无重叠案例」
+        for label, (text, _environment) in self.SINGLE_ENVIRONMENT_INVENTORIES.items():
+            with self.subTest(inventory=label), tempfile.TemporaryDirectory() as directory:
+                inventory = self.write_inventory(directory, text)
+                with self.assertRaisesRegex(RuntimeError, "no overlapping eth0 IP"):
+                    self.probe.detect_environment(inventory, probe=lambda *_args: None)
+                stderr = io.StringIO()
+                with contextlib.redirect_stderr(stderr), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(1, self.probe.main(["--inventory", inventory]))
+                self.assertIn("no overlapping eth0 IP", stderr.getvalue())
+
+    def test_single_environment_policy_selects_the_only_valid_side(self):
+        # guide 8.3 第 1 条 :2054「仅当一边非空、另一边为空时选非空环境」「选择环境不等于核验设备身份」:
+        # the selection needs no reachable device; identity is checked later by the normal login.
+        for label, (text, environment) in self.SINGLE_ENVIRONMENT_INVENTORIES.items():
+            with self.subTest(inventory=label), tempfile.TemporaryDirectory() as directory:
+                inventory = self.write_inventory(directory, text)
+                calls = []
+
+                def unreachable(ip, _user, _timeout):
+                    calls.append(ip)
+                    return None
+
+                selected, details = self.probe.detect_environment(
+                    inventory, probe=unreachable, allow_single_environment=True,
+                )
+                self.assertEqual(environment, selected)
+                self.assertEqual([], calls, "there is no overlapping IP to probe")
+                self.assertEqual("single-valid-inventory", details[0]["result"])
+                self.assertEqual(environment, details[0]["environment"])
+
+    def test_single_environment_policy_never_guesses(self):
+        # guide 8.3 第 2 条 :2055「空 type 现行同时属于两边…两边都空、格式错误或仍有歧义不猜。两边都有候选且无重叠 IP 仍拒绝」
+        cases = {
+            "empty type belongs to both sides": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,,192.0.2.10,24,02:00:00:00:00:01\n",
+                RuntimeError, "ambiguous hostname.*192\\.0\\.2\\.10",
+            ),
+            "Production rows plus one empty type row": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,eth,192.0.2.11,24,02:00:00:00:00:11\n"
+                "EXAMPLE-Leaf02,,192.0.2.12,24,02:00:00:00:00:12\n",
+                RuntimeError, "ambiguous hostname.*192\\.0\\.2\\.12",
+            ),
+            "empty inventory": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n",
+                RuntimeError, "no overlapping eth0 IP",
+            ),
+            "only unusable rows": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,eth,NA,24,02:00:00:00:00:11\n"
+                ",air,192.0.2.21,24,02:00:00:00:00:21\n",
+                RuntimeError, "no overlapping eth0 IP",
+            ),
+            "both sides without overlap": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,eth,192.0.2.11,24,02:00:00:00:00:11\n"
+                "AIR-EXAMPLE-Leaf01,air,192.0.2.21,24,02:00:00:00:00:21\n",
+                RuntimeError, "no overlapping eth0 IP",
+            ),
+            "missing column": (
+                "hostname,type,eth0_ip\n"
+                "EXAMPLE-Leaf01,eth,192.0.2.11\n",
+                ValueError, "missing columns: eth0_mac",
+            ),
+            "duplicate Production IP": (
+                "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                "EXAMPLE-Leaf01,eth,192.0.2.11,24,02:00:00:00:00:11\n"
+                "EXAMPLE-Leaf02,eth,192.0.2.11,24,02:00:00:00:00:12\n",
+                ValueError, "duplicate Production eth0 IP 192\\.0\\.2\\.11",
+            ),
+        }
+        # the device at each address answers with the identity its (shared) inventory row names
+        answers = {
+            "192.0.2.10": ("EXAMPLE-Leaf01", "02:00:00:00:00:01"),
+            "192.0.2.12": ("EXAMPLE-Leaf02", "02:00:00:00:00:12"),
+        }
+        for label, (text, error, pattern) in cases.items():
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as directory:
+                inventory = self.write_inventory(directory, text)
+                with self.assertRaisesRegex(error, pattern):
+                    self.probe.detect_environment(
+                        inventory,
+                        probe=lambda ip, _user, _timeout: answers.get(ip),
+                        allow_single_environment=True,
+                    )
+
+    def test_single_environment_policy_keeps_the_overlap_identity_probe(self):
+        # guide 8.3 第 2 条 :2055「有重叠则沿原带身份核对的 probe 路径」: the actual identity still decides
+        text = (
+            "hostname,type,eth0_ip,netmask,eth0_mac\n"
+            "EXAMPLE-Border01,eth,192.0.2.10,24,02:00:00:00:00:01\n"
+            "AIR-EXAMPLE-Border01,air,192.0.2.10,24,02:00:00:00:00:02\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = self.write_inventory(directory, text)
+            environment, details = self.probe.detect_environment(
+                inventory,
+                probe=lambda _ip, _user, _timeout: ("AIR-EXAMPLE-Border01", "02:00:00:00:00:02"),
+                allow_single_environment=True,
+            )
+            self.assertEqual("air", environment)
+            self.assertEqual("192.0.2.10", details[0]["ip"])
+            self.assertEqual("air", details[0]["environment"])
+            with self.assertRaisesRegex(RuntimeError, "identity conflict at 192\\.0\\.2\\.10"):
+                self.probe.detect_environment(
+                    inventory,
+                    probe=lambda _ip, _user, _timeout: ("AIR-EXAMPLE-Border01", "02:00:00:00:00:01"),
+                    allow_single_environment=True,
+                )
+            with self.assertRaisesRegex(RuntimeError, "cannot identify environment"):
+                self.probe.detect_environment(
+                    inventory, probe=lambda *_args: None, allow_single_environment=True,
+                )
+
+    def test_cli_internal_policy_option_reports_how_the_environment_was_chosen(self):
+        # guide 8.3 :2052「cron 经 helper CLI 调用时，可用一个内部策略选项向 helper 传递」; 第 1 条 :2054 the
+        # selection is logged as 「单一有效清单选择」, so the helper tells cron.sh which way it chose.
+        text, _environment = self.SINGLE_ENVIRONMENT_INVENTORIES["air-only"]
+        with tempfile.TemporaryDirectory() as directory:
+            inventory = self.write_inventory(directory, text)
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.probe.main(["--inventory", inventory, "--allow-single-environment"])
+            self.assertEqual(0, rc)
+            self.assertEqual("air single-valid-inventory\n", stdout.getvalue())
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+                rc = self.probe.main(["--inventory", inventory, "--allow-single-environment", "--prod"])
+            self.assertEqual(1, rc, "an explicit selection is still compared with the chosen environment")
+            self.assertEqual("", stdout.getvalue())
+
 
 class YamlCollectFallbackContractTests(unittest.TestCase):
     @classmethod

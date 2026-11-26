@@ -8197,5 +8197,160 @@ class BringupSafetyTests(unittest.TestCase):
         LegacyShellCompatibilityWorkflowTests().test_invalid_parallel_keeps_original_exit_and_unsupported_methods_never_fallback()
 
 
+# A device answering environment_probe.py's identity command: FAKE_DEVICES maps an address to
+# [hostname, eth0 MAC]; an address that is not listed cannot be reached.
+_SINGLE_ENVIRONMENT_FAKE_SSH = '''#!{python}
+import json, os, sys
+with open(os.environ["FAKE_SSH_CALLS"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(sys.argv[1:]) + "\\n")
+target = next(arg for arg in sys.argv[1:] if "@" in arg)
+answer = json.loads(os.environ["FAKE_DEVICES"]).get(target.split("@", 1)[1])
+if answer is None:
+    sys.exit(255)
+print(answer[0])
+print(answer[1])
+'''
+# python3 on cron.sh's PATH: records each helper argv, then runs the real interpreter.
+_SINGLE_ENVIRONMENT_PYTHON = '''#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_PYTHON_CALLS"
+exec {python} "$@"
+'''
+
+
+class CronSingleEnvironmentSelectionTests(unittest.TestCase):
+    """I-067 direct: cron.sh's detect_eth_environment, cut out of the real cron.sh, with the real probe helper.
+
+    Expectations: 问题文档 I-067 合同 (owner Q-058); v3.1.6 guide 8.3 :2052-2056 and 8.4 C5 direct :2070.
+    The function line itself and the functions before it stay as they are (guide 8.3 现状, :7411-7413 cut).
+    """
+
+    PROD_ONLY = (
+        "hostname,type,eth0_ip,netmask,eth0_mac\n"
+        "EXAMPLE-Leaf01,eth,192.0.2.11,24,02:00:00:00:00:11\n"
+        "EXAMPLE-Spine01,spx,192.0.2.12,24,02:00:00:00:00:12\n"
+    )
+    AIR_ONLY = (
+        "hostname,type,eth0_ip,netmask,eth0_mac\n"
+        "AIR-EXAMPLE-Leaf01,air,192.0.2.21,24,02:00:00:00:00:21\n"
+    )
+
+    def run_detect(self, inventory, type_filter="", devices=None):
+        source = (ROOT / "ethernet/monitor/cron.sh").read_text(encoding="utf-8")
+        match = re.search(r"^detect_eth_environment\(\) \{\n.*?^\}\n", source, re.S | re.M)
+        self.assertIsNotNone(match)
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        base = root / "ethernet/monitor"
+        base.mkdir(parents=True)
+        (root / "ztp").mkdir()
+        shutil.copy2(ROOT / "ztp/environment_probe.py", root / "ztp/environment_probe.py")
+        if inventory is not None:
+            (base / "eth.csv").write_text(inventory, encoding="utf-8")
+        bin_dir = root / "bin"
+        bin_dir.mkdir()
+        for name, text in (("ssh", _SINGLE_ENVIRONMENT_FAKE_SSH.format(python=sys.executable)),
+                           ("python3", _SINGLE_ENVIRONMENT_PYTHON.format(python=shlex.quote(sys.executable)))):
+            (bin_dir / name).write_text(text, encoding="utf-8")
+            (bin_dir / name).chmod(0o755)
+        calls = {"python": root / "python-calls", "ssh": root / "ssh-calls"}
+        for path in calls.values():
+            path.write_text("", encoding="utf-8")
+        harness = root / "harness.sh"
+        harness.write_text(
+            "#!/bin/bash\n"
+            "log() { printf '[log] %s\\n' \"$*\"; }\n"
+            'BASE="$TEST_BASE"\nTYPE_FILTER="$TEST_TYPE_FILTER"\nCOLLECTION_ENV=""\nETH_SSH_USER=cumulus\n'
+            + match.group(0)
+            + "detect_eth_environment\nrc=$?\n"
+              "printf '__RC__=%s\\n__TYPE__=%s\\n__ENV__=%s\\n' \"$rc\" \"$TYPE_FILTER\" \"$COLLECTION_ENV\"\n",
+            encoding="utf-8",
+        )
+        environment = dict(
+            os.environ, PATH=f"{bin_dir}:/usr/bin:/bin", TEST_BASE=str(base), TEST_TYPE_FILTER=type_filter,
+            FAKE_DEVICES=json.dumps(devices or {}), FAKE_SSH_CALLS=str(calls["ssh"]),
+            FAKE_PYTHON_CALLS=str(calls["python"]),
+        )
+        completed = subprocess.run(["bash", str(harness)], env=environment, stdin=subprocess.DEVNULL,
+                                   capture_output=True, text=True, timeout=60, check=False)
+        output = completed.stdout + completed.stderr
+        result = dict(re.findall(r"^__(RC|TYPE|ENV)__=(.*)$", completed.stdout, re.M))
+        self.assertEqual({"RC", "TYPE", "ENV"}, set(result), output)
+        return result, output, {key: path.read_text(encoding="utf-8").splitlines()
+                                for key, path in calls.items()}
+
+    def test_auto_entry_selects_the_only_valid_inventory_side(self):
+        # guide 8.3 第 1 条 :2054「仅当一边非空、另一边为空时选非空环境并记明“单一有效清单选择”的本地日志及环境值」;
+        # :2052 the manual cron automatic entry turns the policy on through the helper's internal option.
+        for label, inventory, type_filter, environment in (
+            ("prod-only", self.PROD_ONLY, "ethernet", "prod"),
+            ("air-only", self.AIR_ONLY, "air", "air"),
+        ):
+            with self.subTest(inventory=label):
+                result, output, calls = self.run_detect(inventory)
+                self.assertEqual({"RC": "0", "TYPE": type_filter, "ENV": environment}, result, output)
+                self.assertIn(f"[ENV] single valid inventory selected: {environment}", output)
+                self.assertIn("单一有效清单选择", output)
+                self.assertNotIn("auto-detected reachable environment", output)
+                self.assertEqual(1, len(calls["python"]), calls)
+                self.assertIn("--allow-single-environment", calls["python"][0].split())
+                self.assertEqual([], calls["ssh"], "choosing the environment logs in to no device")
+
+    def test_auto_entry_never_guesses_and_keeps_the_identity_probe(self):
+        # guide 8.3 第 2 条 :2055「空 type 现行同时属于两边…两边都空、格式错误或仍有歧义不猜。两边都有候选且无重叠 IP
+        # 仍拒绝；有重叠则沿原带身份核对的 probe 路径」
+        refused = {
+            "empty type only": "hostname,type,eth0_ip,netmask,eth0_mac\n"
+                               "EXAMPLE-Leaf01,,192.0.2.10,24,02:00:00:00:00:01\n",
+            "empty inventory": "hostname,type,eth0_ip,netmask,eth0_mac\n",
+            "both sides without overlap": self.PROD_ONLY + self.AIR_ONLY.split("\n", 1)[1],
+        }
+        for label, inventory in refused.items():
+            with self.subTest(inventory=label):
+                result, output, _calls = self.run_detect(
+                    inventory, devices={"192.0.2.10": ["EXAMPLE-Leaf01", "02:00:00:00:00:01"]})
+                self.assertEqual({"RC": "1", "TYPE": "", "ENV": ""}, result, output)
+                self.assertIn("[ENV] ERROR: cannot auto-detect reachable environment", output)
+                self.assertNotIn("single valid inventory", output)
+        overlapping = (
+            "hostname,type,eth0_ip,netmask,eth0_mac\n"
+            "EXAMPLE-Border01,eth,192.0.2.10,24,02:00:00:00:00:01\n"
+            "AIR-EXAMPLE-Border01,air,192.0.2.10,24,02:00:00:00:00:02\n"
+        )
+        result, output, calls = self.run_detect(
+            overlapping, devices={"192.0.2.10": ["AIR-EXAMPLE-Border01", "02:00:00:00:00:02"]})
+        self.assertEqual({"RC": "0", "TYPE": "air", "ENV": "air"}, result, output)
+        self.assertIn("[ENV] auto-detected reachable environment: air", output)
+        self.assertNotIn("single valid inventory", output)
+        self.assertEqual(1, len(calls["ssh"]), "the overlapping address is probed for its identity")
+        result, output, _calls = self.run_detect(
+            overlapping, devices={"192.0.2.10": ["AIR-EXAMPLE-Border01", "02:00:00:00:00:01"]})
+        self.assertEqual({"RC": "1", "TYPE": "", "ENV": ""}, result, output)
+        self.assertIn("identity conflict at 192.0.2.10", output)
+
+    def test_explicit_and_worker_selection_never_reach_the_policy(self):
+        # guide 8.3 第 3 条 :2056「显式 prod/air/type 选择、worker 冻结 slot 及其上下文保持原流程，不走这项自动单环境政策」:
+        # the worker always passes --prod or --air (monitor/switch-collection-worker.py::commands_for_scope).
+        for type_filter, inventory, expected_type, environment in (
+            ("prod", self.AIR_ONLY, "ethernet", "prod"),
+            ("air", self.PROD_ONLY, "air", "air"),
+            ("ethernet", self.AIR_ONLY, "ethernet", "prod"),
+            ("eth", self.AIR_ONLY, "eth", "prod"),
+            ("eth_spx", self.AIR_ONLY, "eth_spx", "prod"),
+            ("spx", self.AIR_ONLY, "spx", "prod"),
+        ):
+            with self.subTest(type_filter=type_filter):
+                result, output, calls = self.run_detect(inventory, type_filter)
+                self.assertEqual({"RC": "0", "TYPE": expected_type, "ENV": environment}, result, output)
+                self.assertEqual({"python": [], "ssh": []}, calls)
+                self.assertNotIn("single valid inventory", output)
+
+    def test_lane_without_eth_csv_is_untouched(self):
+        # guide 8.3 现状 :2050「lane 目录没有 eth.csv 即返回，所以只影响 ETH lane」
+        result, output, calls = self.run_detect(None)
+        self.assertEqual({"RC": "0", "TYPE": "", "ENV": ""}, result, output)
+        self.assertEqual({"python": [], "ssh": []}, calls)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,12 @@
 
 1. `cron.sh` 根据所在目录选择 `eth.csv`、`ib.csv` 或 `nvsw.csv`。Ethernet 默认先用
    同 IP 设备的实际 hostname 与 eth0 MAC 自动判断当前可达的是 Production 还是 AIR，
-   再只读取该环境清单；IP 本身不代表环境。Ethernet 清单中
+   再只读取该环境清单；IP 本身不代表环境。手工运行 `bash cron.sh` 不带环境参数时，若清单只有
+   Production 一边或只有 AIR 一边有有效行（hostname 与 eth0_ip 都有值），直接选这一边，日志写
+   `[ENV] single valid inventory selected: <prod|air> (单一有效清单选择; …)`；选环境不是身份核验，
+   之后每台仍按下面第 2 步核对 hostname / eth0 MAC，不符即拒绝（I-067）。`type` 为空的行同时算两边，
+   两边都空、两边都有行但没有同 IP 设备时仍拒绝，提示用 `--prod` / `--air`。worker 总带
+   `--prod` / `--air`，显式参数和 YAML 备份（`ztp/backup/yaml-collect.py`）都不走这条规则。Ethernet 清单中
    `eth` 只采集 info；`eth_spx`（inband/OOB）和 `spx`（独立 SPX 网络）同时采集
    info 与 SPX link。AIR 批次还调用 `ztp/dynamic_air_inventory.py`，从当前 AIR JSON 与
    `/var/lib/dhcp/dhcpd.leases` 追加已取得 active lease 的 AIR-only Cumulus 节点；没有租约的
@@ -289,7 +294,7 @@ bash cron.sh --type ethernet  # eth + eth_spx + spx
 bash cron.sh --type eth       # 只采集普通 Ethernet info
 bash cron.sh --type eth_spx   # inband/OOB SPX：info + link
 bash cron.sh --type spx       # 独立 SPX 网络：info + link
-bash cron.sh                  # 自动判断当前可达环境，再采集该环境 Ethernet
+bash cron.sh                  # 自动判断当前可达环境（清单只有一边有效时直接选该边），再采集该环境 Ethernet
 ```
 
 显式限定环境时，清单没有 `eth0_mac` 的普通静态设备在 SSH 准备阶段仍要求实际 hostname 与清单完全一致；
