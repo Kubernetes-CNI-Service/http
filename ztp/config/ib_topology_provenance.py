@@ -21,9 +21,21 @@ import zipfile
 CVT_ROLES = frozenset({
     "p2p", "inventory", "port_map", "splitter", "converter", "topology_rules",
 })
-# Owner 2026-10-22: 02-devices_config.csv decides which P2P column names the devices; a CVT built with it
-# records it as a seventh role. A CVT built without it keeps exactly the six roles.
+# Legacy-only roles. Owner 2026-10-22: 02-devices_config.csv decides which P2P column names the devices,
+# and converters before v3.1.6 recorded it as a seventh role. Owner 2026-11-27 (04 Q-115 (c)): the device
+# list has little to do with the expected topology (ib.csv is the same file and is edited in the field), so
+# - writers record exactly CVT_ROLES; `devices` is refused on write;
+# - reading still accepts a `devices` entry in an existing sidecar and checks its shape, but never re-reads
+#   its bytes, so editing the list never makes a CVT stale; the CVT and the six roles stay byte-checked;
+# - devices_changed_since_cvt() tells a caller that the list moved on, for a one-line note.
 OPTIONAL_CVT_ROLES = frozenset({"devices"})
+# http dev 2026-11-27 (Q-115 (c) detail, Codex LC316-066): the list picks the endpoint name column, so a new
+# CVT keeps, beside the six verified roles, an optional top-level "advisory" object: the list's path and
+# sha256 at generation and the name-column key the converter chose. ADVISORY ONLY - never verified: reading
+# checks its shape and never re-reads the list; it only lets the closed loop say that the list changed and
+# which column the CVT still uses. "verified" is always false so the sidecar says so itself.
+ADVISORY_KEYS = frozenset({"devices_path", "devices_sha256", "name_column", "verified"})
+CVT_RECORD_KEYS = frozenset({"schema", "cvt", "cvt_sha256", "sources"})
 
 
 def _cvt_role_set_ok(roles) -> bool:
@@ -231,6 +243,14 @@ def _identity(path: Path, *, allow_directory: bool = False) -> dict[str, str]:
 
 
 def _same_file_identity(identity: object, label: str, *, allow_directory: bool = False) -> str:
+    _check_identity_shape(identity, label, allow_directory=allow_directory)
+    actual = _identity(Path(identity["path"]), allow_directory=allow_directory)
+    if actual != identity:
+        raise ProvenanceError(f"{label} source bytes changed")
+    return identity["sha256"]
+
+
+def _check_identity_shape(identity: object, label: str, *, allow_directory: bool = False) -> None:
     if not isinstance(identity, dict) or set(identity) != {"path", "resolved_path", "kind", "sha256"}:
         raise ProvenanceError(f"invalid {label} identity")
     path, expected = identity["path"], identity["sha256"]
@@ -242,10 +262,6 @@ def _same_file_identity(identity: object, label: str, *, allow_directory: bool =
         raise ProvenanceError(f"invalid {label} digest")
     if identity["kind"] not in ({"file", "directory"} if allow_directory else {"file"}):
         raise ProvenanceError(f"invalid {label} source kind")
-    actual = _identity(Path(path), allow_directory=allow_directory)
-    if actual != identity:
-        raise ProvenanceError(f"{label} source bytes changed")
-    return expected
 
 
 def _object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -376,14 +392,39 @@ def _check_report_sheets(report: Path) -> None:
 
 
 def capture_sources(sources: Mapping[str, Path]) -> dict[str, dict[str, str]]:
-    if not _cvt_role_set_ok(sources):
-        raise ProvenanceError("CVT provenance requires exactly six named source roles (plus optional devices)")
+    if set(sources) != CVT_ROLES:
+        raise ProvenanceError("CVT provenance requires exactly six named source roles (devices is not recorded)")
     return {role: _identity(Path(sources[role])) for role in sorted(sources)}
+
+
+def devices_advisory(devices: Path, name_column: str) -> dict[str, object]:
+    """The advisory (never verified) record of the device list a CVT was generated with."""
+    return _check_advisory({
+        "devices_path": os.path.abspath(Path(devices).expanduser()),
+        "devices_sha256": _identity(Path(devices))["sha256"],
+        "name_column": name_column, "verified": False,
+    })
+
+
+def _check_advisory(advisory: object) -> dict[str, object]:
+    if not isinstance(advisory, dict) or set(advisory) != ADVISORY_KEYS:
+        raise ProvenanceError("invalid CVT advisory fields")
+    path, digest, column = advisory["devices_path"], advisory["devices_sha256"], advisory["name_column"]
+    if not isinstance(path, str) or not Path(path).is_absolute():
+        raise ProvenanceError("invalid CVT advisory devices path")
+    if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+        raise ProvenanceError("invalid CVT advisory devices digest")
+    if not isinstance(column, str) or len(column) > 256:
+        raise ProvenanceError("invalid CVT advisory name column")
+    if advisory["verified"] is not False:
+        raise ProvenanceError("CVT advisory fields are never verified")
+    return advisory
 
 
 def write_cvt_provenance(
     cvt: Path, sources: Mapping[str, Path],
     *, expected_sources: Mapping[str, dict[str, str]] | None = None,
+    advisory: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     with _bound_parent(cvt) as parent_fd:
         captured = capture_sources(sources)
@@ -395,14 +436,18 @@ def write_cvt_provenance(
             "sources": captured,
         }
         record["cvt_sha256"] = record["cvt"]["sha256"]
+        if advisory is not None:
+            record["advisory"] = _check_advisory(dict(advisory))
         _publish(sidecar_path(cvt), record, parent_fd)
         return record
 
 
 def read_cvt_provenance(cvt: Path) -> dict[str, object]:
     record = _load(sidecar_path(cvt))
-    if set(record) != {"schema", "cvt", "cvt_sha256", "sources"} or record["schema"] != "ib-cvt-provenance-v1":
+    if set(record) - {"advisory"} != CVT_RECORD_KEYS or record["schema"] != "ib-cvt-provenance-v1":
         raise ProvenanceError("invalid CVT provenance schema")
+    if "advisory" in record:
+        _check_advisory(record["advisory"])   # advisory only: shape checked, the list is never re-read
     identity = record["cvt"]
     if _same_file_identity(identity, "CVT") != record["cvt_sha256"]:
         raise ProvenanceError("CVT summary digest differs from source identity")
@@ -412,8 +457,38 @@ def read_cvt_provenance(cvt: Path) -> dict[str, object]:
     if not isinstance(sources, dict) or not _cvt_role_set_ok(sources):
         raise ProvenanceError("invalid CVT source roles")
     for role in sorted(sources):
-        _same_file_identity(sources[role], role)
+        if role in OPTIONAL_CVT_ROLES:
+            _check_identity_shape(sources[role], role)   # legacy entry: shape only, bytes never re-read
+        else:
+            _same_file_identity(sources[role], role)
     return record
+
+
+def devices_changed_since_cvt(record: Mapping[str, object]) -> bool:
+    """True when a CVT record names 02-devices_config.csv (the advisory fields, or a legacy source role)
+    and the file at that path now has other bytes or cannot be read. Informational only (owner
+    2026-11-27, 04 Q-115 (c)): the CVT stays valid and keeps the name column chosen when it was generated."""
+    advisory = record.get("advisory")
+    sources = record.get("sources")
+    legacy = sources.get("devices") if isinstance(sources, dict) else None
+    if isinstance(advisory, dict):
+        path, recorded = advisory.get("devices_path"), advisory.get("devices_sha256")
+    elif isinstance(legacy, dict):
+        path, recorded = legacy.get("path"), legacy.get("sha256")
+    else:
+        return False
+    try:
+        return _identity(Path(path))["sha256"] != recorded
+    except (ProvenanceError, KeyError, TypeError, OSError):
+        return True
+
+
+def recorded_name_column(record: Mapping[str, object]) -> str | None:
+    """The name-column key the converter chose ("" = the column next to the port), from the advisory
+    fields; None when the CVT does not say (made before v3.1.6, or without a device list)."""
+    advisory = record.get("advisory")
+    column = advisory.get("name_column") if isinstance(advisory, dict) else None
+    return column if isinstance(column, str) else None
 
 
 def capture_report_inputs(actual: Path, profile: Path) -> dict[str, dict[str, str]]:

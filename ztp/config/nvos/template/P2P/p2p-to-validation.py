@@ -36,6 +36,7 @@ from topology_rules import (  # noqa: E402
 from ib_topology_provenance import (  # noqa: E402
     ProvenanceError,
     capture_sources,
+    devices_advisory,
     write_cvt_provenance,
 )
 
@@ -998,12 +999,17 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
     }
     # Owner 2026-10-22: 02-devices_config.csv (a setup link beside the converter) tells which P2P column
     # holds the device names. Without it the column next to the port is used, as before.
+    # Owner 2026-11-27 (04 Q-115 (c)): the list is not a verified source role of the CVT provenance; editing
+    # it (ib.csv is the same file) leaves the CVT valid, and the CVT keeps the name column chosen here. Its
+    # sha256 and that column are kept as advisory fields (never verified) so the IB closed loop can say the
+    # list changed and which column the CVT uses (http dev 2026-11-27, Codex LC316-066).
     requested = getattr(args, "devices", None)
     devices_path = Path(requested) if requested else script_dir / "02-devices_config.csv"
     device_names: Optional[set[str]] = None
+    advisory: Optional[dict] = None
     if devices_path.is_file():
+        advisory = devices_advisory(devices_path, "")
         device_names = load_device_names(devices_path)
-        source_paths["devices"] = devices_path
     elif requested:
         raise ConversionError(f"devices inventory not found: {devices_path}")
     expected_sources = capture_sources(source_paths)
@@ -1120,8 +1126,10 @@ def convert(args: argparse.Namespace) -> tuple[Path, int, int, list[tuple[str, i
     )
     # The sidecar is only published for final CVT bytes. A missing or stale
     # sidecar keeps this output unusable as REQ7 expected-topology authority.
+    if advisory is not None:
+        advisory["name_column"] = label   # "" = the column next to the port
     write_cvt_provenance(
-        workbook_path, source_paths, expected_sources=expected_sources,
+        workbook_path, source_paths, expected_sources=expected_sources, advisory=advisory,
     )
     if backup_path is not None:
         print(f"Backup created: {backup_path}")
@@ -1147,8 +1155,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--splitter", default=str(script_dir / "03-splitter.log"), help="分线器日志路径")
     parser.add_argument(
         "--devices", default=None,
-        help="02-devices_config.csv used to find the P2P device-name column; "
-             "default: 02-devices_config.csv beside this script when present",
+        help="02-devices_config.csv used to find the P2P device-name column (not recorded in the CVT "
+             "provenance); default: 02-devices_config.csv beside this script when present",
     )
     parser.add_argument(
         "--expect-p2p-sha256", type=lambda value: value if re.fullmatch(r"[0-9a-f]{64}", value)

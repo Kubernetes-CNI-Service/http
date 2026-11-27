@@ -3089,6 +3089,13 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   2. 采集中途在 VIP 上执行 failover：本轮 HA 状态和 ibdiagnet 都从启动时的那台取回，不会取到另一台的旧文件，最多记一条 UFM 警告。
   3. 人为让 ibdiagnet 连续失败 3 次（例如停掉 ufm 容器）：第 4 轮改采 iblinkinfo，页面标为降级；恢复后第 6 轮再试 ibdiagnet，成功即清零。
   4. 跨日后：前两天的文件在 `YYYYMMDD-daily.tar.gz` 里，更早的被删除；CSV 不打包；`cronjob.log` 超过 10 MB 被压缩，最多保留 7 个。
+  5. 改清单后不需重生成 CVT（v3.1.6 DEVHASH，owner 2026-11-27 04 Q-115 (c)；本机先决另加 `test_cases.test_req7_ib_provenance`、`test_cases.test_req7_ib_provenance_workflow`、`test_cases.test_ib_cvt_project_output`）：
+     - 升级过渡（先观察）：v3.1.6 改了 `p2p-to-validation.py`，CVT provenance 的 `converter` 来源记的是它的字节，所以升级前生成的 CVT 在同步代码后、load 前会被拒：这期间每轮 `cronjob.log` 有 `converter source bytes changed` 和一行 `[IB-CLOSED-LOOP] [stderr] [CVT-REMEDY] CVT 的来源 converter自生成 CVT 后已变：请在 ztp/config/nvos/template/P2P 下重跑 python3 p2p-to-validation.py 重生成 CVT（或重新 load）`，本轮不出报告。按正常升级流程 load 后（load 重生成 CVT），下一轮恢复。记下这段时间的轮数和恢复的那一轮 run-id。现场在升级并 load 之后不会再有「provenance 含 `devices`、不记名称列」的旧 CVT，本步只验证本版 CVT。
+     - 前置：升级并 load 完成后，记录当前 `99-output-p2p/<P2P 源文件名>-cvt.xlsx` 与其 `.provenance.json` 的 sha256，以及 provenance 里 `sources` 的键（只有 6 个，没有 `devices`）和 `advisory`（用到清单时才有：`devices_sha256`、`name_column`、`"verified": false`）。
+     - 步骤：在获准窗口按正常流程改 `ib.csv`（即项目的 `02-devices_config.csv`，例如加一行或改一个 IP），不跑转换器、不 load；等下一轮 IB 采集（或页面发起一轮）。
+     - 预期：`cronjob.log` 不出现 `devices source bytes changed`，本轮报告、provenance、收据照常生成，IB Link Validation 显示本轮 run-id；CVT 与其 `.provenance.json` 的 sha256 不变（没有被重生成或改写）。本轮 `cronjob.log` 有且只有一行 `[IB-CLOSED-LOOP] [stdout] [CVT-DEVICES-CHANGED] 设备清单 02-devices_config.csv 自生成 CVT 后已变；CVT 未重生成，名称列沿用生成时的选择：…；若清单改了名称，可能需重跑 p2p-to-validation.py`，其中名称列是 `advisory.name_column`（如「hostname」，空串写「紧挨端口的那一列」）；「旧 CVT 未记录」只在本机替身里出现，现场升级并 load 后不会出现。清单改回原字节（或未改）的一轮不出现这一行。页面 Switch Status 的规划口数不因只改清单而变成「—」。
+     - 不允许：IB 链路检查因改清单而停做；CVT 被自动重写；P2P、inventory、port_map、splitter、converter、topology_rules 任一变化时也被放行（这些仍应报 `<角色> source bytes changed`、带一行 `[CVT-REMEDY]` 并停做本轮分析）。
+     - 证据：改前后 `02-devices_config.csv` 的 sha256、CVT 与 provenance 的 sha256、本轮 `cronjob.log` 的 `[IB-CLOSED-LOOP]` 片段、`99-output-p2p` 本轮报告与收据文件名、页面截图。
 - 证据：各 lane 的 `cronjob.log` 片段（C3（I-053）之后，worker 驱动的轮次也有内容：`[SWITCH-COLLECTION]` 段）、`ufm-ibdiagnet/` 目录清单、`.ibdiagnet-state`、页面截图、`du -sh` 磁盘占用。
 - 清理与风险：
   - 采集对 UFM 只写 `/root/monitor/`；停容器制造失败需要维护窗口。

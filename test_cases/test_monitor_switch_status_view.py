@@ -1147,6 +1147,32 @@ class SwitchStatusV5SourceTests(unittest.TestCase):
         self.write_cvt(p2p=other)
         self.assertIsNone(self.load()["ib"]["counts"])
 
+    def test_a_changed_device_list_alone_keeps_the_planned_ib_count(self):
+        # v3.1.6 DEVHASH (owner 2026-11-27, 04 Q-115 (c)): 02-devices_config.csv never binds a CVT, whether
+        # the sidecar names it as a pre-v3.1.6 source role or in the advisory fields; the planned count stays.
+        cvt = self.write_cvt()
+        expected = self.load()["ib"]["counts"]
+        self.assertIsNotNone(expected)
+        devices = self.project / "02-devices_config.csv"
+        devices.write_text("hostname,type\nleaf01,ib\n", encoding="utf-8")
+        original = devices.read_bytes()
+        digest = hashlib.sha256(original).hexdigest()
+        sidecar = Path(f"{cvt}.provenance.json")
+        record = json.loads(sidecar.read_text(encoding="utf-8"))
+        legacy = copy.deepcopy(record)
+        legacy["sources"]["devices"] = {"path": str(devices), "resolved_path": str(devices.resolve()),
+                                        "kind": "file", "sha256": digest}
+        advisory = copy.deepcopy(record)
+        advisory["advisory"] = {"devices_path": str(devices), "devices_sha256": digest,
+                                "name_column": "hostname", "verified": False}
+        for label, variant in (("legacy devices role", legacy), ("advisory fields", advisory)):
+            with self.subTest(sidecar=label):
+                sidecar.write_text(json.dumps(variant, sort_keys=True), encoding="utf-8")
+                devices.write_bytes(original)
+                self.assertEqual(expected, self.load()["ib"]["counts"], label + ", list unchanged")
+                devices.write_bytes(original + b"spine01,ib\n")
+                self.assertEqual(expected, self.load()["ib"]["counts"], label + ", only the list changed")
+
     def test_missing_products_give_reasons_and_no_generation(self):
         plans = self.load()
         self.assertIsNone(plans["ib"]["counts"])

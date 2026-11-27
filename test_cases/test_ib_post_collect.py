@@ -353,5 +353,133 @@ class IbPostCollectRealAnalyzerWorkflowTest(unittest.TestCase):
             self.assertEqual("", page.load_topology_validation(output, "infiniband", "prod")["collection"])
 
 
+# Owner 2026-11-27 (04 Q-115 (c), v3.1.6 DEVHASH): the one line the analyzer prints when a CVT recorded
+# 02-devices_config.csv (a legacy source role, or the advisory fields since v3.1.6) and the list has changed
+# since; the analysis still runs.
+DEVICES_CHANGED_TAG = "[CVT-DEVICES-CHANGED]"
+DEVICES_CHANGED_TEXT = "设备清单 02-devices_config.csv 自生成 CVT 后已变；CVT 未重生成，名称列沿用生成时的选择"
+
+
+class IbPostCollectDeviceListChangeWorkflowTest(unittest.TestCase):
+    """Field 2026-11-27: editing ib.csv (= 02-devices_config.csv) stopped cron's IB closed loop with
+    `devices source bytes changed`. Real converter (with the device list) and either its own sidecar
+    (advisory fields) or that sidecar reshaped like a pre-v3.1.6 one (an injected `devices` source entry),
+    real post-collect, real analyzer, real page reader."""
+
+    def run_post_collect(self, monitor, data, run_id):
+        archive = ibdiagnet_archive(data / run_id, f"{run_id}_ufm01_ibdiagnet2.tgz")
+        completed = subprocess.run(
+            [sys.executable, "-B", str(monitor / "post-collect.py"), "--archive", str(archive)],
+            capture_output=True, text=True, timeout=300, check=False, cwd=monitor.parent.parent,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
+        return completed, f"{run_id}_ufm01-ibdiagnet-topology-validation.xlsx"
+
+    def test_a_changed_device_list_neither_stops_the_closed_loop_nor_needs_a_new_cvt(self):
+        # a legacy-shaped sidecar: the CVT is made by the current converter, then a pre-v3.1.6 `devices` source
+        # entry is injected and the advisory fields removed; no column is recorded. (A real pre-v3.1.6 CVT also
+        # records the old converter bytes, so after an upgrade it is refused until load regenerates it.)
+        self.check_device_list_change(legacy=True, shown_column="旧 CVT 未记录")
+
+    def test_a_new_cvt_names_the_column_it_chose_when_the_device_list_changed(self):
+        # http dev 2026-11-27 (Q-115 (c) detail, Codex LC316-066): the list chose the endpoint name column, so a
+        # new CVT keeps the list's sha256 and that column as advisory fields; the note names the column.
+        self.check_device_list_change(legacy=False, shown_column="「name」")
+
+    def check_device_list_change(self, *, legacy, shown_column):
+        with tempfile.TemporaryDirectory(prefix="ib-post-collect-devices-") as directory:
+            root = Path(directory).resolve()
+            monitor = root / "infiniband/monitor"
+            monitor.mkdir(parents=True)
+            shutil.copy2(POST_COLLECT, monitor / "post-collect.py")
+            tool = root / "tools/ibdiagnet-analyze-tool"
+            tool.mkdir(parents=True)
+            (tool / "analyze.py").symlink_to(ROOT / "tools/ibdiagnet-analyze-tool/analyze.py")
+            project = root / "DAY0-Prepare/fabric-a"
+            output = project / "99-output-p2p"
+            output.mkdir(parents=True)
+            (monitor / "99-output-p2p").symlink_to(output)
+            p2p = project / "fabric-blue.xlsx"
+            book = xlsxwriter.Workbook(str(p2p))
+            sheet = book.add_worksheet("CL links")
+            for column, value in enumerate(("Name", "Port", "Name", "Port")):
+                sheet.write(0, column, value)
+            for column, value in enumerate(("leaf01", "sw1p1", "server01", "mlx5_0")):
+                sheet.write(1, column, value)
+            book.close()
+            (project / "p2p.xlsx").symlink_to(p2p.name)
+            devices = project / "02-devices_config.csv"
+            devices.write_text("hostname,type,eth0_ip\nleaf01,ib,192.0.2.11\n", encoding="utf-8")
+            setup = root / "converter"
+            setup.mkdir()
+            for name, text in (("01-inventory.log", "[IB-SW]\n*leaf*\n\n[server]\n*server*\n"),
+                               ("02-port-mapping.log", ""), ("03-splitter.log", "")):
+                (setup / name).write_text(text, encoding="utf-8")
+            (setup / "p2p.xlsx").symlink_to(project / "p2p.xlsx")
+            (setup / "02-devices_config.csv").symlink_to(devices)   # setup's link beside the converter
+            cvt = output / "fabric-blue-cvt.xlsx"
+            converted = subprocess.run(
+                [sys.executable, "-B", str(ROOT / "ztp/config/nvos/template/P2P/p2p-to-validation.py"),
+                 "--output", str(cvt), "--devices", str(setup / "02-devices_config.csv"),
+                 "--inventory", str(setup / "01-inventory.log"),
+                 "--port-map", str(setup / "02-port-mapping.log"),
+                 "--splitter", str(setup / "03-splitter.log")],
+                cwd=setup, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "XLSX_TO_CSV_BASE_DIR": str(setup)},
+                capture_output=True, text=True, timeout=120, check=False)
+            self.assertEqual(0, converted.returncode, converted.stdout + converted.stderr)
+            self.assertIn("1 name(s) found in 02-devices_config.csv", converted.stdout)
+            sidecar = Path(f"{cvt}.provenance.json")
+            record = json.loads(sidecar.read_text(encoding="utf-8"))
+            if legacy:
+                # built by the current converter, then reshaped: a pre-v3.1.6 `devices` source entry is injected
+                record.pop("advisory", None)
+                record["sources"]["devices"] = {
+                    "path": str(setup / "02-devices_config.csv"), "resolved_path": str(devices), "kind": "file",
+                    "sha256": hashlib.sha256(devices.read_bytes()).hexdigest()}
+                sidecar.write_text(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n",
+                                   encoding="utf-8")
+            else:
+                self.assertNotIn("devices", record["sources"])
+                self.assertEqual({"devices_path": str(setup / "02-devices_config.csv"),
+                                  "devices_sha256": hashlib.sha256(devices.read_bytes()).hexdigest(),
+                                  "name_column": "name", "verified": False}, record.get("advisory"))
+            cvt_bytes, sidecar_bytes = cvt.read_bytes(), sidecar.read_bytes()
+            data = root / "infiniband/monitor/ufm-ibdiagnet"
+
+            unchanged, _report = self.run_post_collect(monitor, data, "20261127-0300-prod-0123456789abcdef")
+            self.assertEqual(0, unchanged.returncode, unchanged.stdout + unchanged.stderr)
+            self.assertNotIn(DEVICES_CHANGED_TAG, unchanged.stdout, "the list has not changed yet")
+
+            # the operator edits ib.csv, i.e. 02-devices_config.csv; nobody reruns the converter
+            devices.write_text("hostname,type,eth0_ip\nleaf01,ib,192.0.2.11\nufm01,server_ufm,192.0.2.30\n",
+                               encoding="utf-8")
+            edited, report_name = self.run_post_collect(monitor, data, "20261127-0310-prod-0123456789abcdef")
+            self.assertEqual(0, edited.returncode, edited.stdout + edited.stderr)
+            self.assertNotIn("devices source bytes changed", edited.stdout + edited.stderr)
+            notes = [line for line in edited.stdout.splitlines() if DEVICES_CHANGED_TAG in line]
+            self.assertEqual(1, len(notes), edited.stdout)
+            self.assertIn("[IB-CLOSED-LOOP] [stdout] " + DEVICES_CHANGED_TAG, notes[0])
+            self.assertIn(DEVICES_CHANGED_TEXT, notes[0])
+            self.assertIn(f"名称列沿用生成时的选择：{shown_column}；若清单改了名称，可能需重跑 p2p-to-validation.py",
+                          notes[0])
+            self.assertIn(f"validation report published: {report_name}", edited.stdout)
+            self.assertTrue((output / report_name).is_file())
+            self.assertEqual((cvt_bytes, sidecar_bytes), (cvt.read_bytes(), sidecar.read_bytes()),
+                             "the CVT and its provenance are neither regenerated nor rewritten")
+            page = load_module("ib_post_collect_devices_page", ROOT / "monitor/generate-monitor-html.py")
+            tab = page.load_topology_validation(output, "infiniband", "prod")
+            self.assertEqual(f"Production: {report_name}", tab["source"])
+            self.assertEqual("PASS", tab["result"])
+
+            # the six required sources still stop the loop: here the inventory rules change
+            (setup / "01-inventory.log").write_text("[IB-SW]\n*leaf*\n*spine*\n\n[server]\n*server*\n",
+                                                    encoding="utf-8")
+            refused, refused_report = self.run_post_collect(monitor, data, "20261127-0320-prod-0123456789abcdef")
+            self.assertNotEqual(0, refused.returncode, refused.stdout)
+            self.assertIn("inventory source bytes changed", refused.stdout)
+            self.assertIn("[IB-CLOSED-LOOP] [stderr] [CVT-REMEDY] ", refused.stdout, "one remedy line (add-on A3)")
+            self.assertIn("python3 p2p-to-validation.py", refused.stdout)
+            self.assertFalse((output / refused_report).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

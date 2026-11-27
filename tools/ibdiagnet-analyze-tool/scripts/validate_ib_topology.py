@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import io
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,7 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "ztp/config"))
 from ib_topology_provenance import (
     ProvenanceError,
     capture_report_inputs,
+    devices_changed_since_cvt,
     read_cvt_provenance,
+    recorded_name_column,
     write_report_provenance,
 )
 
@@ -44,6 +47,42 @@ from lib.snapshot import default_report_path, open_snapshot
 DEFAULT_PROFILE_CATALOG = (
     Path(__file__).resolve().parent.parent / "config" / "port_profiles.csv"
 )
+# Owner 2026-11-27 (04 Q-115 (c)) and http dev 2026-11-27 (Codex LC316-066): a CVT records the device list
+# it was generated with (advisory fields; a legacy source role before v3.1.6) but is never bound to it. When
+# the list has changed since, the analysis goes on with the CVT as it is and says so in one line, naming the
+# name column chosen at generation; the column is not chosen again here.
+DEVICES_CHANGED_NOTE = (
+    "[CVT-DEVICES-CHANGED] 设备清单 02-devices_config.csv 自生成 CVT 后已变；CVT 未重生成，"
+    "名称列沿用生成时的选择：{column}；若清单改了名称，可能需重跑 p2p-to-validation.py"
+)
+
+
+def devices_changed_note(cvt_record: dict) -> str | None:
+    if not devices_changed_since_cvt(cvt_record):
+        return None
+    column = recorded_name_column(cvt_record)
+    shown = "旧 CVT 未记录" if column is None else f"「{column}」" if column else "紧挨端口的那一列"
+    return DEVICES_CHANGED_NOTE.format(column=shown)
+
+
+# v3.1.6 DEVHASH (coordinator add-on A3, 2026-11-27): a refused CVT gets one remedy line; the refusal itself
+# and the exit code are unchanged. A new P2P goes through load (it validates the P2P and regenerates the
+# CVT); any other recorded source (or the CVT itself) only needs the converter run again.
+CVT_SOURCE_CHANGED_RE = re.compile(
+    r"(?P<role>p2p|inventory|port_map|splitter|converter|topology_rules|CVT) source bytes changed\Z")
+
+
+def cvt_remedy_line(exc: ProvenanceError) -> str | None:
+    matched = CVT_SOURCE_CHANGED_RE.fullmatch(str(exc))
+    if matched is None:
+        return None
+    role = matched.group("role")
+    if role == "p2p":
+        return ("[CVT-REMEDY] P2P 自生成 CVT 后已变：请重新 load（DAY0-Prepare/11-load.py，按现场常规方式），"
+                "由 load 校验新的 P2P 并重生成 CVT")
+    what = "CVT 文件本身" if role == "CVT" else f"CVT 的来源 {role}"
+    return (f"[CVT-REMEDY] {what}自生成 CVT 后已变：请在 ztp/config/nvos/template/P2P 下重跑 "
+            "python3 p2p-to-validation.py 重生成 CVT（或重新 load）")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -205,7 +244,16 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(f"ERROR: port profile catalog not found: {profile_catalog}")
 
     try:
-        cvt_record = read_cvt_provenance(p2p_path)
+        try:
+            cvt_record = read_cvt_provenance(p2p_path)
+        except ProvenanceError as exc:
+            remedy = cvt_remedy_line(exc)
+            if remedy:
+                print(remedy, file=sys.stderr, flush=True)
+            raise
+        note = devices_changed_note(cvt_record)
+        if note:
+            print(note, flush=True)
         cvt_bytes = p2p_path.read_bytes()
         expected_digest = cvt_record["cvt_sha256"]
         if hashlib.sha256(cvt_bytes).hexdigest() != expected_digest:

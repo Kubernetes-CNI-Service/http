@@ -224,7 +224,12 @@ NVOS 镜像精确支持 `nvos-amd64-<A.B.C>.bin` 和
     nvlink/nvsw.csv -----> DAY0-Prepare/<项目>/02-devices_config.csv
     ethernet/monitor/eth.csv -----> ../eth.csv
     nvlink/monitor/nvsw.csv -----> ../nvsw.csv
-  p2p-to-validation.py 用 P2P 目录下这份清单的设备名选出 P2P 的名称列。
+  p2p-to-validation.py 用 P2P 目录下这份清单的设备名选出 P2P 的名称列（端点名都取该列）。
+  v3.1.6 起清单不是 CVT provenance 的校验项：改清单（含 ib.csv）后不用重生成 CVT，IB 闭环照常
+  分析；provenance 的 advisory 只记生成时清单的 sha256 和选中的名称列，仅供参考、不参与校验。
+  清单自生成后变了时，分析输出多一行 [CVT-DEVICES-CHANGED] 提示，写出生成时选中的名称列；
+  清单改了设备名、要换名称列时，在 ztp/config/nvos/template/P2P 下重跑 python3 p2p-to-validation.py。
+  升级到 v3.1.6 后，旧 CVT 因转换器本身变了要重生成一次（正常升级流程的 load 会做）。
   监控、ZTP、backup、Feedback 统一读取本文件并按 type 过滤；infra 只选择 type=server 或
   type=server_mgmt 行；type=server_ufm 不进入 infra 部署，只由
   infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py 和监控处理，其余脚本直接跳过服务器行。

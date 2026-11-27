@@ -99,6 +99,7 @@ DEVICES_CONFIG = ("hostname,type,eth0_ip\n"
                   "ufm01.site.example.test,server_ufm,192.0.2.30\n")
 INVENTORY_RULES = "[IB-SW]\n*ew-leaf*\n*ew-spine*\n\n[SMC-B300]\n*gpu*\n*hgx*\n\n[ufm]\n*ufm*\n"
 PORT_RULES = "[IB-SW]\n1to2#/1,sw#p1\n1to2#/2,sw#p2\n"
+SIX_CVT_ROLES = {"p2p", "inventory", "port_map", "splitter", "converter", "topology_rules"}
 
 
 def write_endpoint_sheets(path: Path, gpu_rows, switch_rows, *, name_first=True) -> None:
@@ -163,6 +164,14 @@ class CvtDeviceNameColumnTest(unittest.TestCase):
         rows = list(book["Links"].iter_rows(min_row=2, values_only=True))
         return {(row[1], row[2], row[6], row[7]) for row in rows if row and row[1]}
 
+    @staticmethod
+    def advisory(cvt: Path, name_column: str) -> dict:
+        """The advisory fields a run with the fixture's 02-devices_config.csv link writes (never verified)."""
+        link = cvt.parents[3] / "ztp/config/nvos/template/P2P/02-devices_config.csv"
+        return {"devices_path": str(link),
+                "devices_sha256": hashlib.sha256(DEVICES_CONFIG.encode("utf-8")).hexdigest(),
+                "name_column": name_column, "verified": False}
+
     GPU = [("hgx0001", "gpu-001.site.example.test", "1", "IBSW-Leaf01", "ew-leaf001", "1/1")]
     SWITCHES = [("IBSW-Leaf01", "ew-leaf001", "37/1", "IBSW-Spine01", "ew-spine001", "1/1")]
 
@@ -174,17 +183,45 @@ class CvtDeviceNameColumnTest(unittest.TestCase):
             ("ew-leaf001", "sw37p1", "ew-spine001", "sw1p1")})
         self.assertIn("'Hostname'", completed.stdout)
         provenance = json.loads(Path(f"{cvt}.provenance.json").read_text(encoding="utf-8"))
-        self.assertTrue(provenance["sources"]["devices"]["resolved_path"].endswith("02-devices_config.csv"))
+        # Owner 2026-11-27 (04 Q-115 (c)): 02-devices_config.csv picks the name column but is no longer
+        # recorded; the CVT is bound to the six source roles only.
+        self.assertEqual(SIX_CVT_ROLES, set(provenance["sources"]), "Q-115: devices is not recorded")
+        # http dev 2026-11-27 (Q-115 (c) detail): the list's sha256 and the chosen name column stay beside
+        # the six roles as advisory fields for the closed loop's note; they are never verified.
+        self.assertEqual(self.advisory(cvt, "hostname"), provenance.get("advisory"))
         sys.path.insert(0, str(ROOT / "ztp/config"))
         try:
             from ib_topology_provenance import ProvenanceError, read_cvt_provenance
-            self.assertEqual(read_cvt_provenance(cvt)["sources"]["devices"], provenance["sources"]["devices"])
-            # only `devices` may join the six roles: any other extra role is refused
+            self.assertEqual(read_cvt_provenance(cvt)["sources"], provenance["sources"])
+            # only a legacy `devices` entry may join the six roles: any other extra role is refused
             sidecar = Path(f"{cvt}.provenance.json")
-            provenance["sources"]["extra"] = provenance["sources"]["devices"]
+            provenance["sources"]["extra"] = provenance["sources"]["p2p"]
             sidecar.write_text(json.dumps(provenance), encoding="utf-8")
             with self.assertRaises(ProvenanceError):
                 read_cvt_provenance(cvt)
+        finally:
+            sys.path.remove(str(ROOT / "ztp/config"))
+
+    def test_editing_devices_config_later_keeps_the_cvt_valid_and_the_name_warning_stays(self):
+        # Owner 2026-11-27 (04 Q-115 (c)): ib.csv is 02-devices_config.csv; editing it must not make the
+        # CVT stale. The converter still warns about P2P switch/UFM names missing from the list.
+        gpu = self.GPU + [("UFM-01", "ufm-01", "IB0", "IBSW-Leaf01", "ew-leaf001", "FNM")]
+        completed, cvt = self.run_converter(gpu, self.SWITCHES)
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        self.assertIn("WARNING: 1 switch/UFM name(s) in the P2P are not in 02-devices_config.csv: ufm-01",
+                      completed.stderr)
+        devices = cvt.parent.parent / "02-devices_config.csv"
+        before = devices.stat()
+        devices.write_text(DEVICES_CONFIG + "ew-leaf002.site.example.test,ib,192.0.2.13\n", encoding="utf-8")
+        os.utime(devices, ns=(before.st_atime_ns, before.st_mtime_ns))
+        sys.path.insert(0, str(ROOT / "ztp/config"))
+        try:
+            from ib_topology_provenance import ProvenanceError, read_cvt_provenance
+            try:
+                record = read_cvt_provenance(cvt)
+            except ProvenanceError as exc:
+                self.fail(f"Q-115: editing 02-devices_config.csv must not make the CVT stale: {exc}")
+            self.assertEqual(SIX_CVT_ROLES, set(record["sources"]))
         finally:
             sys.path.remove(str(ROOT / "ztp/config"))
 
@@ -197,6 +234,8 @@ class CvtDeviceNameColumnTest(unittest.TestCase):
         self.assertEqual(self.links(cvt), {
             ("gpu-001.site.example.test", "1", "ew-leaf001", "sw1p1"),
             ("ew-leaf001", "sw37p1", "ew-spine001", "sw1p1")})
+        provenance = json.loads(Path(f"{cvt}.provenance.json").read_text(encoding="utf-8"))
+        self.assertEqual(self.advisory(cvt, "name"), provenance.get("advisory"), "the chosen column is recorded")
 
     def test_without_devices_config_the_column_next_to_the_port_is_used(self):
         gpu = [("gpu-001.site.example.test", "R3-U7", "1", "ew-leaf001", "IBSW-Leaf01", "1/1")]
@@ -208,6 +247,7 @@ class CvtDeviceNameColumnTest(unittest.TestCase):
         self.assertIn("02-devices_config.csv", completed.stdout)
         provenance = json.loads(Path(f"{cvt}.provenance.json").read_text(encoding="utf-8"))
         self.assertNotIn("devices", provenance["sources"], "the six source roles as before")
+        self.assertNotIn("advisory", provenance, "no device list, nothing to advise about")
 
     def test_switch_and_ufm_names_missing_from_devices_config_are_reported(self):
         gpu = self.GPU + [("UFM-01", "ufm-01", "IB0", "IBSW-Leaf01", "ew-leaf001", "FNM")]

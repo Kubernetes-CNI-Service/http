@@ -176,5 +176,73 @@ class IbCvtProvenanceWorkflowTests(unittest.TestCase):
                 read_cvt_provenance(cvt)
 
 
+class IbCvtRemedyLineWorkflowTests(unittest.TestCase):
+    """v3.1.6 DEVHASH (coordinator add-on A3, 2026-11-27): when the analyzer refuses a CVT whose recorded
+    source changed, it adds one remedy line. P2P: rerun load (load validates the new P2P and regenerates
+    the CVT); any other recorded source: rerun the converter. The refusal and its exit code stay as they are."""
+
+    def test_a_refused_cvt_names_the_remedy_and_keeps_its_exit_code(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            p2p = root / "p2p.xlsx"
+            workbook = xlsxwriter.Workbook(str(p2p))
+            sheet = workbook.add_worksheet("CL links")
+            for column, value in enumerate(("Name", "Port", "Name", "Port")):
+                sheet.write(0, column, value)
+            for column, value in enumerate(("leaf01", "sw1p1", "server01", "mlx5_0")):
+                sheet.write(1, column, value)
+            workbook.close()
+            inputs = {"inventory": root / "01-inventory.log", "port_map": root / "02-port-mapping.log",
+                      "splitter": root / "03-splitter.log"}
+            inputs["inventory"].write_text("[ib]\n*leaf*\n\n[server]\n*server*\n", encoding="utf-8")
+            inputs["port_map"].write_text("", encoding="utf-8")
+            inputs["splitter"].write_text("", encoding="utf-8")
+            cvt = root / "expected-cvt.xlsx"
+            env = {**os.environ, "XLSX_TO_CSV_BASE_DIR": str(root), "PYTHONDONTWRITEBYTECODE": "1"}
+            conversion = subprocess.run(
+                [sys.executable, "-B", str(CONVERTER), "--output", str(cvt),
+                 "--inventory", str(inputs["inventory"]), "--port-map", str(inputs["port_map"]),
+                 "--splitter", str(inputs["splitter"])],
+                cwd=root, text=True, capture_output=True, timeout=60, check=False, env=env)
+            self.assertEqual(0, conversion.returncode, conversion.stderr)
+            actual = root / "iblinkinfo.log"
+            actual.write_text(
+                "Switch: 0x1 MF0;leaf01:MQM9700/U1:\n"
+                ' 10 1[  ] ==( 4X 200 Gbps Active / LinkUp )==> 20 1[  ] "server01 mlx5_0"\n',
+                encoding="utf-8")
+            report = root / "iblinkinfo-topology-validation.xlsx"
+
+            def validate():
+                return subprocess.run(
+                    [sys.executable, "-B", str(VALIDATOR), "--iblinkinfo", str(actual),
+                     "--p2p", str(cvt), "--output", str(report)],
+                    cwd=root, text=True, capture_output=True, timeout=60, check=False, env=env)
+
+            def rewrite(path, data):
+                before = path.stat()
+                path.write_bytes(data)
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+            for role, path, wanted in (("p2p", p2p, ("重新 load", "11-load.py")),
+                                       ("splitter", inputs["splitter"], ("splitter", "python3 p2p-to-validation.py"))):
+                with self.subTest(role=role):
+                    original = path.read_bytes()
+                    rewrite(path, original + b"changed")
+                    try:
+                        refused = validate()
+                    finally:
+                        rewrite(path, original)
+                    self.assertEqual(1, refused.returncode, refused.stdout + refused.stderr)
+                    self.assertIn(f"ERROR: {role} source bytes changed", refused.stderr)
+                    self.assertFalse(report.exists(), "a refused CVT publishes no report")
+                    remedies = [line for line in refused.stderr.splitlines() if line.startswith("[CVT-REMEDY] ")]
+                    self.assertEqual(1, len(remedies), refused.stderr)
+                    for text in wanted:
+                        self.assertIn(text, remedies[0])
+            accepted = validate()
+            self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
+            self.assertNotIn("[CVT-REMEDY]", accepted.stdout + accepted.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
