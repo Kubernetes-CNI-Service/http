@@ -187,7 +187,7 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
 | `check` | 输入合法性 + 设备状态 | 输入检查 → 地址占用检查 → 每台只读登录核验；新设备到此为止，已改过密码的设备做全部只读检查 |
 | `config-upgrade --apply` | 阶段一 + 步骤 1 + 步骤 3 | 先做与 check 相同的检查，列出改动计划，确认一次；新设备先改密；每一步只改不符合或缺少的项；最后升级 UFM |
 | `ha-setup --apply` | 步骤 2 + 步骤 4 | 先读两台的 `ufm_ha_cluster status`：已有 HA 配置就不做任何事并提示（清除后重跑，或直接 ha-post-config）；没有集群时检查 HA 六项前提，确认一次后做互信、配置 standby 和 master、等 DRBD 同步、启动，以 status 判定，再自动做 ha-post-config |
-| `ha-post-config --apply` | HA 之后的配置 | 只在已有且正常的 HA 上运行：经 VIP 安装 license、改 gv.cfg 的 [Server] 三项、按 ibswitches 写 root_guid.conf；任何一项有改动就 failover 一次，再核对 |
+| `ha-post-config --apply` | HA 之后的配置 | 只在已有且正常的 HA 上运行：经 VIP 安装 license、改 gv.cfg 的 [Server] 三项、按 ib.csv 主机名形状写 root port group（opensm.conf、策略文件、root_guid.conf）；任何一项有改动就 failover 一次、等 60 秒，再只核对改过的项；最后在 VIP 所在主机留一个 root 核对脚本 |
 
 ### check（默认，只读）
 
@@ -370,25 +370,39 @@ HA 的操作分成两块：`ha-setup` 只负责部署 HA；`ha-post-config` 负�
    - 只改 `[Server]` 段的三个键：`fabric_interface = ib0`、`multi_port_sm = ha_enabled`、`additional_fabric_interfaces = ib1`，所有项目相同；
    - 其它内容一个字节都不动，键不存在就加在 `[Server]` 段末尾；
    - 改前备份到 `/root/ufm-setup-upgrade-backup/<运行目录>/post-ha/`。
-5. **root_guid.conf**（`opensm.conf` 的 `root_guid_file` 必须是 `/opt/ufm/files/conf/opensm/root_guid.conf`，否则不自动改）：
-   - 在容器里运行 `ibswitches`，只解析以 `Switch` 开头的行；
-   - 描述 `"MF0;<主机名>:<型号>/U<n>"` 里的主机名与 ib.csv 中 `type=ib` 的设备比对：
-     - 有主机名含 `core` 的设备时，只写 core；
-     - 否则写 spine，判断规则与监控页面相同；
-   - 每台写入它的全部 ASIC GUID，按描述自然排序，与你的 `sort -t'"' -k2,2V` 相同；
-   - 清单里有、但 ibswitches 里没有的设备，只在最后提示，已发现的照样写入；
-   - 内容相同不改；一个也没发现不改。
+5. **root port group**（v3.1.6 R-031；owner 2026-11-17 现场手工验证的写法：按交换机主机名定义 OpenSM 的 port group `root_switches`，换设备只要主机名不变就不用再改）：
+   - **判断 root**：取 ib.csv 中 `type=ib` 每个主机名的第一段，数字串换成占位得到「形状」（例如 `site-spine{n}`、`sp{n}-{n}`），同形状一组。按形状里的完整词定角色：有 `core` 的是 core 组；有 `spine`、`sp`、`ibsp`，或以 `EDIBS` 结尾的是 spine 组；有 `leaf`、`lf`，或以 `EDIBLE` 结尾的是 leaf 组。有 core 组时只用 core 组，否则用 spine 组，可以有多组。认不出角色的组在最后提示；同时像 spine 和 leaf 的组报错，什么都不改。
+   - **认不出 core/spine 时整个 root 配置不做**：三个文件都不动、不生成脚本，结果里写「ib.csv 主机名里认不出 core/spine，root 配置未做」并列出各组形状；license 和 gv.cfg 照常。
+   - **规则**：每个 root 组的形状直接变成正则，占位换成 `[0-9]+`、其它正则符号转义（`-` 不转义），多组用 `|` 合并，两头是 `^(…)(\..*)?$`，例如 `^(site-spine[0-9]+)(\..*)?$`；短名、带域名的长名都能匹配，`site-spine-test` 不匹配。用这条规则过滤 ib.csv 必须正好得到判出的 root，否则报错不写。
+   - **写入前核对**（只提示，不阻止写入）：`ibswitches` 里按短名去重（一台多个 ASIC 算一台），缺的 root 提示「未上线，或主机名还没生效」，ib.csv 没有但符合规则的另行提示，读不到就跳过；一致时结果里记「root 规则匹配 N 台 / M 个 ASIC」。
+   - **三个文件**，先全部读出、规划完，才开始任何写入（策略文件分不出块等错误时三个都不写，license、gv.cfg 也还没写）：
+     - `opensm.conf`：生效的 `pgrp_policy_file` 是 `(null)` 或空（默认状态）时，原行改成注释、紧接着下一行写 `pgrp_policy_file /opt/ufm/files/conf/opensm/port_groups_policy_file.conf`；没有这个键时加在文件末尾；生效行不止一行时只留最后一行、其余改成注释；指向 `/opt/ufm/files/` 下别的文件时沿用那个文件、不改这一行；在 `/opt/ufm/files/` 之外、含 `..` 或认不出时报错，请人工确认。`root_guid_file` 同样处理（标准路径 `/opt/ufm/files/conf/opensm/root_guid.conf`）。两个键指向同一个文件时报错。
+     - 策略文件：没有就新建 `port-group` / `name: root_switches` / `port-regexp: <规则>` / `end-port-group` 这一块；已有文件只新增或替换 `root_switches` 这一块，其它块、注释、空行原样；分不出块时不改并报错。
+     - `root_guid.conf`（或沿用的文件）：不存在、为空、只有注释或只有旧的 GUID 列表时写成一行 `root_switches`；已有这一行不动；有别的内容时保留，在末尾加 `root_switches` 并提示。
+   - 内容相同不改；改前备份到 `/root/ufm-setup-upgrade-backup/<运行目录>/post-ha/`，备份名带语义（`opensm.conf`、`pgrp_policy_file.<文件名>`、`root_guid_file.<文件名>`），两个目录里同名的文件不会互相覆盖。写到一半失败（例如目录不存在）时列出本次已写的文件和备份位置，停止，不 failover、不回滚。
 6. **failover**：
    - 3–5 步任何一项有改动，就只做一次 `ufm_ha_cluster failover`；都没改动就不做；
    - 经 VIP 的会话会被切断，这是预期的；
-   - 之后经新主机自己的地址读 `ufm_ha_cluster status`，等它正常，且 Promoted 是另一台；
+   - 命令返回或会话因 VIP 切换断开后，固定等 60 秒（只等这一次，不计入下面两个阶段的时限）；
+   - 之后经新主机自己的地址读 `ufm_ha_cluster status`，等它正常，且 Promoted 是另一台（默认每 15 秒一次、最长 900 秒，从这一步开始计）；
    - 不切回，不清除 move constraint（owner 2026-10-22）。
-7. **核对**（经 VIP，在新主机上）：
-   - `grep smi /opt/ufm/files/log/opensm-smdb.dump` 有 2 行，说明 gv.cfg 已生效；未配置时只有 1 行；
-   - 装了 license 时，`ufmlicense` 里新主机 eno8303 MAC 的那一行为 Valid（owner 2026-10-22；输出样本待 owner 提供后再核对格式）；
-   - root_guid.conf 不核对生效。
-8. **结果**：
-   - `HA_POST_CONFIGURED`：有改动，已 failover 并核对通过；
+7. **核对**（经 VIP，在新主机上；只核本次改过的项，默认每 15 秒一轮、最长 900 秒，从这一步开始计）：
+   - VIP 在新主机上：做了 failover 就核；
+   - gv.cfg 本次改了：`grep smi /opt/ufm/files/log/opensm-smdb.dump` 有 2 行，说明 gv.cfg 已生效；未配置时只有 1 行；
+   - license 本次装了或换了：`ufmlicense` 里新主机 eno8303 MAC 的那一行为 Valid（owner 2026-10-22；输出样本待 owner 提供后再核对格式）；
+   - root 本次改了：读 `opensm-smdb.dump` 的 `START_NODES`（NodeType 2 的 NodeDesc 里的主机名）和 `START_SWITCHES`（每个 ASIC 的 Rank），以及 `opensm.log` 在本次 failover 之后新增的部分。在线 root 的全部 ASIC 为 rank 0、其余交换机大于 0、smdb 晚于本次 failover、日志里有 `New Port Group Added: root_switches`，才写 `post_ha_root_verify` 为 `VERIFIED`（「root 生效：N 台 / M 个 ASIC 为 rank 0」）。
+     - 在线 root 有 ASIC 不是 rank 0、有在线 root 时非 root 是 rank 0、smdb 一直早于本次 failover、日志没有那一行：在时限内继续等，到时限仍不符和其它项一样报「failover 后核对未通过」，结果 `HA_POST_CONFIG_FAILED`；
+     - root 未上线、没有在线的 root、交换机主机名还没生效、文件或段读不到：只提示，`post_ha_root_verify` 为 `NOT_VERIFIED`，不算失败；有已确认的问题时这些提示一起列出，不会掩盖问题；
+     - ib.csv 没有、但符合规则的交换机只提示，不当成非 root；
+     - `post_ha_verify` 的 `OK` 只说明它列出的那几项，不代表 root 已生效；没改的项不核、不写成已核对。
+   - 都不回滚，不再 failover。
+8. **root 核对脚本**：判出了 root 就在最后经 VIP 确认的那台主机上生成 `/root/ufm-setup-upgrade-backup/<运行目录>/post-ha/ufm-root-switches.py`（权限 0700，自包含的 python3，只放这一台），没有改动、没有 failover 时也生成；认不出 core/spine 时不生成。文件头写着生成时间、运行目录、所用 ib.csv 的 sha256、规则、root 清单和标准路径。规则和 root 清单在生成时写死：**ib.csv 改了要重跑 ha-post-config 重新生成**；换设备但主机名不变不用重跑。
+   - 只能在当前 HA 主机（`DRBD_ROLE: [Primary]`）上起作用，在另一台上只提示、不改任何文件；
+   - 不带参数：只读，显示三个文件是否符合，再读 smdb 和 `opensm.log` 核对生效；
+   - `--apply`：按第 5 步同样的规则写不符合的文件（改前备份到脚本旁边按时间命名的子目录），都已符合就不写、不 failover、不做生效核对；有改动时 failover 一次，固定等 60 秒，再在 900 秒内确认 HA 恢复。切换后这台已不是主机，脚本不在这台读文件判断生效，输出 ATTENTION：到新主机（经 VIP 登录）把脚本复制过去不带参数执行，或重跑 ha-post-config；60 秒已经等过，不用再等。脚本不建认证、密钥、信任，也不向另一台远程执行命令；
+   - 退出码：`--help` 为 0；参数错误 2；核对生效（`VERIFIED`）0；不是主机、证据不全、切换后转人工、无改动的 `--apply` 都是 3（`NOT_VERIFIED`）；已确认的问题（例如 root 的 ASIC 不是 rank 0）或读写、执行、格式错误为 1，同时有提示时仍为 1。
+9. **结果**：
+   - `HA_POST_CONFIGURED`：有改动，已 failover 并核对通过（root 的生效另见 `post_ha_root_verify`）；
    - `HA_POST_UP_TO_DATE`：都已符合，没有改动；
    - `HA_POST_CONFIG_FAILED`：失败，原因写在 detail 里。
 
@@ -648,4 +662,4 @@ Leaf、Spine 只做只读查询，不修改任何交换机配置。
 - 密码不接受命令行参数或环境变量，日志中做脱敏。每次运行的报告、各次 SSH 会话输出和
   `result.json` 保存在 `ufm-setup-upgrade-logs/<时间>-<命令>/`。
 
-HA 配置（config、DRBD 同步、start、status 判定）和 HA 之后的配置（license、gv.cfg、root_guid.conf、failover、核对）都已按 owner 2026-10-22 在 `ufm-manual.log` 中的实测记录实现，见「ha-setup」「ha-post-config」两节。`ufmlicense` 的实际输出样本还在等 owner 提供，届时再核对 license 判定的格式。
+HA 配置（config、DRBD 同步、start、status 判定）和 HA 之后的配置（license、gv.cfg、root port group（v3.1.6 R-031）、failover、核对）都已按 owner 2026-10-22 在 `ufm-manual.log` 中的实测记录实现，见「ha-setup」「ha-post-config」两节。`ufmlicense` 的实际输出样本还在等 owner 提供，届时再核对 license 判定的格式。

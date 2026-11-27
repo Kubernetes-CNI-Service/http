@@ -9,6 +9,7 @@ import base64
 import csv
 import getpass
 import hashlib
+import inspect
 import ipaddress
 import itertools
 import json
@@ -2036,6 +2037,14 @@ OPENSM_CONF = "/opt/ufm/files/conf/opensm/opensm.conf"
 LICENSE_DIR = "/opt/ufm/files/licenses"
 SMDB_DUMP = "/opt/ufm/files/log/opensm-smdb.dump"
 ROOT_GUID_FILE = "/opt/ufm/files/conf/opensm/root_guid.conf"   # what opensm.conf names (ufm-manual.log 1724)
+# v3.1.6 B7 (R-031, 问题文档 18.2): the owner's manual root port group; OpenSM logs loading it in opensm.log
+# beside the smdb (问题文档 20.4; the log's place under /opt/ufm/files/log is inferred, TC-REAL-UFM-ROOT-PORT-GROUP-001)
+FILES_ROOT = "/opt/ufm/files"
+PGRP_POLICY_FILE = "/opt/ufm/files/conf/opensm/port_groups_policy_file.conf"
+OPENSM_LOG = "/opt/ufm/files/log/opensm.log"
+ROOT_GROUP = "root_switches"
+ROOT_LOAD_EVENT = "New Port Group Added: root_switches"
+ROOT_SCRIPT_NAME = "ufm-root-switches.py"
 # Owner 2026-10-22: only these three keys of [Server] change, the same in every project.
 GV_SERVER_SETTINGS = (("fabric_interface", "ib0"), ("multi_port_sm", "ha_enabled"),
                       ("additional_fabric_interfaces", "ib1"))
@@ -2077,27 +2086,13 @@ def gv_server_update(text: str) -> tuple:
     return "".join(lines), changes
 
 
-def spine_like(hostname: str) -> bool:
-    """The monitor page's Spine rule (generate-monitor-html.py::infer_device_role)."""
-    name = hostname.strip().upper()
-    return ("SPINE" in name or bool(re.search(r"EDIBS\d*$", name))
-            or bool(re.search(r"(?:^|[-_.])SP(?:[-_.]?\d+)?$", name)))
-
-
-def ib_root_switches(csv_path: Path) -> tuple:
-    """('core' | 'spine', hostnames) from ib.csv type=ib. Owner 2026-10-22: a large fabric has core
-    switches (their host names contain "core"), and then only the cores are roots."""
+def ib_switch_names(csv_path: Path) -> list:
+    """The host names of ib.csv's type=ib rows, as written."""
     with csv_path.open(encoding="utf-8-sig", newline="") as handle:
         rows = list(csv.reader(handle))
-    names = [row[0].strip() for row in rows[1:]
-             if len(row) > 1 and row[0].strip() and not row[0].lstrip().startswith("#")
-             and row[1].strip().lower() == "ib"]
-    cores = [name for name in names if "core" in name.casefold()]
-    return ("core", cores) if cores else ("spine", [name for name in names if spine_like(name)])
-
-
-def natural_key(text: str) -> list:
-    return [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", text)]
+    return [row[0].strip() for row in rows[1:]
+            if len(row) > 1 and row[0].strip() and not row[0].lstrip().startswith("#")
+            and row[1].strip().lower() == "ib"]
 
 
 def parse_ibswitches(text: str) -> list:
@@ -2113,16 +2108,278 @@ def parse_ibswitches(text: str) -> list:
     return found
 
 
-def root_guid_plan(switches: list, roots: list) -> tuple:
-    """(GUIDs in the owner's order, missing root switches): every ASIC GUID of each root switch,
-    sorted naturally by description as `sort -t'"' -k2,2V` does."""
-    def names(text: str) -> set:
-        return {text.casefold(), first_label(text).casefold()}
-    chosen = [(description, guid) for guid, description, host in switches
-              if any(names(host) & names(root) for root in roots)]
-    seen = {name for _guid, _description, host in switches for name in names(host)}
-    missing = [root for root in roots if not names(root) & seen]
-    return [guid for _description, guid in sorted(chosen, key=lambda item: natural_key(item[0]))], missing
+# ---- v3.1.6 B7 / R-031 (指导 8.18; 问题文档 18.4): the root switches by host-name shape, as an OpenSM port group.
+# Owner 2026-10-22: core switches when the fabric has them, otherwise the spines. Only the UFM root role uses these.
+
+ROOT_ROLE_WORDS = {"core": "core", "spine": "spine", "sp": "spine", "ibsp": "spine", "leaf": "leaf", "lf": "leaf"}
+
+
+@dataclass
+class RootPlan:
+    kind: str           # "core", "spine" or "" (no root group: the root configuration is not done)
+    roots: list         # ib.csv names of the chosen groups, in ib.csv order
+    rule: str           # the port-regexp, "" without roots
+    groups: dict        # shape -> ib.csv names
+    unknown: list       # shapes without a role (listed, never roots)
+    conflicts: list     # shapes with spine and leaf words (an error)
+
+
+def name_shape(name: str) -> str:
+    """问题文档 18.4 第 1 条: the first label of a host name, as written, every digit run a {n} placeholder."""
+    return re.sub(r"[0-9]+", "{n}", short_name(name))
+
+
+def shape_role(shape: str) -> str:
+    """'core', 'spine', 'leaf', 'conflict' or '' by whole words of a shape (split at - _ . and the placeholder):
+    core; spine, sp or the narrow ibsp alias; leaf or lf; a word ending in EDIBS / EDIBLE is the monitor page's
+    old spine / leaf name. A shape with spine and leaf words is a conflict; core wins over both."""
+    roles = set()
+    for word in (word.casefold() for word in re.split(r"[-_.]|\{n\}", shape) if word):
+        roles.add(ROOT_ROLE_WORDS.get(word) or ("spine" if word.endswith("edibs") else
+                                                "leaf" if word.endswith("edible") else ""))
+    roles.discard("")
+    if "core" in roles:
+        return "core"
+    return "conflict" if {"spine", "leaf"} <= roles else next(iter(roles), "")
+
+
+def shape_regex(shape: str) -> str:
+    """问题文档 18.4 第 2 条: {n} becomes [0-9]+, regex metacharacters are escaped, "-" is not."""
+    return "".join("[0-9]+" if part == "{n}" else re.sub(r"([.*+?()\[\]{}|^$\\])", r"\\\1", part)
+                   for part in re.split(r"(\{n\})", shape))
+
+
+def root_plan(names: list) -> RootPlan:
+    """Shape groups of ib.csv's type=ib names, the core groups or else the spine groups as roots, and one rule
+    ^(shape1|shape2)(\\..*)?$ that matches a short or a long host name of those shapes only."""
+    groups = {}
+    for name in names:
+        groups.setdefault(name_shape(name), []).append(name)
+    roles = {shape: shape_role(shape) for shape in groups}
+    kind = "core" if "core" in roles.values() else "spine" if "spine" in roles.values() else ""
+    shapes = sorted(shape for shape, role in roles.items() if kind and role == kind)
+    return RootPlan(kind, [name for name in names if kind and roles[name_shape(name)] == kind],
+                    "^(" + "|".join(shape_regex(shape) for shape in shapes) + r")(\..*)?$" if shapes else "",
+                    groups, sorted(shape for shape, role in roles.items() if not role),
+                    sorted(shape for shape, role in roles.items() if role == "conflict"))
+
+
+def root_rule_problem(names: list, plan: RootPlan) -> str:
+    """问题文档 18.4 第 4 条: ib.csv filtered by the rule (A) must be the chosen roots (R); otherwise no root write."""
+    chosen = [name for name in names if re.search(plan.rule, name)]
+    if sorted(chosen) == sorted(plan.roots):
+        return ""
+    return (f"root 规则 {plan.rule} 过滤 ib.csv 的结果与判出的 root 不同（多出 {sorted(set(chosen) - set(plan.roots))}，"
+            f"缺少 {sorted(set(plan.roots) - set(chosen))}）：规则生成有误，root 配置不写")
+
+
+def root_ibswitches_check(switches: list, plan: RootPlan) -> dict:
+    """问题文档 18.4 第 4 条: ibswitches' switches the rule matches (B) by short name against the roots (R); one
+    switch with several ASICs is one device. Only notes, never a reason not to write."""
+    roots = {short_name(name) for name in plan.roots}
+    matched = [short_name(host) for _guid, _description, host in switches if host and re.search(plan.rule, host)]
+    found = set(matched)
+    return {"readable": bool(switches), "devices": len(found), "asics": len(matched),
+            "missing": sorted(roots - found), "extra": sorted(found - roots)}
+
+
+# The functions from here to root_grade are also copied into the generated ufm-root-switches.py
+# (ROOT_SCRIPT_SHARED): standard library only, module names FILES_ROOT, OPENSM_CONF, PGRP_POLICY_FILE,
+# ROOT_GUID_FILE, ROOT_GROUP and UfmError.
+
+def short_name(name: str) -> str:
+    return name.strip().split(".", 1)[0]
+
+
+def root_file_path(key: str, value: str) -> str:
+    """A target named in opensm.conf: a file under /opt/ufm/files is used as it is (问题文档 18.4 第 3 条)."""
+    if not value.startswith(FILES_ROOT + "/") or ".." in value or not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
+        raise UfmError(f"opensm.conf 的 {key} 是 {value}：不在 {FILES_ROOT}/ 下或格式认不出，不自动改动，请人工确认")
+    return value
+
+
+def conf_key_update(lines: list, key: str, standard: str) -> tuple:
+    """(target, changes) of one opensm.conf key; `lines` (with their newlines) change in place. The last active
+    line counts, earlier ones become comments; (null) or empty: that line becomes a comment with the standard
+    path on the next line; no line: the standard path at the end (问题文档 18.4 第 3 条, owner 2026-11-17)."""
+    active = [index for index, line in enumerate(lines) if line.split(None, 1)[:1] == [key]]
+    changes = [f"{key}: 多余的生效行改成注释（只留最后一行）: {lines[index].strip()}" for index in active[:-1]]
+    for index in active[:-1]:
+        lines[index] = "#" + lines[index]
+    if not active:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key} {standard}\n")
+        return standard, changes + [f"{key}: 新增 {standard}"]
+    last = active[-1]
+    parts = lines[last].split(None, 1)
+    value = parts[1].strip() if len(parts) > 1 else ""
+    if value in ("", "(null)"):
+        lines[last:last + 1] = ["#" + lines[last] + ("" if lines[last].endswith("\n") else "\n"), f"{key} {standard}\n"]
+        return standard, changes + [f"{key}: {value or '空'} → {standard}（原行改成注释）"]
+    return root_file_path(key, value), changes
+
+
+def opensm_conf_update(text: str) -> tuple:
+    """(new text, policy file, root_guid file, changes) of opensm.conf."""
+    lines = text.splitlines(keepends=True)
+    policy, changes = conf_key_update(lines, "pgrp_policy_file", PGRP_POLICY_FILE)
+    roots, more = conf_key_update(lines, "root_guid_file", ROOT_GUID_FILE)
+    if policy == roots or OPENSM_CONF in (policy, roots):
+        raise UfmError(f"opensm.conf 的 pgrp_policy_file 和 root_guid_file 指向同一个文件或 opensm.conf 本身"
+                       f"（{policy}、{roots}）：不自动改动，请人工确认")
+    return "".join(lines), policy, roots, changes + more
+
+
+def policy_file_update(text: Optional[str], rule: str, path: str = "") -> tuple:
+    """(new text, changes) of the port-group policy file: only the root_switches block is added or replaced;
+    other blocks, comments and blank lines stay. Lines outside port-group ... end-port-group other than blank
+    lines and comments, an unclosed or nested block or two root_switches blocks: an error (问题文档 18.4 第 3 条)."""
+    block = ["port-group", f"name: {ROOT_GROUP}", f"port-regexp: {rule}", "end-port-group"]
+    if text is None or not text.strip():
+        return "".join(line + "\n" for line in block), [f"{'新建文件，' if text is None else ''}写入 {ROOT_GROUP} 组"]
+    where = path or "port-group 策略文件"
+    lines = text.splitlines(keepends=True)
+    blocks, start = [], None
+    for index, line in enumerate(lines):
+        word = line.strip()
+        if not word or word.startswith("#"):
+            continue
+        if word == "port-group" and start is None:
+            start = index
+        elif word == "end-port-group" and start is not None:
+            blocks.append((start, index))
+            start = None
+        elif start is None or word == "port-group":
+            raise UfmError(f"{where} 第 {index + 1} 行（{word}）分不出 port-group 块：不改动，请人工确认")
+    if start is not None:
+        raise UfmError(f"{where} 第 {start + 1} 行的 port-group 没有 end-port-group：不改动，请人工确认")
+    named = [(first, last) for first, last in blocks
+             if any(re.fullmatch(rf"name\s*:\s*{ROOT_GROUP}", lines[index].strip()) for index in range(first, last))]
+    if len(named) > 1:
+        raise UfmError(f"{where} 里有 {len(named)} 个 {ROOT_GROUP} 块：不改动，请人工确认")
+    wanted = [line + "\n" for line in block]
+    if not named:
+        return text + ("" if text.endswith("\n") else "\n") + "".join(wanted), [f"新增 {ROOT_GROUP} 组"]
+    first, last = named[0]
+    current = [lines[index].strip() for index in range(first, last + 1)
+               if lines[index].strip() and not lines[index].strip().startswith("#")]
+    if current == block:
+        return text, []
+    return "".join(lines[:first] + wanted + lines[last + 1:]), [f"替换 {ROOT_GROUP} 组（原来: {'; '.join(current[1:-1])}）"]
+
+
+def root_guid_update(text: Optional[str]) -> tuple:
+    """(new text, changes) of the root_guid file: the group name instead of a missing, empty or comment-only file
+    or the old GUID list; kept when it names the group; other contents kept with the group added at the end."""
+    if text is None:
+        return ROOT_GROUP + "\n", [f"新建文件，写入 {ROOT_GROUP}"]
+    content = [line.strip() for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if ROOT_GROUP in content:
+        return text, []
+    if not content:
+        return ROOT_GROUP + "\n", [f"原来为空或只有注释，写入 {ROOT_GROUP}"]
+    if all(re.fullmatch(r"(0x)?[0-9a-fA-F]{1,16}", item) for item in content):
+        return ROOT_GROUP + "\n", [f"旧的 GUID 列表（{len(content)} 行）换成 {ROOT_GROUP}"]
+    return (text + ("" if text.endswith("\n") else "\n") + ROOT_GROUP + "\n",
+            [f"保留原有内容（{', '.join(content[:5])}），在末尾加入 {ROOT_GROUP}，请确认原有内容仍然需要"])
+
+
+def smdb_switches(text: str) -> Optional[list]:
+    """[(NodeGUID, host name or "", Rank)] for each switch ASIC of opensm-smdb.dump: START_NODES gives NodeDesc of
+    NodeType 2 ("MF0;<host>:<model>/U<n>"), START_SWITCHES the Rank, joined by NodeGUID (问题文档 18.2). Each
+    section has a header line of column names (tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py). None when a
+    section or a column is missing or a Rank is not a number."""
+    sections, name = {}, None
+    for line in text.splitlines():
+        word = line.strip()
+        if word.startswith("START_"):
+            name = word[len("START_"):]
+            sections[name] = []
+        elif word.startswith("END_"):
+            name = None
+        elif name and word:
+            sections[name].append(word)
+
+    def table(rows: Optional[list], *columns: str) -> Optional[list]:
+        if not rows:
+            return None
+        header = [cell.strip() for cell in next(csv.reader(rows[:1], skipinitialspace=True))]
+        if not set(columns) <= set(header):
+            return None
+        return [[cells[header.index(column)].strip() for column in columns]
+                for cells in csv.reader(rows[1:], skipinitialspace=True) if len(cells) >= len(header)]
+
+    nodes = table(sections.get("NODES"), "NodeGUID", "NodeType", "NodeDesc")
+    switches = table(sections.get("SWITCHES"), "NodeGUID", "Rank")
+    if nodes is None or switches is None or not all(rank.isdigit() for _guid, rank in switches):
+        return None
+    described = {guid.lower(): description for guid, kind, description in nodes if kind == "2"}
+    hosts = {guid: description.split(";", 1)[1].split(":", 1)[0].strip() if ";" in description else ""
+             for guid, description in described.items()}
+    return [(guid.lower(), hosts.get(guid.lower(), ""), int(rank)) for guid, rank in switches]
+
+
+def root_rank_check(switches: list, roots: list, rule: str) -> dict:
+    """The roots (ib.csv names) against smdb's ASICs: online roots and their ASICs, roots not online, root ASICs
+    not at rank 0, true non-roots at rank 0, switches without a host name, and switches outside ib.csv that the
+    rule matches (an extra match, never a non-root)."""
+    wanted = {short_name(name) for name in roots}
+    online, bad, false_roots, unknown, extra, asics = set(), [], [], [], set(), 0
+    for guid, host, rank in switches:
+        short = short_name(host)
+        if not host:
+            unknown.append(guid)
+        elif short in wanted:
+            online.add(short)
+            asics += 1
+            if rank != 0:
+                bad.append(f"{host}（{guid}）rank {rank}")
+        elif re.search(rule, host):
+            extra.add(short)
+        elif rank == 0:
+            false_roots.append(f"{host}（{guid}）")
+    return {"online": sorted(online), "missing": sorted(wanted - online), "bad": bad, "false_roots": false_roots,
+            "unknown": unknown, "extra": sorted(extra), "asics": asics}
+
+
+def root_grade(check: Optional[dict], *, fresh: Optional[bool], load_seen: Optional[bool],
+               after_failover: bool) -> tuple:
+    """Q-085: (confirmed problems, unready items, hints). Confirmed: an online root ASIC not at rank 0, a true
+    non-root at rank 0 while a root is online, a dump older than this run's failover, a readable opensm.log
+    without this run's root_switches line. Unready (ATTENTION/NOT_VERIFIED only): roots not online, no root
+    online, switches without a host name, a missing file or section. Without this run's failover (a read-only
+    check) a log without the line is unready, never confirmed."""
+    hard, pending, hints = [], [], []
+    if check is None:
+        pending.append("smdb 读不到或缺 START_NODES/START_SWITCHES 段：未能核对 Rank")
+    else:
+        if check["bad"]:
+            hard.append("在线 root 有 ASIC 不是 rank 0: " + ", ".join(check["bad"]))
+        if check["false_roots"] and check["online"]:
+            hard.append("非 root 交换机是 rank 0: " + ", ".join(check["false_roots"]))
+        if not check["online"]:
+            pending.append("没有在线的 root，root 配置当前不起作用"
+                           + (f"（rank 0 的交换机: {', '.join(check['false_roots'])}）" if check["false_roots"] else ""))
+        if check["missing"]:
+            pending.append("这些 root 未上线，无法核对: " + ", ".join(check["missing"]))
+        if check["unknown"]:
+            pending.append("主机名未生效，不会被当成 root: " + ", ".join(check["unknown"]))
+        if check["extra"]:
+            hints.append("有 ib.csv 没有、但符合 root 规则的交换机: " + ", ".join(check["extra"]))
+    if fresh is False:
+        hard.append("smdb 早于本次 failover（还没生效）")
+    if load_seen is None:
+        pending.append("opensm.log 读不到：未能核对 OpenSM 是否读入了 root 组")
+    elif not load_seen:
+        (hard if after_failover else pending).append(
+            f"未看到 OpenSM 读入 {ROOT_GROUP} 组（日志里没有 New Port Group Added: {ROOT_GROUP}"
+            + ("，只看本次 failover 之后新增的部分）" if after_failover else "）"))
+    return hard, pending, hints
+
+
+ROOT_SCRIPT_SHARED = (short_name, root_file_path, conf_key_update, opensm_conf_update, policy_file_update,
+                      root_guid_update, smdb_switches, root_rank_check, root_grade)
 
 
 def license_rows(text: str) -> list:
@@ -2177,31 +2434,76 @@ def host_key_fact(record: "login_rules.HostKeyRefreshRecord") -> dict:
     """result.json's host_key: the library's record (no raw warning) and how it was verified."""
     return {**asdict(record), "note": "已核实（经已核验 MAC 的会话读取设备主机公钥）" if record.verification == "verified"
             else "未核实（操作员指定）"}
-POST_CONFIG_PLAN = ("经 VIP 在主机上：安装 image 目录里的 *.lic、gv.cfg 的 [Server] 三项、按 ibswitches 写 root_guid.conf；"
-                    "任何一项有改动就执行一次 ufm_ha_cluster failover（主机切到另一台），再核对 HA 状态、gv.cfg 和 license")
+POST_CONFIG_PLAN = ("经 VIP 在主机上：安装 image 目录里的 *.lic、gv.cfg 的 [Server] 三项、按 ib.csv 主机名形状写 root port group"
+                    "（opensm.conf、port-group 策略文件、root_guid.conf）；任何一项有改动就执行一次 ufm_ha_cluster failover"
+                    "（主机切到另一台），固定等 60 秒，再核对 HA 状态和本次改过的项；最后在 VIP 所在主机留一个 root 核对脚本")
+# 问题文档 18.2 / 22.3: only the NODES rows of switches (NodeType 2) and the SWITCHES rows come back, not the whole
+# dump (about 26 MB on a site); the header lines stay, so smdb_switches reads columns by name
+ROOT_SMDB_AWK = r'''$0 ~ /^[ \t]*START_NODES[ \t\r]*$/ { s = "N"; h = 1; print; next }
+$0 ~ /^[ \t]*START_SWITCHES[ \t\r]*$/ { s = "S"; print; next }
+$0 ~ /^[ \t]*END_/ { if (s != "") print; s = ""; next }
+s == "N" && h { h = 0; t = 0; for (i = 1; i <= NF; i++) { c = $i; gsub(/[ \t\r"]/, "", c); if (c == "NodeType") t = i }; print; next }
+s == "N" { v = t ? $t : ""; gsub(/[ \t\r]/, "", v); if (v == "2") print; next }
+s == "S" { print }
+'''
 
 
-def post_read_script(mgmt_device: str, licenses: list) -> str:
-    """Read-only, on the VIP holder: who it is, gv.cfg, root_guid.conf, the licenses in place,
-    ibswitches and ufmlicense. Each part follows a POST_MARK line."""
+def post_read_script(mgmt_device: str, licenses: list, *, verify: Optional[frozenset] = None,
+                     log_lines: int = 0) -> str:
+    """Read-only, on the VIP holder; each part follows a POST_MARK line. verify None: the read before any
+    change (who it is, its clock, the smdb time and opensm.log's length as this run's baseline, gv.cfg,
+    opensm.conf, the licenses in place, ibswitches, ufmlicense). Otherwise only what this run changed (Q-086):
+    'gv.cfg' the smi lines, 'license' ufmlicense, 'root' the smdb switches with their time and the root_switches
+    lines opensm.log got after the first `log_lines` lines (问题文档 22.3)."""
     if not host.IFNAME_RE.fullmatch(mgmt_device) or not all(LICENSE_NAME_RE.fullmatch(name) for name in licenses):
         raise UfmError("内部错误：管理接口名或 license 文件名无效")
     mark = lambda name: f"echo {shlex.quote(POST_MARK.format(name))}"   # noqa: E731
-    lines = ["set -u",
-             f"printf 'mac=%s\\n' \"$(cat /sys/class/net/{mgmt_device}/address 2>/dev/null)\"",
-             f"root_guid_file=$(awk '$1 == \"root_guid_file\" {{print $2; exit}}' {OPENSM_CONF} 2>/dev/null)",
-             "printf 'root_guid_file=%s\\n' \"$root_guid_file\"",
-             mark("gv.cfg"), f"if [ -f {GV_CFG} ]; then base64 < {GV_CFG} | tr -d '\\n'; fi; echo",
-             mark("root_guid"), f"if [ -f {ROOT_GUID_FILE} ]; then base64 < {ROOT_GUID_FILE} | tr -d '\\n'; fi; echo",
-             mark("licenses")]
-    for name in licenses:
-        path = f"{LICENSE_DIR}/{name}"
-        lines.append(f"if [ -f {path} ]; then printf '%s %s\\n' {name} \"$(sha256sum < {path} | cut -d' ' -f1)\"; "
-                     f"else printf '%s -\\n' {name}; fi")
-    lines += [mark("ibswitches"), "docker exec ufm /opt/ufm/opensm/sbin/ibswitches 2>/dev/null || true",
-              mark("ufmlicense"), "docker exec ufm ufmlicense 2>&1 || true",
-              mark("smdb"), f"grep smi {SMDB_DUMP} 2>/dev/null || true"]
+    lines = ["set -u", f"printf 'mac=%s\\n' \"$(cat /sys/class/net/{mgmt_device}/address 2>/dev/null)\""]
+    smi = f"grep smi {SMDB_DUMP} 2>/dev/null || true"
+    if verify is None:
+        lines += ["printf 'now=%s\\n' \"$(date +%s)\"",
+                  f"if [ -r {SMDB_DUMP} ]; then printf 'smdb_mtime=%s\\n' \"$(date -r {SMDB_DUMP} +%s)\"; fi",
+                  f"if [ -r {OPENSM_LOG} ]; then printf 'opensm_log_lines=%s\\n' \"$(wc -l < {OPENSM_LOG} | tr -d ' ')\"; fi",
+                  mark("gv.cfg"), f"if [ -f {GV_CFG} ]; then base64 < {GV_CFG} | tr -d '\\n'; fi; echo",
+                  mark("opensm.conf"), f"if [ -f {OPENSM_CONF} ]; then base64 < {OPENSM_CONF} | tr -d '\\n'; echo; "
+                                       "else echo MISSING; fi",
+                  mark("licenses")]
+        for name in licenses:
+            path = f"{LICENSE_DIR}/{name}"
+            lines.append(f"if [ -f {path} ]; then printf '%s %s\\n' {name} \"$(sha256sum < {path} | cut -d' ' -f1)\"; "
+                         f"else printf '%s -\\n' {name}; fi")
+        lines += [mark("ibswitches"), "docker exec ufm /opt/ufm/opensm/sbin/ibswitches 2>/dev/null || true",
+                  mark("ufmlicense"), "docker exec ufm ufmlicense 2>&1 || true"]
+        return "\n".join(lines) + "\n"
+    if "root" in verify:
+        lines += [f"if [ -r {SMDB_DUMP} ]; then printf 'smdb=yes\\nsmdb_mtime=%s\\n' \"$(date -r {SMDB_DUMP} +%s)\"; "
+                  "else echo smdb=no; fi",
+                  f"if [ -r {OPENSM_LOG} ]; then n=$(wc -l < {OPENSM_LOG} | tr -d ' '); s={int(log_lines) + 1}; "
+                  f"if [ \"$n\" -lt {int(log_lines)} ]; then s=1; fi; printf 'root_load_events=%s\\n' "
+                  f"\"$(tail -n +\"$s\" {OPENSM_LOG} | grep -cF {shlex.quote(ROOT_LOAD_EVENT)})\"; fi"]
+    if "gv.cfg" in verify:
+        lines += [mark("smdb"), smi]
+    if "license" in verify:
+        lines += [mark("ufmlicense"), "docker exec ufm ufmlicense 2>&1 || true"]
+    if "root" in verify:
+        lines += [mark("root_smdb"), f"awk -F, {shlex.quote(ROOT_SMDB_AWK)} {SMDB_DUMP} 2>/dev/null || true"]
     return "\n".join(lines) + "\n"
+
+
+def root_files_read_script(policy: str, roots: str) -> str:
+    """Read-only: the two root targets opensm.conf names, base64, or MISSING."""
+    lines = ["set -u"]
+    for label, path in (("pgrp_policy_file", policy), ("root_guid_file", roots)):
+        quoted = shlex.quote(path)
+        lines += [f"echo {shlex.quote(POST_MARK.format(label))}",
+                  f"if [ -f {quoted} ]; then base64 < {quoted} | tr -d '\\n'; echo; else echo MISSING; fi"]
+    return "\n".join(lines) + "\n"
+
+
+def post_file(parts: dict, name: str) -> Optional[str]:
+    """A file a read script sent as base64; None when it was MISSING."""
+    body = parts.get(name, "").strip()
+    return None if body == "MISSING" else base64.b64decode(body).decode("utf-8")
 
 
 def post_sections(body: str) -> dict:
@@ -2217,19 +2519,20 @@ def post_sections(body: str) -> dict:
     return {key: "\n".join(value) for key, value in parts.items()}
 
 
-def file_replace_script(path: str, content: bytes, backup_dir: str) -> str:
-    """Back the file up, write the new bytes beside it with the old mode and owner (cp -p), check the
-    sha256, then move it into place."""
+def file_replace_script(path: str, content: bytes, backup_dir: str, backup_name: str = "") -> str:
+    """Back the file up (as backup_name, default its own name), write the new bytes beside it with the old mode
+    and owner (cp -p), check the sha256, then move it into place."""
     if not (path == GV_CFG or ROOT_GUID_PATH_RE.fullmatch(path)) or ".." in path:
         raise UfmError(f"内部错误：不改动这个文件: {path!r}")
-    if not re.fullmatch(r"/root/ufm-setup-upgrade-backup/[A-Za-z0-9._/-]+", backup_dir):
-        raise UfmError(f"内部错误：备份目录无效: {backup_dir!r}")
+    if not re.fullmatch(r"/root/ufm-setup-upgrade-backup/[A-Za-z0-9._/-]+", backup_dir) \
+            or not re.fullmatch(r"[A-Za-z0-9._-]*", backup_name):
+        raise UfmError(f"内部错误：备份目录或备份名无效: {backup_dir!r} {backup_name!r}")
     payload = base64.b64encode(content).decode("ascii")
     digest = hashlib.sha256(content).hexdigest()
     return ("set -eu\n"
-            f"f={shlex.quote(path)}; b={shlex.quote(backup_dir)}\n"
+            f"f={shlex.quote(path)}; b={shlex.quote(backup_dir)}; n={shlex.quote(backup_name)}\n"
             'mkdir -p "$b"\n'
-            'if [ -f "$f" ]; then cp -p "$f" "$b/${f##*/}"; cp -p "$f" "$f.part"; fi\n'
+            'if [ -f "$f" ]; then cp -p "$f" "$b/${n:-${f##*/}}"; cp -p "$f" "$f.part"; fi\n'
             f'printf %s {payload} | base64 -d > "$f.part"\n'
             f'if [ "$(sha256sum < "$f.part" | cut -d" " -f1)" != {digest} ]; then\n'
             '  rm -f "$f.part"; echo "written bytes differ" >&2; exit 1\n'
@@ -2258,6 +2561,245 @@ def license_install_script(licenses: list, image_server: str, backup_dir: str) -
                   f"mv -f {target}.part {target}",
                   f"echo installed={name}"]
     return "\n".join(lines) + "\n"
+
+
+def root_script_install_script(directory: str, text: str, mgmt_device: str, mac: str) -> str:
+    """Write the generated root script as <directory>/ufm-root-switches.py, mode 0700, only on the host whose
+    management MAC is `mac`: the VIP holder last confirmed (指导 8.18 第 9 条, 问题文档 18.4 第 7 条)."""
+    if not re.fullmatch(r"/root/ufm-setup-upgrade-backup/[A-Za-z0-9._/-]+", directory) or ".." in directory \
+            or not host.IFNAME_RE.fullmatch(mgmt_device):
+        raise UfmError(f"内部错误：脚本目录或管理接口名无效: {directory!r}")
+    payload = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return ("set -eu\n"
+            f'if [ "$(cat /sys/class/net/{mgmt_device}/address 2>/dev/null)" != {shlex.quote(mac)} ]; then\n'
+            '  echo "the VIP is no longer on the host just checked: the root script is not written" >&2; exit 1\n'
+            "fi\n"
+            f"d={shlex.quote(directory)}; f=\"$d/{ROOT_SCRIPT_NAME}\"\n"
+            'mkdir -p "$d"\n'
+            f'printf %s {payload} | base64 -d > "$f.part"\n'
+            f'if [ "$(sha256sum < "$f.part" | cut -d" " -f1)" != {digest} ]; then\n'
+            '  rm -f "$f.part"; echo "written bytes differ" >&2; exit 1\n'
+            "fi\n"
+            'chmod 0700 "$f.part"\n'
+            'mv -f "$f.part" "$f"\n'
+            'echo "script=$f"\n')
+
+
+ROOT_SCRIPT_MAIN = r'''
+
+def say(line):
+    print(line, flush=True)
+
+
+def ha_status():
+    """(DRBD_ROLE, DRBD_CONNECTIVITY, PEER_DRBD_ROLE) of `ufm_ha_cluster status` (问题文档 20.4), None when unreadable."""
+    try:
+        proc = subprocess.run(["ufm_ha_cluster", "status"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    fields = []
+    for name in ("DRBD_ROLE", "DRBD_CONNECTIVITY", "PEER_DRBD_ROLE"):
+        found = re.search(r"^\s*" + name + r":\s*\[\s*([^\]]*?)\s*\]", proc.stdout, re.M)
+        fields.append(found.group(1) if found else "")
+    return tuple(fields)
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return None
+
+
+def plan():
+    """opensm.conf and the two targets it names, all read and planned before any write."""
+    conf = read(OPENSM_CONF)
+    if conf is None:
+        raise UfmError(f"读不到 {OPENSM_CONF}")
+    new_conf, policy_path, roots_path, conf_changes = opensm_conf_update(conf)
+    policy, roots = read(policy_path), read(roots_path)
+    new_policy, policy_changes = policy_file_update(policy, ROOT_RULE, policy_path)
+    new_roots, roots_changes = root_guid_update(roots)
+    return [("pgrp_policy_file", policy_path, policy, new_policy, policy_changes),
+            ("root_guid_file", roots_path, roots, new_roots, roots_changes),
+            ("opensm.conf", OPENSM_CONF, conf, new_conf, conf_changes)]
+
+
+def finish(code, summary):
+    say(f"RESULT: {summary} exit={code}")
+    return code
+
+
+def check(pending):
+    """The default mode: rank and load evidence as it is now; no failover of this run to bind it to."""
+    smdb, log = read(SMDB_DUMP), read(OPENSM_LOG)
+    switches = None if smdb is None else smdb_switches(smdb)
+    found = None if switches is None else root_rank_check(switches, ROOT_NAMES, ROOT_RULE)
+    hard, waiting, hints = root_grade(found, fresh=None, load_seen=None if log is None else ROOT_LOAD_EVENT in log,
+                                      after_failover=False)
+    for hint in hints:
+        say(f"NOTE {hint}")
+    if hard and not pending:
+        for item in hard:
+            say(f"ERROR {item}")
+        for item in waiting:
+            say(f"ATTENTION {item}")
+        return finish(1, "FAILED")
+    if pending:
+        waiting = ["三个文件有不符合的地方：用 --apply 写入（有改动会 failover 一次）"] + hard + waiting
+    if waiting:
+        for item in waiting:
+            say(f"ATTENTION {item}")
+        return finish(3, "NOT_VERIFIED")
+    say(f"OK root 生效：{len(found['online'])} 台 / {found['asics']} 个 ASIC 为 rank 0，"
+        f"opensm.log 有 OpenSM 读入 {ROOT_GROUP} 组的记录")
+    return finish(0, "VERIFIED")
+
+
+def apply(pending):
+    if not pending:
+        say("ATTENTION 三个文件都已符合：不写、不 failover；本次没有改动，不做生效核对（未核对）")
+        return finish(3, "NOT_VERIFIED")
+    backup = os.path.join(os.path.dirname(os.path.abspath(__file__)), time.strftime("backup-%Y%m%d-%H%M%S"))
+    os.makedirs(backup, mode=0o700, exist_ok=True)
+    written = []
+    try:
+        for label, path, old, new, _changes in pending:
+            if old is not None:
+                shutil.copy2(path, os.path.join(backup, label if label == "opensm.conf"
+                                                else f"{label}.{os.path.basename(path)}"))
+            part = path + ".part"
+            with open(part, "w", encoding="utf-8") as handle:
+                handle.write(new)
+            if old is not None:
+                shutil.copymode(path, part)
+            os.replace(part, path)
+            written.append(path)
+    except OSError as exc:
+        say(f"ERROR 写入失败: {exc}；本次已写: {', '.join(written) or '无'}；改前备份在 {backup}；未 failover")
+        return finish(1, "FAILED")
+    say(f"CHANGED 已写 {', '.join(written)}；改前备份在 {backup}")
+    try:
+        proc = subprocess.run(["ufm_ha_cluster", "failover"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=600)
+        failed = proc.returncode != 0 and f"退出码 {proc.returncode}: {proc.stdout.strip()[-300:]}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        failed = str(exc)
+    if failed:
+        say(f"ERROR ufm_ha_cluster failover 没有成功（{failed}）；三个文件已写，未生效")
+        return finish(1, "FAILED")
+    say(f"已执行一次 ufm_ha_cluster failover：固定等 {SETTLE}s，再在 {LIMIT}s 内每 {INTERVAL}s 确认一次 HA 恢复")
+    time.sleep(SETTLE)
+    started = time.monotonic()
+    while True:
+        status = ha_status()
+        if status is not None and status[0] != "Primary" and status[1] == "Connected" and status[2] == "Primary":
+            break
+        if time.monotonic() - started >= LIMIT:
+            say(f"ERROR failover 之后 {LIMIT}s 内 HA 没有恢复（ufm_ha_cluster status: {status or '读不到'}）")
+            return finish(1, "FAILED")
+        time.sleep(INTERVAL)
+    say("ATTENTION 已切换到另一台，本机已不是 HA 主机：不在本机读文件判断生效，未核对。请登录新主机（经 VIP）"
+        "只读核对：把本脚本复制过去不带参数执行，或重跑 ha-post-config；本次切换后的 "
+        f"{SETTLE} 秒已经等过，不用再等。手工核对：grep -F '{ROOT_LOAD_EVENT}' {OPENSM_LOG}；"
+        f"{SMDB_DUMP} 里在线 root 的全部 ASIC Rank 为 0、其余大于 0")
+    return finish(3, "NOT_VERIFIED")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="核对（默认，只读）或用 --apply 写入本机的 UFM root port group（R-031）；只在当前 HA 主机上有效。",
+        epilog="退出码：0 已核对生效；3 有提示或未核对；1 已确认的问题或执行错误；2 参数错误。")
+    parser.add_argument("--apply", action="store_true",
+                        help="写入不符合的文件（改前备份到本脚本旁边），有改动时执行一次 ufm_ha_cluster failover")
+    args = parser.parse_args(argv)
+    status = ha_status()
+    if status is None:
+        say("ERROR 读不到 ufm_ha_cluster status")
+        return finish(1, "FAILED")
+    if status[0] != "Primary":
+        say(f"ATTENTION 本机不是当前 HA 主机（DRBD_ROLE: {status[0] or '-'}）：请到 VIP 所在的主机上执行；"
+            "本机不做任何改动")
+        return finish(3, "NOT_VERIFIED")
+    try:
+        items = plan()
+    except (UfmError, OSError, ValueError) as exc:
+        say(f"ERROR {exc}")
+        return finish(1, "FAILED")
+    pending = [item for item in items if item[3] != item[2]]
+    for label, path, old, new, changes in items:
+        say(f"{'不符合' if new != old else '符合'} {label} {path}" + (f"：{'; '.join(changes)}" if changes else ""))
+    return apply(pending) if args.apply else check(pending)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
+
+
+def root_script_text(plan: RootPlan, *, csv_sha256: str, run_name: str, generated: str, files_root: str = FILES_ROOT,
+                     settle: int = 60, interval: int = 15, limit: int = 900) -> str:
+    """The self-contained ufm-root-switches.py (指导 8.18 第 9-11 条, 问题文档 18.4 第 7 条): the rule and the root
+    list fixed at generation; the shared functions above copied in; standard library only. files_root and the
+    timing are fixed at generation too (tests use a PUBLIC directory; production /opt/ufm/files)."""
+    conf, policy, roots = (f"{files_root}/conf/opensm/opensm.conf",
+                           f"{files_root}/conf/opensm/port_groups_policy_file.conf",
+                           f"{files_root}/conf/opensm/root_guid.conf")
+    smdb, log = f"{files_root}/log/opensm-smdb.dump", f"{files_root}/log/opensm.log"
+    header = [
+        "#!/usr/bin/env python3",
+        f"# {ROOT_SCRIPT_NAME}: generated by infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py ha-post-config (R-031)",
+        f"# generated: {generated}   run directory: {run_name}",
+        f"# ib.csv sha256: {csv_sha256}",
+        f"# rule: {plan.rule}",
+        f"# roots ({len(plan.roots)}): {', '.join(plan.roots)}",
+        f"# opensm.conf: {conf}",
+        f"# standard pgrp_policy_file: {policy}",
+        f"# standard root_guid_file: {roots}",
+        f"# evidence: {smdb}, {log}",
+        "# ib.csv 改了要重跑 ha-post-config 重新生成本脚本（规则和 root 清单在生成时写死）；",
+        "# 当前 opensm.conf 指向 /opt/ufm/files 下别的文件时沿用那个文件。",
+        '"""Check (default, read-only) or with --apply write this HA primary\'s UFM root port group (R-031).',
+        "",
+        "Only the current HA primary (DRBD_ROLE Primary) is read or written; elsewhere nothing changes. --apply plans all",
+        "three files first, backs up what it changes beside this script, and fails over once when something changed;",
+        "afterwards this host is no longer the primary and the effect is checked on the new primary by hand (Q-081).",
+        '"""',
+        "from __future__ import annotations",
+        "",
+        "import argparse",
+        "import csv",
+        "import os",
+        "import re",
+        "import shutil",
+        "import subprocess",
+        "import sys",
+        "import time",
+        "from typing import Optional",
+        "",
+        f"FILES_ROOT = {files_root!r}",
+        f"OPENSM_CONF = {conf!r}",
+        f"PGRP_POLICY_FILE = {policy!r}",
+        f"ROOT_GUID_FILE = {roots!r}",
+        f"SMDB_DUMP = {smdb!r}",
+        f"OPENSM_LOG = {log!r}",
+        f"ROOT_GROUP = {ROOT_GROUP!r}",
+        f"ROOT_LOAD_EVENT = {ROOT_LOAD_EVENT!r}",
+        f"ROOT_RULE = {plan.rule!r}",
+        f"ROOT_NAMES = {tuple(plan.roots)!r}",
+        f"SETTLE, INTERVAL, LIMIT = {int(settle)}, {int(interval)}, {int(limit)}",
+        "",
+        "",
+        "class UfmError(Exception):",
+        '    """A planning error: nothing is written."""',
+    ]
+    shared = "\n\n".join(inspect.getsource(function) for function in ROOT_SCRIPT_SHARED)
+    return "\n".join(header) + "\n\n\n" + shared + ROOT_SCRIPT_MAIN
 
 
 def ha_config_argv(role: str, local_primary: str, peer_primary: str, local_secondary: str, peer_secondary: str,
@@ -2333,11 +2875,13 @@ class Session:
                  confirm_new_password: Optional[Callable[[], str]] = None,
                  ha_wait: tuple = (100, 7200, 15, 900), direct_access: frozenset = frozenset(),
                  routes: Optional[dict] = None, ignore_cable_check: bool = False,
-                 refresh_host_key: frozenset = frozenset()):
+                 refresh_host_key: frozenset = frozenset(), failover_settle: int = 60):
         self.plan, self.creds, self.timeout = plan, creds, timeout
         # (DRBD probe interval, DRBD sync limit, status probe interval, limit after start), seconds. Owner
         # 2026-10-22: the sync took under 30 minutes on ufm01/02; a line every 100 s while waiting.
         self.ha_wait = ha_wait
+        # Q-084 (需求文档 R-031): one fixed wait after ha-post-config's real failover, outside both ha_wait limits
+        self.failover_settle = failover_settle
         self.run_dir, self.say, self.ask_eth_password = run_dir, say, ask_eth_password
         self.spines = select_spine_inventory(plan) if spines is None else spines
         self.choose = choose or random.SystemRandom().choice
@@ -4129,9 +4673,10 @@ class Session:
                             if path.is_file() and LICENSE_NAME_RE.fullmatch(path.name))
 
     def vip_read(self, vip_node: UfmNode, result: NodeResult, access: dict, nodes: list, step: str,
-                 licenses: list) -> tuple:
+                 licenses: list, *, verify: Optional[frozenset] = None, log_lines: int = 0) -> tuple:
         parts = post_sections(self.run_script(vip_node, result, step, post_read_script(
-            self.plan.mgmt_device, [name for name, _digest in licenses]), access=access))
+            self.plan.mgmt_device, [name for name, _digest in licenses], verify=verify, log_lines=log_lines),
+            access=access))
         try:
             mac = normalize_mac(host.parse_kv(parts[""]).get("mac", ""))
         except ValueError:
@@ -4143,20 +4688,32 @@ class Session:
 
     def ha_post_config(self, primary: UfmNode, other: UfmNode, results: dict, status: dict) -> tuple:
         """(done, latest status). Owner 2026-10-22 (ufm-manual.log 1143-2088), all through the VIP:
-        licenses, gv.cfg [Server], root_guid.conf; one `ufm_ha_cluster failover` if anything changed, then
-        the HA status, gv.cfg (two smi lines in opensm-smdb.dump) and the license are checked on the new
-        master. A missing .lic or root switch is only a note at the end."""
+        licenses, gv.cfg [Server], and (v3.1.6 B7, R-031) the root port group by ib.csv's host-name shapes in
+        opensm.conf, the policy file and the root_guid file; one `ufm_ha_cluster failover` if anything changed,
+        one fixed wait (Q-084), the HA status, then only what changed is checked on the new master (Q-086);
+        the root script is left on the host holding the VIP. A missing .lic or root switch is only a note."""
         nodes, mine = [primary, other], results[primary.hostname]
         notes = mine.facts.setdefault("notes", [])
         vip_node = UfmNode(f"VIP-{self.plan.vip}", 0, self.plan.vip, "", "", "")
         backup = f"{self.backup_dir()}/post-ha"
         self.say(f"  ha-post-config：{POST_CONFIG_PLAN}")
         try:
+            # ib.csv is checked once, before any login or change (问题文档 18.4 第 1、4 条)
+            names = ib_switch_names(self.plan.input_dir / "ib.csv")
+            roots = root_plan(names)
+            if roots.conflicts:
+                raise UfmError("ib.csv 里这些主机名形状既像 spine 又像 leaf，不能判断 root："
+                               + ", ".join(roots.conflicts) + "；请改名或人工确认")
+            problem = root_rule_problem(names, roots) if roots.kind else ""
+            if problem:
+                raise UfmError(problem)
             access = self.vip_access(nodes, results)
             found, licenses = self.local_licenses()
             parts, holder = self.vip_read(vip_node, mine, access, nodes, "post-ha-read", licenses)
             self.say(f"    VIP {self.plan.vip} 在 {holder.hostname} 上")
-            changed = []
+            # 指导 8.18 第 4 条: the three root files are read and planned before any write of this run
+            root_files = self.post_root_plan(vip_node, mine, access, parts, roots) if roots.kind else []
+            changed, written = [], []
             # licenses: every *.lic, a file of the same name replaced (owner 2026-10-22)
             installed = dict(line.split(" ", 1) for line in parts.get("licenses", "").splitlines() if " " in line)
             pending = [(name, digest) for name, digest in licenses if installed.get(name) != digest]
@@ -4170,6 +4727,7 @@ class Session:
                 self.run_script(vip_node, mine, "post-ha-license",
                                 license_install_script(pending, self.plan.image_server, backup), access=access)
                 changed.append("license")
+                written += [f"{LICENSE_DIR}/{name}" for name, _digest in pending]
                 self.ha_step(results, holder, "post_ha_license", "INSTALLED",
                              ", ".join(name for name, _digest in pending))
             else:
@@ -4184,17 +4742,21 @@ class Session:
                 self.run_script(vip_node, mine, "post-ha-gv-cfg",
                                 file_replace_script(GV_CFG, new_text.encode("utf-8"), backup), access=access)
                 changed.append("gv.cfg")
+                written.append(GV_CFG)
             self.ha_step(results, holder, "post_ha_gv_cfg", "CHANGED" if gv_changes else "UNCHANGED",
                          "; ".join(gv_changes))
-            # root_guid.conf: the core switches, or the spines when there is no core (owner 2026-10-22)
-            changed += self.post_root_guid(vip_node, mine, access, holder, results, parts, backup)
+            # the root port group: the core switches, or the spines when there is no core (owner 2026-10-22, R-031)
+            changed += self.post_root(vip_node, mine, access, holder, results, parts, roots, root_files, backup,
+                                      written)
             if not changed:
                 self.say("    HA 之后的配置都已符合，不做 failover")
                 self.ha_step(results, holder, "post_ha_failover", "NOT_NEEDED")
+                self.post_root_script(vip_node, mine, access, holder, results, roots, backup)
                 return True, status
             status = self.post_failover(vip_node, mine, access, holder, nodes, results, changed)
             new_master = next(node for node in nodes if node is not holder)
-            self.post_verify(vip_node, mine, access, new_master, nodes, results, licenses)
+            self.post_verify(vip_node, mine, access, new_master, nodes, results, licenses, changed, roots, parts)
+            self.post_root_script(vip_node, mine, access, new_master, results, roots, backup)
             return True, status
         except NotAuthorized as exc:
             for result in results.values():
@@ -4209,39 +4771,67 @@ class Session:
         results[node.hostname].steps.append({"step": step, "outcome": outcome, **({"detail": detail} if detail else {})})
         self.say(f"    {node.hostname} [{step}] {outcome}{('：' + detail) if detail else ''}")
 
-    def post_root_guid(self, vip_node: UfmNode, mine: NodeResult, access: dict, holder: UfmNode, results: dict,
-                       parts: dict, backup: str) -> list:
+    def post_root_plan(self, vip_node: UfmNode, mine: NodeResult, access: dict, parts: dict, roots: RootPlan) -> list:
+        """[(label, path, old text or None, new text, changes)]: the policy file and the root_guid file opensm.conf
+        names (custom files under /opt/ufm/files kept), then opensm.conf itself (指导 8.18 第 3、4 条)."""
+        conf = post_file(parts, "opensm.conf")
+        if conf is None:
+            raise UfmError(f"读不到 {OPENSM_CONF}")
+        new_conf, policy_path, roots_path, conf_changes = opensm_conf_update(conf)
+        targets = post_sections(self.run_script(vip_node, mine, "post-ha-root-read",
+                                                root_files_read_script(policy_path, roots_path), access=access))
+        policy, root_guid = post_file(targets, "pgrp_policy_file"), post_file(targets, "root_guid_file")
+        new_policy, policy_changes = policy_file_update(policy, roots.rule, policy_path)
+        new_root_guid, root_guid_changes = root_guid_update(root_guid)
+        return [("pgrp_policy_file", policy_path, policy, new_policy, policy_changes),
+                ("root_guid_file", roots_path, root_guid, new_root_guid, root_guid_changes),
+                ("opensm.conf", OPENSM_CONF, conf, new_conf, conf_changes)]
+
+    def post_root(self, vip_node: UfmNode, mine: NodeResult, access: dict, holder: UfmNode, results: dict,
+                  parts: dict, roots: RootPlan, files: list, backup: str, written: list) -> list:
+        """R-031: no core/spine shape: nothing at all (指导 8.18 第 1 条); ibswitches only adds notes; the files
+        that differ are written with one backup each under a fixed name, so two files of one basename never
+        overwrite each other's backup; a failed write lists what this run wrote and stops (no failover)."""
         notes = mine.facts.setdefault("notes", [])
-        path = host.parse_kv(parts[""]).get("root_guid_file", "")
-        if path != ROOT_GUID_FILE:
-            raise UfmError(f"{OPENSM_CONF} 的 root_guid_file 是 {path or '空'}，不是 {ROOT_GUID_FILE}：不自动改动，请人工确认")
-        kind, roots = ib_root_switches(self.plan.input_dir / "ib.csv")
-        if not roots:
-            notes.append("ib.csv 里没有 spine/core 交换机：root_guid.conf 不改")
-            self.ha_step(results, holder, "post_ha_root_guid", "SKIPPED")
+        if not roots.kind:
+            notes.append("ib.csv 主机名里认不出 core/spine，root 配置未做；各组形状："
+                         + ", ".join(f"{shape}（{len(group)} 台）" for shape, group in sorted(roots.groups.items())))
+            self.ha_step(results, holder, "post_ha_root", "SKIPPED")
             return []
-        guids, missing = root_guid_plan(parse_ibswitches(parts.get("ibswitches", "")), roots)
-        if missing:
-            notes.append(f"ibswitches 里没有这些 {kind}（{len(missing)}/{len(roots)}）：{', '.join(missing)}；"
-                         f"root_guid.conf 只写入已发现的 {len(guids)} 个 GUID，补齐后重跑 ha-post-config")
-        if not guids:
-            notes.append(f"ibswitches 里一台 {kind} 也没发现：root_guid.conf 不改")
-            self.ha_step(results, holder, "post_ha_root_guid", "SKIPPED")
-            return []
-        current = base64.b64decode(parts.get("root_guid", "").strip() or b"").decode("utf-8", "replace")
-        if [line.strip().casefold() for line in current.splitlines() if line.strip()] == guids:
-            self.ha_step(results, holder, "post_ha_root_guid", "UNCHANGED", f"{len(guids)} 个 {kind} GUID")
+        if roots.unknown:
+            notes.append("ib.csv 里认不出角色的主机名形状（不当 root）：" + ", ".join(roots.unknown))
+        found = root_ibswitches_check(parse_ibswitches(parts.get("ibswitches", "")), roots)
+        if not found["readable"]:
+            notes.append("ibswitches 读不到：跳过写入前核对，root 规则照常写入")
+        if found["missing"]:
+            notes.append(f"ibswitches 里缺这些 root（未上线，或主机名还没生效）：{', '.join(found['missing'])}")
+        if found["extra"]:
+            notes.append(f"ibswitches 里有 ib.csv 没有、但符合 root 规则的：{', '.join(found['extra'])}")
+        summary = (f"{len(roots.roots)} 台 {roots.kind}，规则 {roots.rule}"
+                   + (f"；root 规则匹配 {found['devices']} 台 / {found['asics']} 个 ASIC" if found["readable"] else ""))
+        pending = [item for item in files if item[3] != item[2]]
+        if not pending:
+            self.ha_step(results, holder, "post_ha_root", "UNCHANGED", summary)
             return []
         self.authorize(holder, "ha-post-config: " + POST_CONFIG_PLAN)
-        self.run_script(vip_node, mine, "post-ha-root-guid",
-                        file_replace_script(path, ("\n".join(guids) + "\n").encode("ascii"), backup), access=access)
-        self.ha_step(results, holder, "post_ha_root_guid", "CHANGED", f"{len(guids)} 个 {kind} GUID → {path}")
-        return ["root_guid.conf"]
+        for label, path, _old, new, _changes in pending:
+            try:
+                self.run_script(vip_node, mine, f"post-ha-root-{label.replace('_', '-').replace('.', '-')}",
+                                file_replace_script(path, new.encode("utf-8"), backup, label if label == "opensm.conf"
+                                                    else f"{label}.{path.rsplit('/', 1)[-1]}"), access=access)
+            except UfmError as exc:
+                raise UfmError(f"root 文件写入中途失败（{path}）: {exc}；本次已写: {', '.join(written) or '无'}；"
+                               f"改前备份在 {backup}；未 failover，不回滚") from exc
+            written.append(path)
+        self.ha_step(results, holder, "post_ha_root", "CHANGED",
+                     summary + "；" + "; ".join(change for item in pending for change in item[4]))
+        return ["root"]
 
     def post_failover(self, vip_node: UfmNode, mine: NodeResult, access: dict, holder: UfmNode, nodes: list,
                       results: dict, changed: list) -> dict:
         """One `ufm_ha_cluster failover` makes the changes take effect; the SSH session through the VIP
-        drops when the VIP moves (ufm-manual.log 2009), so only the status decides afterwards."""
+        drops when the VIP moves (ufm-manual.log 2009), so only the status decides afterwards. Q-084: after
+        this real failover one fixed wait (failover_settle), then wait_ha_status from its own start."""
         log = self.ha_log("post-ha-failover")
         new_master = next(node for node in nodes if node is not holder)
         self.say(f"    {', '.join(changed)} 已改动：在 {holder.hostname} 上执行 ufm_ha_cluster failover"
@@ -4252,36 +4842,92 @@ class Session:
         except UfmError as exc:   # the VIP moved under the session: expected
             self.say(f"    failover 后会话断开（VIP 已切换）：{str(exc)[:120]}")
         self.ha_step(results, holder, "post_ha_failover", "DONE", f"{holder.hostname} → {new_master.hostname}")
+        self.say(f"    [{clock()}] failover 之后固定等待 {self.failover_settle}s，再确认 HA 状态")
+        time.sleep(self.failover_settle)
         return self.wait_ha_status(new_master, nodes, results[new_master.hostname])
 
     def post_verify(self, vip_node: UfmNode, mine: NodeResult, access: dict, new_master: UfmNode, nodes: list,
-                    results: dict, licenses: list) -> None:
-        """Owner 2026-10-22: on the new master, gv.cfg shows as two smi lines in opensm-smdb.dump, and the
-        license row of this master's eno8303 MAC is Valid. root_guid.conf is not checked."""
+                    results: dict, licenses: list, changed: list, roots: RootPlan, before: dict) -> None:
+        """On the new master, only what this run changed (Q-086): the VIP always (a failover happened); gv.cfg:
+        two smi lines in opensm-smdb.dump; license: the row of this master's eno8303 MAC is Valid; root: Q-085
+        by smdb rank and this run's root_switches line in opensm.log, the unready items noted (owner 2026-10-22,
+        v3.1.6 B7). Its own ha_wait interval and limit, counted from here."""
         interval, limit = self.ha_wait[2], self.ha_wait[3]
+        checks = frozenset(changed)
+        head = host.parse_kv(before[""])
+        since = int(head["now"]) if head.get("now", "").isdigit() else None
+        log_lines = int(head["opensm_log_lines"]) if head.get("opensm_log_lines", "").isdigit() else 0
         started, probe = time.monotonic(), 0
         while True:
             probe += 1
-            problems = []
+            problems, graded = [], None
             try:
-                parts, holder = self.vip_read(vip_node, mine, access, nodes, f"post-ha-verify-{probe}", licenses)
+                parts, holder = self.vip_read(vip_node, mine, access, nodes, f"post-ha-verify-{probe}", licenses,
+                                              verify=checks, log_lines=log_lines)
                 if holder is not new_master:
                     problems.append(f"VIP 在 {holder.hostname} 上，应在 {new_master.hostname} 上")
-                smi = [line for line in parts.get("smdb", "").splitlines() if "smi" in line]
-                if len(smi) < 2:
-                    problems.append(f"{SMDB_DUMP} 里只有 {len(smi)} 行 smi（gv.cfg 生效后应有 2 行）")
-                if licenses and not license_valid_for(license_rows(parts.get("ufmlicense", "")), new_master.mac):
+                if "gv.cfg" in checks:
+                    smi = [line for line in parts.get("smdb", "").splitlines() if "smi" in line]
+                    if len(smi) < 2:
+                        problems.append(f"{SMDB_DUMP} 里只有 {len(smi)} 行 smi（gv.cfg 生效后应有 2 行）")
+                if "license" in checks and not license_valid_for(license_rows(parts.get("ufmlicense", "")),
+                                                                  new_master.mac):
                     problems.append(f"ufmlicense 里 {new_master.hostname}（{new_master.mac}）的 license 不是 Valid")
+                if "root" in checks:
+                    graded = self.root_evidence(parts, roots, since)
+                    problems += graded[0]
             except (UfmError, host.HostConfigError) as exc:
                 problems.append(f"读取失败: {str(exc)[:120]}")
             if not problems:
-                self.ha_step(results, new_master, "post_ha_verify", "OK",
-                             "HA 正常，gv.cfg 已生效" + ("，license 有效" if licenses else ""))
+                done = ["HA 正常", f"VIP 在 {new_master.hostname} 上"] + (["gv.cfg 已生效"] if "gv.cfg" in checks else []) \
+                    + (["license 有效"] if "license" in checks else [])
+                self.ha_step(results, new_master, "post_ha_verify", "OK", "，".join(done))
+                if graded:
+                    self.root_verified(results, new_master, mine, graded)
                 return
             if time.monotonic() - started >= limit:
-                raise UfmError("failover 后核对未通过: " + "; ".join(problems))
+                unready = [f"未就绪: {item}" for item in (graded[1] if graded else [])]
+                raise UfmError("failover 后核对未通过: " + "; ".join(problems + unready))
             self.say(f"    [{clock()}] 等待配置生效 [{probe}]: {'; '.join(problems)}")
             time.sleep(interval)
+
+    def root_evidence(self, parts: dict, roots: RootPlan, since: Optional[int]) -> tuple:
+        """Q-085 grading of one verify read: (confirmed, unready, hints, rank check)."""
+        head = host.parse_kv(parts[""])
+        mtime, events = head.get("smdb_mtime", ""), head.get("root_load_events", "")
+        switches = smdb_switches(parts.get("root_smdb", "")) if head.get("smdb") == "yes" else None
+        check = None if switches is None else root_rank_check(switches, roots.roots, roots.rule)
+        fresh = int(mtime) >= since if mtime.isdigit() and since is not None else None
+        return root_grade(check, fresh=fresh, load_seen=int(events) > 0 if events.isdigit() else None,
+                          after_failover=True) + (check,)
+
+    def root_verified(self, results: dict, new_master: UfmNode, mine: NodeResult, graded: tuple) -> None:
+        """post_ha_root_verify: VERIFIED only with every root online at rank 0 and this run's load line; an unready
+        item leaves NOT_VERIFIED with an ATTENTION note (Q-085; 指导 8.18 第 12 条: post_ha_verify OK is not root)."""
+        _hard, pending, hints, check = graded
+        notes = mine.facts.setdefault("notes", [])
+        notes += [f"root 提示：{item}" for item in hints]
+        if pending:
+            notes += [f"root 未核对生效（ATTENTION/NOT_VERIFIED）：{item}" for item in pending]
+            self.ha_step(results, new_master, "post_ha_root_verify", "NOT_VERIFIED", "; ".join(pending))
+            return
+        self.ha_step(results, new_master, "post_ha_root_verify", "VERIFIED",
+                     f"root 生效：{len(check['online'])} 台 / {check['asics']} 个 ASIC 为 rank 0，"
+                     f"opensm.log 有本次读入 {ROOT_GROUP} 组的记录")
+
+    def post_root_script(self, vip_node: UfmNode, mine: NodeResult, access: dict, node: UfmNode, results: dict,
+                         roots: RootPlan, backup: str) -> None:
+        """指导 8.18 第 6、9 条: with a root plan, the self-contained 0700 script goes to this run's post-ha backup
+        directory on the host just confirmed to hold the VIP, also when nothing changed."""
+        if not roots.kind:
+            return
+        text = root_script_text(roots, csv_sha256=hashlib.sha256((self.plan.input_dir / "ib.csv").read_bytes()).hexdigest(),
+                                run_name=self.run_dir.name, generated=time.strftime("%Y-%m-%d %H:%M:%S %z"),
+                                settle=self.failover_settle, interval=self.ha_wait[2], limit=self.ha_wait[3])
+        self.run_script(vip_node, mine, "post-ha-root-script",
+                        root_script_install_script(backup, text, self.plan.mgmt_device, node.mac), access=access)
+        self.ha_step(results, node, "post_ha_root_script", "WRITTEN",
+                     f"{backup}/{ROOT_SCRIPT_NAME}（{node.hostname}，0700；ib.csv 改了要重跑 ha-post-config 重新生成）")
 
     def ha_post_config_command(self, nodes: list) -> list:
         """ha-post-config --apply: only on an existing HA of these two UFMs and this VIP whose
@@ -5086,8 +5732,9 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
                                                            "DNS/NTP/时区），然后把 UFM 升级到 global 的 version")
     ha_setup = sub.add_parser("ha-setup", help="已有 HA 配置时不做任何事并提示；否则检查 HA 条件，做互信和 HA 部署，"
                                                "完成后自动执行 ha-post-config")
-    ha_post = sub.add_parser("ha-post-config", help="在已有且正常的 HA 上经 VIP 配置 license、gv.cfg、root_guid.conf，"
-                                                    "有改动就 failover 并核对")
+    ha_post = sub.add_parser("ha-post-config", help="在已有且正常的 HA 上经 VIP 配置 license、gv.cfg、root port group"
+                                                    "（opensm.conf、策略文件、root_guid.conf），有改动就 failover 并核对；"
+                                                    "判出 root 时在 VIP 所在主机留一个 root 核对脚本")
     for command in (check, config_upgrade, ha_setup, ha_post):
         command.add_argument("--node", help="只处理这一台（hostname 或第一段）；默认 ib.csv 中全部 server_ufm")
         command.add_argument("--ufm-user", default="root", help="UFM 登录用户（默认 root）")

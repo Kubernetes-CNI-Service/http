@@ -1448,6 +1448,12 @@ def ufm_ha_cluster(state, item, name, args):
             # inferred: on a node without a cluster pcs cannot read the cluster information base
             print("Error: error running crm_mon, is pacemaker running?")
             return 1
+        if ha.get("failovers") and ha.get("status_errors", 0) > 0:
+            # v3.1.6 B7 (Q-084/Q-086 timing): the cluster is still settling after the failover
+            ha["status_errors"] -= 1
+            save(state)
+            print("Error: error running crm_mon, is pacemaker running?")
+            return 1
         print(ha_status_text(state, ha))
         return 0
     return 2
@@ -1469,18 +1475,80 @@ def pcs(state, item, args):
     return 0
 
 
+def read_shared(files, path):
+    """A file of /opt/ufm/files on the DRBD volume, or None."""
+    local = os.path.join(files, path[len("/opt/ufm/files/"):]) if path.startswith("/opt/ufm/files/") else ""
+    return open(local).read() if local and os.path.isfile(local) else None
+
+
+def opensm_root_rule(files):
+    """v3.1.6 B7: the root port group OpenSM loads, as in the owner's manual configuration (问题文档 18.2): the
+    last active pgrp_policy_file and root_guid_file lines of opensm.conf; root_guid_file names root_switches and
+    the policy file has that port-group with a port-regexp. None when any part is missing (no root group)."""
+    conf = read_shared(files, "/opt/ufm/files/conf/opensm/opensm.conf") or ""
+    active = {}
+    for line in conf.splitlines():
+        parts = line.split(None, 1)
+        if parts and parts[0] in ("pgrp_policy_file", "root_guid_file"):
+            active[parts[0]] = parts[1].strip() if len(parts) > 1 else ""
+    roots = read_shared(files, active.get("root_guid_file", ""))
+    policy = read_shared(files, active.get("pgrp_policy_file", ""))
+    if roots is None or policy is None or "root_switches" not in [line.strip() for line in roots.splitlines()]:
+        return None
+    rule, inside = None, False
+    for line in policy.splitlines():
+        text = line.strip()
+        if text == "port-group":
+            inside, name, regexp = True, "", ""
+        elif text == "end-port-group" and inside:
+            inside = False
+            if name == "root_switches":
+                rule = regexp
+        elif inside and text.startswith("name:"):
+            name = text[len("name:"):].strip()
+        elif inside and text.startswith("port-regexp:"):
+            regexp = text[len("port-regexp:"):].strip()
+    return rule
+
+
 def load_shared_configuration(state, ha):
     """ufm-enterprise starting on the master reads gv.cfg and the licenses from /opt/ufm/files; with
-    multi_port_sm = ha_enabled and ib1 added, opensm runs on both smi ports (ufm-manual.log 2085-2087)."""
+    multi_port_sm = ha_enabled and ib1 added, opensm runs on both smi ports (ufm-manual.log 2085-2087).
+    v3.1.6 B7 (问题文档 18.2, 20.4): OpenSM also loads the root port group, logs
+    `osm_create_port_grp: New Port Group Added: root_switches` and dumps NODES and SWITCHES with each ASIC's
+    Rank (the section layout of tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py): the matched switches are
+    rank 0, the others 1. Without a root group OpenSM ranks by itself, here the spines 0 (inferred: on a
+    two-tier fabric its own choice may look the same). state: keep_smdb (no new dump), rank_override
+    {guid: rank}, no_load_event, no_smdb_sections, one_smi (gv.cfg not taken: one smi line)."""
+    import re
     files = os.path.join(shared_dir(), "opt/ufm/files")
     gv = open(os.path.join(files, "conf/gv.cfg")).read() if os.path.exists(os.path.join(files, "conf/gv.cfg")) else ""
     master = state["ufms"][ha["master"]]
     lines = [f'{master.get("hca_guid", "0x0200000000000a01")}, VALID    , MAIN     ,    0, "smi0:1"']
-    if "multi_port_sm = ha_enabled" in gv and "additional_fabric_interfaces = ib1" in gv:
+    if "multi_port_sm = ha_enabled" in gv and "additional_fabric_interfaces = ib1" in gv and not state.get("one_smi"):
         lines.append(f'{master.get("hca_guid2", "0x0200000000000a02")}, VALID    , AUXILIARY,    0, "smi1:1"')
+    rule = opensm_root_rule(files)
+    if not state.get("no_smdb_sections"):
+        lines += ["START_NODES", "SystemImageGUID, NodeGUID, NodeType, ExtNodeType, NumPorts, VendorID, DeviceID, NodeDesc",
+                  '0x0200000000000a00, 0x0200000000000a00, 1, 0, 2, 713, 4131, "ufm-host mlx5_0"']
+        lines += [f'{guid}, {guid}, 2, 0, 149, 713, 54004, "{description}"' for guid, description in state.get("fabric", [])]
+        lines += ["END_NODES", "START_SWITCHES",
+                  "NodeGUID, NumPorts, Status, Rank, Coordinate, ISSU, SharpMLIDStart, SharpMLIDEnd"]
+        for guid, description in state.get("fabric", []):
+            name = description.split(";", 1)[-1].split(":", 1)[0]
+            rank = 0 if (re.search(rule, name) if rule else "spine" in name) else 1
+            rank = state.get("rank_override", {}).get(guid, rank)
+            lines.append(f"{guid}, 149, 0, {rank}, 0xffffffff, 0, 0, 0")
+        lines.append("END_SWITCHES")
     os.makedirs(os.path.join(files, "log"), exist_ok=True)
-    with open(os.path.join(files, "log/opensm-smdb.dump"), "w") as handle:
-        handle.write("\n".join(lines) + "\n")
+    if not (state.get("keep_smdb") and os.path.exists(os.path.join(files, "log/opensm-smdb.dump"))):
+        with open(os.path.join(files, "log/opensm-smdb.dump"), "w") as handle:
+            handle.write("\n".join(lines) + "\n")
+    with open(os.path.join(files, "log/opensm.log"), "a") as handle:
+        handle.write("Nov 17 10:00:00 000001 [0001] 0x02 -> osm_opensm_init: OpenSM started\n")
+        if rule and not state.get("no_load_event"):
+            handle.write("Nov 17 10:00:02 000002 [0001] 0x02 -> osm_create_port_grp: "
+                         "New Port Group Added: root_switches,  1 rules in group\n")
     licenses = os.path.join(files, "licenses")
     ha["loaded_licenses"] = sorted(os.listdir(licenses)) if os.path.isdir(licenses) else []
 
@@ -1499,6 +1567,9 @@ def docker(state, name, args):
             print(f'Switch  : {guid} ports 149 "{description}" enhanced port 0 lid 11 lmc 0')
         return 0
     if args[2:] == ["ufmlicense"]:
+        # v3.1.6 B7 (Q-086): reads after a failover are counted, so a test can show an unchanged license is not read
+        ha["ufmlicense_reads"] = ha.get("ufmlicense_reads", 0) + (1 if ha.get("failovers") else 0)
+        save(state)
         rule = "|" + "-" * 120 + "|"
         print(rule)
         print("|   Customer ID   |     SN     |        swName      |        Type         |   MAC Address   "
@@ -1508,7 +1579,7 @@ def docker(state, name, args):
               "|2026-11-21     |1024 |Advanced       |Valid   |")
         for _license in ha.get("loaded_licenses", []):
             for node in sorted(state["ufms"]):
-                status = "Valid" if node == ha["master"] else "Invalid"
+                status = "Valid" if node == ha["master"] and not ha.get("license_invalid") else "Invalid"
                 print(f"|986799359        |7777777777  |UFM Enterprise      |Subscription         "
                       f"|{state['ufms'][node]['reported_mac']}|2027-10-21     |1024 |Advanced       |{status}   |")
         print(rule)
@@ -1771,8 +1842,17 @@ ws_port = 8000
 [Logging]
 level = INFO
 """
-OPENSM_CONF = ("root_guid_file /opt/ufm/files/conf/opensm/root_guid.conf\n"
+# v3.1.6 B7: opensm.conf in its default state (问题文档 18.2, owner 2026-11-17): an active pgrp_policy_file (null)
+# and root_guid_file at the standard path; no policy file, no root_guid.conf
+OPENSM_CONF = ("# Port Group policy file\npgrp_policy_file (null)\n\n"
+               "root_guid_file /opt/ufm/files/conf/opensm/root_guid.conf\n"
                "# 0x2 - The root_guid_file is complete for all ranks.\n")
+PGRP_FILE = "/opt/ufm/files/conf/opensm/port_groups_policy_file.conf"
+# the rule from ib.csv's one spine (问题文档 18.4 第 2 条): shape ew-spine{n}
+SPINE_RULE = r"^(ew-spine[0-9]+)(\..*)?$"
+ROOT_POLICY = f"port-group\nname: root_switches\nport-regexp: {SPINE_RULE}\nend-port-group\n"
+OPENSM_CONF_DONE = OPENSM_CONF.replace("pgrp_policy_file (null)\n",
+                                       f"#pgrp_policy_file (null)\npgrp_policy_file {PGRP_FILE}\n")
 LICENSE_TEXT = "fixture license, not a real one\n"
 LICENSE_URL = "http://198.51.103.200:8088/image/site.lic"
 SPINE = "ew-spine001.site01.example.test"   # the ib row in OTHER_ROWS
@@ -1859,7 +1939,7 @@ class FakeSshCase(unittest.TestCase):
     def run_login(self, allow_change=True, choose=None, action="login", ipmi_password="", upgrade_wait=(1, 1, 30),
                   apply=True, confirm=None, factory=None, confirm_new_password=None,
                   eth_password=None, ask_eth=None, ha_wait=(0, 60, 0, 60), direct_access=frozenset(),
-                  ignore_cable_check=False, refresh_host_key=frozenset()):
+                  ignore_cable_check=False, refresh_host_key=frozenset(), failover_settle=0):
         if not self.state_path.exists():
             self.state.setdefault("image_url", IMAGE_URL)
             self.state_path.write_text(json.dumps(self.state), encoding="utf-8")
@@ -1876,6 +1956,9 @@ class FakeSshCase(unittest.TestCase):
                               apply=apply, confirm=confirm, confirm_new_password=confirm_new_password,
                               ha_wait=ha_wait, direct_access=direct_access, ignore_cable_check=ignore_cable_check,
                               refresh_host_key=refresh_host_key)
+        # v3.1.6 B7 (指导 8.18 注入点): the fixed wait after a real failover (Q-084, production 60 s) is 0 here unless
+        # a test sets it, or every case reaching a failover would sleep a minute
+        session.failover_settle = failover_settle
         self.session = session
         if action in ("trust", "ha_setup", "check", "config_upgrade_all", "ha_post_config_command"):
             results = {item.hostname.split(".")[0]: item for item in getattr(session, action)(plan.nodes)}
@@ -3171,8 +3254,11 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
         self.assertEqual(master[master.index(("ha_config", "CONFIGURED")):],
                          [("ha_config", "CONFIGURED"), ("drbd_sync", "SYNCED"), ("ha_start", "STARTED"),
                           ("ha_status", "OK"), ("post_ha_license", "INSTALLED"), ("post_ha_gv_cfg", "CHANGED"),
-                          ("post_ha_root_guid", "CHANGED"), ("post_ha_failover", "DONE")])
-        self.assertEqual(self.outcomes(applied["ufm02"])[-1], ("post_ha_verify", "OK"))
+                          ("post_ha_root", "CHANGED"), ("post_ha_failover", "DONE")])
+        # R-031 (指导 8.18 第 6、7、9 条): root is checked on the new master by itself, then the script is left there
+        self.assertEqual(self.outcomes(applied["ufm02"])[-3:], [("post_ha_verify", "OK"),
+                                                               ("post_ha_root_verify", "VERIFIED"),
+                                                               ("post_ha_root_script", "WRITTEN")])
         self.assertEqual((state["ha"]["master"], state["ha"]["failovers"]), ("ufm02", 1), "no failback")
         self.assertEqual(state["ha"]["sync_left"], 0)
         self.assertIn("等待 DRBD 同步 [2]", logs, "a timestamped line per probe while the sync runs")
@@ -3582,6 +3668,32 @@ class HaPostConfigTest(ConfiguredPairCase):
                 handle.write(f"{name},ib,NA,198.51.100.{20 + 2 * index},/23,198.51.101.254,,"
                              f"198.51.100.{21 + 2 * index},/23,198.51.101.254" + "," * 26 + "\n")
 
+    def set_state(self, **values):
+        """Fake device knobs after make_ha_running (v3.1.6 B7)."""
+        state = json.loads(self.state_path.read_text())
+        for key, value in values.items():
+            if key.startswith("ha_"):
+                state["ha"][key[len("ha_"):]] = value
+            else:
+                state[key] = value
+        self.state_path.write_text(json.dumps(state))
+
+    def rename_ib_row(self, old, new):
+        """Both ib.csv and the master inventory 02 (v3.1.6 B0: ib.csv is a subset of 02)."""
+        for name in ("ib.csv", "02-devices_config.csv"):
+            path = self.inputs / name
+            path.write_text(path.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
+
+    def opensm(self, relative="opensm.conf"):
+        path = self.files / "conf/opensm" / relative
+        return path.read_text() if path.exists() else None
+
+    def post_ha_backup(self, node="ufm01"):
+        return self.sandbox / node / "root/ufm-setup-upgrade-backup" / self.run_dir.name / "post-ha"
+
+    def notes(self, results):
+        return [note for item in results.values() for note in item.facts.get("notes", [])]
+
     def test_changes_fail_over_once_and_are_checked_on_the_new_master(self):
         self.make_ha_running()
         asked = []
@@ -3598,19 +3710,28 @@ class HaPostConfigTest(ConfiguredPairCase):
         expected = (GV_CFG_SHIPPED.replace("multi_port_sm = disabled", "multi_port_sm = ha_enabled")
                     .replace("additional_fabric_interfaces =\n", "additional_fabric_interfaces = ib1\n"))
         self.assertEqual((self.files / "conf/gv.cfg").read_text(), expected)
-        backup = self.sandbox / "ufm01/root/ufm-setup-upgrade-backup" / self.run_dir.name / "post-ha"
+        backup = self.post_ha_backup()
         self.assertEqual((backup / "gv.cfg").read_text(), GV_CFG_SHIPPED)
-        # root_guid.conf: every ASIC of the spine in ib.csv, in the owner's order; the leaf is not a root
-        self.assertEqual((self.files / "conf/opensm/root_guid.conf").read_text(),
-                         "0x02000000000001a0\n0x02000000000001a1\n")
+        # R-031 (问题文档 18.4 第 3 条, owner 2026-11-17): from the default state opensm.conf keeps the (null) line
+        # as a comment with the standard path right below it, the policy file gets the root_switches group by
+        # the ib.csv spine's shape, root_guid.conf names the group; the changed opensm.conf is backed up
+        self.assertEqual(self.opensm(), OPENSM_CONF_DONE)
+        self.assertIn("#pgrp_policy_file (null)\npgrp_policy_file " + PGRP_FILE + "\n", self.opensm(), "two lines")
+        self.assertEqual(self.opensm("port_groups_policy_file.conf"), ROOT_POLICY)
+        self.assertEqual(self.opensm("root_guid.conf"), "root_switches\n")
+        self.assertEqual((backup / "opensm.conf").read_text(), OPENSM_CONF)
         # one failover; the new master shows two smi lines and a Valid license for its own MAC
         self.assertEqual((state["ha"]["master"], state["ha"]["failovers"]), ("ufm02", 1))
         self.assertEqual(state["ha"]["loaded_licenses"], ["site.lic"])
         self.assertEqual(self.outcomes(results["ufm01"]),
                          [("post_ha_license", "INSTALLED"), ("post_ha_gv_cfg", "CHANGED"),
-                          ("post_ha_root_guid", "CHANGED"), ("post_ha_failover", "DONE")])
-        self.assertEqual(self.outcomes(results["ufm02"]), [("post_ha_verify", "OK")])
-        self.assertEqual([note for item in results.values() for note in item.facts.get("notes", [])], [])
+                          ("post_ha_root", "CHANGED"), ("post_ha_failover", "DONE")])
+        # R-031 (指导 8.18 第 6、7、9 条): root by its own rank and load evidence, then the script on the new master
+        self.assertEqual(self.outcomes(results["ufm02"]), [("post_ha_verify", "OK"), ("post_ha_root_verify", "VERIFIED"),
+                                                          ("post_ha_root_script", "WRITTEN")])
+        verified = next(step for step in results["ufm02"].steps if step["step"] == "post_ha_root_verify")
+        self.assertIn("root 生效：1 台 / 2 个 ASIC 为 rank 0", verified["detail"])
+        self.assertEqual(self.notes(results), [])
         # every VIP login checked the host key against the two UFMs' own keys only
         vip_calls = [call for call in calls if call["target"].endswith("@" + self.VIP)]
         self.assertTrue(vip_calls)
@@ -3618,16 +3739,23 @@ class HaPostConfigTest(ConfiguredPairCase):
         known = (self.run_dir / "vip-known-hosts").read_text()
         self.assertIn(f"{self.VIP} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHOSTKEYUFM01", known)
         self.assertIn(f"{self.VIP} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHOSTKEYUFM02", known)
+        # 指导 8.18 第 9 条 (问题文档 18.4 第 7 条): the script lands only on the host the VIP was last confirmed on
+        script = self.post_ha_backup("ufm02") / "ufm-root-switches.py"
+        self.assertEqual(script.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.post_ha_backup("ufm01") / "ufm-root-switches.py").exists())
 
         # run again: everything is as wanted, nothing changes, no failover, nothing to confirm
         again, state, _calls, _logs = self.run_login(action="ha_post_config_command",
                                                      confirm=lambda host, action: self.fail(action))
         for name in ("ufm01", "ufm02"):
             self.assertEqual(again[name].status, "HA_POST_UP_TO_DATE", again[name].detail)
+        # R-031 (指导 8.18 第 6 条): no change and no failover still leave the script (Q-086: no check of effect)
         self.assertEqual(self.outcomes(again["ufm02"]),
                          [("post_ha_license", "UNCHANGED"), ("post_ha_gv_cfg", "UNCHANGED"),
-                          ("post_ha_root_guid", "UNCHANGED"), ("post_ha_failover", "NOT_NEEDED")])
+                          ("post_ha_root", "UNCHANGED"), ("post_ha_failover", "NOT_NEEDED"),
+                          ("post_ha_root_script", "WRITTEN")])
         self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertTrue((self.post_ha_backup("ufm02") / "ufm-root-switches.py").exists())
 
     def test_check_of_an_existing_ha_built_without_our_trust_counts_no_trust_change(self):
         # Owner 2026-10-23 (lab check of an HA set up by hand): ha-setup never touches an existing HA, so it
@@ -3656,21 +3784,336 @@ class HaPostConfigTest(ConfiguredPairCase):
         self.assertEqual({item.status for item in results.values()}, {"HA_POST_CONFIGURED"})
         notes = results["ufm01"].facts["notes"]
         self.assertIn("image 目录里没有 .lic 文件：未安装 license，跳过这一步；当前评估 license 到期日 2026-11-21", notes)
-        self.assertTrue(any("ew-spine002.site01.example.test" in note and "补齐后重跑 ha-post-config" in note
-                            for note in notes), notes)
-        self.assertEqual((self.files / "conf/opensm/root_guid.conf").read_text(),
-                         "0x02000000000001a0\n0x02000000000001a1\n", "what was found is still written")
+        # R-031 (问题文档 18.4 第 4 条): a root missing from ibswitches is only a note, the rule is written all the same
+        self.assertTrue(any("ibswitches 里缺这些 root" in note and "ew-spine002" in note for note in notes), notes)
+        self.assertEqual(self.opensm("root_guid.conf"), "root_switches\n", "the rule is written all the same")
+        self.assertEqual(self.opensm("port_groups_policy_file.conf"), ROOT_POLICY, "spine002 has the same shape")
+        # Q-085: a root that is not online leaves root NOT_VERIFIED with a note, not a failure
+        self.assertEqual(self.outcomes(results["ufm02"])[:2], [("post_ha_verify", "OK"),
+                                                              ("post_ha_root_verify", "NOT_VERIFIED")])
+        self.assertTrue(any("这些 root 未上线" in note and "ew-spine002" in note for note in self.notes(results)))
         self.assertFalse(list((self.files / "licenses").iterdir()))
         self.assertNotIn("wget", state["ufms"]["ufm01"])
 
     def test_core_switches_are_the_only_roots_when_the_fabric_has_them(self):
         # Owner 2026-10-22: a large fabric has core switches (named "core"); then only they are roots.
+        # R-031 (问题文档 18.4 第 1、2 条): the core group's shape is the only rule
         self.add_ib_rows("ew-core001.site01.example.test")
         self.state["fabric"] = FABRIC + [["0x02000000000003c0", "MF0;ew-core001.site01.example.test:Q3400_RA/U1"]]
         self.make_ha_running()
         results, _state, _calls, _logs = self.run_login(action="ha_post_config_command")
         self.assertEqual({item.status for item in results.values()}, {"HA_POST_CONFIGURED"})
-        self.assertEqual((self.files / "conf/opensm/root_guid.conf").read_text(), "0x02000000000003c0\n")
+        self.assertEqual(self.opensm("port_groups_policy_file.conf"),
+                         "port-group\nname: root_switches\nport-regexp: ^(ew-core[0-9]+)(\\..*)?$\nend-port-group\n")
+        self.assertEqual(self.opensm("root_guid.conf"), "root_switches\n")
+        root = next(step for step in results["ufm01"].steps if step["step"] == "post_ha_root")
+        self.assertIn("core", root["detail"])
+
+    # ---- v3.1.6 B7 / R-031 (指导 8.18; 问题文档 18.4; 04 Q-081, Q-084～Q-086)
+
+    def make_root_done(self, **policy):
+        """The three root files already as R-031 wants them (指导 8.18 第 3、4 条)."""
+        (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF_DONE)
+        (self.files / "conf/opensm/port_groups_policy_file.conf").write_text(ROOT_POLICY)
+        (self.files / "conf/opensm/root_guid.conf").write_text("root_switches\n")
+
+    def make_gv_done(self):
+        (self.files / "conf/gv.cfg").write_text(
+            GV_CFG_SHIPPED.replace("multi_port_sm = disabled", "multi_port_sm = ha_enabled")
+            .replace("additional_fabric_interfaces =\n", "additional_fabric_interfaces = ib1\n"))
+
+    def test_q086_only_what_this_run_changed_is_checked_and_a_failover_always_checks_the_vip(self):
+        # Q-086 (需求文档 R-031 后继): only gv/license/root changed now are checked; a failover always checks the VIP;
+        # nothing changed: no failover and no check. An unchanged item's evidence is made wrong on the fake, so
+        # reading it would fail the run (指导 8.18 测试「未改项读取替身一旦被调用须失败」).
+        for license_changed in (True, False):
+            for gv_changed in (True, False):
+                for root_changed in (True, False):
+                    with self.subTest(license=license_changed, gv=gv_changed, root=root_changed):
+                        (self.files / "conf/gv.cfg").write_text(GV_CFG_SHIPPED)
+                        (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+                        for name in ("port_groups_policy_file.conf", "root_guid.conf"):
+                            if (self.files / "conf/opensm" / name).exists():
+                                (self.files / "conf/opensm" / name).unlink()
+                        for path in (self.files / "licenses").iterdir():
+                            path.unlink()
+                        if not license_changed:
+                            (self.files / "licenses/site.lic").write_text(LICENSE_TEXT)
+                        if not gv_changed:
+                            self.make_gv_done()
+                        if not root_changed:
+                            self.make_root_done()
+                        self.make_ha_running(license_invalid=not license_changed)
+                        self.set_state(one_smi=not gv_changed,
+                                       rank_override={} if root_changed else {"0x02000000000001a0": 1})
+                        results, state, _calls, _logs = self.run_login(action="ha_post_config_command",
+                                                                       ha_wait=(0, 60, 0, 2))
+                        any_change = license_changed or gv_changed or root_changed
+                        status = "HA_POST_CONFIGURED" if any_change else "HA_POST_UP_TO_DATE"
+                        for name in ("ufm01", "ufm02"):
+                            self.assertEqual(results[name].status, status, results[name].detail)
+                        self.assertEqual(state["ha"].get("failovers", 0), 1 if any_change else 0)
+                        self.assertEqual(state["ha"].get("ufmlicense_reads", 0) > 0, license_changed and any_change)
+                        steps = {step["step"]: step for item in results.values() for step in item.steps}
+                        self.assertEqual(steps["post_ha_root"]["outcome"], "CHANGED" if root_changed else "UNCHANGED")
+                        self.assertEqual("post_ha_verify" in steps, any_change)
+                        self.assertEqual("post_ha_root_verify" in steps, root_changed)
+                        self.assertEqual(steps["post_ha_root_script"]["outcome"], "WRITTEN")
+                        if any_change:
+                            detail = steps["post_ha_verify"]["detail"]
+                            self.assertIn("VIP 在 ufm02.site01.example.test 上", detail)
+                            self.assertEqual("gv.cfg 已生效" in detail, gv_changed, detail)
+                            self.assertEqual("license 有效" in detail, license_changed, detail)
+                            self.assertNotIn("root", detail, "post_ha_verify OK never stands for root (指导 8.18 第 12 条)")
+
+    def test_q086_a_changed_gv_cfg_still_fails_on_one_smi_line_beside_an_unready_root(self):
+        # 指导 8.18 第 6 条 / Q-085: when gv.cfg changed, its old hard failure (smdb with one smi line) stays and an
+        # unready root (here offline) never hides it
+        self.make_ha_running()
+        self.set_state(one_smi=True, fabric=[FABRIC[2]])
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+        detail = results["ufm01"].detail
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", detail)
+        self.assertIn("只有 1 行 smi", detail)
+        self.assertIn("这些 root 未上线", detail)
+        self.assertEqual(state["ha"]["failovers"], 1)
+
+    def test_q085_only_this_failovers_part_of_opensm_log_counts(self):
+        # 问题文档 22.3 / Q-085: a root_switches line from an earlier failover never stands for this one
+        self.make_ha_running()
+        first, _state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual(first["ufm01"].status, "HA_POST_CONFIGURED", first["ufm01"].detail)
+        self.assertIn("New Port Group Added: root_switches", (self.files / "log/opensm.log").read_text())
+        (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+        self.make_ha_running()
+        self.set_state(no_load_event=True)
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+        self.assertIn("未看到 OpenSM 读入 root_switches 组", results["ufm01"].detail)
+        self.assertEqual(state["ha"]["failovers"], 1)
+
+    def test_q086_an_unchanged_license_is_not_read_after_the_failover(self):
+        # Q-086: gv.cfg changed, the license already in place: the failover checks the VIP and gv.cfg, never the
+        # license (the fake would report it Invalid)
+        self.make_root_done()
+        (self.files / "licenses/site.lic").write_text(LICENSE_TEXT)
+        self.make_ha_running(license_invalid=True)
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIGURED", results["ufm01"].detail)
+        self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertEqual(state["ha"].get("ufmlicense_reads", 0), 0)
+
+    def test_q084_one_settle_after_the_real_failover_then_two_phases_each_with_its_own_deadline(self):
+        # Q-084 (需求文档 R-031): exactly one 60 s wait after this run's real failover and before wait_ha_status;
+        # Q-086: wait_ha_status and post_verify keep their own ha_wait interval and limit, each from its own entry.
+        # A fake clock: time.sleep advances time.monotonic, nothing really sleeps.
+        self.make_ha_running(status_errors=2)
+        self.set_state(rank_override={"0x02000000000001a0": 1})   # root never takes: post_verify runs to its limit
+        now, events = [1000.0], []
+        original = ufm.Session.run_script
+
+        def recorded(session, node, result, step, script, **kwargs):
+            events.append(step)
+            return original(session, node, result, step, script, **kwargs)
+
+        def sleep(seconds):
+            # subprocess.Popen.wait polls through time.sleep in steps of a few ms: not a wait of the tool
+            if seconds >= 1:
+                events.append(seconds)
+            now[0] += seconds
+
+        with mock.patch.object(ufm.Session, "run_script", recorded), \
+                mock.patch.object(ufm.time, "sleep", sleep), mock.patch.object(ufm.time, "monotonic", lambda: now[0]):
+            results, state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 15, 90),
+                                                           failover_settle=60)
+        self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+        self.assertIn("failover 后核对未通过", results["ufm01"].detail)
+        self.assertIn("在线 root 有 ASIC 不是 rank 0", results["ufm01"].detail)
+        sleeps = [item for item in events if not isinstance(item, str)]
+        self.assertEqual(sleeps, [60, 15, 15] + [15] * 6,
+                         "one 60 s wait; wait_ha_status 2 x 15 s; post_verify 6 x 15 s to its own 90 s limit")
+        failover = events.index("post-ha-failover")
+        self.assertEqual(events[failover + 1], 60, "the wait comes right after the failover command")
+        self.assertTrue(str(events[failover + 2]).startswith("ha-status-"), events[failover:failover + 4])
+        defaults = inspect.signature(ufm.Session).parameters
+        self.assertEqual((defaults["ha_wait"].default, defaults["failover_settle"].default), ((100, 7200, 15, 900), 60),
+                         "ha_wait keeps its meaning; the production wait is 60 s")
+
+        # no change: no failover, no wait (Q-084: only after this run's real failover)
+        self.make_root_done()
+        self.make_gv_done()
+        (self.files / "licenses/site.lic").write_text(LICENSE_TEXT)
+        self.make_ha_running()
+        events.clear()
+        with mock.patch.object(ufm.time, "sleep", sleep), mock.patch.object(ufm.time, "monotonic", lambda: now[0]):
+            again, state, _calls, _logs = self.run_login(action="ha_post_config_command", failover_settle=60)
+        self.assertEqual(again["ufm01"].status, "HA_POST_UP_TO_DATE", again["ufm01"].detail)
+        self.assertNotIn(60, events)
+
+    def test_q085_confirmed_root_problems_fail_at_the_deadline_and_unready_ones_are_attention(self):
+        # Q-085 (需求文档 R-031; 问题文档 18.4 第 5 条): confirmed problems are retried to the limit and then
+        # HA_POST_CONFIG_FAILED; a root not online, no root online, a switch without a host name and missing
+        # evidence are ATTENTION/NOT_VERIFIED only; an unready item never hides a confirmed one.
+        old = time.time() - 3600
+        cases = {
+            "root_rank": ({"rank_override": {"0x02000000000001a1": 2}}, "在线 root 有 ASIC 不是 rank 0"),
+            "non_root_rank0": ({"rank_override": {"0x02000000000002b0": 0}}, "非 root 交换机是 rank 0"),
+            "old_smdb": ({"keep_smdb": True}, "smdb 早于本次 failover"),
+            "no_load_event": ({"no_load_event": True}, "未看到 OpenSM 读入 root_switches 组"),
+        }
+        for name, (knobs, reason) in cases.items():
+            with self.subTest(failed=name):
+                (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+                self.make_ha_running()
+                os.utime(self.files / "log/opensm-smdb.dump", (old, old))
+                self.set_state(**knobs)
+                results, state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+                self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+                self.assertIn("failover 后核对未通过", results["ufm01"].detail)
+                self.assertIn(reason, results["ufm01"].detail)
+                self.assertEqual(state["ha"]["failovers"], 1, "no rollback, no second failover")
+        unready = {
+            "root_offline": ({"fabric": [FABRIC[2]]}, "这些 root 未上线"),
+            "no_host_name": ({"fabric": FABRIC + [["0x02000000000004d0", "MF0;:Q3400_RA/U1"]]}, "主机名未生效"),
+            "no_sections": ({"no_smdb_sections": True}, "未能核对"),
+        }
+        for name, (knobs, reason) in unready.items():
+            with self.subTest(unready=name):
+                (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+                self.make_ha_running()
+                self.set_state(**knobs)
+                results, _state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+                self.assertEqual(results["ufm01"].status, "HA_POST_CONFIGURED", results["ufm01"].detail)
+                verify = next(step for step in results["ufm02"].steps if step["step"] == "post_ha_root_verify")
+                self.assertEqual(verify["outcome"], "NOT_VERIFIED")
+                self.assertTrue(any(reason in note for note in self.notes(results)), self.notes(results))
+        with self.subTest(extra="a switch outside ib.csv matching the rule is only an extra match"):
+            (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+            self.make_ha_running()
+            self.set_state(fabric=FABRIC + [["0x02000000000009e0", "MF0;ew-spine009.site01.example.test:Q3400_RA/U1"]])
+            results, _state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+            self.assertEqual(results["ufm01"].status, "HA_POST_CONFIGURED", results["ufm01"].detail)
+            verify = next(step for step in results["ufm02"].steps if step["step"] == "post_ha_root_verify")
+            self.assertEqual(verify["outcome"], "VERIFIED", self.notes(results))
+            self.assertTrue(any("ew-spine009" in note for note in self.notes(results)))
+            self.assertFalse(any("非 root 交换机是 rank 0" in note for note in self.notes(results)))
+        with self.subTest(mixed="a root offline and another root not at rank 0"):
+            (self.files / "conf/opensm/opensm.conf").write_text(OPENSM_CONF)
+            self.add_ib_rows("ew-spine002.site01.example.test")
+            self.make_ha_running()
+            self.set_state(rank_override={"0x02000000000001a1": 2})
+            results, _state, _calls, _logs = self.run_login(action="ha_post_config_command", ha_wait=(0, 60, 0, 1))
+            self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+            self.assertIn("在线 root 有 ASIC 不是 rank 0", results["ufm01"].detail)
+            self.assertIn("ew-spine002", results["ufm01"].detail, "the unready root is still listed")
+
+    def test_no_core_or_spine_in_ib_csv_leaves_root_alone_but_not_license_and_gv(self):
+        # 指导 8.18 第 1 条 (owner 2026-11-17, 问题文档 :1293, :1336): three files untouched, no script, the shapes listed;
+        # license and gv.cfg still change and fail over once
+        self.rename_ib_row("ew-spine001.site01.example.test", "ew-node001.site01.example.test")
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual({item.status for item in results.values()}, {"HA_POST_CONFIGURED"})
+        self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertEqual(self.opensm(), OPENSM_CONF)
+        self.assertIsNone(self.opensm("port_groups_policy_file.conf"))
+        self.assertIsNone(self.opensm("root_guid.conf"))
+        self.assertTrue(any("ib.csv 主机名里认不出 core/spine，root 配置未做" in note and "ew-node{n}" in note
+                            for note in self.notes(results)), self.notes(results))
+        steps = {step["step"]: step["outcome"] for item in results.values() for step in item.steps}
+        self.assertEqual(steps["post_ha_root"], "SKIPPED")
+        self.assertNotIn("post_ha_root_verify", steps)
+        self.assertNotIn("post_ha_root_script", steps)
+        for node in ("ufm01", "ufm02"):
+            self.assertFalse((self.post_ha_backup(node) / "ufm-root-switches.py").exists())
+
+    def test_a_shape_both_spine_and_leaf_is_refused_before_any_change(self):
+        # 问题文档 18.4 第 1 条: a group that looks like spine and leaf is an error, listed; nothing is written
+        self.rename_ib_row("ew-spine001.site01.example.test", "ew-spine-leaf001.site01.example.test")
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+        self.assertIn("既像 spine 又像 leaf", results["ufm01"].detail)
+        self.assertIn("ew-spine-leaf{n}", results["ufm01"].detail)
+        self.assertEqual((self.files / "conf/gv.cfg").read_text(), GV_CFG_SHIPPED)
+        self.assertFalse(list((self.files / "licenses").iterdir()))
+        self.assertEqual(self.opensm(), OPENSM_CONF)
+        self.assertNotIn("failovers", state["ha"])
+
+    def test_custom_paths_other_groups_and_same_basename_backups(self):
+        # 指导 8.18 第 3、4 条: custom files under /opt/ufm/files are kept as the targets; other groups and comments
+        # stay; an old GUID list becomes the group name; two files of one basename in two directories both keep
+        # their original bytes in the backup
+        for sub in ("conf/opensm/a", "conf/opensm/b"):
+            (self.files / sub).mkdir(parents=True)
+        conf = ("pgrp_policy_file\t/opt/ufm/files/conf/opensm/a/site.conf\n"
+                "root_guid_file   /opt/ufm/files/conf/opensm/b/site.conf\n")
+        policy = ("# site groups\nport-group\nname: storage\nport-guid: 0x0200000000000005\nend-port-group\n")
+        guids = "0x02000000000001a0\n0x02000000000001a1\n"
+        (self.files / "conf/opensm/opensm.conf").write_text(conf)
+        (self.files / "conf/opensm/a/site.conf").write_text(policy)
+        (self.files / "conf/opensm/b/site.conf").write_text(guids)
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIGURED", results["ufm01"].detail)
+        self.assertEqual(self.opensm(), conf, "custom paths are kept")
+        self.assertEqual(self.opensm("a/site.conf"), policy + ROOT_POLICY)
+        self.assertEqual(self.opensm("b/site.conf"), "root_switches\n")
+        self.assertIsNone(self.opensm("port_groups_policy_file.conf"))
+        backups = {path.name: path.read_text() for path in self.post_ha_backup().iterdir()}
+        self.assertIn(policy, backups.values())
+        self.assertIn(guids, backups.values())
+        self.assertNotIn("opensm.conf", backups, "an unchanged opensm.conf is not backed up")
+        self.assertEqual(state["ha"]["failovers"], 1)
+
+    def test_a_bad_policy_block_stops_before_any_write(self):
+        # 指导 8.18 第 4 条: every root file is read and planned before any backup or write; a policy file
+        # without its end-port-group writes none of them (nor license or gv.cfg, planned before them)
+        (self.files / "conf/opensm/port_groups_policy_file.conf").write_text("port-group\nname: storage\n")
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+        self.assertIn("port_groups_policy_file.conf", results["ufm01"].detail)
+        self.assertEqual(self.opensm(), OPENSM_CONF)
+        self.assertIsNone(self.opensm("root_guid.conf"))
+        self.assertEqual((self.files / "conf/gv.cfg").read_text(), GV_CFG_SHIPPED)
+        self.assertFalse(list((self.files / "licenses").iterdir()))
+        self.assertNotIn("failovers", state["ha"])
+
+    def test_a_write_failing_midway_lists_what_was_written_and_does_not_fail_over(self):
+        # 指导 8.18 第 5 条: a real I/O failure on a later root file lists the partial writes, keeps the backups,
+        # stops: no false success, no failover
+        conf = OPENSM_CONF.replace("/opt/ufm/files/conf/opensm/root_guid.conf",
+                                   "/opt/ufm/files/conf/opensm/missing/root_guid.conf")
+        (self.files / "conf/opensm/opensm.conf").write_text(conf)
+        self.make_ha_running()
+        results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+        detail = results["ufm01"].detail
+        self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", detail)
+        self.assertIn("已写", detail)
+        self.assertIn(PGRP_FILE, detail)
+        self.assertIn("gv.cfg", detail)
+        self.assertIn("未 failover", detail)
+        self.assertEqual(self.opensm("port_groups_policy_file.conf"), ROOT_POLICY)
+        self.assertEqual(self.opensm(), conf, "opensm.conf comes after the failed file")
+        self.assertNotIn("failovers", state["ha"])
+
+    def test_a_target_outside_opt_ufm_files_or_twice_the_same_file_is_refused(self):
+        # 问题文档 18.4 第 3 条: outside /opt/ufm/files, or both keys naming one file: error, nothing written
+        for name, conf in (("outside", "pgrp_policy_file /etc/opensm/site.conf\nroot_guid_file (null)\n"),
+                           ("dotdot", "pgrp_policy_file /opt/ufm/files/../x.conf\n"),
+                           ("same", "pgrp_policy_file /opt/ufm/files/conf/opensm/x.conf\n"
+                                    "root_guid_file /opt/ufm/files/conf/opensm/x.conf\n")):
+            with self.subTest(name):
+                (self.files / "conf/opensm/opensm.conf").write_text(conf)
+                self.make_ha_running()
+                results, state, _calls, _logs = self.run_login(action="ha_post_config_command")
+                self.assertEqual(results["ufm01"].status, "HA_POST_CONFIG_FAILED", results["ufm01"].detail)
+                self.assertIn("请人工确认", results["ufm01"].detail)
+                self.assertEqual(self.opensm(), conf)
+                self.assertEqual((self.files / "conf/gv.cfg").read_text(), GV_CFG_SHIPPED)
+                self.assertNotIn("failovers", state["ha"])
 
     def test_a_stranger_answering_the_vip_is_refused_before_any_change(self):
         self.make_ha_running()
@@ -3727,10 +4170,11 @@ class HaPostConfigPureTest(unittest.TestCase):
                 'Switch  : 0x02000000000001b0 ports 149 "MF0;ew-spine002.example.test:Q3400_RA/U1" enhanced port 0 lid 3 lmc 0\n')
         switches = ufm.parse_ibswitches(text)
         self.assertEqual(len(switches), 3)
-        guids, missing = ufm.root_guid_plan(switches, ["ew-spine002", "ew-spine010.example.test", "ew-spine003"])
-        self.assertEqual(guids, ["0x02000000000001b0", "0x02000000000001a0", "0x02000000000001a1"],
-                         "natural order: spine002 before spine010, U1 before U2")
-        self.assertEqual(missing, ["ew-spine003"])
+        # R-031 (问题文档 18.4 第 4 条): ibswitches no longer gives GUIDs to write; it only checks the rule's devices,
+        # one switch with several ASICs counted once, a missing root noted
+        plan = ufm.root_plan(["ew-spine002", "ew-spine010.example.test", "ew-spine003"])
+        self.assertEqual(ufm.root_ibswitches_check(switches, plan),
+                         {"readable": True, "devices": 2, "asics": 3, "missing": ["ew-spine003"], "extra": []})
 
     def test_the_license_row_of_the_master_must_be_valid(self):
         table = ("|----|\n|   Customer ID   |   Type   |   MAC Address   |   Exp. Date   | Status |\n|----|\n"
@@ -4516,6 +4960,481 @@ class ScriptLoaderTest(unittest.TestCase):
             (folder / "001-first.sh").unlink()   # someone tidied up by hand: numbers still only go up
             self.assertEqual(run(again).stdout, f"{ufm.SCRIPT_TAG}003-first.sh\none\n")
             self.assertEqual(oct(folder.stat().st_mode & 0o777), "0o700")
+
+
+# v3.1.6 B7 / R-031 (指导 8.18; 问题文档 18.2-18.6): smdb in the two-section layout the owner read on site B
+# (问题文档 18.2) and the START_<NAME>/END_<NAME> format of tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py
+SMDB_SITE_B = """0x0200000000000a01, VALID    , MAIN     ,    0, "smi0:1"
+START_NODES
+SystemImageGUID, NodeGUID, NodeType, ExtNodeType, NumPorts, VendorID, DeviceID, NodeDesc
+0x0200000000000a00, 0x0200000000000a00, 1, 0, 2, 713, 4131, "gpu-node01 mlx5_0"
+0x0200000000001000, 0x0200000000001000, 2, 0, 149, 713, 54004, "MF0;sp1-1.site.example.test:Q3400_RA/U1"
+0x0200000000001000, 0x0200000000001001, 2, 0, 149, 713, 54004, "MF0;sp1-1.site.example.test:Q3400_RA/U2"
+0x0200000000002000, 0x0200000000002000, 2, 0, 149, 713, 54004, "MF0;lf1-1.site.example.test:Q3400_RA/U1"
+END_NODES
+START_SWITCHES
+NodeGUID, NumPorts, Status, Rank, Coordinate, ISSU, SharpMLIDStart, SharpMLIDEnd
+0x0200000000001000, 149, 0, 0, 0xffffffff, 0, 0, 0
+0x0200000000001001, 149, 0, 0, 0xffffffff, 0, 0, 0
+0x0200000000002000, 149, 0, 1, 0xffffffff, 0, 0, 0
+END_SWITCHES
+"""
+SITE_B_RULE = r"^(sp[0-9]+-[0-9]+)(\..*)?$"
+
+
+class UfmRootRoleTest(unittest.TestCase):
+    """R-031 pure rules: shape groups and roles, the rule, the A=R and ibswitches checks, the three files, the smdb
+    ranks and Q-085's grading. Expectations from 问题文档 18.4 and 指导 8.18, not from the implementation."""
+
+    def test_shapes_and_roles_by_whole_words(self):
+        # 问题文档 18.4 第 1 条: first label, digit runs as a placeholder, words split at - _ . and at the placeholder
+        self.assertEqual(ufm.name_shape("site-spine001.dc1.example.test"), "site-spine{n}")
+        self.assertEqual(ufm.name_shape("sp12-3"), "sp{n}-{n}")
+        self.assertEqual(ufm.name_shape("xx-sp013-r2"), "xx-sp{n}-r{n}")
+        self.assertEqual(ufm.name_shape("Site-Spine01"), "Site-Spine{n}", "case as in ib.csv")
+        roles = {"site-spine{n}": "spine", "sp{n}-{n}": "spine", "xx-sp{n}-r{n}": "spine", "ibsp{n}": "spine",
+                 "XX-EDIBS{n}": "spine", "Site-SPINE{n}": "spine", "ew-core{n}": "core", "site-leaf{n}": "leaf",
+                 "lf{n}-{n}": "leaf", "XX-EDIBLE{n}": "leaf", "wasp{n}": "", "ew-node{n}": "", "spinex{n}": "",
+                 "ew-spine-leaf{n}": "conflict", "sp{n}-lf{n}": "conflict"}
+        for shape, role in roles.items():
+            with self.subTest(shape):
+                self.assertEqual(ufm.shape_role(shape), role)
+        # a domain is never part of the shape: "sp" in the domain does not make a spine
+        self.assertEqual(ufm.shape_role(ufm.name_shape("node01.sp.example.test")), "")
+
+    def test_root_groups_core_first_several_shapes_and_none(self):
+        names = ["a-spine01.x.test", "a-spine02.x.test", "b-spine1.y.test", "a-leaf01.x.test", "a-misc01"]
+        plan = ufm.root_plan(names)
+        self.assertEqual(plan.kind, "spine")
+        self.assertEqual(plan.roots, ["a-spine01.x.test", "a-spine02.x.test", "b-spine1.y.test"])
+        self.assertEqual(plan.rule, r"^(a-spine[0-9]+|b-spine[0-9]+)(\..*)?$")
+        self.assertEqual(plan.unknown, ["a-misc{n}"])
+        self.assertEqual(plan.conflicts, [])
+        core = ufm.root_plan(names + ["a-core01.x.test"])
+        self.assertEqual((core.kind, core.roots, core.rule), ("core", ["a-core01.x.test"], r"^(a-core[0-9]+)(\..*)?$"))
+        none = ufm.root_plan(["a-leaf01", "a-misc01"])
+        self.assertEqual((none.kind, none.roots, none.rule), ("", [], ""))
+        self.assertEqual(sorted(none.groups), ["a-leaf{n}", "a-misc{n}"])
+        clash = ufm.root_plan(["a-spine01", "a-spine-leaf01"])
+        self.assertEqual(clash.conflicts, ["a-spine-leaf{n}"])
+
+    def test_the_rule_escapes_only_metacharacters_and_matches_short_or_long_names(self):
+        # 问题文档 18.4 第 2 条: [0-9]+ for the placeholder, metacharacters escaped, "-" not, ^(...)(\..*)?$
+        self.assertEqual(ufm.shape_regex("a+b(c)[d]{n}-x|y^$*?.\\"), r"a\+b\(c\)\[d\][0-9]+-x\|y\^\$\*\?\.\\")
+        rule = ufm.root_plan(["site-spine01"]).rule
+        self.assertEqual(rule, r"^(site-spine[0-9]+)(\..*)?$")
+        for name, matched in (("site-spine01", True), ("site-spine36.dc1.example.test", True),
+                              ("site-spine-test", False), ("site-spineX01", False), ("SITE-SPINE01", False),
+                              ("xsite-spine01", False), ("site-spine01x", False)):
+            with self.subTest(name):
+                self.assertEqual(bool(re.search(rule, name)), matched)
+
+    def test_a_rule_that_does_not_select_exactly_the_roots_is_an_error(self):
+        # 问题文档 18.4 第 4 条: A (ib.csv filtered by the rule) must equal R, otherwise no root write
+        from dataclasses import replace
+        names = ["ew-spine01.x.test", "ew-leaf01.x.test"]
+        plan = ufm.root_plan(names)
+        self.assertEqual(ufm.root_rule_problem(names, plan), "")
+        wrong = ufm.root_rule_problem(names, replace(plan, rule=r"^(ew-[a-z]+[0-9]+)(\..*)?$"))
+        self.assertIn("ew-leaf01.x.test", wrong)
+
+    def test_ibswitches_against_the_rule(self):
+        # 问题文档 18.4 第 4 条: devices by short name (four ASICs are one switch), missing and extra only noted
+        switches = [("0x0200000000001000", "MF0;sp1-1.site.example.test:Q3400_RA/U1", "sp1-1.site.example.test"),
+                    ("0x0200000000001001", "MF0;sp1-1.site.example.test:Q3400_RA/U2", "sp1-1.site.example.test"),
+                    ("0x0200000000001100", "MF0;sp1-9.site.example.test:Q3400_RA/U1", "sp1-9.site.example.test"),
+                    ("0x0200000000002000", "MF0;lf1-1.site.example.test:Q3400_RA/U1", "lf1-1.site.example.test")]
+        plan = ufm.root_plan(["sp1-1.site.example.test", "sp1-2.site.example.test", "lf1-1.site.example.test"])
+        self.assertEqual(ufm.root_ibswitches_check(switches, plan),
+                         {"readable": True, "devices": 2, "asics": 3, "missing": ["sp1-2"], "extra": ["sp1-9"]})
+        self.assertEqual(ufm.root_ibswitches_check([], plan)["readable"], False)
+
+    def test_opensm_conf_keys(self):
+        # 问题文档 18.4 第 3 条 and :1302-1308
+        std_pgrp, std_root = "/opt/ufm/files/conf/opensm/port_groups_policy_file.conf", ufm.ROOT_GUID_FILE
+        text, pgrp, root, changes = ufm.opensm_conf_update(OPENSM_CONF)
+        self.assertEqual((text, pgrp, root), (OPENSM_CONF_DONE, std_pgrp, std_root))
+        self.assertEqual(len(changes), 1)
+        self.assertEqual(ufm.opensm_conf_update(OPENSM_CONF_DONE)[0], OPENSM_CONF_DONE, "standard: unchanged")
+        for value in ("pgrp_policy_file\t\t(null)\n", "pgrp_policy_file\n", "  pgrp_policy_file   \n"):
+            with self.subTest(value):
+                text, pgrp, _root, _changes = ufm.opensm_conf_update(value + f"root_guid_file {std_root}\n")
+                self.assertEqual(text, "#" + value + f"pgrp_policy_file {std_pgrp}\nroot_guid_file {std_root}\n")
+        custom = "pgrp_policy_file  /opt/ufm/files/site/pg.conf\nroot_guid_file\t/opt/ufm/files/site/roots.conf\n"
+        self.assertEqual(ufm.opensm_conf_update(custom), (custom, "/opt/ufm/files/site/pg.conf",
+                                                          "/opt/ufm/files/site/roots.conf", []))
+        # several active lines: the last one counts, the others become comments and are listed
+        several = "pgrp_policy_file /opt/ufm/files/a.conf\n# note\npgrp_policy_file (null)\n"
+        text, pgrp, root, changes = ufm.opensm_conf_update(several)
+        self.assertEqual(text, "#pgrp_policy_file /opt/ufm/files/a.conf\n# note\n#pgrp_policy_file (null)\n"
+                               f"pgrp_policy_file {std_pgrp}\nroot_guid_file {std_root}\n")
+        self.assertTrue(any("/opt/ufm/files/a.conf" in change for change in changes), changes)
+        # no key at all: the standard line at the end
+        self.assertEqual(ufm.opensm_conf_update("sm_db_dump TRUE")[0],
+                         f"sm_db_dump TRUE\npgrp_policy_file {std_pgrp}\nroot_guid_file {std_root}\n")
+        self.assertEqual(ufm.opensm_conf_update(f"pgrp_policy_file {std_pgrp}\nroot_guid_file (null)\n")[0],
+                         f"pgrp_policy_file {std_pgrp}\n#root_guid_file (null)\nroot_guid_file {std_root}\n")
+        for bad in ("pgrp_policy_file /etc/opensm/pg.conf\n", "root_guid_file /opt/ufm/files/../etc/x\n",
+                    "pgrp_policy_file /opt/ufm/files/x.conf\nroot_guid_file /opt/ufm/files/x.conf\n",
+                    "pgrp_policy_file /opt/ufm/files/a b.conf\n"):
+            with self.subTest(bad):
+                with self.assertRaises(ufm.UfmError) as caught:
+                    ufm.opensm_conf_update(bad)
+                self.assertIn("请人工确认", str(caught.exception))
+
+    def test_policy_file_blocks(self):
+        # 问题文档 18.4 第 3 条: only the root_switches block is added or replaced; others and comments stay
+        rule = r"^(ew-spine[0-9]+)(\..*)?$"
+        block = f"port-group\nname: root_switches\nport-regexp: {rule}\nend-port-group\n"
+        self.assertEqual(ufm.policy_file_update(None, rule)[0], block)
+        self.assertEqual(ufm.policy_file_update("", rule)[0], block)
+        other = "# groups\n\n  port-group\n  name: storage\n  port-guid: 0x0200000000000005\n  end-port-group  \n"
+        self.assertEqual(ufm.policy_file_update(other, rule)[0], other + block)
+        old = other + "port-group\nname: root_switches\nport-regexp: x-spine.*\nend-port-group\n# tail\n"
+        self.assertEqual(ufm.policy_file_update(old, rule)[0], other + block + "# tail\n")
+        same = other + "port-group\n  name: root_switches\n\n  port-regexp: " + rule + "\nend-port-group\n"
+        self.assertEqual(ufm.policy_file_update(same, rule), (same, []), "the same block: unchanged")
+        for bad in ("port-group\nname: a\n", "end-port-group\n", "port-group\nport-group\nend-port-group\n",
+                    "stray line\n", block + block):
+            with self.subTest(bad):
+                with self.assertRaises(ufm.UfmError):
+                    ufm.policy_file_update(bad, rule)
+
+    def test_root_guid_file(self):
+        # 问题文档 18.4 第 3 条
+        self.assertEqual(ufm.root_guid_update(None)[0], "root_switches\n")
+        for text in ("", "\n\n", "# roots\n"):
+            with self.subTest(text):
+                self.assertEqual(ufm.root_guid_update(text)[0], "root_switches\n")
+        self.assertEqual(ufm.root_guid_update("0x02000000000001a0\n0x02000000000001A1\n")[0], "root_switches\n")
+        self.assertEqual(ufm.root_guid_update("# x\nroot_switches\n"), ("# x\nroot_switches\n", []))
+        text, changes = ufm.root_guid_update("other_group")
+        self.assertEqual(text, "other_group\nroot_switches\n")
+        self.assertTrue(changes and "other_group" in changes[0], changes)
+
+    def test_smdb_ranks_by_node_guid(self):
+        # 问题文档 18.2 site B: NodeGUID joins NodeDesc (NodeType 2) to each ASIC's Rank; a host CA is ignored
+        switches = ufm.smdb_switches(SMDB_SITE_B)
+        self.assertEqual(switches, [("0x0200000000001000", "sp1-1.site.example.test", 0),
+                                    ("0x0200000000001001", "sp1-1.site.example.test", 0),
+                                    ("0x0200000000002000", "lf1-1.site.example.test", 1)])
+        self.assertIsNone(ufm.smdb_switches('0x0200000000000a01, VALID , MAIN , 0, "smi0:1"\n'), "no sections")
+        self.assertIsNone(ufm.smdb_switches(SMDB_SITE_B.replace("Rank", "Rang")), "no Rank column")
+        check = ufm.root_rank_check(switches, ["sp1-1.site.example.test", "sp1-2.site.example.test"], SITE_B_RULE)
+        self.assertEqual(check, {"online": ["sp1-1"], "missing": ["sp1-2"], "bad": [], "false_roots": [],
+                                 "unknown": [], "extra": [], "asics": 2})
+
+    def test_q085_grading(self):
+        # Q-085: confirmed (hard) and unready (pending) are kept apart; a CSV-outside match is only a hint
+        roots = ["sp1-1.site.example.test"]
+        def check(rows):
+            return ufm.root_rank_check(rows, roots, SITE_B_RULE)
+        good = [("0x0200000000001000", "sp1-1.site.example.test", 0), ("0x0200000000002000", "lf1-1.site.example.test", 1)]
+        self.assertEqual(ufm.root_grade(check(good), fresh=True, load_seen=True, after_failover=True), ([], [], []))
+        cases = [
+            ([("0x0200000000001000", "sp1-1.site.example.test", 1)], True, True, "在线 root 有 ASIC 不是 rank 0", 0),
+            (good + [("0x0200000000002001", "lf1-2.site.example.test", 0)], True, True, "非 root 交换机是 rank 0", 0),
+            (good, False, True, "smdb 早于本次 failover", 0),
+            (good, True, False, "未看到 OpenSM 读入 root_switches 组", 0),
+            ([("0x0200000000002000", "lf1-1.site.example.test", 1)], True, True, "这些 root 未上线", 1),
+            ([("0x0200000000002000", "lf1-1.site.example.test", 0)], True, True, "没有在线的 root", 1),
+            (good + [("0x0200000000003000", "", 1)], True, True, "主机名未生效", 1),
+            (None, True, True, "未能核对", 1),
+            (good, True, None, "opensm.log", 1),
+            (good + [("0x0200000000001900", "sp1-9.site.example.test", 0)], True, True, "sp1-9", 2),
+        ]
+        for rows, fresh, seen, reason, kind in cases:
+            with self.subTest(reason):
+                graded = ufm.root_grade(None if rows is None else check(rows), fresh=fresh, load_seen=seen,
+                                        after_failover=True)
+                self.assertTrue(any(reason in item for item in graded[kind]), graded)
+                for other in {0, 1, 2} - {kind}:
+                    self.assertFalse(any(reason in item for item in graded[other]), graded)
+        # without this run's failover (a read-only check) a missing load line is not a confirmed failure
+        graded = ufm.root_grade(check(good), fresh=None, load_seen=False, after_failover=False)
+        self.assertEqual(graded[0], [])
+        self.assertTrue(graded[1])
+
+
+FAKE_HA_CLUSTER = r'''#!{python}
+"""ufm_ha_cluster for the generated root script (v3.1.6 B7): status as ufm01 printed it on 2026-10-22, reduced
+to the DRBD lines (问题文档 20.4); failover swaps the roles; every call is recorded."""
+import json, os, sys
+path = os.environ["FAKE_HA_STATE"]
+state = json.load(open(path))
+state.setdefault("calls", []).append(sys.argv[1:])
+def save():
+    json.dump(state, open(path, "w"))
+if sys.argv[1:] == ["status"]:
+    if state.get("unsettled", 0) > 0 and state.get("failovers"):
+        state["unsettled"] -= 1
+        save()
+        print("Error: error running crm_mon, is pacemaker running?")
+        sys.exit(1)
+    save()
+    connected = "Connected" if not state.get("never_settles") or not state.get("failovers") else "Connecting"
+    print(f"DRBD Status:\n  DRBD_RESOURCE:              [ha_data]\n  DRBD_CONNECTIVITY:          [{connected}]\n"
+          f"  DISK_STATE:                 [UpToDate]\n  DRBD_ROLE:                  [{state['role']}]\n"
+          f"  PEER_DISK_STATE:            [UpToDate]\n  PEER_DRBD_ROLE:             [{state['peer']}]\n"
+          f"VIRTUAL_IP:                   [198.51.101.133]")
+    sys.exit(0)
+if sys.argv[1:] == ["failover"]:
+    if state.get("failover_fails"):
+        save()
+        print("Error: failover failed (fake)")
+        sys.exit(1)
+    state["role"], state["peer"] = state["peer"], state["role"]
+    state["failovers"] = state.get("failovers", 0) + 1
+    save()
+    print("Cleaned up all resources on all nodes")
+    sys.exit(0)
+save()
+sys.exit(2)
+'''
+FAKE_REMOTE = r'''#!/bin/sh
+# v3.1.6 B7 (Q-081): the generated script never makes a remote call, trust or key; any such call is recorded
+echo "$0 $*" >> "$FAKE_REMOTE_LOG"
+exit 99
+'''
+
+
+class UfmRootScriptRunTest(unittest.TestCase):
+    """指导 8.18 第 9-11 条 (R-031 生成脚本, Q-081): the real generator writes the script, which really runs here on
+    PUBLIC files under a temporary /opt/ufm/files with a fake ufm_ha_cluster. Exit codes as 指导 8.18 第 11 条:
+    --help 0, argument error 2, VERIFIED 0, ATTENTION/NOT_VERIFIED 3, confirmed failure or I/O error 1."""
+    CSV_NAMES = ["sp1-1.site.example.test", "sp1-2.site.example.test", "lf1-1.site.example.test"]
+
+    def setUp(self):
+        self.prepare()
+
+    def prepare(self):
+        """A fresh temporary UFM; subtests call it again."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.base = Path(tmp.name)
+        self.files = self.base / "opt/ufm/files"
+        for sub in ("conf/opensm", "log"):
+            (self.files / sub).mkdir(parents=True)
+        self.root = str(self.files)
+        self.conf = OPENSM_CONF.replace("/opt/ufm/files", self.root)
+        self.write("conf/opensm/opensm.conf", self.conf)
+        # sp1-1 (two ASICs) and sp1-2 online at rank 0, the leaf at 1
+        self.write("log/opensm-smdb.dump", SMDB_SITE_B.replace(
+            "END_NODES", '0x0200000000001100, 0x0200000000001100, 2, 0, 149, 713, 54004, '
+                         '"MF0;sp1-2.site.example.test:Q3400_RA/U1"\nEND_NODES').replace(
+            "END_SWITCHES", "0x0200000000001100, 149, 0, 0, 0xffffffff, 0, 0, 0\nEND_SWITCHES"))
+        self.write("log/opensm.log", "Nov 17 10:00:02 000002 [0001] 0x02 -> osm_create_port_grp: "
+                                     "New Port Group Added: root_switches,  1 rules in group\n")
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        fake = self.bin / "ufm_ha_cluster"
+        fake.write_text(FAKE_HA_CLUSTER.replace("{python}", sys.executable), encoding="utf-8")
+        fake.chmod(0o755)
+        for name in ("ssh", "scp", "ssh-keygen", "ssh-copy-id"):
+            (self.bin / name).write_text(FAKE_REMOTE, encoding="utf-8")
+            (self.bin / name).chmod(0o755)
+        self.remote_log = self.base / "remote.log"
+        self.ha_state = self.base / "ha.json"
+        self.set_ha(role="Primary", peer="Secondary")
+        self.plan = ufm.root_plan(self.CSV_NAMES)
+        self.csv_sha = "0" * 63 + "1"
+        self.script = self.base / "post-ha" / "ufm-root-switches.py"
+        self.script.parent.mkdir()
+        self.generate()
+
+    def write(self, relative, text):
+        path = self.files / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def read(self, relative):
+        path = self.files / relative
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def set_ha(self, **values):
+        self.ha_state.write_text(json.dumps(values), encoding="utf-8")
+
+    def ha(self):
+        return json.loads(self.ha_state.read_text(encoding="utf-8"))
+
+    def generate(self, **timing):
+        text = ufm.root_script_text(self.plan, csv_sha256=self.csv_sha, run_name="20261126-120000-ha-post-config",
+                                    generated="2026-11-26 12:00:00", files_root=self.root,
+                                    **dict({"settle": 0, "interval": 0, "limit": 2}, **timing))
+        self.script.write_text(text, encoding="utf-8")
+        self.script.chmod(0o700)
+        return text
+
+    def done(self):
+        """The three files as R-031 wants them."""
+        rule = self.plan.rule
+        self.write("conf/opensm/opensm.conf", self.conf.replace(
+            "pgrp_policy_file (null)\n", f"#pgrp_policy_file (null)\npgrp_policy_file {self.root}/conf/opensm/"
+                                         "port_groups_policy_file.conf\n"))
+        self.write("conf/opensm/port_groups_policy_file.conf",
+                   f"port-group\nname: root_switches\nport-regexp: {rule}\nend-port-group\n")
+        self.write("conf/opensm/root_guid.conf", "root_switches\n")
+
+    def snapshot(self):
+        return {str(path.relative_to(self.base)): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in sorted(self.files.rglob("*")) if path.is_file()}
+
+    def run_script(self, *args):
+        env = {"PATH": f"{self.bin}{os.pathsep}/usr/bin:/bin", "FAKE_HA_STATE": str(self.ha_state),
+               "FAKE_REMOTE_LOG": str(self.remote_log), "HOME": str(self.base), "LANG": "en_US.UTF-8"}
+        # -I: no repository module or site directory is reachable; cwd is not the repository either
+        return subprocess.run([sys.executable, "-I", str(self.script), *args], cwd=str(self.base), env=env,
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+
+    def assert_no_remote(self):
+        self.assertFalse(self.remote_log.exists(), "no ssh, scp or key tool (Q-081)")
+
+    def test_header_records_rule_roots_paths_source_and_rerun_hint(self):
+        text = ufm.root_script_text(self.plan, csv_sha256=self.csv_sha, run_name="20261126-120000-ha-post-config",
+                                    generated="2026-11-26 12:00:00")
+        header = text.split('"""', 1)[0]
+        for needle in ("ib.csv sha256: " + self.csv_sha, "rule: " + SITE_B_RULE, "roots (2): sp1-1.site.example.test, "
+                       "sp1-2.site.example.test", "/opt/ufm/files/conf/opensm/opensm.conf",
+                       "/opt/ufm/files/conf/opensm/port_groups_policy_file.conf", ufm.ROOT_GUID_FILE,
+                       "20261126-120000-ha-post-config", "2026-11-26 12:00:00", "ha-post-config"):
+            with self.subTest(needle):
+                self.assertIn(needle, header)
+        self.assertIn("ib.csv 改了要重跑 ha-post-config", header)
+        self.assertRegex(text, r"(?m)^SETTLE, INTERVAL, LIMIT = 60, 15, 900$", "Q-084 60 s, the ha_wait defaults")
+        self.assertTrue(text.startswith("#!/usr/bin/env python3\n"))
+        self.assertNotRegex(text, r"(?m)^\s*(import|from)\s+(ubuntu24_host|tools)\b", "self-contained")
+
+    def test_help_first_and_argument_errors(self):
+        before = self.snapshot()
+        result = self.run_script("--help")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--apply", result.stdout)
+        self.assertNotIn("VERIFIED", result.stdout, "help is not a check")
+        self.assertEqual(self.ha().get("calls"), None, "--help runs nothing")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.run_script("--bogus").returncode, 2)
+        self.assertEqual(self.ha().get("calls"), None)
+        self.assert_no_remote()
+
+    def test_read_only_verified_only_with_conforming_files_and_complete_evidence(self):
+        self.done()
+        before = self.snapshot()
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("VERIFIED", result.stdout)
+        self.assertIn("2 台 / 3 个 ASIC", result.stdout)
+        self.assertEqual(self.snapshot(), before, "the default mode writes nothing")
+        self.assertEqual(self.ha()["calls"], [["status"]])
+        self.assert_no_remote()
+
+    def test_read_only_attention_cases_write_nothing(self):
+        cases = {
+            "not conforming": lambda: None,
+            "not primary": lambda: (self.done(), self.set_ha(role="Secondary", peer="Primary")),
+            "no smdb": lambda: (self.done(), (self.files / "log/opensm-smdb.dump").unlink()),
+            "no load line": lambda: (self.done(), self.write("log/opensm.log", "Nov 17 opensm started\n")),
+            "a root offline": lambda: (self.done(), self.write("log/opensm-smdb.dump", SMDB_SITE_B)),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(name):
+                self.prepare()
+                arrange()
+                before = self.snapshot()
+                result = self.run_script()
+                self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+                self.assertIn("NOT_VERIFIED", result.stdout)
+                self.assertEqual(self.snapshot(), before)
+                self.assertNotIn(["failover"], self.ha()["calls"])
+                self.assert_no_remote()
+
+    def test_read_only_confirmed_rank_problem_is_1_even_with_an_unready_root(self):
+        self.done()
+        self.write("log/opensm-smdb.dump", SMDB_SITE_B.replace("0x0200000000001001, 149, 0, 0,",
+                                                               "0x0200000000001001, 149, 0, 2,"))
+        result = self.run_script()
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("在线 root 有 ASIC 不是 rank 0", result.stdout)
+        self.assertIn("这些 root 未上线", result.stdout, "sp1-2 is offline and still reported")
+
+    def test_apply_writes_backs_up_fails_over_once_and_hands_over_to_a_person(self):
+        result = self.run_script("--apply")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.ha()["failovers"], 1)
+        self.assertEqual(self.ha()["calls"].count(["failover"]), 1)
+        self.assertEqual(self.read("conf/opensm/root_guid.conf"), "root_switches\n")
+        self.assertEqual(self.read("conf/opensm/port_groups_policy_file.conf"),
+                         f"port-group\nname: root_switches\nport-regexp: {SITE_B_RULE}\nend-port-group\n")
+        self.assertIn(f"#pgrp_policy_file (null)\npgrp_policy_file {self.root}/conf/opensm/port_groups_policy_file.conf\n",
+                      self.read("conf/opensm/opensm.conf"))
+        backups = [path for path in self.script.parent.iterdir() if path.is_dir()]
+        self.assertEqual(len(backups), 1)
+        self.assertIn(self.conf, [path.read_text() for path in backups[0].iterdir()])
+        # Q-081: the old primary never reports the effect; ATTENTION, check on the new primary by hand
+        self.assertIn("ATTENTION", result.stdout)
+        self.assertIn("NOT_VERIFIED", result.stdout)
+        self.assertNotIn("RESULT: VERIFIED", result.stdout)
+        self.assertIn("新主机", result.stdout)
+        self.assert_no_remote()
+
+    def test_apply_with_nothing_to_change_does_not_fail_over_or_claim_a_check(self):
+        self.done()
+        before = self.snapshot()
+        result = self.run_script("--apply")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("NOT_VERIFIED", result.stdout)
+        self.assertEqual(self.snapshot(), before)
+        self.assertNotIn(["failover"], self.ha()["calls"])
+
+    def test_apply_on_a_standby_writes_nothing(self):
+        self.set_ha(role="Secondary", peer="Primary")
+        before = self.snapshot()
+        result = self.run_script("--apply")
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.ha()["calls"], [["status"]])
+
+    def test_apply_errors_are_1(self):
+        cases = {
+            "bad block": (lambda: self.write("conf/opensm/port_groups_policy_file.conf", "port-group\n"), True),
+            "failover fails": (lambda: self.set_ha(role="Primary", peer="Secondary", failover_fails=True), False),
+            "ha never settles": (lambda: self.set_ha(role="Primary", peer="Secondary", never_settles=True), False),
+        }
+        for name, (arrange, untouched) in cases.items():
+            with self.subTest(name):
+                self.prepare()
+                arrange()
+                before = self.snapshot()
+                result = self.run_script("--apply")
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("FAILED", result.stdout)
+                if untouched:
+                    self.assertEqual(self.snapshot(), before, "planned before any write")
+                    self.assertNotIn(["failover"], self.ha()["calls"])
+                self.assertLessEqual(self.ha()["calls"].count(["failover"]), 1)
+
+    def test_q084_one_settle_after_the_scripts_own_failover(self):
+        # the script itself, loaded in this process: a fake clock shows one 60 s wait after its failover, then
+        # the HA check at the original 15 s interval (Q-084)
+        self.generate(settle=60, interval=15, limit=900)
+        self.set_ha(role="Primary", peer="Secondary", unsettled=2)
+        script = load_script("ufm_root_switches_under_test", self.script)
+        now, sleeps = [1000.0], []
+
+        def sleep(seconds):
+            if seconds >= 1:   # subprocess.Popen.wait polls through time.sleep in steps of a few ms
+                sleeps.append(seconds)
+            now[0] += seconds
+
+        env = dict(os.environ, PATH=f"{self.bin}{os.pathsep}/usr/bin:/bin", FAKE_HA_STATE=str(self.ha_state),
+                   FAKE_REMOTE_LOG=str(self.remote_log))
+        import contextlib
+        import io
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(script.time, "sleep", sleep), \
+                mock.patch.object(script.time, "monotonic", lambda: now[0]), contextlib.redirect_stdout(io.StringIO()):
+            code = script.main(["--apply"])
+        self.assertEqual(code, 3)
+        self.assertEqual(sleeps, [60, 15, 15])
+        self.assertEqual(self.ha()["failovers"], 1)
 
 
 class UpgradeScriptTest(unittest.TestCase):

@@ -2951,6 +2951,35 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - `ufmlicense` 的实际输出格式待 owner 提供样本后核对：判据是新主机 eno8303 MAC 那一行为 Valid。
   - 未执行前保持 NOT RUN，不得写 PASS。
 
+## TC-REAL-UFM-ROOT-PORT-GROUP-001 — ha-post-config 按主机名形状设置 root port group 并留下核对脚本（R-031）
+
+- Case ID：`TC-REAL-UFM-ROOT-PORT-GROUP-001`；类型：real-environment / HA / OpenSM 配置；状态：**OPEN / NOT RUN / REAL_ENV REQUIRED**。
+- 本机先决：`test_cases.test_ufm_setup_upgrade` 中 `UfmRootRoleTest`、`UfmRootScriptRunTest`、`HaPostConfigTest` 和 `test_cases.test_ufm_setup_upgrade_workflow` 中 `UfmRootPortGroupScenarioTest` 全部通过。替身 GREEN 不等于现场验收：替身的 OpenSM 只按本仓库对 `port-regexp` 的理解排 Rank、写那一行日志。
+- 依据：需求文档 R-031 及其后继（需求文档 :1464、:1472、:1474、:1491）；问题文档 18.2、18.4、18.5、20.4；v3.1.6 指导 8.18「现场卡」（指导 :2384）。
+- 执行人与核验人（分栏写；没人执行的一栏标「未执行」，不算通过）：执行人 owner 或 owner 授权的现场人员；核验人验证 AI，在 prod 只读已保存的结果（check 会写远端脚本，同 8.7）。
+- 前置条件：
+  - 两台 HA 正常：`check` 的 `ha_config` 为 `OK`；owner 书面授权维护窗口（会 failover 一次）；
+  - 改前在 VIP 所在主机记：`opensm.conf` 里 `pgrp_policy_file`、`root_guid_file` 两行；策略文件和 `root_guid.conf` 全文（脱敏）；`stat -c %y /opt/ufm/files/log/opensm-smdb.dump`；`opensm.log` 的行数；
+  - ib.csv 的 root 形状（只记形状和台数，不记主机名）。
+- 步骤与预期：
+  0. `check`（执行人跑）：HA 正常，无改动（指导 :2384；沿 `ufm-setup-upgrade.py::Session.check` 只读）。
+  1. `ha-post-config --apply`：三个文件按指导 8.18 第 3、4 条改（指导 :2354、:2355），默认状态时 `opensm.conf` 两行紧挨、`#pgrp_policy_file (null)` 的下一行是标准路径（问题文档 :1302；`ufm-setup-upgrade.py::conf_key_update`）。
+  2. 同一次运行：备份在 `/root/ufm-setup-upgrade-backup/<运行目录>/post-ha/`，两个目录里同名的文件按语义名分开（指导 :2355；`ufm-setup-upgrade.py::Session.post_root`）；只 failover 一次（指导 :2356）。
+  3. 同一次运行：failover 返回后固定等 60 秒，再进入 `wait_ha_status`、`post_verify` 两阶段，各自原期限（需求文档 :1472、:1491；`ufm-setup-upgrade.py::Session.post_failover` 先等再调 `wait_ha_status`）。
+  4. 同一次运行的结果：`post_ha_root_verify` 为 `VERIFIED`（root 生效台数和 ASIC 数），或按 R-031 后继的分级写 `HA_POST_CONFIG_FAILED` 或 `NOT_VERIFIED` 的原因（需求文档 :1474；`ufm-setup-upgrade.py::root_grade`）。
+  5. （只读）新主机上 smdb 修改时间晚于本次 failover，`opensm.log` 新增部分有 `New Port Group Added: root_switches`，在线 root 的全部 ASIC Rank 为 0、其余大于 0（问题文档 :1321、:1330）。
+  6. 再跑 `ha-post-config --apply`：`HA_POST_UP_TO_DATE`、零 failover、零等待、仍生成脚本（指导 :2357；需求文档 :1493；`ufm-setup-upgrade.py::Session.ha_post_config` 无改动分支调 `post_root_script`）。
+  7. （只读）VIP 所在主机上 `post-ha/ufm-root-switches.py` 权限 0700，文件头有 ib.csv sha256 和规则（指导 :2360；`ufm-setup-upgrade.py::root_script_text`）；默认模式执行只读，符合且证据齐全退出 0，否则 3（指导 :2362）。
+  8. （只读）在另一台（非 primary）执行脚本：只提示、零写、退出 3（指导 :2361；脚本 `main` 先判 `DRBD_ROLE`）。
+  9. （可选，owner 定）脚本 `--apply` 在已符合时零改动零 failover、退出 3（指导 :2362）。
+  10. 记 `port-regexp` 是整段还是部分匹配、长度限制的观察，做得到时（问题文档 :1347）；记 `opensm.log` 是否在 `/opt/ufm/files/log/opensm.log`、smdb 两段是否有表头行（本仓库按 `ufm-setup-upgrade.py::smdb_switches` 的格式读，格式取自 `tools/ib-tool-Jie/ib_tool_box/lib/parsers/smdb.py`，现场未核）。
+- 不允许的副作用：第二次 failover；改到三文件以外的 OpenSM 配置；在非 primary 上写任何文件；建新的认证、密钥或信任（需求文档 :1464）。
+- 证据：`report.log`、`result.json`；备份目录里三文件改前副本；改后三文件全文（脱敏）；smdb 修改时间、Rank 汇总、`opensm.log` 那一行；脚本头和两台上的执行输出。
+- 故障注入与清理：
+  - 需要撤回时由 owner 决定用备份目录里的三文件手工还原并再 failover 一次（代码不自动回退，I-038）。
+  - 不做破坏性注入；Q-085 的硬失败分级由本机 `HaPostConfigTest` 覆盖。
+- 风险：中；failover 期间 UFM 服务切换；`port-regexp` 匹配语义未核（问题文档 18.5），不符时 root 可能不生效，会报 `HA_POST_CONFIG_FAILED`，不回滚。未执行前保持 NOT RUN，不得写 PASS。
+
 ## TC-REAL-UFM-HA-DEFAULT-CLUSTER-001 — ha-setup 处理新 UFM 上 pacemaker 自带的默认单节点集群（I-009）
 
 - Case ID：`TC-REAL-UFM-HA-DEFAULT-CLUSTER-001`；类型：real-environment / destructive / HA；状态：**OPEN / NOT RUN**。

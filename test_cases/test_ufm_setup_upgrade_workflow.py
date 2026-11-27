@@ -2,8 +2,11 @@
 
 Setup-created bringup links are the only inputs the tool needs and unsetup knows them. A running HA pair
 takes the HA link's ignore-carrier by networkd reload only, then checks clean (v3.1.6 B6, B6-O8 (b)).
+ha-post-config sets the root port group from opensm.conf's default state and leaves the generated root
+script on the VIP holder (v3.1.6 B7, R-031).
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -126,6 +129,72 @@ class UfmHaLinkCarrierScenarioTest(tufm.ConfiguredPairCase):
             outcomes = dict(self.outcomes(checked[name]))
             self.assertEqual((outcomes["netplan"], outcomes["ha_config"]), ("UNCHANGED", "OK"), checked[name].steps)
             self.assertEqual(state["ufms"][name]["networkctl"], ["reload"])
+
+
+class UfmRootPortGroupScenarioTest(tufm.ConfiguredPairCase):
+    """R-031 end to end through the UFM script, the host module and the generated root script (指导 8.18 workflow):
+    from opensm.conf's default state ha-post-config writes the three root files, fails over once, waits 60 s once
+    (fake clock), keeps both original phases, verifies root by rank and load line on the new master and leaves a
+    0700 script only there; a second run changes nothing, fails over and waits for nothing, checks nothing and
+    still leaves the script."""
+    VIP = "198.51.101.133"
+
+    def make_ha_running(self):
+        state = dict(self.state, image_url=tufm.IMAGE_URL)
+        state["ha"] = {"master": "ufm01", "standby": "ufm02", "vip": self.VIP, "started": True, "sync_left": 0,
+                       "loaded_licenses": []}
+        state["ufms"]["ufm01"]["ipv4"] += f" {self.VIP}/23"
+        self.state_path.write_text(json.dumps(state))
+        self.make_upgraded()
+
+    def run_post_config(self):
+        now, events = [1000.0], []
+
+        def sleep(seconds):
+            if seconds >= 1:   # subprocess.Popen.wait polls through time.sleep in steps of a few ms
+                events.append(seconds)
+            now[0] += seconds
+
+        with mock.patch.object(tufm.ufm.time, "sleep", sleep), \
+                mock.patch.object(tufm.ufm.time, "monotonic", lambda: now[0]):
+            results, state, _calls, _logs = self.run_login(action="ha_post_config_command", failover_settle=60,
+                                                           ha_wait=(0, 60, 15, 900))
+        return results, state, events
+
+    def script(self, node):
+        return (self.sandbox / node / "root/ufm-setup-upgrade-backup" / self.run_dir.name / "post-ha"
+                / "ufm-root-switches.py")
+
+    def test_default_state_to_root_port_group_then_a_quiet_second_run(self):
+        self.make_ha_running()
+        results, state, sleeps = self.run_post_config()
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(results[name].status, "HA_POST_CONFIGURED", results[name].detail)
+        files = self.files / "conf/opensm"
+        self.assertEqual((files / "opensm.conf").read_text(), tufm.OPENSM_CONF_DONE)
+        self.assertEqual((files / "port_groups_policy_file.conf").read_text(), tufm.ROOT_POLICY)
+        self.assertEqual((files / "root_guid.conf").read_text(), "root_switches\n")
+        self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertEqual(sleeps, [60], "one 60 s wait; both phases pass on their first read")
+        self.assertEqual(self.outcomes(results["ufm02"]), [("post_ha_verify", "OK"), ("post_ha_root_verify", "VERIFIED"),
+                                                          ("post_ha_root_script", "WRITTEN")])
+        script = self.script("ufm02")
+        self.assertEqual(script.stat().st_mode & 0o777, 0o700)
+        self.assertFalse(self.script("ufm01").exists(), "only on the host holding the VIP")
+        header = script.read_text(encoding="utf-8")
+        digest = hashlib.sha256((self.inputs / "ib.csv").read_bytes()).hexdigest()
+        self.assertIn(f"ib.csv sha256: {digest}", header)
+        self.assertIn("rule: " + tufm.SPINE_RULE, header)
+
+        again, state, sleeps = self.run_post_config()
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(again[name].status, "HA_POST_UP_TO_DATE", again[name].detail)
+        self.assertEqual(state["ha"]["failovers"], 1)
+        self.assertEqual(sleeps, [], "no failover: no wait and no check loop")
+        steps = [step["step"] for item in again.values() for step in item.steps]
+        self.assertNotIn("post_ha_verify", steps)
+        self.assertNotIn("post_ha_root_verify", steps)
+        self.assertEqual(self.script("ufm02").stat().st_mode & 0o777, 0o700, "the script is left again")
 
 
 if __name__ == "__main__":
