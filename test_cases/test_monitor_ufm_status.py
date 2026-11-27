@@ -342,22 +342,29 @@ class UfmStatusTest(unittest.TestCase):
 
     def test_the_list_row_keeps_21_columns_and_shows_ha(self):
         row = self.monitor.render_sw_list_row(self.parse())
-        self.assertEqual(row.count("<td"), 21)
+        # v3.1.6 R-028 (guide :2240) adds the CPLD column after SSD.
+        # v3.1.6 R-029 (guide :2278) adds 组件需升级 before Health.
+        self.assertEqual(row.count("<td"), 23)
         self.assertIn("HA: 未就绪", row)
         self.assertIn("MT4131 40.50.1002 ×2", row)
         self.assertIn("64°C", row)
         self.assertIn('data-cat="ib-ufm"', row)
         primary, _standby = self.pair()
         row = self.monitor.render_sw_list_row(primary)
-        self.assertEqual(row.count("<td"), 21)
+        # v3.1.6 R-028 (guide :2240) adds the CPLD column after SSD.
+        # v3.1.6 R-029 (guide :2278) adds 组件需升级 before Health.
+        self.assertEqual(row.count("<td"), 23)
         self.assertIn("HA: 主 · 在线 2/2", row)
         self.assertIn("VIRTUAL_IP", row, "the cluster detail is in the cell title")
 
     def test_the_card_uses_the_infiniband_header_and_an_ha_row(self):
-        card = self.monitor.render_eth_card(self.parse())
-        self.assertIn("sw-hdr-ib", card)
-        self.assertIn(">UFM<", card)
-        self.assertIn('<span class="sw-k">HA</span>', card)
+        # v3.1.6 R-027 (guide 8.13 :2223) removed the card view.  The same facts on the
+        # list row: a UFM sits in the InfiniBand family's UFM subclass and shows HA.
+        self.assertFalse(hasattr(self.monitor, "render_eth_card"))
+        row = self.monitor.render_sw_list_row(self.parse())
+        self.assertIn('data-family="ib"', row)
+        self.assertIn('data-cat="ib-ufm"', row)
+        self.assertIn("HA: 未就绪", row)
 
     def ib_switch(self, hostname="ew-spine001.example.test"):
         switch = self.monitor.make_missing_switch(hostname, "IB")
@@ -368,7 +375,19 @@ class UfmStatusTest(unittest.TestCase):
         missing = self.monitor.make_missing_switch("ufm01.example.test", "UFM")
         missing["device_kind"] = "ufm"
         switches = [self.ib_switch(), self.parse(), missing]
-        for build in (self.monitor.build_switch_list_html, self.monitor.build_switch_cards_html):
+        stats = {"changed": 0, "new": 0, "removed": 0, "same": 0}
+
+        def page_list(devices, _categories, _kind):
+            # v3.1.6 R-027 (guide :2223): the card builder is gone; the second view is
+            # the real page's InfiniBand list group built from the same devices.
+            page = self.monitor.build_html(
+                {}, "", 0, "", "", len(devices), {}, devices,
+                "", "", stats, None, 0, "", "", stats, None, 0,
+                "", "", 0, "", "", "", stats, None, 0, {}, {}, {}, {},
+                {"available": False, "counts": {}, "environment_updates": {}, "devices": []})
+            return page.split('<tbody id="lst-body">', 1)[1].split("</tbody>", 1)[0]
+
+        for build in (self.monitor.build_switch_list_html, page_list):
             html = build(switches, self.monitor._IB_CATEGORIES, "IB")
             ufm_at = html.index("UFM Servers（2）")
             self.assertLess(ufm_at, html.index("Spine（1）"), build.__name__)
@@ -408,7 +427,8 @@ class UfmStatusTest(unittest.TestCase):
                     self.monitor.main(scope)
                 pages[scope] = output.read_text(encoding="utf-8")
             production = pages["prod"]
-            self.assertRegex(production, r"InfiniBand Switches \(2\)", "the .ha file is not a device")
+            # v3.1.6 R-027 (guide :2206): the list groups by environment / family.
+            self.assertRegex(production, r"Production / InfiniBand（2）", "the .ha file is not a device")
             self.assertIn("UFM Servers（2）", production)
             self.assertIn("ufm02.example.test", production)
             self.assertIn("HA: 备 · 在线 2/2", production, "the primary's HA state reaches the standby row")
@@ -487,15 +507,17 @@ class IbInventoryAlignmentTest(unittest.TestCase):
         self.assertNotIn("old-leaf09", page, "removed from the inventory: not shown, like Ethernet")
         self.assertNotIn("ufm-retired", page)
         self.assertIn("ufm02.example.test", page)
-        self.assertRegex(page, r"InfiniBand Switches \(3\)")
+        # v3.1.6 R-027 (guide :2206/:2223): the card section is gone; the list group header counts.
+        self.assertRegex(page, r"Production / InfiniBand（3）")
 
     def test_an_empty_batch_still_lists_the_inventory_as_missing(self):
         page = self.page({}, nvl_members={})
         self.assertIn("ew-leaf01", page)
         self.assertIn("ew-spine01", page)
-        self.assertRegex(page, r"InfiniBand Switches \(2\)")
+        # v3.1.6 R-027 (guide :2206/:2223): the card section is gone; the list group header counts.
+        self.assertRegex(page, r"Production / InfiniBand（2）")
         self.assertIn("rack1-nvsw01", page)
-        self.assertRegex(page, r"NVLink Switches \(2\)")
+        self.assertRegex(page, r"Production / NVLink（2）")
 
     def test_nvlink_follows_the_same_inventory_rules(self):
         page = self.page(None, nvl_members={"rack1-nvsw01.info": nvl_info("rack1-nvsw01"),
@@ -503,7 +525,7 @@ class IbInventoryAlignmentTest(unittest.TestCase):
         self.assertIn("rack1-nvsw01", page)
         self.assertIn("rack1-nvsw02", page, "in the inventory, not in the batch: shown missing")
         self.assertNotIn("rack9-nvsw07", page, "removed from the inventory: not shown")
-        self.assertRegex(page, r"NVLink Switches \(2\)")
+        self.assertRegex(page, r"Production / NVLink（2）")
 
 
 if __name__ == "__main__":

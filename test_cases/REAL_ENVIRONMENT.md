@@ -4675,3 +4675,84 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 ### 自动化状态
 
 - 本机 direct：`test_monitor_stack_review.SwitchWorkerProcessLifecycleTests` 的 `test_group_number_is_never_signalled_after_the_leader_is_reaped`、`test_group_kill_follows_leader_exit_and_precedes_the_reap`（macOS 分支真实子进程组）、`test_linux_leader_wait_uses_waitid_without_reaping`（Linux 分支替身）。Linux 实跑仍为 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-SWITCH-STATUS-V2-PIE-001 — Switch Status 饼图、组按钮、标签与地址栏 hash 的浏览器交互
+
+- 基本信息：real-environment / scenario；R-027（v3.1.6 C1/V2，指导 :2198-2223）。状态 **NOT RUN / REAL_ENV REQUIRED**。执行人为 owner 或其授权人员；本卡只写验收条件，不授权采集、下发或修改项目与设备。本机不执行页面 JS（指导 :2208「本版不新增JS执行器或浏览器依赖」），以下交互只在浏览器里见证。
+- 风险与目标：Python 端已把三色 bucket、CSV 分类、组按钮计数、饼图计数写进行 `data-*` 和静态数字（`test_monitor_switch_status_view`、`test_monitor_switch_status_view_workflow` 断言结构）；浏览器里的点击、筛选、hash 写入与恢复只能现场看。要防的是：按钮跨组串状态、数字随搜索变、饼图标签筛到别的族、刷新或分享后状态丢失、旧 `card` 偏好使页面空白（指导 :2206、:2211、:2219）。
+- 前置条件与输入：已部署本版的管理服务器上一个有 Production（及可选 AIR）采集归档的项目；同一项目里至少一个子类同时有 OK、NOT OK（健康原值如 FATAL）和未采集设备；`02-devices_config.csv` 里另有一行 template 归不了类的 Ethernet 设备时可一并核红字（没有就该分项 NOT RUN）；一台浏览器。记录本轮源码提交、页面生成时间与 `monitor.html` 的 SHA256。
+
+### 步骤
+
+1. 打开 Switch Status：默认显示饼图；每个数量不为 0 的子类一个环形图，标题如「IB · Leaf（68）」；只有一种状态的子类画完整圆环；有红或黄的饼图有红框；CSV 归不了类的主机名在饼图上方红字列出（指导 :2206，`monitor/generate-monitor-html.py::render_switch_pie`、`render_switch_status`）。
+2. 点某饼图的红块（或其数字）：切到列表，顶部出现「饼图：IB · Leaf · NOT OK ×」标签；本组只剩该子类的 NOT OK 行，别的设备族照常显示，本组按钮都不高亮（指导 :2206，`selectPieSlice`/`applySwitchFilters`）。
+3. 依次点本组任一按钮、标签上的 ×、「清除」：各自都撤销标签；无标签时本组按钮只有一个高亮（加粗、同色描边），「全部」恢复本组全部设备；点一组按钮不影响别的组（指导 :2206，`selectGroupButton`、`removeSwitchPieTag`、`clearSwitchFilters`）。
+4. 在搜索框输入主机名片段：只按主机名匹配；各组按钮上的数字不变；没有可见行的分组和子类标题隐藏（指导 :2206）。
+5. 设好视图、一组按钮、一个标签和搜索词后：复制地址栏链接到新标签页打开、再按 F5、再打开 Auto-Refresh 等它自动刷新，三次都完整恢复视图、各组按钮、标签与搜索词（指导 :2206，`switchHashSuffix`、`reloadActiveTab`、`initSwitchStatus`）。
+6. 勾选「有问题的排前面」：只在每个子类内把有问题的行排前，取消后恢复原顺序；默认不勾选（指导 :2206、:2279）。
+7. 点「复制主机名」：剪贴板内容是当前实际可见的全部主机名，以空格分隔（指导 :2206）。
+8. 在浏览器开发者工具里把 localStorage 的 `network-monitor:switch-view:<路径>` 改为 `card` 后刷新：显示饼图，不报错；旧的 `#eth` 链接和其它页签照常（指导 :2206）。
+
+### 预期结果
+
+- 正向：上面每步的现象成立；未采集设备留在其 CSV 子类里计黄，已采得 unknown 计红，二者 Health 文字都是 NOT OK；红桶 Health 悬停显示采集原值（指导 :2200、:2202、:2206；`monitor/generate-monitor-html.py::switch_status_bucket` → `render_sw_list_row`）。
+- 拒绝/不允许：按钮数字随搜索变化；点一组按钮改变别组；饼图标签筛掉别的设备族；刷新或分享后状态丢失；`card` 偏好导致空白；出现卡片视图入口或「其他」「未采集 · 可能掉线」分组（指导 :2206、:2221；数字由 `render_switch_group_buttons` 写成静态值，JS `applySwitchFilters` 只读 `data-*`）。
+- 证据：每步一张截图（脱敏主机名）、地址栏 hash 原文、`monitor.html` 的 SHA256、本轮源码提交与生成时间；不外带真实项目输入（指导 :2219「执行人为owner或授权人员，NOT RUN」）。
+
+### 故障注入与清理
+
+- 只操作浏览器与 localStorage；不改项目文件、设备、服务或 cron。结束后把 localStorage 的视图值改回原值。
+- 自动化映射：`test_monitor_switch_status_view.SwitchStatusV2Tests`、`test_monitor_switch_status_view_workflow.SwitchStatusV2Workflow`；本机结构断言通过不代表浏览器交互通过。本卡 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-SWITCH-STATUS-V3V4-VERSION-001 — CPLD 逐槽显示、复制，以及按 global 目标的组件需升级
+
+- 基本信息：real-environment / scenario；R-028、R-029、Q-080（v3.1.6 C1/V3、V4，指导 :2231-2302）。状态 **NOT RUN / REAL_ENV REQUIRED**。执行人为 owner 或其授权人员；本卡只写验收条件，不授权升级、下发或改动 `01-global.yaml`。页面目标只是显示投影，不是升级许可（指导 :2259「只读投影，不是升级许可」）。
+- 风险与目标：页面按 `nv show platform firmware` 的 `Actual FW` 整列逐槽读 CPLD（`monitor/generate-monitor-html.py::parse_cpld_slots`），按项目 `01-global.yaml` 的点名字段读目标（`load_version_targets`），逐组件比较（`compare_switch_versions`）。要防的是：槽序或槽数被压缩串改写、部分 N/A 槽被当成一致或不一致、型号与包不对应仍计需升级、UFM 用 ENTERPRISE 版本冒充 APPLIANCE、页面为显示放宽升级器严格 N/A 判断（指导 :2240、:2272-2275、:2265、:2234）。
+- 前置条件与输入：已部署本版的管理服务器上的一个 IB 项目，`01-global.yaml` 的 `switches.ib.upgrade.packages` 有 BIOS、SSD、CPLD burn 目标，`servers.ufm.version` 有目标；至少一台 IB 交换机（例如 6 槽 CPLD）已采集；如现场有部分槽 N/A、型号与包不对应、版本低于目标或未采集的设备，各作一个分项，没有的分项 NOT RUN。记录本轮源码提交、`monitor.html` 与对应 `.info` 原件的 SHA256。
+
+### 步骤
+
+1. 列表视图里该 IB 交换机的「CPLD 版本」列位于「SSD 版本」之后，短串形如 `232_0900/383_1001/389_0600/368_0300`，与 `.info` 固件表逐槽 Actual FW 对照：按槽号数字序、相同型号与版本只写一次、版本前导 0 保留、N/A 槽写成 `CPLD<n>=N/A`（指导 :2240，`cpld_short_text`）。
+2. 点短串展开逐槽明细：每槽的槽位、Actual FW 原值、目标、是否一致；点「复制完整串」，剪贴板内容是全部槽 `CPLD<n>=<原值>`，不是压缩摘要（指导 :2241，`toggleCpldDetail`、`copyCpld`）。
+3. 「组件需升级」列（在「健康」之前）：全部有目标的组件已知一致显示绿色 NA；不一致组件橙色标签（SW、BIOS、SSD、CPLD）；当前值缺失或不可解析（含部分 CPLD 槽 N/A）显示橙色「<组件> Unknown」；未采集设备显示橙色 Unknown；CPLD 型号或槽数与包不对应时 CPLD 列注「型号与包不匹配」、不计需升级（指导 :2272-2278）。
+4. 不一致的版本值深灰底白字，悬停显示目标，没有箭头；有问题设备（需升级或需检查）的主机名同样反色，行最左侧有橙色竖条；只有「<组件> Unknown」的设备不算有问题（指导 :2278-2279）。
+5. 本组按钮「SW/BIOS/SSD/CPLD 不一致」「需升级」的数字与列表一致，一台设备只算一次；没有目标的组件按钮灰色不可点（指导 :2280）。
+6. UFM 行：`/etc/ufm-release` 的 `UFM_APPLIANCE` 等于目标时显示 NA；只有 `UFM_ENTERPRISE` 时 SW 显示 Unknown（指导 :2265）。
+7. 在同一台设备上用升级器的只读检查确认：页面显示 N/A 槽时，升级器仍按原合同拒绝该槽（`tools/ibsw_upgrade_contract.py::_documented_firmware_fields`），页面没有改变升级结论（指导 :2234、:2268）。
+
+### 预期结果
+
+- 正向：每步现象成立；短串、明细和复制串与 `.info` 原件逐槽一致；按钮计数与列表行一致（指导 :2240-2241、:2278-2280；`parse_cpld_slots` → `render_cpld_cell`，`compare_switch_versions` → `render_switch_group_buttons`）。
+- 拒绝/不允许：任何「未知」显示成绿色 NA 或灰色/中文「未知」；以一个未知吞掉已知的 SW 差异；按槽数或组件数累计设备数；升级器因页面而接受 N/A 槽或降级（指导 :2274-2275、:2289；升级器 `tools/ibsw_upgrade_contract.py::_documented_firmware_fields` 本版未改）。
+- 证据：脱敏截图、`monitor.html` 与 `.info` 的 SHA256、`01-global.yaml` 版本字段的脱敏摘录、复制串原文、本轮源码提交；不外带真实项目输入或口令（指导 :2253「AI本地PUBLIC替身不能声称AIR/prod设备验收」）。
+
+### 故障注入与清理
+
+- 不改设备固件、不升级、不改 `01-global.yaml`；只观察现有状态。结束时不留文件。
+- 自动化映射：`test_monitor_switch_status_view.SwitchStatusV3CpldTests`、`SwitchStatusV4VersionTests`，`test_monitor_switch_status_view_workflow.SwitchStatusV3V4Workflow`；本机模型通过不代表现场通过。本卡 **NOT RUN / REAL_ENV REQUIRED**。
+
+
+## TC-REAL-SWITCH-STATUS-V5-INTERFACE-001 — 接口「可用 / 规划 / 总数」与现存 P2P 产物
+
+- 基本信息：real-environment / scenario；R-030（v3.1.6 C1/V5，指导 :2304-2343），owner 2026-11-20 第 1 条 (a)。状态 **NOT RUN / REAL_ENV REQUIRED**。执行人为 owner 或其授权人员；本卡只写验收条件，不授权跑 load、转换器或改项目。
+- 本版范围：页面只读已存在且来源校验有效的产物（IB `<stem>-cvt.xlsx` 加 provenance，ETH `<stem>-lldpq.dot` 加 `-splitter-profiles.json`），缺失或过期时规划数显示「—」并写原因；页面自动生成产物的支路属于设计门 V5-T01，本版未实现（HOLD），所以本卡不含「页面持锁时 load 被拒」的分项（指导 :2319、:2324）。
+- 风险与目标：规划数 P 按（网络，短名）只查本网络产物，两端都数、按端口去重、只数业务口；A、T 沿 C4；颜色只给 A：有 Down 时橙色加「(n↓)」优先，否则 A=P 绿、不等黄；P 拿不到为「—」不为 0（指导 :2327-2330）。
+- 前置条件与输入：已部署本版的管理服务器上的项目，已由正常 load 生成当前 P2P 的 CVT（含 provenance）和/或 DOT（含两份伴随文件）；至少一台有规划连线的 IB 或 Ethernet 交换机已采集。记录本轮源码提交、`99-output-p2p/` 文件列表及各产物 SHA256、`monitor.html` 的 SHA256。
+
+### 步骤
+
+1. 列表「接口 可用/规划/总数」列：与设备 `nv show interface` 及 CVT `Links`/DOT 逐端口连线对照三个数（指导 :2327，`planned_port_counts`、`load_planned_ports`）。
+2. 颜色与悬停：无 Down 且 A=P 绿；A≠P 黄；有 Down 时橙色加红「(n↓)」，悬停写「实际可用 A，P2P 规划 P，设备总口数 T」并照旧列出故障口名；例如 owner 例 `112/120/144 (32↓)` 为橙色（指导 :2329-2330）。
+3. 观察 UFM 与 NVLink 行的 P 固定为「—」；不在 P2P 里的设备、产物里没有业务口的设备 P 为「—」，悬停写原因（指导 :2306、:2328）。
+4. 在获准窗口由操作员按正常流程改动 P2P 并重新 load 前，先看页面：旧 CVT/DOT 不再对应当前 `p2p.xlsx` 时 P 为「—」并写过期原因；页面没有生成或改写 `99-output-p2p/` 下任何文件（只核文件列表与 SHA256 不变）（指导 :2321、:2331）。
+
+### 预期结果
+
+- 正向：上述每步成立；三个数与原件可逐一对账（指导 :2327-2329；`load_planned_ports` → `planned_port_counts` → `planned_ports_for` → `render_sw_list_row`）。
+- 拒绝/不允许：P 显示为 0；IB 设备用 DOT 计数或 ETH 设备用 CVT；页面写入 `99-output-p2p/`、调用转换器或占用部署锁；接口不一致新增健康或 Tracker High（指导 :2312、:2328、:2330、:2341）。
+- 证据：脱敏截图、`99-output-p2p/` 文件列表与 SHA256（前后各一份）、本轮源码提交；不外带真实 P2P（指导 :2343「现场设备/服务只由owner或授权人员执行」）。
+
+### 故障注入与清理
+
+- 不改设备端口、不改 P2P、不跑转换器；第 4 步只在正常变更窗口顺带观察。结束时不留文件。
+- 自动化映射：`test_monitor_switch_status_view.SwitchStatusV5InterfaceTests`、`SwitchStatusV5SourceTests`，`test_monitor_switch_status_view_workflow.SwitchStatusV5Workflow`；本机模型通过不代表现场通过。本卡 **NOT RUN / REAL_ENV REQUIRED**。

@@ -284,16 +284,23 @@ class MonitorC4ParserContracts(unittest.TestCase):
         host = "public-switch.example.test"
 
         def check_badge(device, css, label):
-            for renderer in (self.page.render_eth_card, self.page.render_sw_list_row):
-                with self.subTest(view=renderer.__name__):
+            # v3.1.6 R-027 (guide 8.13 :2223) removed the card view.  Its half of this
+            # loop becomes the same per-device assertion on the list row's V2 pie
+            # bucket: green OK, yellow missing, red for every other value (:2216).
+            bucket = {"h-ok": "ok", "h-miss": "offline"}.get(css, "notok")
+            for view in ("pie_bucket", "render_sw_list_row"):
+                with self.subTest(view=view):
                     before = copy.deepcopy(device)
-                    rendered = renderer(device)
+                    rendered = self.page.render_sw_list_row(device)
                     self.assertEqual(before, device, "a display must not rewrite raw facts")
+                    if view == "pie_bucket":
+                        self.assertEqual([bucket], re.findall(
+                            r'<tr class="lst-row[^"]*"[^>]*\bdata-bucket="([^"]+)"', rendered))
+                        continue
                     self.assertEqual([(css, label)], re.findall(
                         r'<span class="h-badge ([^"]+)">([^<]*)</span>', rendered))
                     if device["health"] == "missing":
-                        self.assertIn("sw-card-miss" if renderer == self.page.render_eth_card
-                                      else "lst-row-miss", rendered)
+                        self.assertIn("lst-row-miss", rendered)
                         self.assertIn("collect-fail" if device["collection_attempted"]
                                       else "collect-pending", rendered)
                         self.assertIn(device["collection_error"], rendered)
@@ -346,7 +353,8 @@ class MonitorC4ParserContracts(unittest.TestCase):
                                                             logical, physical))))
                     self.assertEqual((int(up), 1, int(not up)), tuple(parsed[k] for k in
                                      ("interfaces_up", "interfaces_total", "interfaces_down_count")))
-                    for render in (self.page.render_eth_card, self.page.render_sw_list_row):
+                    # R-027 (guide :2223): the card renderer is gone; the list keeps the title.
+                    for render in (self.page.render_sw_list_row,):
                         text = render(parsed)
                         if not up:
                             self.assertIn("Down接口", text)
@@ -377,7 +385,8 @@ class MonitorC4ParserContracts(unittest.TestCase):
         parsed = self.page.parse_info_file("public-switch.example.test", info_text("NVLINK", interfaces=crowded))
         self.assertEqual(25, parsed["interfaces_down_count"])
         self.assertEqual(20, len(parsed["interfaces_down"]))
-        for render in (self.page.render_eth_card, self.page.render_sw_list_row):
+        # R-027 (guide :2223): the card renderer is gone; the list keeps the truncation note.
+        for render in (self.page.render_sw_list_row,):
             self.assertIn("plus 5 more", render(parsed))
 
     def test_firmware_column_boundaries_multiword_and_bios_only_na(self):

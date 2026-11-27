@@ -57,6 +57,7 @@ from project_contract import (
     MAX_CONTINUOUS_BACKUP_INTERVAL_MINUTES,
 )
 from ztp.dynamic_air_inventory import dynamic_air_devices
+from device_identity import short_key
 from ztp.config_sync_authority import monitor_observation_allows_completion
 from tools.log_rotation import rotate as rotate_log_file
 
@@ -2699,6 +2700,62 @@ def parse_firmware_versions(text: str) -> tuple[str, str, str]:
     return bios, ssd, asic
 
 
+def parse_cpld_slots(text: str) -> list[dict[str, object]]:
+    """逐槽读取固件表的 CPLD<n> 行（R-028 V3，只读旁路，不改 BIOS/SSD/ASIC 三元组）。
+
+    只认同一行里 ``Actual FW`` 在 ``Part Number`` 之前的表头，按这段列宽取整列原值
+    （多词值完整保留，N/A 原样保留）；没有这样的表头就不读，不按首个空格截取。
+    升级器的严格入口（tools/ibsw_upgrade_contract.py）不受影响。
+    """
+    slots: list[dict[str, object]] = []
+    columns = None
+    for line in text.splitlines():
+        actual = re.search(r"\bActual\s+FW\b", line)
+        part = re.search(r"\bPart\s+Number\b", line)
+        if actual and part:
+            columns = (actual.start(), part.start()) if actual.start() < part.start() else None
+            source = re.search(r"\bFW\s+Source\b", line)
+            source_start = source.start() if source and part and source.start() > part.start() else None
+            continue
+        match = re.match(r"^(CPLD(\d+))\s", line)
+        if columns is None or not match:
+            continue
+        slots.append({
+            "slot": int(match.group(2)),
+            "name": match.group(1),
+            "actual": line[columns[0]:columns[1]].strip(),
+            "part": line[columns[1]:source_start].strip() if source_start else line[columns[1]:].strip(),
+            "source": line[source_start:].strip() if source_start else "",
+        })
+    return sorted(slots, key=lambda slot: int(slot["slot"]))
+
+
+def cpld_slot_label(slot: dict) -> str:
+    """一槽的短串段：型号去前导 0 _ 版本去 REV；N/A 写成 CPLD<n>=N/A；其它原值照写。"""
+    actual = str(slot.get("actual") or "")
+    if actual.casefold() in {"n/a", ""}:
+        return f"CPLD{slot['slot']}={actual or 'N/A'}"
+    match = re.fullmatch(r"CPLD(\d+)_REV(\S+)", actual, re.IGNORECASE)
+    if not match:
+        return actual
+    return f"{int(match.group(1))}_{match.group(2)}"
+
+
+def cpld_short_text(slots: list[dict]) -> str:
+    """按槽序、首次出现位置用「/」连接；型号与版本都相同的槽只写一次。"""
+    seen: list[str] = []
+    for slot in slots:
+        label = cpld_slot_label(slot)
+        if label not in seen or label.startswith("CPLD"):
+            seen.append(label)
+    return "/".join(seen)
+
+
+def cpld_full_text(slots: list[dict]) -> str:
+    """可复制的完整逐槽串：每槽 CPLD<n>=<Actual FW 原值>，空格分隔。"""
+    return " ".join(f"CPLD{slot['slot']}={slot['actual']}" for slot in slots)
+
+
 def parse_ntp_sync(text: str) -> Optional[bool]:
     """从 timedatectl 解析系统时钟同步状态。"""
     match = re.search(
@@ -3035,8 +3092,15 @@ def parse_info_file(
     hostname: str,
     content: str,
     expected_collect_utc: Optional[datetime] = None,
+    *,
+    family: str = "",
 ) -> dict:
-    """解析单个 .info 文件（ETH 或 IB），返回结构化信息字典。"""
+    """解析单个 .info 文件（ETH 或 IB），返回结构化信息字典。
+
+    ``family``（ETH/IB/NVL）是设备所在 CSV 列表的族；给出时接口口名规则按它选，
+    不按采集头的 ``Switch Type``（R-027，v3.1.6 指导 8.13：CSV 是 ib、采集头写成
+    NVLINK 的设备仍按 ``sw*`` 计口）。采集头原值留在 ``collected_sw_type``。
+    """
     info: dict = {
         "hostname":          hostname,
         "sw_type":           "UNKNOWN",   # "ETH" or "IB"
@@ -3102,6 +3166,9 @@ def parse_info_file(
         # 规范化：sw-info.sh 写入 NVLINK，统一改为 NVL
         if info["sw_type"] == "NVLINK":
             info["sw_type"] = "NVL"
+    if family:
+        info["collected_sw_type"] = info["sw_type"]
+        info["sw_type"] = family
     secs = split_sections(content)
     device_tz = parse_timedate_timezone(secs.get("timedatectl", ""))
     m = re.search(r"Collect Time:\s+(.+)", content)
@@ -3142,6 +3209,8 @@ def parse_info_file(
     ) = parse_firmware_versions(
         secs.get("nv show platform firmware", "")
     )
+    # R-028 V3: every CPLD<n> slot's raw Actual FW, beside the unchanged triple.
+    info["cpld_slots"] = parse_cpld_slots(secs.get("nv show platform firmware", ""))
 
     # fallback: nv show system image 的 description 字段
     if not info["version"]:
@@ -3182,6 +3251,9 @@ def parse_info_file(
     health_kv = parse_nv_kv(secs.get("nv show system health", ""))
     health = health_kv.get("status", "unknown").strip().lower()
     info["health"] = health if health in {"ok", "", "unknown", "n/a", "missing"} else "not ok"
+    # R-027 V2：红桶 Health 悬停显示采集原值（如 FATAL）；只是旁路展示事实，
+    # 不改上面 C4 的 health 语义，也不参与 switch-status 的 High 判断。
+    info["health_raw"] = health_kv.get("status", "").strip()
 
     # ── nv show platform environment temperature ──────────────────────────────
     # 实际格式：Asic-Temp-Sensor  64.0  120.0  105.0  5  ok
@@ -3555,6 +3627,11 @@ def parse_ufm_info_file(
         line.split("=", 1) for line in release.splitlines() if "=" in line
     )
     info["version"] = release_kv.get("UFM_APPLIANCE") or release_kv.get("UFM_ENTERPRISE", "")
+    # R-029 V4: only an UFM_APPLIANCE version takes part in the target comparison.
+    info["version_source"] = (
+        "UFM_APPLIANCE" if release_kv.get("UFM_APPLIANCE")
+        else ("UFM_ENTERPRISE" if release_kv.get("UFM_ENTERPRISE") else "")
+    )
     info["ssd_version"] = _ufm_count_label(
         _ufm_disk_revisions(_ufm_section(secs, "lsblk -d -o NAME,MODEL,SERIAL,REV,SIZE,TYPE"))
     )
@@ -3741,204 +3818,47 @@ def render_bond_multihoming_summary(sw: dict, *, compact: bool = False) -> str:
     return "<br>".join(summaries) if summaries else "—"
 
 
-def render_eth_card(sw: dict) -> str:
-    """生成单台交换机的 HTML 卡片。"""
-    hostname = escape(sw["hostname"])
-    hostname_chars = max(1, len(sw["hostname"]))
-    sw_type  = escape(sw["sw_type"])
-    role     = infer_device_role(sw["hostname"])
-    type_tag = escape(f'{sw["sw_type"]} · {role}' if role else sw["sw_type"])
-    model    = escape(sw["model"] or sw["system_type"] or "—")
-    serial   = escape(sw["serial"] or "—")
-    asic     = escape(sw["asic"] or "—")
-    version  = escape(sw["version"] or "—")
-    c_time   = escape(
-        sw.get("collect_time") or sw.get("collection_attempt_time") or "—"
-    )
-
-    h = sw["health"].lower()
-    h_cls = {"ok": "h-ok", "not ok": "h-err", "error": "h-err", "warning": "h-warn", "missing": "h-miss"}.get(h, "h-unk")
-    if sw["sw_type"] == "UFM":
-        h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
-    else:
-        h_lbl = "OK" if h == "ok" else "NOT OK"
-
-    if h == "missing":
-        attempted = bool(sw.get("collection_attempted", True))
-        collection_label = "失败" if attempted else "未发起"
-        collection_class = "collect-fail" if attempted else "collect-pending"
-        if sw["sw_type"] in {"IB", "UFM"}:
-            hdr_cls = "sw-hdr-ib"
-        elif sw["sw_type"] == "NVL":
-            hdr_cls = "sw-hdr-nv"
-        else:
-            hdr_cls = ""
-        cat_key, _ = classify_host(
-            sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
-        )
-        return f"""
-<div class="sw-card sw-card-miss" style="--hostname-ch:{hostname_chars}"
-     data-hn="{hostname.lower()}" data-cat="{cat_key}">
-  <div class="sw-hdr {hdr_cls}">
-    <span class="sw-name" title="{hostname}">{hostname}</span>
-    <div class="sw-hdr-meta">
-      <span class="sw-type-tag">{type_tag}</span>
-      <span class="h-badge {h_cls}">{h_lbl}</span>
-    </div>
-  </div>
-  <div class="sw-miss-body">
-    <div class="miss-warn">&#9888;</div>
-    <div class="collect-result {collection_class}">{collection_label} · {c_time}</div>
-    <div class="miss-sub">{escape(sw.get("collection_error") or "本批次未返回采集文件")}</div>
-  </div>
-</div>"""
-
-    if sw["temperature"]:
-        temperature_details = sw.get("temperature_details") or [
-            {"name": name, "current": value, "critical": None,
-             "maximum": None, "state": ""}
-            for name, value in sw["temperature"]
-        ]
-        severity = {"t-ok": 0, "t-warn": 1, "t-crit": 2}
-        t_cls = max(
-            (temperature_status_class(sensor) for sensor in temperature_details),
-            key=lambda css_class: severity[css_class],
-        )
-        t_detail = escape("\n".join(
-            temperature_sensor_title(sensor) for sensor in temperature_details[:8]
-        ))
-        mt = max(float(sensor["current"]) for sensor in temperature_details)
-        t_html = (f'<span class="{t_cls}" title="{t_detail}">'
-                  f'{mt:.0f}°C ({len(temperature_details)} sensors)</span>')
-    else:
-        t_html = "—"
-
-    if sw["interfaces_total"]:
-        up, total = sw["interfaces_up"], sw["interfaces_total"]
-        downs = sw["interfaces_down"]
-        down_count = int(sw.get("interfaces_down_count", len(downs)) or 0)
-        i_cls = "i-warn" if down_count else "i-ok"
-        i_html = f'<span class="{i_cls}">{up}/{total} up</span>'
-        if down_count:
-            title = "Down接口" if sw["sw_type"] in {"IB", "NVL"} else "Admin up / Oper down"
-            down_detail = title + ":\n" + "\n".join(downs)
-            if down_count > len(downs):
-                down_detail += f"\n… plus {down_count - len(downs)} more"
-            i_html += (f' <span class="i-down" title="{escape(down_detail)}">'
-                       f'({down_count} down)</span>')
-    else:
-        i_html = "—"
-
-    # BGP / IB ASIC 行（按交换机类型显示不同内容）
-    if sw["sw_type"] == "ETH":
-        if sw["bgp_total"]:
-            bgp_down = max(0, sw["bgp_total"] - sw["bgp_established"])
-            bgp_cls = "i-ok" if not bgp_down else "i-warn"
-            extra_lbl  = "BGP Peers"
-            extra_html = f'<span class="{bgp_cls}">{sw["bgp_established"]}/{sw["bgp_total"]} established</span>'
-            if bgp_down:
-                extra_html += f' <span class="i-down">({bgp_down} down)</span>'
-        else:
-            extra_lbl  = "BGP Peers"
-            extra_html = "—"
-    elif sw["sw_type"] == "NVL":
-        extra_lbl  = "NVLink"
-        extra_html = "—"
-    else:
-        cnt = sw.get("ib_asic_count", 0)
-        typ = escape(sw.get("ib_asic_type", ""))
-        extra_lbl  = "IB HCAs" if sw.get("device_kind") == "ufm" else "IB ASICs"
-        extra_html = f"{cnt} × {typ}" if cnt else "—"
-
-    bond_row = ""
-    if sw["sw_type"] == "ETH":
-        bond_row = (
-            '<div class="sw-r"><span class="sw-k">EVPN/MLAG Bond</span>'
-            f'<span>{render_bond_multihoming_summary(sw)}</span></div>'
-        )
-    elif sw.get("device_kind") == "ufm":
-        bond_row = (
-            '<div class="sw-r"><span class="sw-k">HA</span>'
-            f'<span>{render_bond_multihoming_summary(sw)}</span></div>'
-        )
-
-    # PSU 状态
-    psu_ok   = sw.get("psu_ok", 0)
-    psu_fail = sw.get("psu_fail", 0)
-    psu_total = psu_ok + psu_fail
-    if psu_total:
-        psu_cls  = "i-warn" if psu_fail else "i-ok"
-        psu_html = f'<span class="{psu_cls}">{psu_ok}/{psu_total} ok</span>'
-        if psu_fail:
-            psu_html += f' <span class="i-down">({psu_fail} FAIL)</span>'
-            failed_psus = render_failed_inventory_components(sw, "psu")
-            if failed_psus:
-                psu_html += f" {failed_psus}"
-    else:
-        psu_html = "—"
-
-    # 卡片头颜色：ETH 深蓝，IB（含 UFM）紫色，NV 深维
-    if sw["sw_type"] in {"IB", "UFM"}:
-        hdr_cls = "sw-hdr-ib"
-    elif sw["sw_type"] == "NVL":
-        hdr_cls = "sw-hdr-nv"
-    else:
-        hdr_cls = ""
-
-    cat_key, _ = classify_host(
-        sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-        bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
-    )
-    return f"""
-<div class="sw-card" style="--hostname-ch:{hostname_chars}"
-     data-hn="{hostname.lower()}" data-cat="{cat_key}">
-  <div class="sw-hdr {hdr_cls}">
-    <span class="sw-name" title="{hostname}">{hostname}</span>
-    <div class="sw-hdr-meta">
-      <span class="sw-type-tag">{type_tag}</span>
-      <span class="h-badge {h_cls}">{h_lbl}</span>
-    </div>
-  </div>
-  <div class="sw-body">
-    <div class="sw-r"><span class="sw-k">Model</span><span>{model}</span></div>
-    <div class="sw-r"><span class="sw-k">Serial</span><span>{serial}</span></div>
-    <div class="sw-r"><span class="sw-k">ASIC</span><span>{asic}</span></div>
-    <div class="sw-r"><span class="sw-k">SW Version</span><span class="sw-ver">{version}</span></div>
-    <div class="sw-r"><span class="sw-k">Temperature</span><span>{t_html}</span></div>
-    <div class="sw-r"><span class="sw-k">Interfaces</span><span>{i_html}</span></div>
-    <div class="sw-r"><span class="sw-k">PSU</span><span>{psu_html}</span></div>
-    <div class="sw-r"><span class="sw-k">{extra_lbl}</span><span>{extra_html}</span></div>
-    {bond_row}
-    <div class="sw-r sw-r-last"><span class="sw-k">采集</span><span class="collect-result collect-ok">成功 · {c_time}</span></div>
-  </div>
-</div>"""
-
-
-# ── 列表视图辅助 ──────────────────────────────────────────────────────────────
-
+# ── Switch Status 展示模型（R-027 V2；V3～V5 与以后的页面项复用） ───────────────
+# 饼图、列表行 data-*、组按钮数字和 hash 允许值都来自这里同一份 Python 计算
+# （v3.1.6 指导 8.13「测试方式」第 1 条）；页面 JS 只读 data-* 做集合筛选。
+# 复用方式（V6 等后继项）：
+#   switch_status_bucket(sw)            三色桶 ok / notok / offline（健康原值不改）
+#   switch_status_placement(sw, family) CSV 口径的 环境 / 设备族 / 子类；None 表示不计入
+#   switch_status_groups(...)           按 环境×设备族 分组的同一份设备集合
+#   render_switch_group_buttons(...)    组按钮（固定顺序、计数只取本组）
+#   SWITCH_HASH_KEYS 等常量              原样以 JSON 嵌入页面，JS 不另写一份
+SWITCH_VIEWS: tuple[str, ...] = ("pie", "list")
+SWITCH_HASH_KEYS: tuple[str, ...] = ("view", "q", "pie", "btn")
+SWITCH_BUCKETS: tuple[str, ...] = ("ok", "notok", "offline")
+SWITCH_GROUP_BUTTONS: tuple[str, ...] = (
+    "all", "sw", "bios", "ssd", "cpld", "upgrade", "check",
+)
+SWITCH_BUCKET_LABELS = {"ok": "OK", "notok": "NOT OK", "offline": "Offline"}
+# (设备族 key, 列表标题, 饼图前缀)；设备族取自设备所在的 CSV 列表，不取采集头。
+SWITCH_FAMILIES: tuple[tuple[str, str, str], ...] = (
+    ("eth", "Ethernet", "ETH"), ("ib", "InfiniBand", "IB"), ("nvl", "NVLink", "NVL"),
+)
+SWITCH_ENVIRONMENTS: tuple[tuple[str, str], ...] = (
+    ("air", "AIR"), ("production", "Production"), ("unknown", "Unknown / 未归类"),
+)
+_SWITCH_FAMILY_OF_TYPE = {"ETH": "eth", "IB": "ib", "UFM": "ib", "NVL": "nvl"}
 _ETH_CATEGORIES: list[tuple[str, str]] = [
-    ("missing", "未采集 · 可能掉线"),
     ("oob2",  "OOBofOOB"),
     ("oob",   "OOB / Border"),
     ("tan",   "TAN"),
     ("spx",   "SPX"),
-    ("other", "其他"),
 ]
 
-SWITCH_LIST_COLUMN_COUNT = 21
+SWITCH_LIST_COLUMN_COUNT = 23
 
 _IB_CATEGORIES: list[tuple[str, str]] = [
     ("ib-ufm", "UFM Servers"),          # owner 2026-10-21: IB 组的最上面；无 UFM 时不显示
-    ("missing", "未采集 · 可能掉线"),
     ("ib-spine", "Spine"),
     ("ib-leaf",  "Leaf"),
-    ("other",    "其他"),
 ]
+_SWITCH_PIE_LABELS = {"ib-ufm": "UFM"}
+_SWITCH_UNCOUNTED_LABEL = "未绑定 / 未归类设备（不计入饼图）"
 
-_UNBOUND_CATEGORIES: list[tuple[str, str]] = [
-    ("other", "其他"),
-]
 
 def extract_nvlink_group(hostname: str) -> Optional[tuple[str, str]]:
     """从 ``<组名>-nvswNN`` 主机名提取稳定的 NVSwitch 组 key 和显示名。"""
@@ -3952,63 +3872,281 @@ def extract_nvlink_group(hostname: str) -> Optional[tuple[str, str]]:
     return (f"nv-group-{normalized}", label)
 
 
-def build_nvlink_categories(switches: list[dict]) -> list[tuple[str, str]]:
-    """按主机名前缀动态生成 NVLink 子类，通常每个子类包含 nvsw01..09。"""
-    groups: dict[str, str] = {}
-    has_missing = False
-    has_other = False
-    for sw in switches:
-        if sw.get("health") == "missing":
-            has_missing = True
-            continue
-        group = extract_nvlink_group(sw["hostname"])
-        if group:
-            groups.setdefault(*group)
-        else:
-            has_other = True
-    categories: list[tuple[str, str]] = []
-    if has_missing:
-        categories.append(("missing", "未采集 · 可能掉线"))
-    categories.extend(sorted(groups.items(), key=lambda item: _nat_key(item[1])))
-    if has_other:
-        categories.append(("other", "其他"))
-    return categories
+def switch_status_bucket(sw: dict) -> str:
+    """V2 三色：ok 绿；未采集（missing）黄；其余已采得值（含 unknown/N/A/空）红。"""
+    health = str(sw.get("health") or "").casefold()
+    if health == "missing":
+        return "offline"
+    return "ok" if health == "ok" else "notok"
 
 
-def classify_host(
-    hostname: str, sw_type: str = "ETH", health: str = "", template: str = "",
-    dynamic_dhcp: bool = False, *, device_kind: str = "",
-) -> tuple[str, str]:
-    """根据主机名和交换机类型返回 (cat_key, cat_label)。"""
-    hn = hostname.upper()
-    if device_kind == "ufm":
-        # 未采集到的 UFM 也留在 UFM Servers 内，以 MISSING 行显示。
-        return ("ib-ufm", "UFM Servers")
-    if health == "missing" and not dynamic_dhcp:
-        return ("missing", "未采集 · 可能掉线")
-    role = infer_device_role(hostname)
-    if sw_type == "NVL":
-        group = extract_nvlink_group(hostname)
-        if group:
-            return group
-        return ("other", "其他")
-    if sw_type == "IB":
-        if role == "Spine":
-            return ("ib-spine", "Spine")
-        if role == "Leaf":
-            return ("ib-leaf", "Leaf")
-        return ("other", "其他")
-    # ETH 分类规则
-    if "OOBOFOOB" in hn or "oobofoob" in template.casefold():
-        return ("oob2", "OOBofOOB")
-    if ("OOB" in hn or "BORDER" in hn
-            or "oob" in template.casefold() or "border" in template.casefold()):
-        return ("oob", "OOB")
-    if "TAN" in hn or "tan" in template.casefold():
-        return ("tan", "TAN")
-    if "CF" in hn or "CL" in hn or "CS" in hn:
-        return ("spx", "SPX")
-    return ("other", "其他")
+def switch_status_subclass(sw: dict, family: str = "") -> Optional[tuple[str, str]]:
+    """按 CSV 口径返回 (子类 key, 标题)；不在 CSV 的动态设备或 CSV 归不了类时为 None。
+
+    Ethernet 按 CSV template（spx 类型也归 SPX），InfiniBand 按主机名 Spine/Leaf，
+    UFM 归 InfiniBand/UFM，NVLink 按主机名 POD；采集数据和健康值不参与（指导 8.13）。
+    """
+    if sw.get("dynamic_dhcp"):
+        return None
+    family = family or _SWITCH_FAMILY_OF_TYPE.get(str(sw.get("sw_type") or ""), "")
+    hostname = str(sw.get("hostname") or "")
+    if family == "ib":
+        if sw.get("device_kind") == "ufm":
+            return _IB_CATEGORIES[0]
+        return {"Spine": _IB_CATEGORIES[1], "Leaf": _IB_CATEGORIES[2]}.get(
+            infer_device_role(hostname)
+        )
+    if family == "nvl":
+        return extract_nvlink_group(hostname)
+    if family == "eth":
+        template = str(sw.get("template") or "").strip().casefold()
+        if "oobofoob" in template:
+            return _ETH_CATEGORIES[0]
+        if template.startswith(("oob", "border")):
+            return _ETH_CATEGORIES[1]
+        if template.startswith("tan"):
+            return _ETH_CATEGORIES[2]
+        if "spx" in template or str(sw.get("csv_type") or "").casefold() == "spx":
+            return _ETH_CATEGORIES[3]
+    return None
+
+
+def switch_status_placement(sw: dict, family: str = "") -> Optional[dict[str, str]]:
+    """一台设备在饼图/组按钮里的位置；None 表示只在列表的「不计入」段显示。"""
+    family = family or _SWITCH_FAMILY_OF_TYPE.get(str(sw.get("sw_type") or ""), "")
+    subclass = switch_status_subclass(sw, family)
+    if subclass is None:
+        return None
+    environment = switch_environment(sw)
+    return {
+        "env": environment, "family": family, "group": f"{environment}-{family}",
+        "cat": subclass[0], "cat_label": subclass[1],
+    }
+
+
+def switch_status_categories(family: str, devices: list[dict]) -> list[tuple[str, str]]:
+    """本设备族子类的固定显示顺序（NVLink 的 POD 按名字自然序）。"""
+    if family == "eth":
+        return list(_ETH_CATEGORIES)
+    if family == "ib":
+        return list(_IB_CATEGORIES)
+    groups = {
+        group[0]: group[1] for group in
+        (extract_nvlink_group(str(sw.get("hostname") or "")) for sw in devices) if group
+    }
+    return sorted(groups.items(), key=lambda item: _nat_key(item[1]))
+
+
+def switch_status_groups(
+    family_lists: list[tuple[str, str, list[dict]]],
+) -> tuple[list[dict], dict[str, list[dict]]]:
+    """把 (设备族, 列表所在环境, 设备) 按 环境×设备族 分组；返回 (组, 各环境不计入的设备)。"""
+    groups: dict[str, dict] = {}
+    uncounted: dict[str, list[dict]] = {env: [] for env, _ in SWITCH_ENVIRONMENTS}
+    for family, environment, devices in family_lists:
+        for sw in devices:
+            placement = switch_status_placement(sw, family)
+            if placement is None:
+                uncounted.setdefault(environment, []).append(sw)
+                continue
+            group = groups.setdefault(placement["group"], {
+                "id": placement["group"], "env": placement["env"],
+                "family": family, "devices": [], "placements": [],
+            })
+            group["devices"].append(sw)
+            group["placements"].append(placement)
+    env_order = {env: index for index, (env, _) in enumerate(SWITCH_ENVIRONMENTS)}
+    family_order = {family: index for index, (family, _, _) in enumerate(SWITCH_FAMILIES)}
+    ordered = sorted(
+        groups.values(),
+        key=lambda group: (env_order.get(group["env"], 99), family_order[group["family"]]),
+    )
+    return ordered, uncounted
+
+
+def render_switch_group_buttons(group_id: str, devices: list[dict],
+                                comparisons: Optional[list[dict]] = None) -> str:
+    """本组按钮：全部、SW/BIOS/SSD/CPLD 不一致、需升级、需检查；数字是本组总数。
+
+    组件差异按设备并集计，一台设备最多算一次需升级；没有目标的组件按钮灰色不可点，
+    全无目标时比较与需升级全灰，需检查照常（指导 8.16）。
+    """
+    comparisons = comparisons or [{"diff": [], "targets": {}} for _ in devices]
+    buckets = [switch_status_bucket(sw) for sw in devices]
+    nodata, notok = buckets.count("offline"), buckets.count("notok")
+    check = nodata + notok
+    upgrade = sum(bool(item["diff"]) for item in comparisons)
+    enabled = {name: any(name in item["targets"] for item in comparisons)
+               for name, _ in SWITCH_COMPONENTS}
+    group = escape(group_id)
+
+    def button(name: str, content: str, *, warn: bool, enabled: bool) -> str:
+        state = "grp-off" if not enabled else ("grp-warn" if warn else "grp-ok")
+        return (
+            f'<button type="button" class="grp-btn {state}" data-group="{group}" '
+            f'data-button="{name}" onclick="selectGroupButton(this)"'
+            f'{"" if enabled else " disabled"}>{content}</button>'
+        )
+
+    parts = [button(
+        "all", f'全部 <span class="grp-num">{len(devices)}</span>',
+        warn=bool(upgrade or check), enabled=True,
+    )]
+    for name, label in SWITCH_COMPONENTS:
+        count = sum(name in item["diff"] for item in comparisons)
+        parts.append(button(
+            name, f'{label} 不一致 <span class="grp-num">{count}</span>',
+            warn=bool(count), enabled=enabled[name],
+        ))
+    parts.append(button(
+        "upgrade", f'需升级 <span class="grp-num">{upgrade}</span>',
+        warn=bool(upgrade), enabled=any(enabled.values()),
+    ))
+    parts.append(button(
+        "check",
+        f'需检查 <span class="grp-num">{check}</span>（NO DATA '
+        f'<span class="grp-nodata">{nodata}</span>，NOT OK '
+        f'<span class="grp-notok">{notok}</span>）',
+        warn=bool(check), enabled=True,
+    ))
+    return "".join(parts)
+
+
+_PIE_RADIUS = 42
+_PIE_CIRCUMFERENCE = 2 * 3.141592653589793 * _PIE_RADIUS
+
+
+def render_switch_pie(group_id: str, prefix: str, cat: str, label: str,
+                      devices: list[dict]) -> str:
+    """一个子类的环形图（内联 SVG）；只有一种状态时画完整圆环。"""
+    buckets = [switch_status_bucket(sw) for sw in devices]
+    counts = {bucket: buckets.count(bucket) for bucket in SWITCH_BUCKETS}
+    total = len(devices)
+    present = [bucket for bucket in SWITCH_BUCKETS if counts[bucket]]
+    title = f"{prefix} · {label}"
+    segments, offset = [], 0.0
+    for bucket in present:
+        attrs = (
+            f'class="pie-seg pie-{bucket}" data-bucket="{bucket}" cx="60" cy="60" '
+            f'r="{_PIE_RADIUS}" onclick="selectPieSlice(this)"'
+        )
+        if len(present) > 1:
+            length = _PIE_CIRCUMFERENCE * counts[bucket] / total
+            attrs += (
+                f' stroke-dasharray="{length:.3f} {_PIE_CIRCUMFERENCE - length:.3f}"'
+                f' stroke-dashoffset="{-offset:.3f}"'
+            )
+            offset += length
+        segments.append(
+            f'<circle {attrs}><title>{SWITCH_BUCKET_LABELS[bucket]} {counts[bucket]}</title></circle>'
+        )
+    numbers = "".join(
+        f'<span class="pie-num pie-{bucket}" data-bucket="{bucket}" '
+        f'onclick="selectPieSlice(this)">{counts[bucket]}</span>'
+        for bucket in present
+    )
+    alert = " pie-alert" if counts["notok"] or counts["offline"] else ""
+    return (
+        f'<figure class="pie{alert}" data-group="{escape(group_id)}" data-cat="{escape(cat)}" '
+        f'data-label="{escape(title)}" data-total="{total}" data-ok="{counts["ok"]}" '
+        f'data-notok="{counts["notok"]}" data-offline="{counts["offline"]}">'
+        f'<figcaption>{escape(title)}（{total}）</figcaption>'
+        f'<svg class="pie-svg" viewBox="0 0 120 120" role="img" aria-label="{escape(title)}">'
+        f'<g transform="rotate(-90 60 60)">{"".join(segments)}</g>'
+        f'<text x="60" y="66" text-anchor="middle" class="pie-total">{total}</text></svg>'
+        f'<div class="pie-legend">{numbers}</div></figure>'
+    )
+
+
+def render_switch_status(
+    eth_devices: dict, ib_devices, nv_devices, headers: str,
+    targets: Optional[dict] = None, plans: Optional[dict] = None,
+) -> dict[str, object]:
+    """Switch Status 的饼图与列表；二者用同一次 switch_status_groups 的结果。"""
+    family_lists: list[tuple[str, str, list[dict]]] = [
+        ("eth", env, list(eth_devices.get(env) or [])) for env, _ in SWITCH_ENVIRONMENTS
+    ]
+    family_lists += [("ib", "production", list(ib_devices or [])),
+                     ("nvl", "production", list(nv_devices or []))]
+    groups, uncounted = switch_status_groups(family_lists)
+    unbound_count = 0
+    for env, _ in SWITCH_ENVIRONMENTS:
+        unbound = list(eth_devices.get(f"unbound_{env}") or [])
+        unbound_count += len(unbound)
+        uncounted[env].extend(unbound)
+    unclassified = [
+        str(sw.get("hostname") or "")
+        for env, _ in SWITCH_ENVIRONMENTS for sw in uncounted[env]
+        if not sw.get("dynamic_dhcp")
+        and str(sw.get("sw_type") or "") in _SWITCH_FAMILY_OF_TYPE
+    ]
+    family_info = {family: (label, prefix) for family, label, prefix in SWITCH_FAMILIES}
+
+    pies = ""
+    if unclassified:
+        pies += (
+            '<div class="pie-unclassified" role="alert">以下设备在 02-devices_config.csv '
+            '里归不了类（不计入饼图），请修正 CSV：'
+            + "".join(f'<span class="pie-unclassified-host">{escape(name)}</span>'
+                      for name in unclassified)
+            + '</div>'
+        )
+    rows = ""
+    for env, env_label in SWITCH_ENVIRONMENTS:
+        env_groups = [group for group in groups if group["env"] == env]
+        env_total = sum(len(group["devices"]) for group in env_groups) + len(uncounted[env])
+        rows += (
+            f'<tr class="lst-env" data-environment="{env}" role="button" tabindex="0" '
+            f'aria-expanded="true" onclick="toggleListEnvironment(this)" '
+            f'onkeydown="handleListEnvironmentKey(event, this)">'
+            f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{env_label}（{env_total}）</td></tr>'
+        )
+        if env_groups:
+            pies += (f'<section class="pie-env" data-environment="{env}">'
+                     f'<div class="pie-env-title">{env_label}</div>')
+        for group in env_groups:
+            family_label, prefix = family_info[group["family"]]
+            group_id = escape(group["id"])
+            title = f"{env_label} / {family_label}（{len(group['devices'])}）"
+            figures = ""
+            for cat, label in switch_status_categories(group["family"], group["devices"]):
+                members = [sw for sw, placement in zip(group["devices"], group["placements"])
+                           if placement["cat"] == cat]
+                if members:
+                    figures += render_switch_pie(
+                        group["id"], prefix, cat, _SWITCH_PIE_LABELS.get(cat, label), members,
+                    )
+            pies += (f'<div class="pie-group" data-group="{group_id}">'
+                     f'<div class="pie-group-title">{escape(title)}</div>'
+                     f'<div class="pie-grid">{figures}</div></div>')
+            rows += (
+                f'<tr class="lst-sec lst-grp lst-sec-{group["family"]}" data-group="{group_id}" '
+                f'role="button" tabindex="0" aria-expanded="true" '
+                f'onclick="toggleListSwitchType(this)" onkeydown="handleListSwitchTypeKey(event, this)">'
+                f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{escape(title)}</td></tr>'
+                f'<tr class="lst-btns" data-group="{group_id}"><td colspan="{SWITCH_LIST_COLUMN_COUNT}">'
+                f'{render_switch_group_buttons(group["id"], group["devices"], [compare_switch_versions(sw, group["family"], targets) for sw in group["devices"]])}</td></tr>'
+                f'<tr class="lst-repeat-head" data-group="{group_id}">{headers}</tr>'
+                + build_switch_list_html(
+                    group["devices"], switch_status_categories(group["family"], group["devices"]),
+                    {"eth": "ETH", "ib": "IB", "nvl": "NVL"}[group["family"]], targets, plans,
+                )
+            )
+        if env_groups:
+            pies += '</section>'
+        if uncounted[env]:
+            ordered = sorted(uncounted[env], key=lambda sw: air_first_hostname_key(sw["hostname"]))
+            rows += (
+                f'<tr class="lst-sec lst-uncounted" role="button" tabindex="0" '
+                f'aria-expanded="true" onclick="toggleListSwitchType(this)" '
+                f'onkeydown="handleListSwitchTypeKey(event, this)">'
+                f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{_SWITCH_UNCOUNTED_LABEL} ({len(ordered)})</td></tr>'
+                f'<tr class="lst-repeat-head">{headers}</tr>'
+                + "".join(render_sw_list_row(sw, "", targets, plans) for sw in ordered)
+            )
+    if not groups:
+        pies += '<p class="pie-empty">当前没有可统计的设备。</p>'
+    return {"pies": pies, "rows": rows, "unbound_count": unbound_count}
 
 
 def _nat_key(s: str) -> list:
@@ -4159,15 +4297,377 @@ def render_failed_inventory_components(sw: dict, component_type: str) -> str:
     return '<span class="component-failures">' + " / ".join(failures) + "</span>"
 
 
-def render_sw_list_row(sw: dict) -> str:
-    """生成列表视图的单行 <tr>。"""
+# ── 版本目标与组件比较（R-029 V4，指导 8.16） ───────────────────────────────
+# 只读当前项目 01-global.yaml 的点名字段，是显示用投影，不是升级许可；不调用
+# tools/project_contract.py 的完整升级验证器，也不扫描包或设备。
+SWITCH_COMPONENTS: tuple[tuple[str, str], ...] = (
+    ("sw", "SW"), ("bios", "BIOS"), ("ssd", "SSD"), ("cpld", "CPLD"),
+)
+_CPLD_TARGET_SEGMENT = re.compile(r"(CPLD\d+)_(REV[0-9A-Za-z]+)")
+
+
+def _global_family_entries(value: object) -> dict[str, dict]:
+    """``switches``/``servers`` 是单键族映射的列表；族缺失、重复或格式不对时只丢该族。"""
+    if not isinstance(value, list):
+        return {}
+    seen: dict[str, list[object]] = {}
+    for item in value:
+        if isinstance(item, dict) and len(item) == 1:
+            name, body = next(iter(item.items()))
+            seen.setdefault(str(name), []).append(body)
+    return {name: bodies[0] for name, bodies in seen.items()
+            if len(bodies) == 1 and isinstance(bodies[0], dict)}
+
+
+def _target_text(value: object) -> str:
+    return str(value).strip() if isinstance(value, (str, int, float)) and str(value).strip() else ""
+
+
+def load_version_targets(path: Path = GLOBAL_FILE) -> dict[str, dict[str, object]]:
+    """各族各组件的目标版本：{"eth"|"ib"|"nvl"|"ufm": {"sw"|"bios"|"ssd"|"cpld": 值}}。
+
+    CPLD 目标是 burn 文件名里每次出现的 CPLD<id>_REV<rev> 段，保原顺序与重复，
+    第 i 段对应 CPLD<i>。读不到的字段只让对应组件没有目标，不影响别的族和整页。
+    """
+    try:
+        import yaml
+    except ImportError:
+        log("[VERSION-TARGET] 没有 PyYAML，不读版本目标")
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        log(f"[VERSION-TARGET] 读不到 {path.name}: {exc}")
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    switches = _global_family_entries(data.get("switches"))
+    servers = _global_family_entries(data.get("servers"))
+    targets: dict[str, dict[str, object]] = {}
+    for family in ("eth", "ib", "nvl"):
+        version = _target_text(switches.get(family, {}).get("version"))
+        if version:
+            targets.setdefault(family, {})["sw"] = version
+    ufm_version = _target_text(servers.get("ufm", {}).get("version"))
+    if ufm_version:
+        targets["ufm"] = {"sw": ufm_version}
+    upgrade = switches.get("ib", {}).get("upgrade")
+    packages = upgrade.get("packages") if isinstance(upgrade, dict) else None
+    if isinstance(packages, dict):
+        for component in ("bios", "ssd"):
+            entry = packages.get(component)
+            version = _target_text(entry.get("version")) if isinstance(entry, dict) else ""
+            if version:
+                targets.setdefault("ib", {})[component] = version
+        cpld = packages.get("cpld")
+        burn = cpld.get("burn") if isinstance(cpld, dict) else None
+        name = _target_text(burn.get("file")) if isinstance(burn, dict) else ""
+        segments = [f"{model}_{rev}" for model, rev in _CPLD_TARGET_SEGMENT.findall(name)]
+        if segments:
+            targets.setdefault("ib", {})["cpld"] = segments
+    return targets
+
+
+def _os_version_key(value: str) -> str:
+    """NVOS 三段版本按 L 的 _ibsw_version 规整（25-02-8008 与 25.02.8008 相同）。"""
+    from project_contract import _ibsw_version
+
+    return _ibsw_version(value)
+
+
+def compare_switch_versions(sw: dict, family: str, targets: Optional[dict]) -> dict[str, object]:
+    """一台设备各组件的比较：same / diff / unknown / mismatch；没有目标的组件不出现。
+
+    当前值缺失或不可解析（含部分 CPLD 槽 N/A）是 unknown，不计需升级、不算一致
+    （Q-080）；CPLD 槽数或任一槽型号与包不对应是 mismatch，只注明、不计（指导 8.16）。
+    """
+    targets = targets or {}
+    if not targets:
+        return {"available": False, "states": {}, "targets": {}, "diff": [], "unknown": []}
+    is_ufm = sw.get("device_kind") == "ufm" or sw.get("sw_type") == "UFM"
+    own = dict(targets.get("ufm" if is_ufm else family) or {})
+    if is_ufm or family != "ib":
+        own = {"sw": own["sw"]} if "sw" in own else {}
+    states: dict[str, str] = {}
+    if str(sw.get("health") or "") == "missing":
+        return {"available": True, "missing": True, "states": {}, "targets": own,
+                "diff": [], "unknown": []}
+    if "sw" in own:
+        current = str(sw.get("version") or "").strip()
+        target = str(own["sw"])
+        if is_ufm and sw.get("version_source") != "UFM_APPLIANCE":
+            states["sw"] = "unknown"
+        elif not current:
+            states["sw"] = "unknown"
+        elif family in {"ib", "nvl"} and not is_ufm:
+            try:
+                states["sw"] = "same" if _os_version_key(current) == _os_version_key(target) else "diff"
+            except ValueError:
+                states["sw"] = "unknown"
+        else:
+            states["sw"] = "same" if current == target else "diff"
+    for component, field in (("bios", "bios_version"), ("ssd", "ssd_version")):
+        if component in own:
+            current = str(sw.get(field) or "").strip()
+            if not current or current.casefold() in {"na", "n/a", "not specified"}:
+                states[component] = "unknown"
+            else:
+                states[component] = "same" if current == str(own[component]) else "diff"
+    if "cpld" in own:
+        expected = list(own["cpld"])
+        slots = list(sw.get("cpld_slots") or [])
+        parsed = [re.fullmatch(r"(CPLD\d+)_(REV\S+)", str(slot.get("actual") or ""), re.IGNORECASE)
+                  for slot in slots]
+        if not slots:
+            states["cpld"] = "unknown"
+        elif len(slots) != len(expected) or any(
+                match and match.group(1).casefold() != target.split("_", 1)[0].casefold()
+                for match, target in zip(parsed, expected)):
+            states["cpld"] = "mismatch"
+        elif not all(parsed):
+            states["cpld"] = "unknown"
+        else:
+            states["cpld"] = "same" if all(
+                str(slot["actual"]).casefold() == target.casefold()
+                for slot, target in zip(slots, expected)) else "diff"
+    return {
+        "available": True, "missing": False, "states": states, "targets": own,
+        "diff": [name for name, _ in SWITCH_COMPONENTS if states.get(name) == "diff"],
+        "unknown": [name for name, _ in SWITCH_COMPONENTS if states.get(name) == "unknown"],
+    }
+
+
+def render_upgrade_cell(comparison: dict) -> str:
+    """「组件需升级」列：橙色不一致组件 / 橙色 <组件> Unknown / 未采集橙色 Unknown / 绿色 NA / —。"""
+    if not comparison.get("available"):
+        return "—"
+    if comparison.get("missing"):
+        return '<span class="upg-tag upg-warn">Unknown</span>' if comparison.get("targets") else "—"
+    labels = dict(SWITCH_COMPONENTS)
+    tags = [f'<span class="upg-tag upg-warn">{labels[name]}</span>' for name in comparison["diff"]]
+    tags += [f'<span class="upg-tag upg-warn">{labels[name]} Unknown</span>'
+             for name in comparison["unknown"]]
+    if tags:
+        return " ".join(tags)
+    if any(state == "same" for state in comparison["states"].values()):
+        return '<span class="upg-tag upg-ok">NA</span>'
+    return "—"
+
+
+# ── 接口「可用 / 规划 / 总数」的规划数（R-030 V5，指导 8.17） ─────────────────
+# 规划数 P 只读当前项目里已经存在、且经来源校验有效的转换产物：IB 读 CVT 的 Links，
+# ETH 读 <stem>-lldpq.dot 的逐端口连线；两张表不合并，查找键是（网络，短名）。
+# 页面不调用转换器、不持部署锁、不写任何 P2P 产物：缺失或过期时 P 显示「—」并写原因
+# （生成支路属于设计门 V5-T01，等 http dev 设计复核后另行落地）。
+_PLAN_PORT_PATTERNS = {"eth": re.compile(r"swp\S+"), "ib": re.compile(r"sw\d+p\d+")}
+_DOT_LINK = re.compile(r'^\s*"([^"]+)":"([^"]+)"\s*--\s*"([^"]+)":"([^"]+)"')
+PLAN_UNCLASSIFIED_REASON = "设备未在01-inventory归类"
+
+
+def planned_port_counts(
+    endpoints: list[tuple[str, str]], family: str,
+) -> dict[str, Optional[int]]:
+    """每台设备（短名 key）规划使用的业务口数；出现但没有一个业务口的设备为 None。
+
+    两端都数，按（短名, 口名）去重；口名只认本族业务口（ETH swp*，IB sw*p*），
+    管理口（eth0/eth1/mgmt/bmc/come/fnm…）不计。
+    """
+    pattern = _PLAN_PORT_PATTERNS[family]
+    ports: dict[str, set[str]] = {}
+    for device, port in endpoints:
+        key = short_key(str(device))
+        if not key:
+            continue
+        found = ports.setdefault(key, set())
+        port_text = str(port).strip()
+        if pattern.fullmatch(port_text):
+            found.add(port_text.casefold())
+    return {key: (len(values) if values else None) for key, values in ports.items()}
+
+
+def _cvt_endpoints(path: Path) -> list[tuple[str, str]]:
+    """CVT Links 表的两端（Protocol=unknown 的行口名未换算，不计入）。"""
+    rows = read_xlsx_tables(path).get("Links") or []
+    endpoints: list[tuple[str, str]] = []
+    for row in rows[1:]:
+        values = [str(value or "").strip() for value in row] + [""] * 8
+        if values[0].casefold() == "unknown":
+            for device in (values[1], values[6]):
+                if device:
+                    endpoints.append((device, ""))
+            continue
+        endpoints += [(values[1], values[2]), (values[6], values[7])]
+    return [(device, port) for device, port in endpoints if device]
+
+
+def _dot_endpoints(path: Path) -> list[tuple[str, str]]:
+    endpoints: list[tuple[str, str]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = _DOT_LINK.match(line)
+        if match:
+            endpoints += [(match.group(1), match.group(2)), (match.group(3), match.group(4))]
+    return endpoints
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def load_planned_ports(directory: Path = P2P_OUTPUT_DIR,
+                       p2p_input: Path = P2P_INPUT_LINK) -> dict[str, dict[str, object]]:
+    """{"ib"|"eth": {"counts": {短名: 口数或 None} | None, "reason": 文字}}。"""
+    result: dict[str, dict[str, object]] = {}
+    try:
+        current_p2p = p2p_input.resolve(strict=True) if p2p_input.is_file() else None
+    except OSError:
+        current_p2p = None
+    stem = current_p2p.stem if current_p2p is not None else ""
+
+    # IB: the CVT of the current P2P, its provenance bound to this project's p2p.xlsx.
+    cvt = directory / f"{stem}-cvt.xlsx" if stem else None
+    if current_p2p is None:
+        result["ib"] = {"counts": None, "reason": "当前项目没有 p2p.xlsx"}
+    elif cvt is None or not cvt.is_file():
+        result["ib"] = {"counts": None, "reason": "未找到当前 P2P 的 CVT（*-cvt.xlsx）"}
+    else:
+        from ztp.config.ib_topology_provenance import ProvenanceError, read_cvt_provenance
+
+        try:
+            record = read_cvt_provenance(cvt)
+            source = record["sources"]["p2p"]["resolved_path"]
+            if Path(source) != current_p2p:
+                raise ProvenanceError("CVT 来源记录属于另一份 P2P")
+            result["ib"] = {"counts": planned_port_counts(_cvt_endpoints(cvt), "ib"),
+                            "reason": f"CVT {cvt.name}"}
+        except (ProvenanceError, OSError, ValueError, KeyError, zipfile.BadZipFile,
+                ET.ParseError) as exc:
+            result["ib"] = {"counts": None, "reason": f"CVT 已过期或来源记录无效：{exc}"}
+
+    # ETH: the current stem's DOT; its splitter-profiles sidecar must name this DOT
+    # and this p2p.xlsx by their own sha256 (the Ethernet converter writes both).
+    dot = directory / f"{stem}-lldpq.dot" if stem else None
+    sidecar = directory / f"{stem}-splitter-profiles.json" if stem else None
+    if current_p2p is None:
+        result["eth"] = {"counts": None, "reason": "当前项目没有 p2p.xlsx"}
+    elif dot is None or not dot.is_file():
+        result["eth"] = {"counts": None, "reason": "未找到当前 P2P 的 DOT（*-lldpq.dot）"}
+    else:
+        try:
+            document = json.loads(sidecar.read_text(encoding="utf-8"))
+            if document.get("lldpq_sha256") != _file_sha256(dot):
+                raise ValueError("DOT 与伴随文件不对应")
+            if document.get("workbook_sha256") != _file_sha256(current_p2p):
+                raise ValueError("DOT 不是当前 p2p.xlsx 生成的")
+            result["eth"] = {"counts": planned_port_counts(_dot_endpoints(dot), "eth"),
+                             "reason": f"DOT {dot.name}"}
+        except (OSError, UnicodeError, ValueError, AttributeError) as exc:
+            result["eth"] = {"counts": None, "reason": f"DOT 已过期或伴随文件无效：{exc}"}
+    return result
+
+
+def planned_ports_for(sw: dict, family: str, plans: Optional[dict]) -> tuple[Optional[int], str]:
+    """一台设备的规划数与原因；UFM、NVLink 及拿不到时为 (None, 原因)。"""
+    if sw.get("device_kind") == "ufm" or sw.get("sw_type") == "UFM":
+        return None, "UFM 的可用数含以太网口，不在 IB 的 P2P 里"
+    if family == "nvl":
+        return None, "NVLink 目前没有 P2P 换算结果"
+    plan = (plans or {}).get(family)
+    if not plan or plan.get("counts") is None:
+        return None, str((plan or {}).get("reason") or "没有 P2P 换算结果")
+    counts = plan["counts"]
+    key = short_key(str(sw.get("hostname") or ""))
+    if key not in counts:
+        return None, "设备不在 P2P 里"
+    if counts[key] is None:
+        return None, PLAN_UNCLASSIFIED_REASON
+    return int(counts[key]), str(plan.get("reason") or "")
+
+
+def render_cpld_cell(sw: dict, comparison: Optional[dict] = None) -> str:
+    """CPLD 列：短串，点击展开逐槽明细（原值、目标、是否一致），可复制完整逐槽串（R-028/R-029）。"""
+    slots = list(sw.get("cpld_slots") or [])
+    if not slots:
+        return '<td class="lst-num">—</td>'
+    comparison = comparison or {}
+    state = comparison.get("states", {}).get("cpld", "")
+    expected = list(comparison.get("targets", {}).get("cpld") or [])
+    rows = []
+    for index, slot in enumerate(slots):
+        actual = str(slot["actual"])
+        if state in {"same", "diff", "unknown"} and index < len(expected):
+            target = expected[index]
+            if state == "unknown" and not re.fullmatch(r"CPLD\d+_REV\S+", actual, re.IGNORECASE):
+                match = "unknown"
+            else:
+                match = "same" if actual.casefold() == target.casefold() else "diff"
+        else:
+            target, match = "—", ("mismatch" if state == "mismatch" else "—")
+        match_label = {"same": "一致", "diff": "不一致", "unknown": "未知",
+                       "mismatch": "型号与包不匹配"}.get(match, "—")
+        rows.append(
+            f'<div class="cpld-slot" data-slot="CPLD{slot["slot"]}" data-actual="{escape(actual)}" '
+            f'data-target="{escape(target)}" data-match="{match}">CPLD{slot["slot"]}：{escape(actual)}'
+            f' · 目标 {escape(target)} · {match_label}</div>'
+        )
+    details = "".join(rows)
+    short_class = "cpld-short"
+    short_title = ""
+    if state == "diff":
+        short_class += " ver-diff"
+        short_title = f' title="目标：{escape(cpld_short_text([{"slot": i + 1, "actual": value} for i, value in enumerate(expected)]))}"'
+    note = '<span class="cpld-note">型号与包不匹配</span>' if state == "mismatch" else ""
+    return (
+        f'<td class="lst-num cpld-cell" data-cpld-full="{escape(cpld_full_text(slots))}">'
+        f'<button type="button" class="cpld-toggle" onclick="toggleCpldDetail(this)">'
+        f'<span class="{short_class}"{short_title}>{escape(cpld_short_text(slots))}</span></button>{note}'
+        f'<div class="cpld-detail" hidden>{details}'
+        f'<button type="button" class="cpld-copy" onclick="copyCpld(this)">复制完整串</button></div></td>'
+    )
+
+
+def render_sw_list_row(sw: dict, family: str = "", targets: Optional[dict] = None,
+                       plans: Optional[dict] = None) -> str:
+    """生成列表视图的单行 <tr>。
+
+    行上的 data-* 是饼图、组按钮和页面筛选共用的同一份 Python 结果（R-027）；
+    ``family`` 是设备所在 CSV 列表的族，缺省按设备的 ``sw_type``。
+    """
     hostname  = escape(sw["hostname"])
+    placement = switch_status_placement(sw, family)
+    bucket    = switch_status_bucket(sw)
+    row_attrs = f'data-hn="{hostname.lower()}" data-hostname="{hostname}"'
+    if placement is not None:
+        row_attrs += (
+            f' data-env="{escape(placement["env"])}" data-family="{placement["family"]}"'
+            f' data-group="{escape(placement["group"])}" data-cat="{escape(placement["cat"])}"'
+        )
+    comparison = compare_switch_versions(
+        sw, family or _SWITCH_FAMILY_OF_TYPE.get(str(sw.get("sw_type") or ""), ""), targets,
+    )
+    upgrade = bool(comparison["diff"])
+    # 有问题设备＝需升级或需检查；只有「<组件> Unknown」的不算（指导 8.16）。
+    problem = upgrade or bucket != "ok"
+    row_attrs += (
+        f' data-bucket="{bucket}" data-diff="{" ".join(comparison["diff"])}"'
+        f' data-upgrade="{int(upgrade)}" data-problem="{int(problem)}"'
+    )
+    hn_class = " hn-problem" if problem else ""
+    upgrade_cell = f'<td class="lst-num upg-cell">{render_upgrade_cell(comparison)}</td>'
     serial    = escape(sw.get("serial") or "—")
     model     = escape(sw["model"] or sw["system_type"] or "—")
     version   = escape(sw["version"] or "—")
     bios_ver  = escape(sw.get("bios_version") or "—")
     ssd_ver   = escape(sw.get("ssd_version") or "—")
+    differing = set(comparison["diff"])
+    own_targets = comparison.get("targets", {})
+    if "sw" in differing:
+        version = f'<span class="ver-diff" title="目标：{escape(str(own_targets["sw"]))}">{version}</span>'
+    if "bios" in differing:
+        bios_ver = f'<span class="ver-diff" title="目标：{escape(str(own_targets["bios"]))}">{bios_ver}</span>'
+    if "ssd" in differing:
+        ssd_ver = f'<span class="ver-diff" title="目标：{escape(str(own_targets["ssd"]))}">{ssd_ver}</span>'
     asic_ver  = escape(sw.get("asic_version") or "—")
+    cpld_cell = render_cpld_cell(sw, comparison)
     asic_temp = render_temperature_values(
         sw.get("asic_temperature_details", []),
         sw.get("asic_temperatures", []),
@@ -4211,6 +4711,11 @@ def render_sw_list_row(sw: dict) -> str:
         h_lbl = "MISSING" if h == "missing" else (h.upper() if h else "N/A")
     else:
         h_lbl = "OK" if h == "ok" else "NOT OK"
+    # R-027 V2：红桶的普通交换机悬停显示采集原值；标签、h_cls 和 raw 都不改。
+    health_title = ""
+    if bucket == "notok" and sw["sw_type"] != "UFM":
+        raw_health = str(sw.get("health_raw") or sw.get("health") or "（空）")
+        health_title = f' title="采集原值：{escape(raw_health)}"'
 
     if h == "missing":
         reason = escape(sw.get("collection_error") or "本批次未返回采集文件")
@@ -4225,27 +4730,39 @@ def render_sw_list_row(sw: dict) -> str:
             f'<span class="collect-result {collection_class}">{collection_label} · {c_time}</span>'
             f'<span class="collect-reason">{reason}</span>'
         )
-        cat_key, _ = classify_host(
-            sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
-        )
         return (
-            f'<tr class="lst-row lst-row-miss" data-hn="{hostname.lower()}" data-cat="{cat_key}">'
-            f'<td class="lst-hn">{hostname}</td>'
+            f'<tr class="lst-row lst-row-miss" {row_attrs}>'
+            f'<td class="lst-hn{hn_class}">{hostname}</td>'
             f'<td class="lst-num">{serial}</td>'
-            f'<td colspan="{SWITCH_LIST_COLUMN_COUNT - 5}" style="color:#9b2335;font-style:italic">{missing_summary}</td>'
+            f'<td colspan="{SWITCH_LIST_COLUMN_COUNT - 6}" style="color:#9b2335;font-style:italic">{missing_summary}</td>'
+            f'{upgrade_cell}'
             f'<td><span class="h-badge {h_cls}">{h_lbl}</span></td>'
             f'<td class="lst-num">{uptime}</td>'
             f'<td class="collect-cell">{collection_html}</td>'
             f'</tr>\n'
         )
 
+    # R-030 V5: 实际可用 / P2P 规划 / 总口数；只给可用数上色：有 Down 橙色优先，
+    # 否则 A=P 绿、A≠P 黄；拿不到规划数时为「—」，颜色按原机制（指导 8.17）。
+    planned, plan_reason = planned_ports_for(
+        sw, family or _SWITCH_FAMILY_OF_TYPE.get(str(sw.get("sw_type") or ""), ""), plans,
+    )
     if sw["interfaces_total"]:
         up, total = sw["interfaces_up"], sw["interfaces_total"]
         downs = sw["interfaces_down"]
         down_count = int(sw.get("interfaces_down_count", len(downs)) or 0)
-        i_cls  = "i-warn" if down_count else "i-ok"
-        i_html = f'<span class="{i_cls}">{up}/{total}</span>'
+        if down_count:
+            i_cls = "i-warn"
+        elif planned is not None:
+            i_cls = "i-ok" if up == planned else "i-mid"
+        else:
+            i_cls = "i-ok"
+        planned_text = "—" if planned is None else str(planned)
+        i_title = f"实际可用 {up}，P2P 规划 {planned_text}，设备总口数 {total}"
+        if planned is None and plan_reason:
+            i_title += f"\n规划数：{plan_reason}"
+        i_html = (f'<span class="if-a {i_cls}">{up}</span>'
+                  f'<span class="if-pt">/{planned_text}/{total}</span>')
         if down_count:
             title = "Down接口" if sw["sw_type"] in {"IB", "NVL"} else "Admin up / Oper down"
             down_detail = title + ":\n" + "\n".join(downs)
@@ -4255,6 +4772,8 @@ def render_sw_list_row(sw: dict) -> str:
                        f'({down_count}↓)</span>')
     else:
         i_html = "—"
+        i_title = ""
+    i_title_attr = f' title="{escape(i_title)}"' if i_title else ""
 
     psu_ok    = sw.get("psu_ok", 0)
     psu_fail  = sw.get("psu_fail", 0)
@@ -4299,18 +4818,15 @@ def render_sw_list_row(sw: dict) -> str:
         bgp_html = '<span class="na">N/A</span>'
     bond_html = render_bond_multihoming_summary(sw, compact=True)
 
-    cat_key, _ = classify_host(
-        sw["hostname"], sw["sw_type"], sw["health"], sw.get("template", ""),
-        bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
-    )
     return (
-        f'<tr class="lst-row" data-hn="{hostname.lower()}" data-cat="{cat_key}">'
-        f'<td class="lst-hn">{hostname}</td>'
+        f'<tr class="lst-row" {row_attrs}>'
+        f'<td class="lst-hn{hn_class}">{hostname}</td>'
         f'<td class="lst-num">{serial}</td>'
         f'<td class="lst-model">{model}</td>'
         f'<td class="lst-num">{version}</td>'
         f'<td class="lst-num">{bios_ver}</td>'
         f'<td class="lst-num">{ssd_ver}</td>'
+        f'{cpld_cell}'
         f'<td class="lst-num">{asic_ver}</td>'
         f'<td class="lst-num">{asic_temp}</td>'
         f'<td class="lst-num">{psu_temp}</td>'
@@ -4320,10 +4836,11 @@ def render_sw_list_row(sw: dict) -> str:
         f'<td class="lst-num">{disk_html}</td>'
         f'<td class="lst-num">{mem_html}</td>'
         f'<td class="lst-num">{ntp_html}</td>'
-        f'<td class="lst-num">{i_html}</td>'
+        f'<td class="lst-num if-cell"{i_title_attr}>{i_html}</td>'
         f'<td class="lst-num">{bgp_html}</td>'
         f'<td class="lst-num">{bond_html}</td>'
-        f'<td class="lst-num"><span class="h-badge {h_cls}">{h_lbl}</span></td>'
+        f'{upgrade_cell}'
+        f'<td class="lst-num"{health_title}><span class="h-badge {h_cls}">{h_lbl}</span></td>'
         f'<td class="lst-num">{uptime}</td>'
         f'<td class="collect-cell"><span class="collect-result collect-ok">成功 · {c_time}</span></td>'
         f'</tr>\n'
@@ -4334,117 +4851,32 @@ def build_switch_list_html(
     switches: list[dict],
     categories: list[tuple[str, str]],
     sw_type: str = "ETH",
-    group_environments: bool = True,
+    targets: Optional[dict] = None,
+    plans: Optional[dict] = None,
 ) -> str:
-    """将交换机按分类分组，生成含子类标题行的列表 <tr> 片段。空分类仍显示标题。"""
-    groups: dict[str, list[dict]] = {}
+    """一个设备族的子类小标题（只写台数）与设备行；只含计入饼图的设备。
+
+    ``sw_type`` 是设备所在 CSV 列表的族（ETH/IB/NVL），不是采集头。没有设备的
+    子类不显示；未采集设备留在自己的 CSV 子类里（R-027，指导 8.13）。
+    """
+    family = _SWITCH_FAMILY_OF_TYPE.get(sw_type, "")
+    members: dict[str, list[tuple[dict, dict]]] = {}
     for sw in switches:
-        key, _ = classify_host(
-            sw["hostname"], sw_type, sw.get("health", ""), sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
-        )
-        groups.setdefault(key, []).append(sw)
-
+        placement = switch_status_placement(sw, family)
+        if placement is not None:
+            members.setdefault(placement["cat"], []).append((sw, placement))
     html = ""
-    environments = (
-        (("air", "AIR"), ("production", "Production"))
-        if sw_type == "ETH" and group_environments else (("all", ""),)
-    )
-    for environment, environment_label in environments:
-        environment_switches = [
-            sw for sw in switches
-            if environment == "all"
-            or switch_environment(sw) == environment
-        ]
-        if sw_type == "ETH" and group_environments:
-            html += (
-                f'<tr class="lst-env" data-environment="{environment}" '
-                f'role="button" tabindex="0" aria-expanded="true" '
-                f'onclick="toggleListEnvironment(this)" '
-                f'onkeydown="handleListEnvironmentKey(event, this)">'
-                f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{environment_label}（{len(environment_switches)}）</td></tr>\n'
-            )
-        for cat_key, cat_label in categories:
-            sws = [
-                sw for sw in groups.get(cat_key, []) if sw in environment_switches
-            ]
-            if cat_key in {"missing", "ib-ufm"} and not sws:
-                continue
-            sws_sorted = sorted(sws, key=lambda s: air_first_hostname_key(s["hostname"]))
-            cat_cls = "lst-cat lst-cat-miss" if cat_key == "missing" else "lst-cat"
-            html += (
-                f'<tr class="{cat_cls}" data-cat="{cat_key}" onclick="toggleCat(this)">'
-                f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{escape(cat_label)}（{len(sws_sorted)}）</td></tr>\n'
-            )
-            for role, role_switches in group_switches_by_role(sws_sorted):
-                html += (
-                    f'<tr class="lst-role" data-role="{escape(role.casefold())}">'
-                    f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{escape(role)}（{len(role_switches)}）</td></tr>\n'
-                )
-                html += "".join(render_sw_list_row(sw) for sw in role_switches)
-    return html
-
-
-def build_switch_cards_html(
-    switches: list[dict],
-    categories: list[tuple[str, str]],
-    sw_type: str,
-    group_environments: bool = True,
-) -> str:
-    """按角色/用途子类组织卡片，并为每个子类生成可折叠标题。"""
-    if not switches:
-        return ""
-    groups: dict[str, list[dict]] = {}
-    for sw in switches:
-        key, _ = classify_host(
-            sw["hostname"], sw_type, sw.get("health", ""), sw.get("template", ""),
-            bool(sw.get("dynamic_dhcp")), device_kind=sw.get("device_kind", ""),
+    for cat_key, cat_label in categories:
+        items = sorted(members.get(cat_key, []),
+                       key=lambda item: air_first_hostname_key(item[0]["hostname"]))
+        if not items:
+            continue
+        html += (
+            f'<tr class="lst-cat" data-group="{escape(items[0][1]["group"])}" '
+            f'data-cat="{escape(cat_key)}" onclick="toggleCat(this)">'
+            f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{escape(cat_label)}（{len(items)}）</td></tr>\n'
         )
-        groups.setdefault(key, []).append(sw)
-
-    html = ""
-    environments = (
-        (("air", "AIR"), ("production", "Production"))
-        if sw_type == "ETH" and group_environments else (("all", ""),)
-    )
-    for environment, environment_label in environments:
-        environment_switches = [
-            sw for sw in switches
-            if environment == "all"
-            or switch_environment(sw) == environment
-        ]
-        if sw_type == "ETH" and group_environments:
-            html += (
-                f'<section class="card-env-group" data-environment="{environment}">'
-                f'<div class="card-env" data-environment="{environment}" '
-                f'role="button" tabindex="0" '
-                f'aria-expanded="true" onclick="toggleCardEnvironment(this)" '
-                f'onkeydown="handleCardEnvironmentKey(event, this)">'
-                f'{environment_label}（{len(environment_switches)}）</div>'
-                f'<div class="card-env-content">'
-            )
-        for cat_key, cat_label in categories:
-            sws = sorted(
-                (sw for sw in groups.get(cat_key, []) if sw in environment_switches),
-                key=lambda sw: air_first_hostname_key(sw["hostname"]),
-            )
-            if cat_key in {"missing", "ib-ufm"} and not sws:
-                continue
-            cat_class = "card-cat card-cat-miss" if cat_key == "missing" else "card-cat"
-            html += (
-                f'<div class="{cat_class}" data-cat="{cat_key}" role="button" tabindex="0" '
-                f'aria-expanded="true" onclick="toggleCardCat(this)" '
-                f'onkeydown="handleCardCatKey(event, this)">'
-                f'{escape(cat_label)}（{len(sws)}）</div>'
-            )
-            for role, role_switches in group_switches_by_role(sws):
-                html += (
-                    f'<div class="card-role" data-role="{escape(role.casefold())}">'
-                    f'{escape(role)}（{len(role_switches)}）</div>'
-                )
-                html += "".join(render_eth_card(sw) for sw in role_switches)
-        if sw_type == "ETH" and group_environments:
-            html += "</div></section>"
+        html += "".join(render_sw_list_row(sw, family, targets, plans) for sw, _ in items)
     return html
 
 
@@ -4868,15 +5300,282 @@ def build_link_content(snaps, headers, latest, latest_ts,
 # HTML 生成
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Switch Status 视图、按钮、饼图标签与 hash 的页面脚本（R-027 V2，指导 8.13）。
+# 只读 Python 已写好的 data-* 做集合交并，不计算分类、计数或比较结果；允许的
+# hash 键和枚举值来自上面的 Python 常量（render 时以 JSON 嵌入）。
+_SWITCH_STATUS_SCRIPT = r"""
+// ── Tab1: Switch Status 饼图 / 列表、组按钮、饼图标签与地址栏 hash ─────────────
+const SWITCH_HASH_KEYS = __SWITCH_HASH_KEYS__;
+const SWITCH_VIEWS = __SWITCH_VIEWS__;
+const SWITCH_GROUP_BUTTONS = __SWITCH_GROUP_BUTTONS__;
+const SWITCH_BUCKETS = __SWITCH_BUCKETS__;
+const SWITCH_BUCKET_LABELS = __SWITCH_BUCKET_LABELS__;
+let switchState = {view: 'pie', q: '', pie: '', btn: {}};
+
+function switchGroupExists(group) {
+  return !!group && Array.from(document.querySelectorAll('tr.lst-grp'))
+    .some(row => row.dataset.group === group);
+}
+
+function switchPieFigure(group, cat) {
+  return Array.from(document.querySelectorAll('figure.pie'))
+    .find(figure => figure.dataset.group === group && figure.dataset.cat === cat) || null;
+}
+
+function parseSwitchHash(hash) {
+  const state = {view: '', q: '', pie: '', btn: {}};
+  const query = String(hash || '').replace(/^#/, '').split('?').slice(1).join('?');
+  new URLSearchParams(query).forEach((value, key) => {
+    if (!SWITCH_HASH_KEYS.includes(key)) return;
+    if (key === 'view') {
+      if (SWITCH_VIEWS.includes(value)) state.view = value;
+    } else if (key === 'q') {
+      state.q = value;
+    } else if (key === 'pie') {
+      const [group, cat, bucket] = value.split('|');
+      if (SWITCH_BUCKETS.includes(bucket) && switchPieFigure(group, cat)) state.pie = value;
+    } else if (key === 'btn') {
+      value.split(',').forEach(item => {
+        const [group, button] = item.split(':');
+        if (switchGroupExists(group) && SWITCH_GROUP_BUTTONS.includes(button) && button !== 'all')
+          state.btn[group] = button;
+      });
+    }
+  });
+  return state;
+}
+
+function switchHashSuffix() {
+  const params = new URLSearchParams();
+  if (switchState.view && switchState.view !== 'pie') params.set('view', switchState.view);
+  if (switchState.q) params.set('q', switchState.q);
+  if (switchState.pie) params.set('pie', switchState.pie);
+  const buttons = Object.entries(switchState.btn)
+    .filter(([, button]) => button && button !== 'all')
+    .map(([group, button]) => group + ':' + button);
+  if (buttons.length) params.set('btn', buttons.join(','));
+  const text = params.toString();
+  return text ? '?' + text : '';
+}
+
+function writeSwitchHash() {
+  if (activeTabName() !== 'eth') return;
+  const target = '#eth' + switchHashSuffix();
+  if (window.location.hash !== target)
+    window.history.replaceState(null, '', window.location.pathname + window.location.search + target);
+}
+
+function setView(view, persist = true) {
+  const chosen = SWITCH_VIEWS.includes(view) ? view : 'pie';
+  switchState.view = chosen;
+  document.getElementById('pie-view').style.display = chosen === 'pie' ? '' : 'none';
+  document.getElementById('list-view').style.display = chosen === 'list' ? '' : 'none';
+  document.getElementById('btn-pie').classList.toggle('active', chosen === 'pie');
+  document.getElementById('btn-list').classList.toggle('active', chosen === 'list');
+  if (persist) {
+    storageSet(SWITCH_VIEW_KEY, chosen);
+    writeSwitchHash();
+  }
+  applySwitchFilters();
+}
+
+function switchRowMatchesButton(row, button) {
+  if (!button || button === 'all') return true;
+  if (button === 'check') return row.dataset.bucket !== 'ok';
+  if (button === 'upgrade') return row.dataset.upgrade === '1';
+  return (row.dataset.diff || '').split(' ').includes(button);
+}
+
+function switchSectionHasVisibleRow(header, stopClasses) {
+  let sibling = header.nextElementSibling;
+  while (sibling && !stopClasses.some(name => sibling.classList.contains(name))) {
+    if (sibling.classList.contains('lst-row') && !sibling.classList.contains('hidden')) return true;
+    sibling = sibling.nextElementSibling;
+  }
+  return false;
+}
+
+function applySwitchFilters() {
+  const q = switchState.q.trim().toLowerCase();
+  const search = document.getElementById('eth-search');
+  if (search && search.value !== switchState.q) search.value = switchState.q;
+  const [pieGroup, pieCat, pieBucket] = switchState.pie ? switchState.pie.split('|') : ['', '', ''];
+  document.querySelectorAll('#lst-body tr.lst-row').forEach(row => {
+    let visible = !q || (row.dataset.hn || '').includes(q);
+    const group = row.dataset.group || '';
+    if (visible && group) {
+      visible = group === pieGroup
+        ? row.dataset.cat === pieCat && row.dataset.bucket === pieBucket
+        : switchRowMatchesButton(row, switchState.btn[group]);
+    }
+    row.classList.toggle('hidden', !visible);
+  });
+  const filtering = !!(q || switchState.pie || Object.keys(switchState.btn).length);
+  document.querySelectorAll('#lst-body tr.lst-cat').forEach(cat => {
+    cat.classList.toggle('hidden',
+      filtering && !switchSectionHasVisibleRow(cat, ['lst-cat', 'lst-sec', 'lst-env']));
+  });
+  document.querySelectorAll('#lst-body tr.lst-sec').forEach(section => {
+    const group = section.dataset.group || '';
+    const own = group && (pieGroup === group || switchState.btn[group]);
+    const hide = filtering && !own && !switchSectionHasVisibleRow(section, ['lst-sec', 'lst-env']);
+    section.classList.toggle('hidden', hide);
+    let sibling = section.nextElementSibling;
+    while (sibling && (sibling.classList.contains('lst-btns')
+                       || sibling.classList.contains('lst-repeat-head'))) {
+      sibling.classList.toggle('hidden', hide);
+      sibling = sibling.nextElementSibling;
+    }
+  });
+  document.querySelectorAll('button.grp-btn').forEach(button => {
+    const group = button.dataset.group;
+    const selected = pieGroup === group ? '' : (switchState.btn[group] || 'all');
+    button.classList.toggle('grp-active', button.dataset.button === selected);
+  });
+  const tag = document.getElementById('switch-pie-tag');
+  if (tag) {
+    tag.textContent = '';
+    if (switchState.pie) {
+      const figure = switchPieFigure(pieGroup, pieCat);
+      const chip = document.createElement('span');
+      chip.className = 'switch-tag';
+      chip.textContent = '饼图：' + (figure?.dataset.label || pieCat) + ' · '
+        + (SWITCH_BUCKET_LABELS[pieBucket] || pieBucket) + ' ';
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'switch-tag-remove';
+      remove.textContent = '×';
+      remove.onclick = removeSwitchPieTag;
+      chip.appendChild(remove);
+      tag.appendChild(chip);
+    }
+  }
+}
+
+function selectPieSlice(element) {
+  const figure = element.closest('figure.pie');
+  if (!figure || !SWITCH_BUCKETS.includes(element.dataset.bucket)) return;
+  switchState.pie = [figure.dataset.group, figure.dataset.cat, element.dataset.bucket].join('|');
+  delete switchState.btn[figure.dataset.group];
+  setView('list');
+}
+
+function selectGroupButton(button) {
+  if (button.disabled) return;
+  const group = button.dataset.group;
+  if (switchState.pie.split('|')[0] === group) switchState.pie = '';
+  if (button.dataset.button === 'all') delete switchState.btn[group];
+  else switchState.btn[group] = button.dataset.button;
+  applySwitchFilters();
+  writeSwitchHash();
+}
+
+function removeSwitchPieTag() {
+  switchState.pie = '';
+  applySwitchFilters();
+  writeSwitchHash();
+}
+
+function searchSwitches(input) {
+  switchState.q = input.value;
+  applySwitchFilters();
+  writeSwitchHash();
+}
+
+function clearSwitchFilters() {
+  switchState.q = '';
+  switchState.pie = '';
+  switchState.btn = {};
+  applySwitchFilters();
+  writeSwitchHash();
+}
+
+function toggleProblemsFirst(checkbox) {
+  document.querySelectorAll('#lst-body tr.lst-cat').forEach(cat => {
+    const rows = [];
+    let sibling = cat.nextElementSibling;
+    while (sibling && sibling.classList.contains('lst-row')) {
+      rows.push(sibling);
+      sibling = sibling.nextElementSibling;
+    }
+    rows.sort((left, right) => {
+      if (checkbox.checked && left.dataset.problem !== right.dataset.problem)
+        return left.dataset.problem === '1' ? -1 : 1;
+      return Number(left.dataset.order) - Number(right.dataset.order);
+    });
+    rows.forEach(row => cat.parentNode.insertBefore(row, sibling));
+  });
+}
+
+function copySwitchText(text) {
+  const fallback = () => {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); } finally { area.remove(); }
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).catch(fallback);
+  else fallback();
+}
+
+function copyVisibleHostnames() {
+  const names = Array.from(document.querySelectorAll('#lst-body tr.lst-row'))
+    .filter(row => !row.classList.contains('hidden') && row.offsetParent !== null)
+    .map(row => row.dataset.hostname);
+  copySwitchText(names.join(' '));
+}
+
+function toggleCpldDetail(button) {
+  const detail = button.parentElement.querySelector('.cpld-detail');
+  if (detail) detail.hidden = !detail.hidden;
+}
+
+function copyCpld(button) {
+  copySwitchText(button.closest('td')?.dataset.cpldFull || '');
+}
+
+function initSwitchStatus() {
+  document.querySelectorAll('#lst-body tr.lst-row').forEach((row, index) => {
+    row.dataset.order = String(index);
+  });
+  const fromHash = tabFromLocation() === 'eth' ? parseSwitchHash(window.location.hash) : null;
+  const stored = storageGet(SWITCH_VIEW_KEY);
+  // An old 'card' preference (R-027 removed the card view) falls back to the pie view.
+  const view = fromHash?.view || (stored === 'list' ? 'list' : 'pie');
+  if (stored === 'card') storageSet(SWITCH_VIEW_KEY, 'pie');
+  switchState = {view, q: fromHash?.q || '', pie: fromHash?.pie || '', btn: fromHash?.btn || {}};
+  setView(view, false);
+}
+"""
+
+
+def switch_status_script() -> str:
+    """Return the Switch Status page script with the Python constants embedded."""
+    script = _SWITCH_STATUS_SCRIPT
+    for name, value in (
+        ("SWITCH_HASH_KEYS", list(SWITCH_HASH_KEYS)),
+        ("SWITCH_VIEWS", list(SWITCH_VIEWS)),
+        ("SWITCH_GROUP_BUTTONS", list(SWITCH_GROUP_BUTTONS)),
+        ("SWITCH_BUCKETS", list(SWITCH_BUCKETS)),
+        ("SWITCH_BUCKET_LABELS", SWITCH_BUCKET_LABELS),
+    ):
+        script = script.replace(f"__{name}__", json.dumps(value, ensure_ascii=False))
+    return script
+
+
 def build_html(
-    eth_cards: dict,
+    eth_summary: dict,
     eth_source: str,
     eth_count: int,
-    ib_cards: str,
+    ib_notice: str,
     ib_source: str,
     ib_count: int,
-    eth_list: dict,
-    ib_list: str,
+    eth_devices: dict,
+    ib_devices,
     spx_thead: str,
     spx_tbody: str,
     spx_stats: dict,
@@ -4887,10 +5586,10 @@ def build_html(
     ibl_stats: dict,
     ibl_latest_ts: Optional[datetime],
     ibl_snap_count: int,
-    nv_cards: str,
+    nv_notice: str,
     nv_source: str,
     nv_count: int,
-    nv_list: str,
+    nv_devices,
     nvl_thead: str,
     nvl_tbody: str,
     nvl_stats: dict,
@@ -4901,6 +5600,9 @@ def build_html(
     ethernet_diagram: dict,
     air_diagram: dict,
     ztp_status: dict,
+    *,
+    version_targets: Optional[dict] = None,
+    planned_ports: Optional[dict] = None,
 ) -> str:
     gen_time      = datetime.now(DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S")
     spx_ts_str    = spx_latest_ts.strftime("%Y-%m-%d %H:%M") if spx_latest_ts else "—"
@@ -4955,139 +5657,26 @@ def build_html(
         )
     switch_list_headers = (
         "<th>主机名</th><th>SN</th><th>型号</th><th>SW 版本</th>"
-        "<th>BIOS 版本</th><th>SSD 版本</th><th>ASIC 版本</th>"
+        "<th>BIOS 版本</th><th>SSD 版本</th><th>CPLD 版本</th><th>ASIC 版本</th>"
         "<th>ASIC 温度</th><th>PSU 温度</th>"
         "<th>PSU</th><th>FAN</th><th>CPU Use</th><th>Disk Use</th><th>Mem Use</th>"
-        "<th>NTP Sync</th><th>接口</th><th>BGP</th>"
-        "<th>EVPN/MLAG Bond</th><th>健康</th>"
+        "<th>NTP Sync</th><th>接口 可用/规划/总数</th><th>BGP</th>"
+        "<th>EVPN/MLAG Bond</th><th>组件需升级</th><th>健康</th>"
         "<th>Uptime</th><th>采集</th>"
     )
-    # 卡片视图始终显示三类设备的分组行头；没有采集数据时明确显示 (0)，
-    # 但不在分组下面渲染占位卡片或提示文本。
-    section_attrs = (
-        'role="button" tabindex="0" aria-expanded="true" '
-        'onclick="toggleCardSection(this)" '
-        'onkeydown="handleCardSectionKey(event, this)"'
+    # R-027 V2：饼图与列表来自同一次分组计算；各设备族的解析错误在两种视图上方显示。
+    switch_view = render_switch_status(
+        eth_devices or {}, ib_devices or [], nv_devices or [], switch_list_headers,
+        version_targets, planned_ports,
     )
-    air_eth_count = int(eth_cards.get("air_count", 0))
-    production_eth_count = int(eth_cards.get("production_count", 0))
-    air_unbound_count = int(eth_cards.get("unbound_air_count", 0))
-    production_unbound_count = int(
-        eth_cards.get("unbound_production_count", 0)
+    switch_notices = "".join(
+        str(notice) for notice in (
+            (eth_summary or {}).get("error", ""), ib_notice or "", nv_notice or "",
+        ) if notice
     )
-    unknown_eth_count = int(eth_cards.get("unknown_count", 0))
-    unknown_unbound_count = int(eth_cards.get("unbound_unknown_count", 0))
-    air_count = air_eth_count + air_unbound_count
-    production_count = (
-        production_eth_count + ib_count + nv_count + production_unbound_count
-    )
-    unknown_count = unknown_eth_count + unknown_unbound_count
+    unbound_count = int(switch_view["unbound_count"])
+    switch_status_script_text = switch_status_script()
 
-    def card_switch_section(label: str, count: int, content: str, cls: str = "") -> str:
-        return (
-            f'<div class="section-divider {cls}" {section_attrs}>{label} ({count})</div>'
-            f'{content}'
-        )
-
-    def card_environment(environment: str, label: str, count: int, content: str) -> str:
-        return (
-            f'<section class="card-env-group" data-environment="{environment}">'
-            f'<div class="card-env" data-environment="{environment}" role="button" '
-            f'tabindex="0" aria-expanded="true" onclick="toggleCardEnvironment(this)" '
-            f'onkeydown="handleCardEnvironmentKey(event, this)">{label}（{count}）</div>'
-            f'<div class="card-env-content">{content}</div></section>'
-        )
-
-    switch_cards_html = (
-        card_environment(
-            "air", "AIR", air_count,
-            card_switch_section(
-                "Ethernet Switches", air_eth_count, str(eth_cards.get("air", "")),
-            )
-            + card_switch_section(
-                "未绑定 / 未分类设备（其他）", air_unbound_count,
-                str(eth_cards.get("unbound_air", "")),
-            ),
-        )
-        + card_environment(
-            "production", "Production", production_count,
-            card_switch_section(
-                "Ethernet Switches", production_eth_count,
-                str(eth_cards.get("production", "")),
-            )
-            + card_switch_section("InfiniBand Switches", ib_count, ib_cards, "ib-divider")
-            + card_switch_section("NVLink Switches", nv_count, nv_cards, "nv-divider")
-            + card_switch_section(
-                "未绑定 / 未分类设备（其他）",
-                production_unbound_count,
-                str(eth_cards.get("unbound_production", "")),
-            ),
-        )
-        + card_environment(
-            "unknown", "Unknown / 未归类", unknown_count,
-            card_switch_section(
-                "Ethernet Switches", unknown_eth_count,
-                str(eth_cards.get("unknown", "")),
-            )
-            + card_switch_section(
-                "未绑定 / 未归类设备（其他）", unknown_unbound_count,
-                str(eth_cards.get("unbound_unknown", "")),
-            ),
-        )
-    )
-
-    list_environment_attrs = (
-        'role="button" tabindex="0" aria-expanded="true" '
-        'onclick="toggleListEnvironment(this)" '
-        'onkeydown="handleListEnvironmentKey(event, this)"'
-    )
-
-    def list_switch_section(label: str, count: int, content: str, cls: str = "") -> str:
-        repeat = (
-            f'<tr class="lst-repeat-head">{switch_list_headers}</tr>'
-            if content else ""
-        )
-        return (
-            f'<tr class="lst-sec {cls}" role="button" tabindex="0" '
-            f'aria-expanded="true" onclick="toggleListSwitchType(this)" '
-            f'onkeydown="handleListSwitchTypeKey(event, this)">'
-            f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">{label} ({count})</td></tr>{repeat}{content}'
-        )
-
-    switch_list_html = (
-        f'<tr class="lst-env" data-environment="air" {list_environment_attrs}>'
-        f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">AIR（{air_count}）</td></tr>'
-        + list_switch_section(
-            "ETHERNET SWITCHES", air_eth_count, str(eth_list.get("air", "")),
-        )
-        + list_switch_section(
-            "未绑定 / 未分类设备（其他）", air_unbound_count,
-            str(eth_list.get("unbound_air", "")),
-        )
-        + f'<tr class="lst-env" data-environment="production" {list_environment_attrs}>'
-        f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">Production（{production_count}）</td></tr>'
-        + list_switch_section(
-            "ETHERNET SWITCHES", production_eth_count,
-            str(eth_list.get("production", "")),
-        )
-        + list_switch_section("INFINIBAND SWITCHES", ib_count, ib_list, "lst-sec-ib")
-        + list_switch_section("NVLINK SWITCHES", nv_count, nv_list, "lst-sec-nv")
-        + list_switch_section(
-            "未绑定 / 未分类设备（其他）",
-            production_unbound_count,
-            str(eth_list.get("unbound_production", "")),
-        )
-        + f'<tr class="lst-env" data-environment="unknown" {list_environment_attrs}>'
-        f'<td colspan="{SWITCH_LIST_COLUMN_COUNT}">Unknown / 未归类（{unknown_count}）</td></tr>'
-        + list_switch_section(
-            "ETHERNET SWITCHES", unknown_eth_count,
-            str(eth_list.get("unknown", "")),
-        )
-        + list_switch_section(
-            "未绑定 / 未分类设备（其他）", unknown_unbound_count,
-            str(eth_list.get("unbound_unknown", "")),
-        )
-    )
     def auto_refresh_control(tab: str) -> str:
         return f"""
     <label class="auto-refresh" data-refresh-tab="{tab}"
@@ -5194,7 +5783,7 @@ body {{
   flex-wrap: wrap;
   flex-shrink: 0;
 }}
-#eth-toolbar .eth-meta {{ font-size: 12px; color: #6c757d; flex: 1; }}
+#eth-toolbar .eth-meta {{ font-size: 12px; color: #6c757d; flex: 0 1 auto; }}
 #eth-search {{
   padding: 5px 10px;
   border: 1px solid var(--border);
@@ -5203,60 +5792,6 @@ body {{
   width: 220px;
 }}
 #eth-search:focus {{ outline: none; border-color: var(--accent); }}
-#card-grid {{
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px 20px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  align-content: flex-start;
-}}
-.section-divider {{
-  width: 100%;
-  padding: 6px 2px 4px;
-  font-size: 11px;
-  font-weight: 700;
-  color: #5a6472;
-  text-transform: uppercase;
-  letter-spacing: .1em;
-  border-bottom: 2px solid #c8d0dc;
-  cursor: pointer;
-  user-select: none;
-}}
-.section-divider::before {{ content: '▾'; display: inline-block; width: 16px; }}
-.section-divider.collapsed::before {{ content: '▸'; }}
-.section-divider:focus {{ outline: 2px solid var(--accent); outline-offset: 2px; }}
-.section-hidden {{ display: none !important; }}
-.ib-divider {{ color: #6b3e9e; border-color: #c4a8e0; margin-top: 12px; }}
-.nv-divider {{ color: #1a7a4a; border-color: #88c9a8; margin-top: 12px; }}
-.card-cat {{
-  width: 100%;
-  margin-top: 2px;
-  padding: 5px 10px;
-  background: #e8ecf1;
-  border-left: 3px solid #8a99ab;
-  color: #4a5568;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-  cursor: pointer;
-  user-select: none;
-}}
-.card-env {{
-  background:#263548; color:#fff; border-left:5px solid #3b7dd8;
-  padding:9px 12px; font-size:14px; font-weight:800; cursor:pointer;
-  user-select:none;
-}}
-.card-env::before {{ content:'▾'; display:inline-block; width:18px; color:#c8d5e3; }}
-.card-env.collapsed::before {{ content:'▸'; }}
-.card-env:focus {{ outline:2px solid var(--accent); outline-offset:1px; }}
-.card-env-group {{ width:100%; min-width:0; margin-top:8px; }}
-.card-env-content {{
-  display:flex; flex-wrap:wrap; gap:16px; align-content:flex-start; padding-top:10px;
-}}
-.card-env-content.env-collapsed {{ display:none; }}
 .lst-env td {{
   background:#263548 !important; color:#fff !important; font-size:14px;
   font-weight:800 !important; border-left:5px solid #3b7dd8; cursor:pointer;
@@ -5265,33 +5800,6 @@ body {{
 .lst-env.collapsed td::before {{ content:'▸'; }}
 .lst-env:focus {{ outline:2px solid var(--accent); outline-offset:-2px; }}
 .lst-env-hidden {{ display:none !important; }}
-.card-cat::before {{ content: '▾'; display: inline-block; width: 16px; }}
-.card-cat.collapsed::before {{ content: '▸'; }}
-.card-cat:focus {{ outline: 2px solid var(--accent); outline-offset: 1px; }}
-.card-cat-miss {{ background: #fff0f0; border-color: #e74c3c; color: #9b2335; }}
-.card-cat-hidden {{ display: none !important; }}
-.card-role {{
-  width: 100%;
-  margin: 0 0 -6px 14px;
-  padding: 3px 10px;
-  border-left: 3px solid #b7c3d1;
-  color: #657184;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .04em;
-}}
-.card-role.card-cat-hidden {{ display: none !important; }}
-.sw-card {{
-  background: #fff;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  width: clamp(320px, calc(var(--hostname-ch, 16) * 9px + 170px), 520px);
-  max-width: calc(100vw - 40px);
-  box-sizing: border-box;
-  box-shadow: 0 1px 4px rgba(0,0,0,.06);
-  overflow: hidden;
-}}
-.sw-card.hidden {{ display: none; }}
 .sw-hdr {{
   background: var(--hdr-bg);
   color: #e8edf3;
@@ -5338,7 +5846,6 @@ body {{
 .h-warn {{ background: #f39c12; color: #fff; }}
 .h-unk  {{ background: #95a5a6; color: #fff; }}
 .h-miss {{ background: #7f1d1d; color: #fca5a5; }}
-.sw-card-miss {{ border: 2px solid #e74c3c; box-shadow: 0 0 8px rgba(231,76,60,.25); }}
 .sw-miss-body {{
   padding: 24px 14px;
   text-align: center;
@@ -5377,6 +5884,8 @@ body {{
 .disk-use-item {{ display: inline-block; margin-right: 4px; }}
 .i-ok   {{ color: #27ae60; }}
 .i-warn {{ color: #e67e22; font-weight: 600; }}
+.i-mid  {{ color: #d4ac0d; font-weight: 600; }}
+.if-pt  {{ color: #8a939c; }}
 .i-down {{ color: #e74c3c; font-size: 12px; cursor: help; }}
 /* ── 视图切换 ── */
 .view-toggle {{ display: flex; gap: 4px; }}
@@ -5385,6 +5894,58 @@ body {{
   background: #fff; cursor: pointer; font-size: 13px; color: #6c757d;
 }}
 .vtbtn.active {{ background: var(--accent); color: #fff; border-color: var(--accent); }}
+/* ── 饼图视图与列表筛选（R-027 V2） ── */
+#pie-view {{ flex: 1; overflow: auto; padding: 14px 20px; }}
+.switch-notices {{ padding: 0 18px; }}
+.pie-unclassified {{ color: #c0392b; font-weight: 600; font-size: 13px; margin: 0 0 10px; }}
+.pie-unclassified-host {{ font-family: monospace; margin-left: 8px; }}
+.pie-env {{ margin-bottom: 14px; }}
+.pie-env-title {{ background:#263548; color:#fff; border-left:5px solid #3b7dd8;
+  padding:7px 12px; font-size:14px; font-weight:800; }}
+.pie-group-title {{ margin: 10px 0 6px; font-size: 13px; font-weight: 700; color: #40505f; }}
+.pie-grid {{ display: flex; flex-wrap: wrap; gap: 14px; }}
+.pie {{ background:#fff; border:2px solid var(--border); border-radius:8px; padding:8px 10px;
+  width: 170px; text-align: center; }}
+.pie.pie-alert {{ border-color: #e74c3c; }}
+.pie figcaption {{ font-size: 12px; font-weight: 700; color: #263548; margin-bottom: 4px; }}
+.pie-svg {{ width: 120px; height: 120px; }}
+.pie-seg {{ fill: none; stroke-width: 16; cursor: pointer; }}
+.pie-seg.pie-ok {{ stroke: #27ae60; }}
+.pie-seg.pie-notok {{ stroke: #e74c3c; }}
+.pie-seg.pie-offline {{ stroke: #f1c40f; }}
+.pie-total {{ font-size: 20px; font-weight: 700; fill: #263548; }}
+.pie-legend {{ display: flex; justify-content: center; gap: 8px; font-weight: 700; }}
+.pie-num {{ cursor: pointer; padding: 0 6px; border-radius: 8px; color: #fff; }}
+.pie-num.pie-ok {{ background: #27ae60; }}
+.pie-num.pie-notok {{ background: #e74c3c; }}
+.pie-num.pie-offline {{ background: #f1c40f; color: #5c4a00; }}
+.pie-empty {{ color: #6c757d; font-size: 13px; }}
+#switch-list-controls {{ display: flex; align-items: center; gap: 10px; padding: 8px 18px;
+  background: #fff; border-bottom: 1px solid var(--border); font-size: 12px; }}
+#switch-pie-tag {{ padding: 4px 18px; }}
+.switch-tag {{ display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
+  border: 1px solid #3b7dd8; border-radius: 10px; background: #eef4fc; font-size: 12px; }}
+.switch-tag-remove {{ border: none; background: none; cursor: pointer; font-weight: 700; }}
+.lst-tbl tr.lst-btns td {{ background: #f7f9fb; padding: 6px 12px; text-align: left; }}
+.grp-btn {{ margin-right: 6px; padding: 3px 10px; border-radius: 4px; border: 1px solid; background: #fff;
+  font-size: 12px; cursor: pointer; }}
+.grp-btn.grp-ok {{ color: #1e8449; border-color: #27ae60; }}
+.grp-btn.grp-warn {{ color: #b9600b; border-color: #e67e22; }}
+.grp-btn.grp-off {{ color: #9aa3ad; border-color: #d0d5db; background: #f1f3f5; cursor: not-allowed; }}
+.grp-btn.grp-active {{ font-weight: 800; box-shadow: 0 0 0 2px currentColor; }}
+tr.lst-sec.hidden, tr.lst-btns.hidden, tr.lst-repeat-head.hidden {{ display: none; }}
+.cpld-toggle {{ border: none; background: none; cursor: pointer; font: inherit; color: inherit; padding: 0; }}
+.cpld-detail {{ text-align: left; margin-top: 4px; font-size: 11px; font-family: monospace; }}
+.cpld-slot {{ white-space: nowrap; }}
+.cpld-copy {{ margin-top: 3px; font-size: 11px; }}
+.cpld-note {{ color: #6c757d; font-size: 11px; margin-left: 4px; }}
+.upg-tag {{ display: inline-block; padding: 0 6px; margin: 0 2px; border-radius: 8px;
+  font-size: 11px; font-weight: 700; color: #fff; }}
+.upg-tag.upg-warn {{ background: #e67e22; }}
+.upg-tag.upg-ok {{ background: #27ae60; }}
+.ver-diff {{ background: #4a4f55; color: #fff; padding: 0 4px; border-radius: 3px; }}
+.lst-tbl tr.lst-row td.hn-problem {{ background: #4a4f55 !important; color: #fff; }}
+.lst-tbl tr.lst-row[data-problem="1"] td:first-child {{ box-shadow: inset 4px 0 0 #e67e22; }}
 /* ── 列表视图 ── */
 #list-view {{ flex: 1; overflow: auto; }}
 .lst-tbl {{ border-collapse: collapse; font-size: 13px; white-space: nowrap; }}
@@ -5723,7 +6284,7 @@ tr.grp-hidden {{ display: none; }}
 }}
 .ztp-toolbar {{ background:#fff; border-bottom:1px solid var(--border); padding:9px 16px;
   display:flex; align-items:center; gap:16px; flex-wrap:wrap; font-size:12px; color:#5b6570; }}
-.ztp-toolbar .ztp-meta {{ flex:1; min-width:360px; }}
+.ztp-toolbar .ztp-meta {{ flex: 0 1 auto; }}
 .ztp-toolbar input {{ width:280px; padding:6px 9px; border:1px solid #ccd2da; border-radius:4px; }}
 .ztp-monitor-control {{ display:flex; align-items:flex-start; gap:9px; flex-wrap:wrap; }}
 .monitor-control-item {{ display:inline-flex; flex-direction:column; align-items:flex-start;
@@ -5853,7 +6414,7 @@ tr.grp-hidden {{ display: none; }}
       &nbsp;·&nbsp;
       NV：<strong>{nv_count} 台</strong>
       &nbsp;·&nbsp;
-      未绑定/未分类：<strong>{air_unbound_count + production_unbound_count + unknown_unbound_count} 台</strong>
+      未绑定/未分类：<strong>{unbound_count} 台</strong>
       <br>ETH 数据源：<strong>{escape(eth_source)}</strong>
     </span>
     <span class="ztp-monitor-control">
@@ -5893,10 +6454,9 @@ tr.grp-hidden {{ display: none; }}
       </span>
     </span>
     {auto_refresh_control('eth')}
-    <input id="eth-search" type="text" placeholder="按主机名筛选…" oninput="filterCards()">
     <div class="view-toggle">
-      <button id="btn-card" class="vtbtn active" onclick="setView('card')">卡片</button>
-      <button id="btn-list" class="vtbtn"        onclick="setView('list')">列表</button>
+      <button id="btn-pie" class="vtbtn active" onclick="setView('pie')">饼图</button>
+      <button id="btn-list" class="vtbtn"       onclick="setView('list')">列表</button>
     </div>
   </div>
   <dialog id="yaml-backup-dialog" class="yaml-backup-dialog">
@@ -5913,13 +6473,21 @@ tr.grp-hidden {{ display: none; }}
       </menu>
     </form>
   </dialog>
-  <div id="card-grid">
-    {switch_cards_html}
+  {f'<div class="switch-notices">{switch_notices}</div>' if switch_notices else ''}
+  <div id="pie-view">
+    {switch_view["pies"]}
   </div>
   <div id="list-view" style="display:none">
+    <div id="switch-list-controls">
+      <input id="eth-search" type="text" placeholder="按主机名筛选…" oninput="searchSwitches(this)">
+      <label class="switch-problems-first"><input id="switch-problems-first" type="checkbox" onchange="toggleProblemsFirst(this)">有问题的排前面</label>
+      <button id="switch-clear" type="button" onclick="clearSwitchFilters()">清除</button>
+      <button id="switch-copy-hosts" type="button" onclick="copyVisibleHostnames()">复制主机名</button>
+    </div>
+    <div id="switch-pie-tag" aria-live="polite"></div>
     <table class="lst-tbl">
       <tbody id="lst-body">
-        {switch_list_html}
+        {switch_view["rows"]}
       </tbody>
     </table>
   </div>
@@ -6115,8 +6683,8 @@ const SWITCH_VIEW_KEY = 'network-monitor:switch-view:' + window.location.pathnam
 const COLLAPSE_STATE_KEY = 'network-monitor:collapse-state:' + window.location.pathname;
 const SORT_STATE_KEY = 'network-monitor:sort-state:' + window.location.pathname;
 const COLLAPSE_TOGGLE_SELECTOR = [
-  '.ztp-environment', '.ztp-group', '.section-divider', '.card-env',
-  '.card-cat', '.lst-env', '.lst-sec', '.lst-cat', '.topo-section > h3',
+  '.ztp-environment', '.ztp-group',
+  '.lst-env', '.lst-sec', '.lst-cat', '.topo-section > h3',
   'tr.grp',
 ].join(',');
 const autoRefreshSettings = Object.fromEntries(
@@ -6237,8 +6805,6 @@ function storageSet(key, value) {{
 
 function collapseEnvironment(element) {{
   if (element.dataset.environment) return element.dataset.environment;
-  const group = element.closest('.card-env-group[data-environment]');
-  if (group) return group.dataset.environment || 'all';
   let previous = element.previousElementSibling;
   while (previous) {{
     if (previous.classList?.contains('lst-env'))
@@ -6265,12 +6831,12 @@ function collapseStateKey(element) {{
     const section = element.closest('.topo-section');
     return `${{panel}}|topology|${{section?.dataset.category || ''}}|${{collapseLabel(element)}}`;
   }}
-  if (element.classList.contains('card-env') || element.classList.contains('lst-env'))
-    return `${{panel}}|${{element.classList.contains('card-env') ? 'card-env' : 'list-env'}}|${{collapseEnvironment(element)}}`;
-  if (element.classList.contains('card-cat') || element.classList.contains('lst-cat'))
-    return `${{panel}}|${{element.classList.contains('card-cat') ? 'card-cat' : 'list-cat'}}|${{collapseEnvironment(element)}}|${{element.dataset.cat || collapseLabel(element)}}`;
-  if (element.classList.contains('section-divider') || element.classList.contains('lst-sec'))
-    return `${{panel}}|${{element.classList.contains('section-divider') ? 'card-section' : 'list-section'}}|${{collapseEnvironment(element)}}|${{collapseLabel(element)}}`;
+  if (element.classList.contains('lst-env'))
+    return `${{panel}}|list-env|${{collapseEnvironment(element)}}`;
+  if (element.classList.contains('lst-cat'))
+    return `${{panel}}|list-cat|${{collapseEnvironment(element)}}|${{element.dataset.cat || collapseLabel(element)}}`;
+  if (element.classList.contains('lst-sec'))
+    return `${{panel}}|list-section|${{collapseEnvironment(element)}}|${{collapseLabel(element)}}`;
   if (element.classList.contains('grp'))
     return `${{panel}}|link-group|${{element.dataset.dev || collapseLabel(element)}}`;
   return '';
@@ -6328,15 +6894,18 @@ function activeTabName() {{
 }}
 
 function tabFromLocation() {{
-  const value = window.location.hash.replace(/^#/, '').trim().toLowerCase();
+  // The Switch Status filters follow the tab name after '?' (R-027 V2).
+  const value = window.location.hash.replace(/^#/, '').split('?')[0].trim().toLowerCase();
   return TAB_NAMES.includes(value) ? value : '';
 }}
 
 function reloadActiveTab() {{
   const tab = activeTabName();
   storageSet(ACTIVE_TAB_KEY, tab);
-  if (window.location.hash !== '#' + tab)
-    window.history.replaceState(null, '', window.location.pathname + window.location.search + '#' + tab);
+  // Keep the Switch Status view, buttons, pie tag and search across the reload.
+  const target = '#' + tab + (tab === 'eth' ? switchHashSuffix() : '');
+  if (window.location.hash !== target)
+    window.history.replaceState(null, '', window.location.pathname + window.location.search + target);
   window.location.reload();
 }}
 
@@ -7905,49 +8474,6 @@ function filterTopology(prefix) {{
   if (info) info.textContent = `${{visible}} / ${{total}} 条`;
 }}
 
-// ── Tab1: 视图切换 ───────────────────────────────────────────────────────────
-function setView(v, persist = true) {{
-  const isCard = v === 'card';
-  document.getElementById('card-grid').style.display  = isCard ? '' : 'none';
-  document.getElementById('list-view').style.display  = isCard ? 'none' : '';
-  document.getElementById('btn-card').classList.toggle('active', isCard);
-  document.getElementById('btn-list').classList.toggle('active', !isCard);
-  if (persist) storageSet(SWITCH_VIEW_KEY, isCard ? 'card' : 'list');
-  filterCards();
-}}
-
-// ── Tab1: 卡片分组折叠 ──────────────────────────────────────────────────────
-function toggleCardSection(header) {{
-  const collapsed = header.classList.toggle('collapsed');
-  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  let sibling = header.nextElementSibling;
-  while (sibling && !sibling.classList.contains('section-divider')) {{
-    sibling.classList.toggle('section-hidden', collapsed);
-    sibling = sibling.nextElementSibling;
-  }}
-}}
-
-function handleCardSectionKey(event, header) {{
-  if (event.key === 'Enter' || event.key === ' ') {{
-    event.preventDefault();
-    toggleCardSection(header);
-  }}
-}}
-
-// ── Tab1: AIR / Production 大类折叠 ───────────────────────────────────────
-function toggleCardEnvironment(header) {{
-  const collapsed = header.classList.toggle('collapsed');
-  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  header.nextElementSibling?.classList.toggle('env-collapsed', collapsed);
-}}
-
-function handleCardEnvironmentKey(event, header) {{
-  if (event.key === 'Enter' || event.key === ' ') {{
-    event.preventDefault();
-    toggleCardEnvironment(header);
-  }}
-}}
-
 function toggleListEnvironment(header) {{
   const collapsed = header.classList.toggle('collapsed');
   header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -7983,27 +8509,6 @@ function handleListSwitchTypeKey(event, header) {{
   }}
 }}
 
-// ── Tab1: 卡片子类折叠 ────────────────────────────────────────────────────
-function toggleCardCat(header) {{
-  const collapsed = header.classList.toggle('collapsed');
-  header.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  let sibling = header.nextElementSibling;
-  while (sibling && !sibling.classList.contains('card-cat') &&
-         !sibling.classList.contains('card-env') &&
-         !sibling.classList.contains('section-divider')) {{
-    if (sibling.classList.contains('sw-card') || sibling.classList.contains('card-role'))
-      sibling.classList.toggle('card-cat-hidden', collapsed);
-    sibling = sibling.nextElementSibling;
-  }}
-}}
-
-function handleCardCatKey(event, header) {{
-  if (event.key === 'Enter' || event.key === ' ') {{
-    event.preventDefault();
-    toggleCardCat(header);
-  }}
-}}
-
 // ── Tab1: 子类折叠 ───────────────────────────────────────────────────────────
 function toggleCat(tr) {{
   tr.classList.toggle('collapsed');
@@ -8017,82 +8522,7 @@ function toggleCat(tr) {{
   }}
 }}
 
-// ── Tab1: 筛选（卡片 + 列表同步）────────────────────────────────────────────
-function filterCards() {{
-  const q = document.getElementById('eth-search').value.toLowerCase();
-  // 卡片视图
-  document.querySelectorAll('.sw-card').forEach(c =>
-    c.classList.toggle('hidden', !!q && !c.dataset.hn.includes(q)));
-  // 搜索时只保留至少有一张匹配卡片的子类标题。
-  document.querySelectorAll('.card-cat').forEach(cat => {{
-    if (!q) {{ cat.classList.remove('hidden'); return; }}
-    let sib = cat.nextElementSibling, hasMatch = false;
-    while (sib && !sib.classList.contains('card-cat') &&
-           !sib.classList.contains('card-env') &&
-           !sib.classList.contains('section-divider')) {{
-      if (sib.classList.contains('sw-card') && !sib.classList.contains('hidden'))
-        hasMatch = true;
-      sib = sib.nextElementSibling;
-    }}
-    cat.classList.toggle('hidden', !hasMatch);
-  }});
-  document.querySelectorAll('.card-role').forEach(role => {{
-    if (!q) {{ role.classList.remove('hidden'); return; }}
-    let sibling = role.nextElementSibling, hasMatch = false;
-    while (sibling && !sibling.classList.contains('card-role') &&
-           !sibling.classList.contains('card-cat') &&
-           !sibling.classList.contains('card-env') &&
-           !sibling.classList.contains('section-divider')) {{
-      if (sibling.classList.contains('sw-card') && !sibling.classList.contains('hidden'))
-        hasMatch = true;
-      sibling = sibling.nextElementSibling;
-    }}
-    role.classList.toggle('hidden', !hasMatch);
-  }});
-  document.querySelectorAll('.card-env-group').forEach(group => {{
-    if (!q) {{ group.classList.remove('hidden'); return; }}
-    const hasMatch = Array.from(group.querySelectorAll('.sw-card'))
-      .some(card => !card.classList.contains('hidden'));
-    group.classList.toggle('hidden', !hasMatch);
-  }});
-  // 列表视图：过滤数据行
-  document.querySelectorAll('tr.lst-row').forEach(r =>
-    r.classList.toggle('hidden', !!q && !(r.dataset.hn || '').includes(q)));
-  // 有搜索词时：隐藏所有行均被过滤的分类标题；无搜索词时：全部显示
-  document.querySelectorAll('tr.lst-cat').forEach(cat => {{
-    if (!q) {{ cat.classList.remove('hidden'); return; }}
-    let sib = cat.nextElementSibling, hasMatch = false;
-    while (sib && !sib.classList.contains('lst-cat') && !sib.classList.contains('lst-sec') &&
-           !sib.classList.contains('lst-env')) {{
-      if (sib.classList.contains('lst-row') && !sib.classList.contains('hidden')) hasMatch = true;
-      sib = sib.nextElementSibling;
-    }}
-    cat.classList.toggle('hidden', !hasMatch);
-  }});
-  document.querySelectorAll('tr.lst-role').forEach(role => {{
-    if (!q) {{ role.classList.remove('hidden'); return; }}
-    let sibling = role.nextElementSibling, hasMatch = false;
-    while (sibling && !sibling.classList.contains('lst-role') &&
-           !sibling.classList.contains('lst-cat') &&
-           !sibling.classList.contains('lst-sec') &&
-           !sibling.classList.contains('lst-env')) {{
-      if (sibling.classList.contains('lst-row') && !sibling.classList.contains('hidden'))
-        hasMatch = true;
-      sibling = sibling.nextElementSibling;
-    }}
-    role.classList.toggle('hidden', !hasMatch);
-  }});
-  document.querySelectorAll('tr.lst-env').forEach(environment => {{
-    if (!q) {{ environment.classList.remove('hidden'); return; }}
-    let sibling = environment.nextElementSibling, hasMatch = false;
-    while (sibling && !sibling.classList.contains('lst-env')) {{
-      if (sibling.classList.contains('lst-row') &&
-          !sibling.classList.contains('hidden')) hasMatch = true;
-      sibling = sibling.nextElementSibling;
-    }}
-    environment.classList.toggle('hidden', !hasMatch);
-  }});
-}}
+{switch_status_script_text}
 
 // ── Tab2/3: 链路通用逻辑工厂 ─────────────────────────────────────────────────
 function makeCtx(pfx) {{
@@ -8364,7 +8794,7 @@ function initColumnResize() {{
 
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 initAutoRefresh();
-setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false);
+initSwitchStatus();
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
 refreshYamlBackupControl();
@@ -8418,16 +8848,11 @@ def _generate_monitor_html(scope: str = "all") -> None:
         log(f"[ZTP] 无可用报告: {ztp_status.get('error', ZTP_STATUS_DIR)}")
 
     # ── ETH-INFO ─────────────────────────────────────────────────────────────
-    eth_cards  = {
-        "air": "", "production": "", "unknown": "",
-        "air_count": 0, "production_count": 0, "unknown_count": 0,
-        "unbound_air": "", "unbound_production": "", "unbound_unknown": "",
-        "unbound_air_count": 0, "unbound_production_count": 0,
-        "unbound_unknown_count": 0,
-    }
-    eth_list   = {
-        "air": "", "production": "", "unknown": "",
-        "unbound_air": "", "unbound_production": "", "unbound_unknown": "",
+    # R-027 V2: the pie and list views are rendered from these device lists.
+    eth_summary: dict[str, str] = {}
+    eth_devices: dict[str, list[dict]] = {
+        "air": [], "production": [], "unknown": [],
+        "unbound_air": [], "unbound_production": [], "unbound_unknown": [],
     }
     rendered_eth_names = {"air": set(), "production": set(), "unknown": set()}
     eth_source = "（无数据）"
@@ -8499,7 +8924,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
                     )
                     archive_time_utc = parse_archive_time_utc(tar_path)
                     parsed_switches = [
-                        parse_info_file(hostname, content, archive_time_utc)
+                        parse_info_file(hostname, content, archive_time_utc, family="ETH")
                         for hostname, content in info_files.items()
                     ]
                     # 本区块的数据源就是 Ethernet 归档。AIR 的虚拟平台输出
@@ -8559,6 +8984,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
                 for switch in switch_infos:
                     current = match_inventory_metadata(switch["hostname"], inventory)
                     switch["template"] = current.get("template", "")
+                    switch["csv_type"] = current.get("type", "")
                     runtime_device = runtime_cumulus_metadata.get(
                         str(switch.get("hostname") or "").casefold()
                     )
@@ -8635,6 +9061,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
                         missing["template"] = inventory.get(
                             hostname_key, {}
                         ).get("template", "")
+                        missing["csv_type"] = inventory.get(hostname_key, {}).get("type", "")
                         if dynamic_device is not None:
                             missing["dynamic_dhcp"] = True
                             missing["management_ip"] = str(dynamic_device.get("ip") or "")
@@ -8659,16 +9086,10 @@ def _generate_monitor_html(scope: str = "all") -> None:
                     rendered_eth_names[environment] = {
                         str(item.get("hostname") or "").casefold() for item in items
                     }
-                    eth_cards[f"{environment}_count"] = len(items)
-                    eth_cards[environment] = build_switch_cards_html(
-                        items, _ETH_CATEGORIES, "ETH", group_environments=False,
-                    )
-                    eth_list[environment] = build_switch_list_html(
-                        items, _ETH_CATEGORIES, "ETH", group_environments=False,
-                    )
+                    eth_devices[environment] = items
             except Exception as e:
                 log(f"[ETH] 解析失败: {e}")
-                eth_cards["production"] = f'<p style="padding:20px;color:#c0392b">解析 eth-info 时出错: {escape(str(e))}</p>'
+                eth_summary["error"] = f'<p style="padding:20px;color:#c0392b">解析 eth-info 时出错: {escape(str(e))}</p>'
         else:
             log("[ETH] 未找到 AIR 或 Production tar.gz 文件")
     else:
@@ -8704,13 +9125,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
         if not extra_switches:
             continue
         extra_switches.sort(key=lambda item: air_first_hostname_key(item["hostname"]))
-        eth_cards[environment] += build_switch_cards_html(
-            extra_switches, _ETH_CATEGORIES, "ETH", group_environments=False,
-        )
-        eth_list[environment] += build_switch_list_html(
-            extra_switches, _ETH_CATEGORIES, "ETH", group_environments=False,
-        )
-        eth_cards[f"{environment}_count"] += len(extra_switches)
+        eth_devices[environment] = eth_devices[environment] + extra_switches
         eth_count += len(extra_switches)
 
     # NVOS identities that have not been bound to a project hostname, and true
@@ -8724,19 +9139,11 @@ def _generate_monitor_html(scope: str = "all") -> None:
             if ztp_environment(device) == environment
         ]
         placeholders.sort(key=lambda item: air_first_hostname_key(item["hostname"]))
-        eth_cards[f"unbound_{environment}_count"] = len(placeholders)
-        eth_cards[f"unbound_{environment}"] = build_switch_cards_html(
-            placeholders, _UNBOUND_CATEGORIES, "UNKNOWN",
-            group_environments=False,
-        )
-        eth_list[f"unbound_{environment}"] = build_switch_list_html(
-            placeholders, _UNBOUND_CATEGORIES, "UNKNOWN",
-            group_environments=False,
-        )
+        eth_devices[f"unbound_{environment}"] = placeholders
 
     # ── IB-INFO ──────────────────────────────────────────────────────────────
-    ib_cards  = ""
-    ib_list   = ""
+    ib_notice = ""
+    ib_devices: list[dict] = []
     ib_source = "（无数据）"
     ib_count  = 0
     ib_error  = ""
@@ -8757,7 +9164,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
                 log(f"[IB] 找到 {ib_count} 个 .info 文件")
                 archive_time_utc = parse_archive_time_utc(tar_path)
                 switch_infos = [
-                    parse_info_file(hn, content, archive_time_utc)
+                    parse_info_file(hn, content, archive_time_utc, family="IB")
                     for hn, content in info_files.items()
                 ]
                 for switch in switch_infos:
@@ -8796,9 +9203,8 @@ def _generate_monitor_html(scope: str = "all") -> None:
             ufm_infos + ib_switch_infos, key=lambda s: air_first_hostname_key(s["hostname"])
         )
         ib_count = len(switch_infos)
-        ib_cards = build_switch_cards_html(switch_infos, _IB_CATEGORIES, "IB")
-        ib_list  = build_switch_list_html(switch_infos, _IB_CATEGORIES, "IB")
-    ib_cards = ib_error + ib_cards
+        ib_devices = switch_infos
+    ib_notice = ib_error
 
     # ── SPX-LINK ──────────────────────────────────────────────────────────────
     spx_thead      = "<tr><th>（无数据）</th></tr>"
@@ -8898,8 +9304,8 @@ def _generate_monitor_html(scope: str = "all") -> None:
         log(f"[IB-LINK] 目录不存在: {IBL_LINK_DIR}")
 
     # ── NV-INFO ──────────────────────────────────────────────────────────────
-    nv_cards  = ""
-    nv_list   = ""
+    nv_notice = ""
+    nv_devices: list[dict] = []
     nv_source = "（无数据）"
     nv_count  = 0
 
@@ -8914,7 +9320,7 @@ def _generate_monitor_html(scope: str = "all") -> None:
                 log(f"[NV] 找到 {nv_count} 个 .info 文件")
                 archive_time_utc = parse_archive_time_utc(tar_path)
                 switch_infos = [
-                    parse_info_file(hn, content, archive_time_utc)
+                    parse_info_file(hn, content, archive_time_utc, family="NVL")
                     for hn, content in info_files.items()
                 ]
                 for switch in switch_infos:
@@ -8927,12 +9333,10 @@ def _generate_monitor_html(scope: str = "all") -> None:
                 )
                 switch_infos.sort(key=lambda s: air_first_hostname_key(s["hostname"]))
                 nv_count = len(switch_infos)
-                nv_categories = build_nvlink_categories(switch_infos)
-                nv_cards = build_switch_cards_html(switch_infos, nv_categories, "NVL")
-                nv_list  = build_switch_list_html(switch_infos, nv_categories, "NVL")
+                nv_devices = switch_infos
             except Exception as e:
                 log(f"[NV] 解析失败: {e}")
-                nv_cards = f'<p style="padding:20px;color:#c0392b">解析 nvsw-info 时出错: {escape(str(e))}</p>'
+                nv_notice = f'<p style="padding:20px;color:#c0392b">解析 nvsw-info 时出错: {escape(str(e))}</p>'
         else:
             log("[NV] 未找到 tar.gz 文件")
     else:
@@ -9046,7 +9450,8 @@ def _generate_monitor_html(scope: str = "all") -> None:
     # runtime data, so it remains available in both AIR and Production views.
     empty_diagram = {"path": None, "source": "（当前环境未选择）", "href": "", "modified": "—"}
     if scope == "air":
-        ib_cards = ib_list = nv_cards = nv_list = ""
+        ib_notice = nv_notice = ""
+        ib_devices, nv_devices = [], []
         ib_count = nv_count = 0
         ibl_thead = nvl_thead = "<tr><th>（当前环境未选择）</th></tr>"
         ibl_tbody = nvl_tbody = '<tr><td>Production 数据未选择。</td></tr>'
@@ -9056,26 +9461,33 @@ def _generate_monitor_html(scope: str = "all") -> None:
             "sources": {}, "downloads": [],
         }
     elif scope == "prod":
-        eth_cards["air"] = ""
-        eth_cards["air_count"] = 0
-        eth_list["air"] = ""
+        eth_devices["air"] = []
         air_diagram = empty_diagram
+
+    # R-029 V4: optional per-family version targets from the project's 01-global.yaml.
+    version_targets = load_version_targets(GLOBAL_FILE)
+    # R-030 V5: planned ports only from valid existing CVT / DOT products (no conversion here).
+    planned_ports = load_planned_ports(P2P_OUTPUT_DIR, P2P_INPUT_LINK)
+    for network, plan in planned_ports.items():
+        log(f"[PLAN-{network.upper()}] {plan['reason']}")
 
     # ── 写出 HTML ────────────────────────────────────────────────────────────
     html = build_html(
-        eth_cards, eth_source, eth_count,
-        ib_cards,  ib_source,  ib_count,
-        eth_list,  ib_list,
+        eth_summary, eth_source, eth_count,
+        ib_notice, ib_source,  ib_count,
+        eth_devices, ib_devices,
         spx_thead, spx_tbody, spx_stats, spx_latest_ts, spx_snap_count,
         ibl_thead, ibl_tbody, ibl_stats, ibl_latest_ts, ibl_snap_count,
-        nv_cards,  nv_source,  nv_count,
-        nv_list,
+        nv_notice, nv_source,  nv_count,
+        nv_devices,
         nvl_thead, nvl_tbody, nvl_stats, nvl_latest_ts, nvl_snap_count,
         topology_reports["ethernet"],
         topology_reports["infiniband"],
         ethernet_diagram,
         air_diagram,
         ztp_status,
+        version_targets=version_targets,
+        planned_ports=planned_ports,
     )
     atomic_write_text(OUTPUT, html)
     log(f"完成 → {OUTPUT}  ({len(html):,} 字节)")

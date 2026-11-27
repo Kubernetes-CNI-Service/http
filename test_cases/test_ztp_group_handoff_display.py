@@ -500,7 +500,10 @@ class CompletionDisplayParityTests(unittest.TestCase):
                     f"status      {raw_health}\n",
                 )
                 self.assertEqual(raw_health.lower(), info["health"])
-                self.assertIn(f'h-badge {badge}', HTML.render_eth_card(info))
+                # v3.1.6 R-027 (guide 8.13 :2223) removed the card; its half is the
+                # same row's V2 bucket (OK green, collected Not OK red).
+                self.assertIn('data-bucket="%s"' % ("ok" if badge == "h-ok" else "notok"),
+                              HTML.render_sw_list_row(info))
                 self.assertIn(f'h-badge {badge}', HTML.render_sw_list_row(info))
 
     def test_html_completion_uses_same_current_nine_stage_proof_as_handoff(self):
@@ -833,16 +836,18 @@ class EnvironmentDisplayTests(unittest.TestCase):
                 HTML.main("all")
 
             document = output.read_text(encoding="utf-8")
-        card_panel = document.split('<div id="card-grid">', 1)[1].split(
-            '<div id="list-view"', 1,
+        # v3.1.6 R-027 (guide 8.13 :2223) removed the card view; the list keeps the
+        # same environment split.
+        card_panel = document.split('<tbody id="lst-body">', 1)[1].split(
+            "</tbody>", 1,
         )[0]
         production = card_panel.split(
-            '<section class="card-env-group" data-environment="production">', 1,
+            '<tr class="lst-env" data-environment="production"', 1,
         )[1].split(
-            '<section class="card-env-group" data-environment="unknown">', 1,
+            '<tr class="lst-env" data-environment="unknown"', 1,
         )[0]
         unknown = card_panel.split(
-            '<section class="card-env-group" data-environment="unknown">', 1,
+            '<tr class="lst-env" data-environment="unknown"', 1,
         )[1]
         self.assertNotIn(hostname, production)
         self.assertIn("Unknown / 未归类（1）", unknown)

@@ -2297,10 +2297,13 @@ class TemplateContractTests(unittest.TestCase):
                 {item["code"] for item in promoted["issues"]},
             )
             self.assertEqual("border_oob", html.ztp_device_group(promoted))
-            self.assertEqual(
-                ("other", "其他"),
-                html.classify_host("AIR-EXAMPLE-Unknown01", "ETH", "missing", "", True),
-            )
+            # v3.1.6 R-027 (guide 8.13 :2200/:2202) replaced classify_host's
+            # "other" group: a dynamic device outside the CSV gets no pie subclass.
+            subclass = getattr(html, "switch_status_subclass", None)
+            self.assertIsNotNone(subclass, "the CSV classification replaced classify_host")
+            dynamic = html.make_missing_switch("AIR-EXAMPLE-Unknown01", "ETH")
+            dynamic["dynamic_dhcp"] = True
+            self.assertIsNone(subclass(dynamic))
             cron_source = (ROOT / "ethernet/monitor/cron.sh").read_text(
                 encoding="utf-8",
             )
@@ -5735,13 +5738,14 @@ class MonitorContractTests(unittest.TestCase):
         self.assertEqual(1, parsed["interfaces_down_count"])
         self.assertEqual(["swp2"], parsed["interfaces_down"])
         row = self.monitor.render_sw_list_row(parsed)
-        card = self.monitor.render_eth_card(parsed)
-        self.assertIn('<span class="i-warn">1/3</span>', row)
+        # v3.1.6 R-030 (guide :2329): A / P / T, only A coloured; no plan here.
+        self.assertIn('<span class="if-a i-warn">1</span><span class="if-pt">/—/3</span>', row)
         self.assertIn('(1↓)</span>', row)
         self.assertIn('Admin up / Oper down:', row)
         self.assertNotIn('swp3', row)
-        self.assertIn('<span class="i-warn">1/3 up</span>', card)
-        self.assertIn('(1 down)</span>', card)
+        # v3.1.6 R-027 (guide 8.13 :2223) removed the card; its half is the row's
+        # V2 bucket for the same collected "Not OK" health (red, :2216).
+        self.assertIn('data-bucket="notok"', row)
         self.assertEqual((1, 1), (parsed["bgp_established"], parsed["bgp_total"]))
         self.assertEqual(20, parsed["disk_use"]["/"])
         self.assertEqual(25, parsed["mem_use"])
@@ -5776,18 +5780,18 @@ class MonitorContractTests(unittest.TestCase):
         )
         switch["bgp_established"] = 2
         switch["bgp_total"] = 2
+        # v3.1.6 R-027 (guide 8.13 :2223) removed the card; its half is the same
+        # BGP fact as one whole list cell.
         row = self.monitor.render_sw_list_row(switch)
-        card = self.monitor.render_eth_card(switch)
         self.assertIn('<span class="i-ok">2/2</span>', row)
-        self.assertIn('<span class="i-ok">2/2 established</span>', card)
+        self.assertIn('<td class="lst-num"><span class="i-ok">2/2</span></td>', row)
 
         switch["bgp_established"] = 1
         row = self.monitor.render_sw_list_row(switch)
-        card = self.monitor.render_eth_card(switch)
         self.assertIn('<span class="i-warn">1/2</span>', row)
         self.assertIn('<span class="i-down">(1↓)</span>', row)
-        self.assertIn('<span class="i-warn">1/2 established</span>', card)
-        self.assertIn('<span class="i-down">(1 down)</span>', card)
+        self.assertIn('<td class="lst-num"><span class="i-warn">1/2</span> '
+                      '<span class="i-down">(1↓)</span></td>', row)
 
     def test_switch_status_use_columns_follow_displayed_percentage_thresholds(self):
         displayed_threshold_cases = (
@@ -5883,12 +5887,12 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
             + table,
         )
         row = self.monitor.render_sw_list_row(switch)
-        card = self.monitor.render_eth_card(switch)
         self.assertIn('<span class="t-ok" title="Asic-Temp-Sensor:', row)
         self.assertIn('<span class="t-ok" title="PSU1-Temp-Sensor:', row)
         self.assertIn('Max 105.0°C', row)
         self.assertIn('Crit 85.0°C', row)
-        self.assertIn('<span class="t-ok" title="Asic-Temp-Sensor:', card)
+        # v3.1.6 R-027 (guide :2223): the card half is the same ASIC sensor shown once.
+        self.assertEqual(1, row.count('<span class="t-ok" title="Asic-Temp-Sensor:'))
 
     def test_switch_status_summarizes_evpn_and_mlag_bonds_after_bgp(self):
         def fixed_row(header, values):
@@ -5997,22 +6001,25 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
         self.assertIn("EVPN 2/3 UP", summary)
         self.assertIn("MLAG 1/4 UP", summary)
         row = self.monitor.render_sw_list_row(parsed)
-        self.assertEqual(21, row.count("<td"))
-        card = self.monitor.render_eth_card(parsed)
-        self.assertLess(card.index("BGP Peers"), card.index("EVPN/MLAG Bond"))
+        # v3.1.6 R-028 (guide :2240) adds the CPLD column after SSD.
+        # v3.1.6 R-029 (guide :2278) adds 组件需升级 before Health.
+        self.assertEqual(23, row.count("<td"))
 
         source = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
+        # v3.1.6 R-027 (guide :2223): the card is gone; the list keeps BGP before the bonds.
+        self.assertFalse(hasattr(self.monitor, "render_eth_card"))
+        self.assertLess(source.index("<th>BGP</th>"), source.index("<th>EVPN/MLAG Bond</th>"))
         self.assertIn(
-            '"<th>NTP Sync</th><th>接口</th><th>BGP</th>"\n'
-            '        "<th>EVPN/MLAG Bond</th><th>健康</th>"',
+            '"<th>NTP Sync</th><th>接口 可用/规划/总数</th><th>BGP</th>"\n'
+            '        "<th>EVPN/MLAG Bond</th><th>组件需升级</th><th>健康</th>"',
             source,
         )
-        self.assertIn("SWITCH_LIST_COLUMN_COUNT = 21", source)
+        self.assertIn("SWITCH_LIST_COLUMN_COUNT = 23", source)
         self.assertNotIn('colspan="20"', source)
         missing = self.monitor.render_sw_list_row(
             self.monitor.make_missing_switch("AIR-EXAMPLE-Missing", "ETH")
         )
-        self.assertIn('colspan="16"', missing)
+        self.assertIn('colspan="17"', missing)
 
     def test_cumulus_internal_mounts_are_hidden_from_disk_use(self):
         output = (
@@ -6085,11 +6092,12 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
     def test_refresh_preserves_switch_card_or_list_view(self):
         source = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
         self.assertIn("const SWITCH_VIEW_KEY", source)
-        self.assertIn("storageSet(SWITCH_VIEW_KEY, isCard ? 'card' : 'list')", source)
-        self.assertIn(
-            "setView(storageGet(SWITCH_VIEW_KEY) === 'list' ? 'list' : 'card', false)",
-            source,
-        )
+        # v3.1.6 R-027 (guide 8.13 :2206): views are pie/list, the pie is the default and
+        # an old stored 'card' value falls back to the pie view.
+        self.assertIn("storageSet(SWITCH_VIEW_KEY, chosen)", source)
+        self.assertIn("(stored === 'list' ? 'list' : 'pie')", source)
+        self.assertIn("if (stored === 'card') storageSet(SWITCH_VIEW_KEY, 'pie');", source)
+        self.assertNotIn("isCard ? 'card' : 'list'", source)
 
     def test_switch_collection_does_not_relabel_ztp_control(self):
         source = (ROOT / "monitor/generate-monitor-html.py").read_text(encoding="utf-8")
@@ -6645,24 +6653,28 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
                 self.monitor.main("all")
 
             document = output.read_text(encoding="utf-8")
-            card_panel = document.split('<div id="card-grid">', 1)[1].split(
-                '<div id="list-view"', 1,
+            # v3.1.6 R-027 (guide 8.13 :2200/:2206) removed the card view and keeps
+            # devices outside the current CSV (DHCP discovered, unbound) in the
+            # list only, outside every pie and group denominator.
+            list_panel = document.split('<tbody id="lst-body">', 1)[1].split(
+                "</tbody>", 1,
             )[0]
-            air_group = card_panel.split(
-                '<section class="card-env-group" data-environment="air">', 1,
+            air_group = list_panel.split(
+                '<tr class="lst-env" data-environment="air"', 1,
             )[1].split(
-                '<section class="card-env-group" data-environment="production">', 1,
+                '<tr class="lst-env" data-environment="production"', 1,
             )[0]
-            production_group = card_panel.split(
-                '<section class="card-env-group" data-environment="production">', 1,
-            )[1]
+            production_group = list_panel.split(
+                '<tr class="lst-env" data-environment="production"', 1,
+            )[1].split('<tr class="lst-env" data-environment="unknown"', 1)[0]
             for group, suffix in ((air_group, "010"), (production_group, "020")):
-                self.assertIn("Ethernet Switches (1)", group)
+                self.assertNotIn('class="lst-sec lst-grp', group)
                 self.assertIn(f"DISCOVERED-CUMULUS-020000000{suffix}", group)
-                self.assertIn("未绑定 / 未分类设备（其他） (2)", group)
+                self.assertIn("未绑定 / 未归类设备（不计入饼图） (3)", group)
                 unbound_section = group.split(
-                    "未绑定 / 未分类设备（其他） (2)", 1,
+                    "未绑定 / 未归类设备（不计入饼图） (3)", 1,
                 )[1]
+                self.assertIn(f"DISCOVERED-CUMULUS-020000000{suffix}", unbound_section)
                 self.assertIn(f"DISCOVERED-NVOS-020000000{int(suffix) + 1:03d}", unbound_section)
                 self.assertIn(f"UNKNOWN-UNKNOWN-020000000{int(suffix) + 2:03d}", unbound_section)
                 self.assertIn("未发起", unbound_section)
@@ -6716,12 +6728,14 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
                 self.monitor.main("all")
 
             document = output.read_text(encoding="utf-8")
+            # v3.1.6 R-027 (guide 8.13 :2223): the card is gone; the same row in the
+            # Production part of the list carries the collection result.
             production_group = document.split(
-                '<section class="card-env-group" data-environment="production">', 1,
-            )[1].split('<div id="list-view"', 1)[0]
+                '<tr class="lst-env" data-environment="production"', 1,
+            )[1].split('<tr class="lst-env" data-environment="unknown"', 1)[0]
             card = production_group.split(
-                "DISCOVERED-CUMULUS-020000000030", 1,
-            )[1].split('</div>\n</div>', 1)[0]
+                'data-hostname="DISCOVERED-CUMULUS-020000000030"', 1,
+            )[1].split("</tr>", 1)[0]
             self.assertIn("未发起", card)
             self.assertNotIn("失败", card)
             self.assertIn("当前没有可用的 Switch Status 采集归档", card)

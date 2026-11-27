@@ -282,20 +282,23 @@ class MonitorC4RealWorkflow(unittest.TestCase):
                                      ("expected", "collected", "with_problems")))
                     self.assertEqual([], report["rows"], "port down alone is not a Tracker High")
                     # The same archive feeds real page main and the status CLI.
-                    # Match only this device's card header/list row Health node.
+                    # Match only this device's list row Health node.  v3.1.6 R-027
+                    # (guide 8.13 :2223) removed the card view; its half becomes the
+                    # same row's V2 pie bucket: collected unknown/N/A/empty stays red.
                     current_html = generate_page(self, page, project)
                     name = re.escape(host.lower())
-                    views = (
-                        ("card", re.search(
-                            r'<div class="sw-card(?: sw-card-miss)?"[^>]*\bdata-hn="' + name +
-                            r'"[^>]*>(.*?)<div class="sw-(?:miss-)?body">', current_html, re.S)),
-                        ("list", re.search(
-                            r'<tr class="lst-row(?: lst-row-miss)?"[^>]*\bdata-hn="' + name +
-                            r'"[^>]*>(.*?)</tr>', current_html, re.S)))
+                    row = re.search(
+                        r'<tr class="lst-row(?: lst-row-miss)?"[^>]*\bdata-hn="' + name +
+                        r'"[^>]*>(.*?)</tr>', current_html, re.S)
+                    views = (("pie_bucket", row), ("list", row))
                     expected = ("h-ok", "OK") if health == "OK" else ("h-unk", "NOT OK")
                     for view, match in views:
                         with self.subTest(view=view):
                             self.assertIsNotNone(match, "the current inventory's device disappeared")
+                            if view == "pie_bucket":
+                                self.assertEqual(["ok" if health == "OK" else "notok"], re.findall(
+                                    r'\bdata-bucket="([^"]+)"', match.group(0).split(">", 1)[0]))
+                                continue
                             self.assertEqual([expected], re.findall(
                                 r'<span class="h-badge ([^"]+)">([^<]*)</span>', match.group(1)))
             html = generate_page(self, page, project)

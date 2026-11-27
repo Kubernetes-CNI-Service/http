@@ -258,13 +258,38 @@ IB 和 NVLink 的采集入口是上述 Ethernet 脚本的发布别名。NVLink �
 Type 为 `nvl`，已有 ASIC 信息由 `nv show ib device` 采集，不增加卡片栏目。
 NVLink Link 表关注 Effective-Error、Link-Downed、QP1-Drops，沿用原快照选择和保留策略。
 
-普通 ETH/IB/NVL 设备的卡片与列表只有解析后的 `ok` 显示 `OK`，其余均显示
+普通 ETH/IB/NVL 设备的列表只有解析后的 `ok` 显示 `OK`，其余均显示
 `NOT OK`；这是显示标签，不改变采集原值、配色、未采集状态或告警口径。UFM 不适用
 此标签规则。PSU 仅在同设备本行 Model、Serial 都是 N/A 且另一 PSU 有至少一个真实
 身份字段时判 absent；全 N/A 仍按原 State，风扇或硬件元数据不能证明 PSU 存在。
 IB `swNpN` 和 NVLink `acpN` 接口只有 State up 且 Active 才计 Up，其余有效接口计入
 “Down接口”。总数完整，名称最多显示 20 个并提示剩余数。固件列表保留 Actual FW 整列；
 只有 BIOS 的 Not Specified 显示 NA。不为显示旧 NVLink 归档绕过当前清单。
+
+Switch Status 默认显示饼图，另有列表视图；卡片视图已去掉（v3.1.6 R-027）。分类以当前
+`02-devices_config.csv` 为准：`type` 定环境和设备族（air→AIR，eth/eth_spx/spx→Ethernet，
+ib→InfiniBand，nvl→NVLink，UFM→InfiniBand/UFM）；子类 Ethernet 按 template（OOBofOOB、
+OOB / Border、TAN，spx 类型或 template 为 SPX），InfiniBand 按主机名（Spine、Leaf），NVLink
+按主机名的 POD。采集头只用于健康、版本和接口，接口口名规则也按 CSV 的设备族选。三色：
+`ok` 绿；未采集黄（Offline，仍留在自己的子类）；其余已采得值红，悬停显示采集原值。CSV
+归不了类的主机名在饼图上方红字列出；不在 CSV 的动态或未绑定设备只出现在列表的「未绑定 /
+未归类设备（不计入饼图）」段。列表按「环境 / 设备族」分组，每组一行按钮（全部、SW/BIOS/
+SSD/CPLD 不一致、需升级、需检查），数字是本组总数、不随搜索变化；点饼图某块切到列表并只筛
+该子类该状态。视图、各组按钮、饼图标签和搜索词写在地址栏 `#eth?…`，刷新和分享后恢复。
+「CPLD 版本」列按固件表的 Actual FW 整列逐槽读 `CPLD<n>` 行：短串按槽号把「型号去前导 0
+_版本去 REV」用「/」连接，型号与版本都相同的槽只写一次，N/A 槽写成 `CPLD<n>=N/A`；点击
+展开逐槽明细并可复制完整逐槽串（v3.1.6 R-028）。升级器的严格固件判断不受影响。
+「组件需升级」列按项目 `01-global.yaml` 的版本目标比较：各族 `version`、IB 的
+`upgrade.packages` 中 bios/ssd 的 `version` 与 CPLD burn 文件名逐段（第 i 段对应 CPLD<i>）、
+`servers.ufm.version`（只比较 `/etc/ufm-release` 的 UFM_APPLIANCE）。不一致的组件橙色；
+当前值读不出（含部分 CPLD 槽 N/A）显示橙色「<组件> Unknown」，不计需升级；未采集显示
+橙色 Unknown；全部有目标的组件一致才显示绿色 NA；CPLD 槽数或型号与包不对应只注「型号与包
+不匹配」。这些目标只用于显示，不是升级许可（v3.1.6 R-029）。
+接口列显示「实际可用 / P2P 规划 / 总口数」：规划数只读当前 P2P 已生成且来源校验有效的
+产物（IB 的 `<stem>-cvt.xlsx` 及其 provenance，Ethernet 的 `<stem>-lldpq.dot` 及其
+`-splitter-profiles.json`），按（网络，短名）两端去重只数业务口；缺失、过期或设备不在 P2P
+里时显示「—」并在悬停里写原因，UFM 与 NVLink 固定为「—」。只给可用数上色：有 Down 时橙色
+加「(n↓)」，否则等于规划数绿、不等黄。页面不调用转换器、不写 `99-output-p2p/`（v3.1.6 R-030）。
 
 当前 `cron.sh` 为兼容频繁 rebuild 的 AIR 仿真，SSH/SCP 仍使用
 `StrictHostKeyChecking=no` 与临时 known-hosts。后续 hostname/MAC 校验只能防止普通地址串线；

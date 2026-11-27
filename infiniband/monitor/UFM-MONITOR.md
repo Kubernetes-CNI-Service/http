@@ -332,7 +332,7 @@ run-id 是部署服务器为**每一次** ibdiagnet 采集生成的唯一编号�
 
 ## 12. Switch Status 展示：UFM Servers（owner 2026-10-21）
 
-- **位置**：InfiniBand Switches 组的最上面，子类名为「UFM Servers」，卡片视图和列表视图都有。项目中没有 UFM 时不显示这个子类。
+- **位置**：InfiniBand Switches 组的最上面，子类名为「UFM Servers」，饼图（「IB · UFM」）和列表视图都有（v3.1.6 R-027 去掉了卡片视图）。项目中没有 UFM 时不显示这个子类。
 - **数据来源**：`infiniband/ufm-info/` 下最新的小时归档（`generate-monitor-html.py::load_ufm_status`）。
   - CSV 中的 `server_ufm` 如果不在归档里，显示为 MISSING 行，但仍放在 UFM Servers 内，不归入「未采集 · 可能掉线」。
   - IB 归档缺失或解析失败都不影响 UFM 的显示。
