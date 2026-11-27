@@ -175,7 +175,7 @@ stem = re.sub(r"\\.(?:tar\\.gz|tgz)$", "", pathlib.Path(arguments.archive).name)
 (pathlib.Path(arguments.output_dir) / f"{stem}-ethernet-topology-validation.xlsx").write_bytes(b"fixture report\\n")
 '''
 PAGE_FILES = ("ethernet/monitor/post-collect.py", "monitor/generate-monitor-html.py", "monitor/dot_to_html.py",
-              "ztp/dynamic_air_inventory.py", "ztp/config_sync_authority.py")
+              "ztp/dynamic_air_inventory.py", "ztp/config_sync_authority.py", "tools/device_identity.py")
 PAGE_END = "=== generate-monitor-html end ==="
 
 
