@@ -809,6 +809,21 @@ ZTP_ENVIRONMENTS = (
     ("production", "Production"),
     ("unknown", "Unknown / 未归类"),
 )
+# ZTP Status 行头分层计数与按状态筛选（R-045 V6，指导 8.27）：行头三行计数和每行的
+# data-overall 都由 ztp_overall_status 得出，页面 JS 只按 data-* 做并集、交集。
+# 完成＝成功＋警告；未完成＝进行中＋等待＋失败＋未知（不是五个值之一的都算未知）。
+ZTP_HEAD_DONE: tuple[str, ...] = ("success", "warning")
+ZTP_HEAD_TODO: tuple[str, ...] = ("running", "pending", "failed", "unknown")
+# 可点筛选的只有五个子状态，「未知」只显示计数（owner 2026-11-23「筛选还是只用5个子类」）。
+ZTP_FILTER_STATUSES: tuple[str, ...] = ("success", "warning", "running", "pending", "failed")
+# 地址栏 #ztp?st=<范围|状态,…>&q=<搜索词>，键集合原样以 JSON 嵌入页面（同 V2）。
+ZTP_HASH_KEYS: tuple[str, ...] = ("st", "q")
+
+
+def ztp_overall_status(device: dict) -> str:
+    """Return the overall used by the ZTP header counts; anything else is unknown."""
+    overall = str(device.get("overall", "unknown"))
+    return overall if overall in ZTP_FILTER_STATUSES else "unknown"
 
 
 def format_ztp_write_time(value: object) -> str:
@@ -996,21 +1011,53 @@ def render_ztp_status_rows(status: dict) -> str:
     }
     for device in status.get("devices", []):
         grouped[ztp_environment(device)][ztp_device_group(device)].append(device)
+
+    def status_head(name: str, scope: str, scope_label: str, devices: list) -> str:
+        """Three header lines (R-045 contract 1); the counts are this scope's rows."""
+        counts = dict.fromkeys(ZTP_HEAD_DONE + ZTP_HEAD_TODO, 0)
+        for device in devices:
+            counts[ztp_overall_status(device)] += 1
+        done = sum(counts[value] for value in ZTP_HEAD_DONE)
+        todo = sum(counts[value] for value in ZTP_HEAD_TODO)
+
+        def count(value: str) -> str:
+            data = (f'data-scope="{scope}" data-status="{value}" '
+                    f'data-count="{counts[value]}"')
+            text = f"{labels[value]} {counts[value]}"
+            if value not in ZTP_FILTER_STATUSES:
+                return f'<span class="ztp-chip ztp-{value}" {data}>{text}</span>'
+            # 0 也显示但不可点；点击和回车不触发行头折叠（指导 8.27 第 3 条）。
+            return (
+                f'<button type="button" class="ztp-chip ztp-{value}" {data} '
+                f'data-scope-label="{escape(scope_label, quote=True)}" aria-pressed="false" '
+                f'onclick="toggleZtpStatusTag(event,this)" '
+                f'onkeydown="event.stopPropagation()"'
+                f'{" disabled" if counts[value] == 0 else ""}>{text}</button>'
+            )
+
+        return (
+            f'<div class="ztp-head">'
+            f'<div class="ztp-head-line"><strong>{escape(name)}</strong> '
+            f'Total: {len(devices)} – 完成 {done} 未完成 {todo}</div>'
+            f'<div class="ztp-head-line">完成: {done} – '
+            f'{" ".join(count(value) for value in ZTP_HEAD_DONE)}</div>'
+            f'<div class="ztp-head-line">未完成: {todo} – '
+            f'{" ".join(count(value) for value in ZTP_HEAD_TODO)}</div></div>'
+        )
+
     rows = []
     for environment, environment_label in ZTP_ENVIRONMENTS:
-        environment_count = sum(len(devices) for devices in grouped[environment].values())
-        environment_completed = sum(
-            ztp_completed(device)
-            for devices in grouped[environment].values()
-            for device in devices
-        )
+        environment_devices = [
+            device for devices in grouped[environment].values() for device in devices
+        ]
         rows.append(
             f'<tr class="ztp-environment" data-environment="{environment}" '
             f'role="button" tabindex="0" aria-expanded="true" '
             f'onclick="toggleZtpEnvironment(this)" '
             f'onkeydown="handleZtpToggleKey(event,this,\'environment\')">'
-            f'<td colspan="18">{escape(environment_label)} '
-            f'<span>{environment_completed}/{environment_count} 台</span></td></tr>'
+            f'<td colspan="18">'
+            f'{status_head(environment_label, environment, environment_label, environment_devices)}'
+            f'</td></tr>'
         )
         for group_name, group_label in ZTP_DEVICE_GROUPS:
             group_id = f"{environment}__{group_name}"
@@ -1018,14 +1065,14 @@ def render_ztp_status_rows(status: dict) -> str:
                 grouped[environment][group_name],
                 key=lambda device: natural_text_key(device.get("hostname", "")),
             )
-            group_completed = sum(ztp_completed(device) for device in devices)
             rows.append(
                 f'<tr class="ztp-group" data-environment="{environment}" '
                 f'data-group="{group_id}" role="button" tabindex="0" '
                 f'aria-expanded="true" onclick="toggleZtpGroup(this)" '
                 f'onkeydown="handleZtpToggleKey(event,this,\'group\')">'
-                f'<td colspan="18">{escape(group_label)} '
-                f'<span>{group_completed}/{len(devices)} 台</span></td></tr>'
+                f'<td colspan="18">'
+                f'{status_head(group_label, group_id, f"{environment_label} · {group_label}", devices)}'
+                f'</td></tr>'
             )
             for device in devices:
                 rows.append(_render_ztp_device_row(
@@ -1429,6 +1476,7 @@ def _render_ztp_device_row(
         return (
             f'<tr class="ztp-row" data-environment="{environment}" '
             f'data-group="{group_name}" '
+            f'data-overall="{ztp_overall_status(device)}" '
             f'data-hostname="{escape(str(device.get("hostname", "")), quote=True)}" '
             f'data-ztp-round="{ztp_round}" '
             f'data-trigger-source="{escape(trigger_source, quote=True)}" '
@@ -6348,14 +6396,24 @@ tr.grp-hidden {{ display: none; }}
   border-color:#26384d; cursor:pointer; text-align:left; }}
 .ztp-tbl .ztp-environment td::before {{ content:'▾'; position:absolute; left:10px; color:#c8d5e3; }}
 .ztp-tbl .ztp-environment.collapsed td::before {{ content:'▸'; }}
-.ztp-tbl .ztp-environment td span {{ margin-left:8px; color:#c8d5e3; font-size:11px; font-weight:600; }}
+.ztp-head {{ display:inline-grid; gap:3px; }}
+.ztp-head-line {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; }}
+.ztp-head-line + .ztp-head-line {{ font-size:11px; font-weight:600; }}
+.ztp-tbl .ztp-environment .ztp-head-line + .ztp-head-line {{ color:#c8d5e3; }}
 .ztp-tbl .ztp-environment:hover {{ background:transparent; }}
 .ztp-tbl .ztp-group td {{ position:sticky; left:0; background:#dfe7f1; color:#26384d;
   padding:8px 10px 8px 42px; font-size:13px; font-weight:700; border-color:#b8c5d3;
   cursor:pointer; text-align:left; }}
 .ztp-tbl .ztp-group td::before {{ content:'▾'; position:absolute; left:25px; color:#66788a; }}
 .ztp-tbl .ztp-group.collapsed td::before {{ content:'▸'; }}
-.ztp-tbl .ztp-group td span {{ margin-left:8px; color:#66788a; font-size:11px; font-weight:600; }}
+.ztp-tbl .ztp-group .ztp-head-line + .ztp-head-line {{ color:#66788a; }}
+.ztp-chip {{ display:inline-block; min-width:44px; padding:1px 8px; border:1px solid transparent;
+  border-radius:10px; text-align:center; font-size:11px; font-weight:700; font-family:inherit; }}
+button.ztp-chip {{ cursor:pointer; }}
+button.ztp-chip:disabled {{ cursor:default; opacity:.55; }}
+button.ztp-chip.ztp-chip-active {{ border-color:currentColor; box-shadow:0 0 0 1px currentColor; }}
+#ztp-status-tags {{ display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:4px 18px; }}
+#ztp-status-tags:empty {{ display:none; }}
 .ztp-tbl .ztp-group:hover {{ background:transparent; }}
 .ztp-collapsed-by-environment,.ztp-collapsed-by-group {{ display:none !important; }}
 .ztp-state {{ display:inline-block; min-width:44px; padding:2px 6px; border-radius:10px;
@@ -6638,8 +6696,9 @@ tr.grp-hidden {{ display: none; }}
     </span>
     <span id="manual-ztp-state" class="ztp-monitor-state" aria-live="polite">手工 ZTP：检查中…</span>
     {auto_refresh_control('ztp')}
-    <input id="ztp-search" type="text" placeholder="设备 / IP / MAC / 问题…" oninput="filterZtpStatus()">
+    <input id="ztp-search" type="text" placeholder="设备 / IP / MAC / 问题…" oninput="filterZtpStatus(); writeZtpHash()">
   </div>
+  <div id="ztp-status-tags" aria-live="polite"></div>
   {ztp_watch_banner}
   <div class="ztp-wrap">
     <table id="ztp-tbl" class="ztp-tbl">
@@ -6902,8 +6961,10 @@ function tabFromLocation() {{
 function reloadActiveTab() {{
   const tab = activeTabName();
   storageSet(ACTIVE_TAB_KEY, tab);
-  // Keep the Switch Status view, buttons, pie tag and search across the reload.
-  const target = '#' + tab + (tab === 'eth' ? switchHashSuffix() : '');
+  // Keep the Switch Status view, buttons, pie tag and search, and the ZTP Status
+  // tags and search (R-045), across the reload.
+  const target = '#' + tab
+    + (tab === 'eth' ? switchHashSuffix() : tab === 'ztp' ? ztpHashSuffix() : '');
   if (window.location.hash !== target)
     window.history.replaceState(null, '', window.location.pathname + window.location.search + target);
   window.location.reload();
@@ -8209,27 +8270,141 @@ function switchTab(name, persist = true) {{
   scheduleAutoRefresh();
 }}
 
+// ── ZTP Status 行头子状态筛选（R-045 V6，指导 8.27）────────────────────────────
+// 标签键＝范围|状态（范围是环境，或 环境__wave）；行显示＝（无标签或命中任一标签）且
+// 命中搜索。计数由 Python 写在 data-count，JS 只按 data-* 做并集、交集。
+const ZTP_HASH_KEYS = {json.dumps(list(ZTP_HASH_KEYS))};
+const ZTP_FILTER_STATUSES = {json.dumps(list(ZTP_FILTER_STATUSES))};
+let ztpStatusTags = [];
+
+function ztpStatusButton(tag) {{
+  const [scope, status] = String(tag).split('|');
+  return Array.from(document.querySelectorAll('#panel-ztp button.ztp-chip'))
+    .find(button => button.dataset.scope === scope && button.dataset.status === status) || null;
+}}
+
 function filterZtpStatus() {{
   const q = (document.getElementById('ztp-search')?.value || '').trim().toLowerCase();
+  const searchHit = row => !q || (row.dataset.search || '').includes(q);
   let visible = 0;
   document.querySelectorAll('#panel-ztp .ztp-row').forEach(row => {{
-    const show = !q || (row.dataset.search || '').includes(q);
+    const show = searchHit(row) && (!ztpStatusTags.length || ztpStatusTags.some(tag => {{
+      const [scope, status] = tag.split('|');
+      return (row.dataset.environment === scope || row.dataset.group === scope)
+        && row.dataset.overall === status;
+    }}));
     row.classList.toggle('hidden', !show);
     if (show) visible++;
   }});
+  // 只由搜索词造成的空分组照旧隐藏；按状态标签筛选时行头始终显示。
   document.querySelectorAll('#panel-ztp .ztp-group').forEach(group => {{
-    const hasVisible = Array.from(document.querySelectorAll(
+    const hasVisible = !q || Array.from(document.querySelectorAll(
       `#panel-ztp .ztp-row[data-group="${{group.dataset.group}}"]`
-    )).some(row => !row.classList.contains('hidden'));
+    )).some(searchHit);
     group.classList.toggle('hidden', !hasVisible);
   }});
   document.querySelectorAll('#panel-ztp .ztp-environment').forEach(environment => {{
-    const hasVisible = Array.from(document.querySelectorAll(
+    const hasVisible = !q || Array.from(document.querySelectorAll(
       `#panel-ztp .ztp-row[data-environment="${{environment.dataset.environment}}"]`
-    )).some(row => !row.classList.contains('hidden'));
+    )).some(searchHit);
     environment.classList.toggle('hidden', !hasVisible);
   }});
   document.getElementById('ztp-no-match')?.classList.toggle('hidden', visible !== 0);
+  document.querySelectorAll('#panel-ztp button.ztp-chip').forEach(button => {{
+    const active = ztpStatusTags.includes(button.dataset.scope + '|' + button.dataset.status);
+    button.classList.toggle('ztp-chip-active', active);
+    button.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }});
+  renderZtpStatusTags();
+}}
+
+function renderZtpStatusTags() {{
+  const bar = document.getElementById('ztp-status-tags');
+  if (!bar) return;
+  bar.textContent = '';
+  ztpStatusTags.forEach(tag => {{
+    const button = ztpStatusButton(tag);
+    const chip = document.createElement('span');
+    chip.className = 'switch-tag';
+    chip.textContent = button.dataset.scopeLabel + ' · ' + button.textContent + ' ';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'switch-tag-remove';
+    remove.textContent = '×';
+    remove.onclick = () => removeZtpStatusTag(tag);
+    chip.appendChild(remove);
+    bar.appendChild(chip);
+  }});
+  if (ztpStatusTags.length) {{
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.textContent = '清除全部';
+    clear.onclick = clearZtpStatusTags;
+    bar.appendChild(clear);
+  }}
+}}
+
+function toggleZtpStatusTag(event, button) {{
+  event.stopPropagation();
+  if (button.disabled) return;
+  const tag = button.dataset.scope + '|' + button.dataset.status;
+  ztpStatusTags = ztpStatusTags.includes(tag)
+    ? ztpStatusTags.filter(item => item !== tag) : [...ztpStatusTags, tag];
+  filterZtpStatus();
+  writeZtpHash();
+}}
+
+function removeZtpStatusTag(tag) {{
+  ztpStatusTags = ztpStatusTags.filter(item => item !== tag);
+  filterZtpStatus();
+  writeZtpHash();
+}}
+
+function clearZtpStatusTags() {{
+  ztpStatusTags = [];
+  filterZtpStatus();
+  writeZtpHash();
+}}
+
+function parseZtpHash(hash) {{
+  const state = {{q: '', st: []}};
+  const query = String(hash || '').replace(/^#/, '').split('?').slice(1).join('?');
+  new URLSearchParams(query).forEach((value, key) => {{
+    if (!ZTP_HASH_KEYS.includes(key)) return;
+    if (key === 'q') state.q = value;
+    else if (key === 'st') value.split(',').forEach(tag => {{
+      const button = ztpStatusButton(tag);
+      if (button && !button.disabled && ZTP_FILTER_STATUSES.includes(button.dataset.status)
+          && !state.st.includes(tag)) state.st.push(tag);
+    }});
+  }});
+  return state;
+}}
+
+function ztpHashSuffix() {{
+  const params = new URLSearchParams();
+  if (ztpStatusTags.length) params.set('st', ztpStatusTags.join(','));
+  const q = document.getElementById('ztp-search')?.value || '';
+  if (q) params.set('q', q);
+  const text = params.toString();
+  return text ? '?' + text : '';
+}}
+
+function writeZtpHash() {{
+  if (activeTabName() !== 'ztp') return;
+  const target = '#ztp' + ztpHashSuffix();
+  if (window.location.hash !== target)
+    window.history.replaceState(null, '', window.location.pathname + window.location.search + target);
+}}
+
+function initZtpStatusFilter() {{
+  if (tabFromLocation() !== 'ztp') return;
+  const state = parseZtpHash(window.location.hash);
+  if (!state.q && !state.st.length) return;
+  const search = document.getElementById('ztp-search');
+  if (search) search.value = state.q;
+  ztpStatusTags = state.st;
+  filterZtpStatus();
 }}
 
 function toggleZtpEnvironment(header) {{
@@ -8795,6 +8970,7 @@ function initColumnResize() {{
 // ── 初始化 ────────────────────────────────────────────────────────────────────
 initAutoRefresh();
 initSwitchStatus();
+initZtpStatusFilter();
 refreshZtpMonitorControl();
 refreshSwitchCollectionControl();
 refreshYamlBackupControl();

@@ -6166,9 +6166,282 @@ PSU1-Temp-Sensor           28.0           85         63.0      5         ok
             rendered,
             r'data-group="production__nvl"[^>]*data-hostname="EXAMPLE-NVL01"',
         )
-        self.assertIn(">IB <span>0/1 台</span>", rendered)
-        self.assertIn(">NVL <span>0/1 台</span>", rendered)
+        # v3.1.6 R-045 (owner 2026-11-23, OWNER-PENDING A-23; guide 8.27 :2954) replaces the
+        # old "<completed>/<total> 台" wave header with three count lines by overall; one
+        # pending device per wave is 1 not-done, 0 shown as 0.
+        heads = self._v6_heads(rendered)
+        self.assertEqual([
+            "IB Total: 1 – 完成 0 未完成 1",
+            "完成: 0 – 成功 0 警告 0",
+            "未完成: 1 – 进行中 0 等待 1 失败 0 未知 0",
+        ], heads["production__ib"])
+        self.assertEqual([
+            "NVL Total: 1 – 完成 0 未完成 1",
+            "完成: 0 – 成功 0 警告 0",
+            "未完成: 1 – 进行中 0 等待 1 失败 0 未知 0",
+        ], heads["production__nvl"])
         self.assertNotIn("IB / NVL", rendered)
+
+    # ── v3.1.6 C1/V6 R-045：ZTP Status 行头三行计数与按状态筛选（指导 8.27 :2940-2962）──
+    # 预期只取自需求 R-045 合同 1～6、owner 2026-11-23 原话（OWNER-DECISIONS 第 16 条，
+    # OWNER-PENDING A-23）与指导 8.27 第 1～4 条；数字按下面夹具手算，不取自生成器输出。
+    # (hostname, type, overall)；overall 为 None 表示报告里没有这个字段。
+    V6_DEVICES = (
+        ("air-tan-leaf01", "air", "success"),
+        ("air-tan-leaf02", "air", "warning"),
+        ("air-tan-leaf03", "air", "failed"),
+        ("air-oobofoob-leaf01", "air", "running"),
+        ("PUBLIC-IB-SW01", "ib", "pending"),
+        ("PUBLIC-IB-SW02", "ib", "stale-value"),
+        ("PUBLIC-IB-SW03", "ib", None),
+    )
+    V6_ZERO_HEAD = [
+        "完成: 0 – 成功 0 警告 0",
+        "未完成: 0 – 进行中 0 等待 0 失败 0 未知 0",
+    ]
+    # R-045 合同 4、指导 8.27 第 1 条（审阅 F10）：可点的只有这五个子状态，顺序同合同 1。
+    V6_CLICKABLE = ["success", "warning", "running", "pending", "failed"]
+    V6_LABELS = {"success": "成功", "warning": "警告", "running": "进行中",
+                 "pending": "等待", "failed": "失败", "unknown": "未知"}
+
+    @staticmethod
+    def _v6_tree(text):
+        """Parse HTML with the standard library into (tag, attrs, children) nodes."""
+        from html.parser import HTMLParser
+
+        void = {"br", "hr", "img", "input", "link", "meta", "wbr", "col", "source"}
+
+        class Node:
+            def __init__(self, tag, attrs, parent):
+                self.tag, self.attrs, self.parent, self.children = tag, dict(attrs), parent, []
+
+            def classes(self):
+                return (self.attrs.get("class") or "").split()
+
+            def text(self):
+                return " ".join("".join(
+                    child if isinstance(child, str) else " " + child.text() + " "
+                    for child in self.children).split())
+
+            def iter(self):
+                for child in self.children:
+                    if isinstance(child, Node):
+                        yield child
+                        yield from child.iter()
+
+        class Tree(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.root = self.current = Node("#root", {}, None)
+
+            def handle_starttag(self, tag, attrs):
+                node = Node(tag, attrs, self.current)
+                self.current.children.append(node)
+                if tag not in void:
+                    self.current = node
+
+            def handle_endtag(self, tag):
+                node = self.current
+                while node.parent is not None and node.tag != tag:
+                    node = node.parent
+                if node.parent is not None:
+                    self.current = node.parent
+
+            def handle_data(self, data):
+                self.current.children.append(data)
+
+        tree = Tree()
+        tree.feed(text)
+        tree.close()
+        return tree.root
+
+    def _v6_head_rows(self, text):
+        """Map each ZTP header row to its scope: the environment, or environment__wave."""
+        heads = {}
+        for node in self._v6_tree(text).iter():
+            if node.tag != "tr":
+                continue
+            if "ztp-environment" in node.classes():
+                heads[node.attrs["data-environment"]] = node
+            elif "ztp-group" in node.classes():
+                heads[node.attrs["data-group"]] = node
+        return heads
+
+    def _v6_heads(self, text):
+        return {
+            scope: [line.text() for line in node.iter()
+                    if line.tag == "div" and "ztp-head-line" in line.classes()]
+            for scope, node in self._v6_head_rows(text).items()
+        }
+
+    def _v6_status(self):
+        devices = []
+        for index, (hostname, device_type, overall) in enumerate(self.V6_DEVICES, 1):
+            device = {
+                "hostname": hostname, "type": device_type, "template": "",
+                "ip": f"192.0.2.{index}", "mac": f"02:00:00:00:00:{index:02x}",
+                "stages": {}, "progress": {"percent": 0}, "issues": [],
+            }
+            if overall is not None:
+                device["overall"] = overall
+            devices.append(device)
+        return {"available": True, "generated_at": "2026-11-26T10:00:00+08:00",
+                "devices": devices, "counts": {}, "environment_updates": {}}
+
+    def _v6_page(self, status):
+        """Render the real whole page (build_html) with only the ZTP status filled in."""
+        stats = {"changed": 0, "new": 0, "removed": 0, "same": 0}
+        return self.monitor.build_html(
+            {}, "", 0, "", "", 0, {}, [],
+            "", "", stats, None, 0,
+            "", "", stats, None, 0,
+            "", "", 0, [],
+            "", "", stats, None, 0,
+            {}, {}, {}, {},
+            status,
+        )
+
+    def test_v6_ztp_heads_three_lines_count_overall_not_ztp_completed(self):
+        status = self._v6_status()
+        # The success device has no nine-stage proof: the old header did not count it
+        # (ztp_completed); R-045 合同 2 counts it as 完成 by overall.
+        self.assertFalse(self.monitor.ztp_completed(status["devices"][0]))
+        heads = self._v6_heads(self._v6_page(status))
+        expected = {
+            "air": ["AIR Total: 4 – 完成 2 未完成 2",
+                    "完成: 2 – 成功 1 警告 1",
+                    "未完成: 2 – 进行中 1 等待 0 失败 1 未知 0"],
+            "air__oobofoob": ["OOBofOOB Total: 1 – 完成 0 未完成 1",
+                              "完成: 0 – 成功 0 警告 0",
+                              "未完成: 1 – 进行中 1 等待 0 失败 0 未知 0"],
+            "air__border_oob": ["OOB / Border Total: 0 – 完成 0 未完成 0", *self.V6_ZERO_HEAD],
+            "air__tan": ["TAN Total: 3 – 完成 2 未完成 1",
+                         "完成: 2 – 成功 1 警告 1",
+                         "未完成: 1 – 进行中 0 等待 0 失败 1 未知 0"],
+            # 合同 2：不是五个值之一（含缺字段）的都算未知，未知归未完成。
+            "production": ["Production Total: 3 – 完成 0 未完成 3",
+                           "完成: 0 – 成功 0 警告 0",
+                           "未完成: 3 – 进行中 0 等待 1 失败 0 未知 2"],
+            "production__ib": ["IB Total: 3 – 完成 0 未完成 3",
+                               "完成: 0 – 成功 0 警告 0",
+                               "未完成: 3 – 进行中 0 等待 1 失败 0 未知 2"],
+            "production__tan": ["TAN Total: 0 – 完成 0 未完成 0", *self.V6_ZERO_HEAD],
+            "unknown": ["Unknown / 未归类 Total: 0 – 完成 0 未完成 0", *self.V6_ZERO_HEAD],
+        }
+        for scope, lines in expected.items():
+            with self.subTest(scope=scope):
+                self.assertEqual(lines, heads[scope])
+        # Every header has the three lines (3 environments + 3 x 6 waves).
+        self.assertEqual(21, len(heads))
+        for scope, lines in heads.items():
+            with self.subTest(scope=scope):
+                self.assertEqual(3, len(lines))
+
+    def test_v6_only_five_sub_status_counts_are_buttons_and_zero_is_disabled(self):
+        rows = self._v6_head_rows(self._v6_page(self._v6_status()))
+        expected_counts = {
+            "air": {"success": 1, "warning": 1, "running": 1, "pending": 0, "failed": 1,
+                    "unknown": 0},
+            "production__ib": {"success": 0, "warning": 0, "running": 0, "pending": 1,
+                               "failed": 0, "unknown": 2},
+            "unknown": dict.fromkeys(self.V6_LABELS, 0),
+        }
+        for scope, row in rows.items():
+            with self.subTest(scope=scope):
+                buttons = [node for node in row.iter() if node.tag == "button"]
+                # 合同 3/4：Total、完成、未完成与「未知」只显示，可点的只有五个子状态。
+                self.assertEqual(self.V6_CLICKABLE,
+                                 [node.attrs.get("data-status") for node in buttons])
+                for button in buttons:
+                    count = int(button.attrs["data-count"])
+                    status = button.attrs["data-status"]
+                    self.assertEqual(scope, button.attrs.get("data-scope"))
+                    self.assertEqual(f"{self.V6_LABELS[status]} {count}", button.text())
+                    # 合同 3：0 也显示，0 不可点（disabled）。
+                    self.assertIs(count == 0, "disabled" in button.attrs, status)
+                    # 指导 8.27 第 4 条：颜色沿用现有 .ztp-<状态>。
+                    self.assertIn(f"ztp-{status}", button.classes())
+                unknown = [node for node in row.iter()
+                           if node.attrs.get("data-status") == "unknown"]
+                self.assertEqual(1, len(unknown))
+                self.assertNotEqual("button", unknown[0].tag)
+                self.assertEqual(scope, unknown[0].attrs.get("data-scope"))
+                self.assertEqual(f"未知 {unknown[0].attrs['data-count']}", unknown[0].text())
+                if scope in expected_counts:
+                    self.assertEqual(expected_counts[scope], {
+                        node.attrs["data-status"]: int(node.attrs["data-count"])
+                        for node in [*buttons, *unknown]
+                    })
+
+    def test_v6_row_overall_and_head_counts_share_one_source(self):
+        text = self._v6_page(self._v6_status())
+        tree = self._v6_tree(text)
+        rows = [node for node in tree.iter()
+                if node.tag == "tr" and "ztp-row" in node.classes()]
+        # 指导 8.27 第 2 条：不是五种值的写 unknown；data-environment/data-group 保留。
+        self.assertEqual({
+            "air-tan-leaf01": ("air", "air__tan", "success"),
+            "air-tan-leaf02": ("air", "air__tan", "warning"),
+            "air-tan-leaf03": ("air", "air__tan", "failed"),
+            "air-oobofoob-leaf01": ("air", "air__oobofoob", "running"),
+            "PUBLIC-IB-SW01": ("production", "production__ib", "pending"),
+            "PUBLIC-IB-SW02": ("production", "production__ib", "unknown"),
+            "PUBLIC-IB-SW03": ("production", "production__ib", "unknown"),
+        }, {
+            row.attrs["data-hostname"]: (row.attrs.get("data-environment"),
+                                         row.attrs.get("data-group"),
+                                         row.attrs.get("data-overall"))
+            for row in rows
+        })
+        counted = 0
+        for scope, head in self._v6_head_rows(text).items():
+            totals = {}
+            for node in head.iter():
+                if "data-count" not in node.attrs:
+                    continue
+                self.assertEqual(scope, node.attrs["data-scope"])
+                status = node.attrs["data-status"]
+                same_rows = [row for row in rows
+                             if scope in (row.attrs["data-environment"], row.attrs["data-group"])
+                             and row.attrs["data-overall"] == status]
+                with self.subTest(scope=scope, status=status):
+                    self.assertEqual(len(same_rows), int(node.attrs["data-count"]))
+                totals[status] = int(node.attrs["data-count"])
+                counted += 1
+            # Total = 完成 + 未完成 = the scope's row count (合同 2).
+            scope_rows = [row for row in rows
+                          if scope in (row.attrs["data-environment"], row.attrs["data-group"])]
+            self.assertEqual(len(scope_rows), sum(totals.values()), scope)
+        self.assertEqual(21 * 6, counted)
+
+    def test_v6_ztp_filter_page_structure_follows_v2(self):
+        keys = getattr(self.monitor, "ZTP_HASH_KEYS", None)
+        self.assertIsNotNone(keys, "the ZTP hash keys are a Python constant like V2 (8.27 第 3 条)")
+        text = self._v6_page(self._v6_status())
+        declared = re.search(r"const ZTP_HASH_KEYS = (\[[^\]]*\]);", text)
+        self.assertIsNotNone(declared)
+        self.assertEqual(list(keys), json.loads(declared.group(1)))
+        # 合同 4：工具栏下的可删标签栏，另有「清除全部」。
+        panel = text.split('<div id="panel-ztp"', 1)[1].split('<table id="ztp-tbl"', 1)[0]
+        self.assertIn('id="ztp-status-tags"', panel.split('class="ztp-toolbar"', 1)[1])
+        for handler in ("toggleZtpStatusTag", "removeZtpStatusTag", "clearZtpStatusTags",
+                        "renderZtpStatusTags", "parseZtpHash", "ztpHashSuffix",
+                        "filterZtpStatus"):
+            self.assertRegex(text, r"function " + handler + r"\(")
+        tags = text.split("function renderZtpStatusTags(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("清除全部", tags)
+        self.assertIn("clearZtpStatusTags", tags)
+        # 标签复用 V2 的可删标签样式（指导 8.27 第 3 条「标签栏、清除全部、hash 读写照 V2」）。
+        self.assertIn("switch-tag", tags)
+        # 合同 5：行头按钮点击不触发折叠。
+        toggle = text.split("function toggleZtpStatusTag(", 1)[1].split("\n}", 1)[0]
+        self.assertIn("stopPropagation()", toggle)
+        # 合同 6：JS 只按 data-* 做并集、交集。
+        self.assertIn("dataset.overall", text.split("function filterZtpStatus(", 1)[1]
+                      .split("\n}", 1)[0])
+        # 刷新后恢复（同 V2 reloadActiveTab）。
+        reload_body = text.split("function reloadActiveTab()", 1)[1].split("\n}", 1)[0]
+        self.assertIn("ztpHashSuffix()", reload_body)
 
     def test_manual_ztp_dhcp_stage_renders_skipped_round(self):
         html = self.monitor.render_ztp_status_rows({

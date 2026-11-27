@@ -4756,3 +4756,30 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
 
 - 不改设备端口、不改 P2P、不跑转换器；第 4 步只在正常变更窗口顺带观察。结束时不留文件。
 - 自动化映射：`test_monitor_switch_status_view.SwitchStatusV5InterfaceTests`、`SwitchStatusV5SourceTests`，`test_monitor_switch_status_view_workflow.SwitchStatusV5Workflow`；本机模型通过不代表现场通过。本卡 **NOT RUN / REAL_ENV REQUIRED**。
+
+## TC-REAL-ZTP-STATUS-V6-FILTER-001 — ZTP Status 行头子状态筛选、标签与地址栏 hash 的浏览器交互
+
+- 基本信息：real-environment / scenario；R-045（v3.1.6 C1/V6，指导 :2940-2962）。状态 **NOT RUN / REAL_ENV REQUIRED**。执行人为 owner 或其授权人员；AIR 上就能做（AIR 有 eth-sw 的 ZTP）。本卡只写验收条件，不授权触发 ZTP、下发或修改项目与设备。本机不执行页面 JS（指导 :2208「本版不新增JS执行器或浏览器依赖」），以下交互只在浏览器里见证。
+- 风险与目标：Python 端已把行头三行计数写进按钮的 `data-count`、每行写 `data-overall`（`test_project_contracts.MonitorContractTests` 的 `test_v6_*` 断言结构）；浏览器里的多选并集、删标签、与搜索取交集、hash 写入与恢复只能现场看。要防的是：点数字触发行头折叠、筛错范围或状态、标签删不掉、按状态筛选时行头被隐藏、刷新或分享后状态丢失（指导 :2949、:2956，需求 R-045 合同 4、5）。
+- 前置条件与输入：已部署本版的管理服务器上一个有 ZTP 报告的项目（AIR 即可）；至少一个 wave 里同时有两种以上 overall 状态的设备，另有一个计数为 0 的子状态；一台浏览器。记录本轮源码提交、页面生成时间与 `monitor.html` 的 SHA256。
+
+### 步骤
+
+1. 打开 ZTP Status：每个环境行头和 wave 行头显示三行「<名> Total: N – 完成 a 未完成 b」「完成: a – 成功 x 警告 y」「未完成: b – 进行中 p 等待 q 失败 r 未知 u」，数字与该范围的设备行逐个数一致；计数为 0 的按钮置灰、不可点；「未知」只显示计数（R-045 合同 1～4，`monitor/generate-monitor-html.py::render_ztp_status_rows`）。
+2. 点某 wave 行头的一个非 0 子状态数字：只留下该范围该状态的设备，行头不折叠；工具栏下出现「范围 · 状态 n ×」标签和「清除全部」（R-045 合同 4，指导 :2949；`monitor/generate-monitor-html.py::render_ztp_status_rows`，页面函数 `toggleZtpStatusTag`、`renderZtpStatusTags`）。
+3. 再点另一范围（例如环境行头）的另一个子状态数字：显示两者的并集，出现两个标签；行头始终显示，数字不变（R-045 合同 4、5，指导 :2949）。
+4. 再点第 2 步的同一数字：该标签消失；点剩下标签的 ×：恢复全部；再加两个标签后点「清除全部」：全部恢复（R-045 合同 4，指导 :2949；页面函数 `removeZtpStatusTag`、`clearZtpStatusTags`）。
+5. 有标签时在搜索框输入主机名片段：显示的是标签并集与搜索的交集；只因搜索没有命中的分组行头隐藏（R-045 合同 4、5，指导 :2949；页面函数 `filterZtpStatus`）。
+6. 设好两个标签和搜索词后：复制地址栏链接（形如 `#ztp?st=…&q=…`）到新标签页打开、再按 F5、再打开 Auto-Refresh 等它自动刷新，三次都完整恢复标签与搜索词（R-045 合同 4，指导 :2949；页面函数 `ztpHashSuffix`、`reloadActiveTab`、`initZtpStatusFilter`）。
+7. 用键盘 Tab 到一个子状态数字按回车：只切换筛选，不折叠行头；行头本身按回车仍折叠或展开；折叠/展开、排序、手工 ZTP 按钮照常（R-045 合同 5，指导 :2949）。
+
+### 预期结果
+
+- 正向：上面每步的现象成立；每行「完成」列、总体状态徽章、工具栏原统计文字和机器交接与改前相同（R-045「不做」，指导 :2962）。
+- 拒绝/不允许：点数字触发折叠；0 或「未知」可点；筛出别的范围或状态；按状态筛选时行头消失或数字变化；刷新、分享后标签或搜索词丢失（R-045 合同 3～5，指导 :2947、:2949）。
+- 证据：每步一张截图（脱敏主机名）、地址栏 hash 原文、`monitor.html` 的 SHA256、本轮源码提交与生成时间；不外带真实项目输入（指导 :2956）。
+
+### 故障注入与清理
+
+- 只操作浏览器；不改项目文件、设备、服务或 cron，不触发 ZTP。
+- 自动化映射：`test_project_contracts.MonitorContractTests` 的 `test_v6_ztp_heads_three_lines_count_overall_not_ztp_completed`、`test_v6_only_five_sub_status_counts_are_buttons_and_zero_is_disabled`、`test_v6_row_overall_and_head_counts_share_one_source`、`test_v6_ztp_filter_page_structure_follows_v2`、`test_ztp_status_renders_ib_and_nvl_as_separate_groups`；本机结构断言通过不代表浏览器交互通过。本卡 **NOT RUN / REAL_ENV REQUIRED**。
