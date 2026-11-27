@@ -103,6 +103,8 @@
   DHCP 日志；未设置时 Production runtime resolver 读取标准 syslog/daemon.log 并补读
   `isc-dhcp-server` journal。
 - `eth-info/`、`spx-link/`、`cronjob.log`：项目专属输出链接。
+- `helper-info-collect.py`：三个目录各一个链接，指向 `tools/helper-info-collect.py`（采集项在 `tools/` 下
+  同名的 `.sh`）；人工临时采集，见下文「人工临时采集」。
 
 ## 运行
 
@@ -193,6 +195,51 @@ sudo apt-get install python3-xlsxwriter
 
 闭环成功后，本轮归档、validation XLSX 和 `monitor.html` 会在同一次 cron 日志中依次出现；
 任一步失败均以 `[ETH-CLOSED-LOOP] ERROR` 记录并返回非零，不会静默保留旧页面作为本轮结果。
+
+### 人工临时采集：`helper-info-collect.py`（owner 2026-11-20，R-041）
+
+排查、升级前核对版本、核对 eth0 MAC 等临时需要时，用这个辅助脚本从交换机同步取回信息。它不进
+监控页面，`sw-info.sh`、`cron.sh` 和页面都不因它改变：`sw-info.sh` 由 cron/worker 定时采集、整个脚本
+发到交换机后台运行再取回 `.info` 喂页面，登录后按 `nv show platform` 定类型；本脚本只做人工临时
+采集，按清单的 `type` 定类型，可挑项、可自加项。两边的命令列表各自维护。
+
+在入口目录里运行（清单从当前目录读）：
+
+```bash
+cd infiniband/monitor                     # 或 ethernet/monitor、nvlink/monitor
+python3 helper-info-collect.py --list     # 列出全部组和项，不写任何文件
+python3 helper-info-collect.py identity   # 整组；identity.eth0-mac 与清单 eth0_mac 比对
+python3 helper-info-collect.py version.ssd,health.system --devices 'leaf[001-004]'
+python3 helper-info-collect.py --commands "nv show system" --type ib
+```
+
+- 采集项：`tools/` 下与程序同名的 `.sh`，两级分组：`#@group <组> <说明>` 开组，`#@item <项> <说明>` 开项，
+  下面的命令到下一个 `#@item`/`#@group` 为止；可选 `#@family ib,nvl`（只在这些设备族上跑，其他记
+  SKIPPED）、`#@pick <正则>`（汇总里显示的值）、`#@compare <清单列> <mac|text>`（与清单那一列比对，MAC
+  多种写法规整后比）。现有 9 组 30 项，用户可按同样格式自加。每次只把选中的项拼起来经
+  `ssh … bash -s` 发到设备上执行，设备上不留文件；`.sh` 本身不单独运行（`--help` 只打印说明）。
+  位置参数写 `组` 或 `组.项`，逗号分隔；`--commands "命令行"` 可写多次，每条作为 `cmd.1`、`cmd.2`… 在每台
+  设备上照原样执行，可单独用，也可与组/项一起用；命令以登录用户身份执行，是否只读由操作员负责。
+- 清单与设备：默认当前目录的族清单（`ethernet` → `eth.csv`，`infiniband` → `ib.csv`，`nvlink` → `nvsw.csv`），
+  没有就用 `02-devices_config.csv`，`--csv` 可指定；主机名重复只取第一行，`#` 开头的行跳过。默认选本族
+  类型（eth：eth、eth_spx、spx、air；ib：ib；nvl：nvl），`--type` 另指定；`--devices` 与其他脚本同一写法
+  （逗号名单、`*`、`leaf[001-039]`、`pod[a-d]`，写错或有一项没匹配上即用法错误退出 2）；`--all` 选清单里
+  所有行，含 server_ufm 等非交换机行。先按 `--type`/`--all` 定范围，再按 `--devices` 选。
+- 登录：用户默认 eth 为 cumulus、ib/nvl 为 admin、其他类型为 root（与 cron.sh 登 UFM 一致），`--user` 可改；
+  地址用清单的 eth0_ip，没有就用主机名。先用密钥；某类型有设备因认证被拒，就对这一类型问一次密码，只
+  重试被拒的设备，连不上的不问。密码经 0700 临时目录里的 SSH_ASKPASS 交给 ssh，用完即删，不写日志。
+  并发 `--jobs`（默认 16），每台超时 `--timeout`（默认 120 秒）。
+- 结果：写到入口目录下的 `99-output-info` 链接，第一次运行时自动建，指向
+  `DAY0-Prepare/activate-project/99-output-info`（目录不在就建，切换项目后同样在新项目里建）。每次运行
+  `info-<YYYYMMDD-HHMMSS>-<选项>/<主机>.out`（每项一段，带说明和退出码）、`info-….csv`（hostname、type、
+  target、item、rc、status、value、expected、compare、detail；默认最后打印到屏幕，`--quiet` 不打印）、
+  `info-….log`（选中的命令、登录方式、耗时、ssh 错误）。status 为 OK、RC_NONZERO、CUT（超时或断开）、
+  SKIPPED、FAILED（没登上或没有输出）；有 FAILED 或 CUT 时退出 1。
+- 运行身份：必须是 `activate-project` 指向的项目目录的属主，否则报错退出，不要用 sudo（整棵目录归 root
+  的服务器上用 root 运行仍允许）。
+- `99-output-info` 链接被 `.gitignore` 忽略、不进 git；但上传打包按文件系统打包，不按 `.gitignore`：在
+  打包所用的机器上运行过本脚本时，打包前先移走该目录下的 `99-output-info` 链接（它的目标在
+  `activate-project` 下，不进包，部署端会以 `archive symlink target is missing` 拒收）。
 
 ## 安全边界
 

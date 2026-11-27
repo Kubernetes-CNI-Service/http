@@ -1,0 +1,1 @@
+../../tools/helper-info-collect.py
