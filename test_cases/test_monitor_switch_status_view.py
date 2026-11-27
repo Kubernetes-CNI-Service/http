@@ -30,6 +30,19 @@ PAGE = ROOT / "monitor/generate-monitor-html.py"
 STATS = {"changed": 0, "new": 0, "removed": 0, "same": 0}
 VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link",
         "meta", "param", "source", "track", "wbr"}
+# The page module's log() appends to LOG_FILE, by default the repository's own
+# monitor/generate-monitor.log.  A test that reaches log() must neither create nor
+# change that file (v3.1.6 full run v316-full-96c2ca2-20261128-01, lane w3 leftover).
+REPOSITORY_PAGE_LOG = PAGE.parent / "generate-monitor.log"
+
+
+def repository_page_log_state():
+    """(inode, size, mtime_ns) of the repository's page log, or None while it is absent."""
+    try:
+        status = os.lstat(REPOSITORY_PAGE_LOG)
+    except FileNotFoundError:
+        return None
+    return status.st_ino, status.st_size, status.st_mtime_ns
 
 
 def load_page(name="_switch_status_view_page"):
@@ -738,11 +751,23 @@ class SwitchStatusV4VersionTests(unittest.TestCase):
     def targets(self, text=None, **keywords):
         loader = getattr(self.page, "load_version_targets", None)
         self.assertIsNotNone(loader, "targets come from one named reader (guide :2259-2269)")
+        before = repository_page_log_state()
         with tempfile.TemporaryDirectory(prefix="v4-global-", dir=owned_test_root()) as folder:
             path = Path(folder) / "01-global.yaml"
             if text is not False:
                 path.write_text(global_yaml(**keywords) if text is None else text, encoding="utf-8")
-            return loader(path)
+            # The page's own log goes to this test's folder, not the repository (lane leftover).
+            with mock.patch.object(self.page, "LOG_FILE", Path(folder) / "generate-monitor.log"):
+                targets = loader(path)
+        self.assertEqual(before, repository_page_log_state(),
+                         "the target reader never creates or changes %s" % REPOSITORY_PAGE_LOG)
+        return targets
+
+    def test_unreadable_targets_never_write_the_repository_page_log(self):
+        # A missing or unparsable 01-global.yaml is logged by the page (guide :2259-2269);
+        # that log line stays inside the test's own folder (targets() checks the file).
+        self.assertEqual({}, self.targets(text=False))
+        self.assertEqual({}, self.targets(text="switches: [unclosed\n"))
 
     def row(self, device, family, targets):
         return row_for(parse_html(self.page.render_sw_list_row(device, family, targets)),
