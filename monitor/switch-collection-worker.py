@@ -29,6 +29,7 @@ import traceback
 import uuid
 import re
 import select
+import shlex
 
 from switch_collection_gate import (
     CollectionGate,
@@ -2663,6 +2664,53 @@ def _collection_snapshot_runtime(slot: str, bindings: dict) -> dict:
             "runtime_input_hashes": hashes}
 
 
+def _append_lane_cron_log(lane: Path, area: str, head: str, result: dict | None = None) -> None:
+    """I-053: append one cron.sh run (or one skipped slot) to the lane's cronjob.log, then rotate it.
+
+    Called only while this worker holds the lane's cron.lock, in the format of
+    12-ztp-monitor.py::append_collector_log with a [SWITCH-COLLECTION] head.  This root worker writes a
+    regular file, or follows only setup's pointer link (pointer_link_target) into the active project when
+    every directory from DAY0-Prepare down to 99-output-monitor/<network>/ is real, and opens the file
+    with O_NOFOLLOW like cron.lock (C3-O7 (a)).  Anything else, or a failed write, is one WARN on stderr;
+    the slot's outcome stays as it is.  Whoever writes a log rotates it (owner 2026-10-22):
+    tools/log_rotation with its defaults, 10 MB and 7 copies as cron.sh.
+    """
+    stamp = timestamp()
+    lines = [f"[{stamp}] [SWITCH-COLLECTION]{head}"]
+    if result is not None:
+        lines.extend(f"[{stamp}] {line}" for line in result["stdout"].splitlines())
+        lines.extend(f"[{stamp}] [stderr] {line}" for line in result["stderr"].splitlines())
+        lines.append(f"[{timestamp()}] [SWITCH-COLLECTION][EXIT] {result['returncode']}")
+    log_file = lane / "cronjob.log"
+    try:
+        if log_file.is_symlink():
+            if os.readlink(log_file) != pointer_link_target(
+                f"{area}/monitor/cronjob.log", f"99-output-monitor/{area}/cronjob.log"
+            ):
+                raise ValueError("the link is not the one setup writes")
+            project = active_project_dir(HTTP_ROOT)  # ActiveProjectPointerError is a ValueError
+            if project is None:
+                raise ValueError("no active project")
+            log_file = HTTP_ROOT
+            for part in ("DAY0-Prepare", project.name, "99-output-monitor", area):
+                log_file = log_file / part
+                if log_file.is_symlink() or not log_file.is_dir():
+                    raise ValueError(f"{log_file} is not a real directory")
+            log_file = log_file / "cronjob.log"
+        descriptor = os.open(
+            log_file, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o666
+        )
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        message = rotate_log_file(log_file)
+    except (OSError, ValueError) as exc:
+        print(f"[{timestamp()}] [WARN] 无法写入 cron 日志 {lane / 'cronjob.log'}: {exc}",
+              file=sys.stderr, flush=True)
+        return
+    if message:
+        print(f"[{timestamp()}] [LOG] {message}", flush=True)
+
+
 def run_collection_slots(
     identity: object,
     *,
@@ -2785,6 +2833,11 @@ def run_collection_slots(
                     if row_types and not lane_types & set(row_types) and not (
                         slot == "ethernet/prod" and runtime_devices
                     ):
+                        _append_lane_cron_log(
+                            cwd, area,
+                            f"[SKIP] slot={slot} cycle={validated_identity['sequence']}: "
+                            "清单里没有这类设备",
+                        )
                         outcomes.append(_collection_slot_wrapper(
                             slot, "no_devices", None,
                             {"returncode": 0, "stdout": "", "stderr": ""}, validated_identity,
@@ -2804,6 +2857,13 @@ def run_collection_slots(
                         planner_command, cwd, timeout,
                         pass_fds=(plan_context.fileno(), plan_file.fileno(), cron_lock_fd),
                         lane=COLLECTION_LANE, env=collector_env,
+                    )
+                    # I-053: logged before any check -- a failed plan is the run that most needs it
+                    _append_lane_cron_log(
+                        cwd, area,
+                        f"[RUN] slot={slot} cycle={validated_identity['sequence']} phase=plan "
+                        f"{shlex.join(planner_command)}",
+                        plan_result,
                     )
                     if plan_cancelled or plan_result["returncode"] != 0:
                         evidence_result = plan_result
@@ -2837,6 +2897,12 @@ def run_collection_slots(
                         managed_command, cwd, timeout,
                         pass_fds=(context_file.fileno(), cron_lock_fd), lane=COLLECTION_LANE,
                         env=collector_env,
+                    )
+                    _append_lane_cron_log(
+                        cwd, area,
+                        f"[RUN] slot={slot} cycle={validated_identity['sequence']} phase=collect "
+                        f"{shlex.join(managed_command)}",
+                        process_result,
                     )
             else:
                 # No input inventory means this cannot be an A4 evidence run.

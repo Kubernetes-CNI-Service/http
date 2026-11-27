@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import gzip
 import hashlib
 import importlib.util
 import inspect
@@ -12,6 +13,8 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import shlex
 import sys
 import tempfile
 import threading
@@ -1151,6 +1154,309 @@ class CollectionCycleWorkerContractTests(unittest.TestCase):
         self.assertEqual("failed", statuses[-1][0])
         self.assertEqual("no devices selected", statuses[-1][1]["reason"])
         self.assertEqual([], marked)
+
+    # I-053（问题文档 :1863 的修法；v3.1.6 指导 WP-10 :1519-1562）：worker 仍持有 cron.lock 时，
+    # 把 cron.sh 规划、正式两次的输出追加到 lane 的 cronjob.log，格式照 12-ztp-monitor 的
+    # append_collector_log（块头带 slot、cycle、phase）；满 10 MB 由写它的 worker 轮转（00 原则 :70）。
+    LANE_ROWS = {
+        "ethernet": ("eth.csv", "leaf-eth,eth,192.0.2.10\n"),
+        "infiniband": ("ib.csv", "leaf-ib,ib,192.0.2.11\n"),
+        "nvlink": ("nvsw.csv", "leaf-nv,nvl,192.0.2.12\n"),
+    }
+    # WORKER::timestamp 的写法：本地时区、精确到秒的 ISO 时间
+    STAMPED = re.compile(r"\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}\] (.*)")
+    # setup 写的链接文本（R-016 §2：经 DAY0-Prepare/activate-project 指针）
+    SETUP_LANE_LOG_LINK = "../../DAY0-Prepare/activate-project/99-output-monitor/{}/cronjob.log"
+    LOG_LIMIT = 10 * 1024 * 1024  # owner 2026-10-22：cronjob.log 满 10 MB 压缩，与 cron.sh 相同
+
+    def _lane_log_tree(self, directory: str) -> Path:
+        root = Path(directory)
+        for area, (name, row) in self.LANE_ROWS.items():
+            monitor = root / area / "monitor"
+            monitor.mkdir(parents=True)
+            (monitor / "cron.sh").write_text("#!/bin/bash\nexit 99\n", encoding="utf-8")
+            (monitor / name).write_text(self.HEADER + row, encoding="utf-8")
+        return root
+
+    def _lane_log_project(self, root: Path) -> Path:
+        """setup 的布局：指针 DAY0-Prepare/activate-project 选中真实项目目录（R-016 §2）。"""
+        project = root / "DAY0-Prepare" / "project-a"
+        for area in self.LANE_ROWS:
+            (project / "99-output-monitor" / area).mkdir(parents=True)
+        (root / "DAY0-Prepare" / "activate-project").symlink_to("project-a")
+        return project
+
+    def _sparse_log(self, path: Path) -> None:
+        """一个刚好 10 MB 的日志，用稀疏文件，不真写 10 MB。"""
+        with path.open("wb") as handle:
+            handle.truncate(self.LOG_LIMIT)
+
+    @staticmethod
+    def _lane_plan_ok(area: str) -> dict:
+        return {"returncode": 0, "stdout": f"plan out {area}\n",
+                "stderr": f"plan note {area}\n"}
+
+    @staticmethod
+    def _lane_collect_ok(area: str) -> dict:
+        return {"returncode": 0, "stdout": f"collect out {area}\n" + marker(legacy()),
+                "stderr": f"collect note {area}\n"}
+
+    def _run_lane_log_slots(self, root: Path, *, plan=None, commands=None):
+        """Run the real prod slot loop over ``root``; cron.sh itself is a stub.
+
+        Returns (outcomes by slot, worker stderr, [(lane area, command)] the stub received).
+        """
+        received = []
+        plan_raw = WORKER._canonical_json_line({
+            "eth": [], "spx": [], "ib": [], "nv": [], "dynamic_identities": [], "ufm": [],
+        })
+
+        def interruptible(command, cwd, timeout, **kwargs):
+            area = Path(cwd).parent.name
+            received.append((area, list(command)))
+            if "--emit-target-plan-fd" in command:
+                result = (plan or self._lane_plan_ok)(area)
+                if result["returncode"] == 0:
+                    os.write(int(command[command.index("--emit-target-plan-fd") + 1]), plan_raw)
+                return dict(result), False
+            return self._lane_collect_ok(area), False
+
+        scripts = {area: root / area / "monitor" / "cron.sh" for area in self.LANE_ROWS}
+        bindings = {}
+        for slot in WORKER.collection_cycle_source_slots("prod"):
+            stem = slot.replace("/", "-")
+            bindings[slot] = {
+                "evidence": str(root / "cycle" / stem / "evidence-manifest.json"),
+                "envelope": str(root / "cycle" / stem / "identity-envelope.json"),
+                "input_inventory": str(root / "cycle/inputs" / f"{stem}.csv"),
+            }
+        stderr = io.StringIO()
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(WORKER, "HTTP_ROOT", root))
+            stack.enter_context(mock.patch.dict(WORKER.SCRIPTS, scripts))
+            stack.enter_context(mock.patch.dict("os.environ", {
+                "DHCP_LEASES_FILE": str(root / "absent.leases"),
+            }))
+            stack.enter_context(mock.patch.object(
+                WORKER, "_collection_snapshot_runtime",
+                side_effect=lambda _slot, _bindings: copy.deepcopy(self.RESOLVED_EMPTY_RUNTIME),
+            ))
+            stack.enter_context(mock.patch.object(
+                WORKER, "run_interruptible", side_effect=interruptible))
+            if commands is not None:
+                stack.enter_context(mock.patch.object(
+                    WORKER, "commands_for_scope", return_value=commands))
+            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            stack.enter_context(contextlib.redirect_stderr(stderr))
+            result = WORKER.run_collection_slots(
+                copy.deepcopy(IDENTITY), artifact_bindings=bindings, timeout=10, lock_wait=0,
+            )
+        outcomes = {item["source_slot"]: item for item in result["outcomes"]}
+        return outcomes, stderr.getvalue(), received
+
+    def _stamped(self, text: str) -> list[str]:
+        """每一行都带 WORKER::timestamp 的时间；返回去掉时间后的内容。"""
+        lines = []
+        for line in text.splitlines():
+            match = self.STAMPED.fullmatch(line)
+            self.assertIsNotNone(match, line)
+            lines.append(match.group(1))
+        return lines
+
+    def _expected_segment(self, slot: str, phase: str, command: list, result: dict) -> list[str]:
+        # 12-ztp-monitor 的 append_collector_log：RUN 行（argv 用 shlex.join）、每行 stdout、
+        # 每行 stderr 前加 [stderr]、EXIT <rc>；块头换成 SWITCH-COLLECTION 并带 slot、cycle、phase
+        return [
+            f"[SWITCH-COLLECTION][RUN] slot={slot} cycle={IDENTITY['sequence']} "
+            f"phase={phase} {shlex.join(command)}",
+            *result["stdout"].splitlines(),
+            *(f"[stderr] {line}" for line in result["stderr"].splitlines()),
+            f"[SWITCH-COLLECTION][EXIT] {result['returncode']}",
+        ]
+
+    def test_each_slot_appends_cron_output_to_its_lane_log(self):
+        # 问题文档 :1863；12-ztp-monitor append_collector_log；指导 :1532
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            previous = "[2026-11-01T00:00:00+00:00] earlier cron.sh output\n"
+            (root / "ethernet/monitor/cronjob.log").write_text(previous, encoding="utf-8")
+            outcomes, _stderr, received = self._run_lane_log_slots(root)
+            logs = {area: (root / area / "monitor/cronjob.log").read_text(encoding="utf-8")
+                    if (root / area / "monitor/cronjob.log").is_file() else ""
+                    for area in self.LANE_ROWS}
+        self.assertEqual(["accepted"] * 3, [item["outcome"] for item in outcomes.values()])
+        self.assertTrue(logs["ethernet"].startswith(previous), "原有内容要保留")
+        logs["ethernet"] = logs["ethernet"][len(previous):]
+        for area in self.LANE_ROWS:
+            slot = f"{area}/prod"
+            plan_command, collect_command = [command for owner, command in received
+                                             if owner == area]
+            self.assertIn("--emit-target-plan-fd", plan_command)
+            self.assertNotIn("--emit-target-plan-fd", collect_command)
+            self.assertEqual(
+                self._expected_segment(slot, "plan", plan_command, self._lane_plan_ok(area))
+                + self._expected_segment(slot, "collect", collect_command,
+                                         self._lane_collect_ok(area)),
+                self._stamped(logs[area]), slot,
+            )
+
+    def test_log_write_failure_does_not_change_the_outcome(self):
+        # 问题文档 :1863（同 12-ztp-monitor：写不进只告警）；指导 :1535
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            (root / "ethernet/monitor/cronjob.log").mkdir()
+            outcomes, stderr, _received = self._run_lane_log_slots(root)
+            other = (root / "infiniband/monitor/cronjob.log").is_file()
+        self.assertEqual("accepted", outcomes["ethernet/prod"]["outcome"])
+        self.assertIn("[WARN]", stderr)
+        self.assertIn("ethernet/monitor/cronjob.log", stderr)
+        self.assertTrue(other, "别的 lane 照常写")
+
+    def test_commands_without_a_lane_script_write_no_log(self):
+        # 指导 :1534：打桩命令里没有 cron.sh 路径时不写（回归）
+        slots = ("ethernet/prod", "infiniband/prod", "nvlink/prod")
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            outcomes, _stderr, _received = self._run_lane_log_slots(
+                root, commands=[["collector", slot] for slot in slots])
+            written = sorted(str(path.relative_to(root)) for path in root.rglob("cronjob.log*"))
+        self.assertEqual(["accepted"] * 3, [outcomes[slot]["outcome"] for slot in slots])
+        self.assertEqual([], written)
+
+    def test_a_lane_without_its_inventory_writes_no_lane_log(self):
+        # 问题文档 :1863（「仍持有 cron.lock 时」）；C3-O6 (a)：不持锁的老分支不写
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            (root / "nvlink/monitor/nvsw.csv").unlink()
+            outcomes, _stderr, received = self._run_lane_log_slots(root)
+            present = {area: (root / area / "monitor/cronjob.log").exists()
+                       for area in self.LANE_ROWS}
+        self.assertEqual([["bash", str(root / "nvlink/monitor/cron.sh"), "--wait-lock", "0"]],
+                         [command for area, command in received if area == "nvlink"])
+        self.assertEqual("accepted", outcomes["nvlink/prod"]["outcome"])
+        self.assertEqual({"ethernet": True, "infiniband": True, "nvlink": False}, present)
+
+    def test_a_lane_log_link_not_written_by_setup_is_left_alone(self):
+        # C3-O7 (a)：只经 setup 写法的链接、沿途都是真实目录才写；否则不写不转、只打 WARN
+        # （WORKER::run_collection_slots 以 O_NOFOLLOW 打开 cron.lock 的先例）
+        def foreign_link(root: Path, project: Path) -> Path:
+            target = root / "elsewhere.log"
+            lane_log = root / "ethernet/monitor/cronjob.log"
+            lane_log.unlink()
+            lane_log.symlink_to("../../elsewhere.log")
+            return target
+
+        def linked_network_dir(root: Path, project: Path) -> Path:
+            outside = root / "outside-network"
+            outside.mkdir()
+            (project / "99-output-monitor/ethernet").rmdir()
+            (project / "99-output-monitor/ethernet").symlink_to(outside)
+            return outside / "cronjob.log"
+
+        def linked_output_dir(root: Path, project: Path) -> Path:
+            outside = root / "outside-output"
+            for area in self.LANE_ROWS:
+                (outside / area).mkdir(parents=True)
+            (project / "99-output-monitor").rename(root / "replaced-output")
+            (project / "99-output-monitor").symlink_to(outside)
+            return outside / "ethernet/cronjob.log"
+
+        def linked_day0(root: Path, project: Path) -> Path:
+            (root / "DAY0-Prepare").rename(root / "real-day0")
+            (root / "DAY0-Prepare").symlink_to("real-day0")
+            return root / "real-day0/project-a/99-output-monitor/ethernet/cronjob.log"
+
+        def linked_project_log(root: Path, project: Path) -> Path:
+            target = root / "outside.log"
+            (project / "99-output-monitor/ethernet/cronjob.log").symlink_to(target)
+            return target
+
+        for case in (foreign_link, linked_network_dir, linked_output_dir, linked_day0,
+                     linked_project_log):
+            with self.subTest(case=case.__name__), \
+                    tempfile.TemporaryDirectory() as directory:
+                root = self._lane_log_tree(directory)
+                project = self._lane_log_project(root)
+                lane_log = root / "ethernet/monitor/cronjob.log"
+                lane_log.symlink_to(self.SETUP_LANE_LOG_LINK.format("ethernet"))
+                target = case(root, project)
+                text = os.readlink(lane_log)
+                self._sparse_log(target)
+                outcomes, stderr, _received = self._run_lane_log_slots(root)
+                self.assertEqual("accepted", outcomes["ethernet/prod"]["outcome"])
+                self.assertTrue(lane_log.is_symlink())
+                self.assertEqual(text, os.readlink(lane_log))
+                self.assertEqual(self.LOG_LIMIT, target.stat().st_size, "不写也不转")
+                self.assertFalse(target.with_name("cronjob.log.1.gz").exists())
+                self.assertIn("[WARN]", stderr)
+                self.assertIn("ethernet/monitor/cronjob.log", stderr)
+
+    def test_lane_log_is_rotated_by_its_writer_at_the_limit(self):
+        # 问题文档 :1863；00 原则 :70（谁写谁转）；tools/log_rotation：经链接时在真实文件旁轮转
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            project = self._lane_log_project(root)
+            lane_log = root / "ethernet/monitor/cronjob.log"
+            lane_log.symlink_to(self.SETUP_LANE_LOG_LINK.format("ethernet"))
+            real = project / "99-output-monitor/ethernet/cronjob.log"
+            self._sparse_log(real)
+            outcomes, stderr, _received = self._run_lane_log_slots(root)
+            copy_path = real.with_name("cronjob.log.1.gz")
+            rotated = copy_path.is_file()
+            archived = b""
+            if rotated:
+                with gzip.open(copy_path, "rb") as stream:
+                    archived = stream.read()
+            remaining = real.read_text(encoding="utf-8")
+            link_kept = lane_log.is_symlink() and os.readlink(lane_log) == \
+                self.SETUP_LANE_LOG_LINK.format("ethernet")
+            beside_link = list((root / "ethernet/monitor").glob("cronjob.log.*"))
+        self.assertEqual("accepted", outcomes["ethernet/prod"]["outcome"])
+        self.assertNotIn("[WARN]", stderr)
+        self.assertTrue(rotated)
+        self.assertTrue(link_kept, "链接还在")
+        self.assertEqual([], beside_link, "副本在真实文件旁，不在链接旁")
+        self.assertGreater(len(archived), self.LOG_LIMIT)
+        self.assertIn(b"phase=plan", archived[self.LOG_LIMIT:])
+        self.assertLess(len(remaining), self.LOG_LIMIT)
+        self.assertIn("phase=collect", remaining)
+
+    def test_planning_failure_still_appends_the_plan_segment(self):
+        # 问题文档 :1863；C3-O2；指导 :1532（规划失败正是最需要日志的一轮）〔R:E-collection-08〕
+        failed = {"returncode": 1, "stdout": "",
+                  "stderr": "ERROR: target planning refused the inventory\n"}
+
+        def plan(area):
+            return failed if area == "ethernet" else self._lane_plan_ok(area)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            outcomes, _stderr, received = self._run_lane_log_slots(root, plan=plan)
+            text = (root / "ethernet/monitor/cronjob.log").read_text(encoding="utf-8") \
+                if (root / "ethernet/monitor/cronjob.log").is_file() else ""
+        self.assertEqual("worker_error", outcomes["ethernet/prod"]["outcome"])
+        (plan_command,) = [command for area, command in received if area == "ethernet"]
+        self.assertEqual(
+            self._expected_segment("ethernet/prod", "plan", plan_command, failed),
+            self._stamped(text),
+        )
+        self.assertNotIn("phase=collect", text)
+
+    def test_a_skipped_slot_leaves_one_skip_line_in_its_lane_log(self):
+        # 指导 :1533：C2 跳过的 slot 也写一行 SKIP（I-052 与 I-053 的交界）
+        with tempfile.TemporaryDirectory() as directory:
+            root = self._lane_log_tree(directory)
+            (root / "nvlink/monitor/nvsw.csv").write_text(
+                self.HEADER + "jump-a,eth_jump,192.0.2.20\n", encoding="utf-8")
+            outcomes, _stderr, received = self._run_lane_log_slots(root)
+            text = (root / "nvlink/monitor/cronjob.log").read_text(encoding="utf-8") \
+                if (root / "nvlink/monitor/cronjob.log").is_file() else ""
+        self.assertEqual("no_devices", outcomes["nvlink/prod"]["outcome"])
+        self.assertEqual([], [command for area, command in received if area == "nvlink"])
+        self.assertEqual([
+            f"[SWITCH-COLLECTION][SKIP] slot=nvlink/prod cycle={IDENTITY['sequence']}: "
+            "清单里没有这类设备",
+        ], self._stamped(text))
 
 
 if __name__ == "__main__":

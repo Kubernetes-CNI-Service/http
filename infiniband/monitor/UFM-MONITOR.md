@@ -167,7 +167,7 @@ docker exec ufm /opt/ufm/opensm/sbin/iblinkinfo > /root/monitor/iblinkinfo/iblin
     - 主机 `/root/monitor/ibdiagnet/`、`/root/monitor/iblinkinfo/` 各保留最近 3 份，下次运行开始时删除更早的。
 - **部署服务器**（owner 2026-10-22）：所有采集到的信息统一由 `cron.sh::cleanup_data_dirs` 保留 3 天：当天原样，前两天按天合并成 `YYYYMMDD-daily.tar.gz`，更早的删除。凡是以日期开头的文件都按这条规则处理，包括交换机归档、UFM 的 `.tgz`、`.log`、`.done`。CSV 不打包，方便页面直接读，只按 3 天删除。配置备份（`ztp/backup`）沿用它自己的版本数规则。
   - 删除超期文件原来用的是 `find "$dir"`，数据目录是指向 99-output-monitor 的链接，find 不会进入，所以超期文件从来没被删过（http `HEAD` 第 1800 行相同）。已改为 `find -H`。
-  - `cronjob.log`：到 10 MB 就压缩成 `cronjob.log.1.gz`，最多保留 7 个；先复制再原地清空，crontab 的 `>>` 重定向继续写同一个文件。
+  - `cronjob.log`：到 10 MB 就压缩成 `cronjob.log.1.gz`，最多保留 7 个；先复制再原地清空，crontab 的 `>>` 重定向继续写同一个文件。worker 驱动的轮次也把 cron.sh 的输出追加到各 lane 的 `cronjob.log`（`[SWITCH-COLLECTION]` 段，I-053），追加后由 worker 用同一模块、同样参数轮转（谁写谁转）。
   - **每类采集信息始终保留最新一份散放**（owner 2026-10-23）：只采 UFM 的一轮 cron 把前一天唯一的 IB 交换机归档打进了每日包，页面因此看不到任何 IB 交换机。现在每类文件里最新的一份照常打进当天的每日包，但散放的原件不删除，也不随过期删除，直到同类出现更新的一份。之后若散放文件与包内 index 记录的 sha256 和大小一致，就删除散放件；不一致的按迟到文件留在包旁边。「同类」指文件名去掉日期、分钟和 run-id 随机串（`YYYYMMDD-HHMM-(prod|air)-<16 位十六进制>`）后剩下的部分：`20261022-0659.tar.gz` 与 `20261023-0100.tar.gz` 同类；ufm01 与 ufm02 的报告、`.xlsx` 与 `.receipt.json` 各是一类。失败批次目录的处理不变。
   - `cleanup_data_dirs` 靠文件名开头的 `YYYYMMDD-HHMM` 识别日期，所以本地以 run-id 开头命名（owner 2026-10-22 定）：`<run-id>_<节点短名>_ibdiagnet2.tgz`、`<run-id>_<节点短名>_iblinkinfo.log`，UFM 的完成标记存为同名 `.done`。例如 `20261022-0644-prod-3f9c0a1b2c3d4e5f_ufm01_ibdiagnet2.tgz`。文件名中带执行节点，满足「按真实节点保存」的要求。UFM 上是 `ibdiagnet2_<run-id>.tgz`、`iblinkinfo_<run-id>.log`（owner 的前缀加 run-id）。
 - 输出不得含有任何密码：UFM 和 BMC 的密码都不进脚本和输出，ipmitool 只用主机侧接口。注意 `99-output-monitor` 位于 Apache 目录树下。

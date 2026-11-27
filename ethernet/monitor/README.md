@@ -74,7 +74,9 @@
 8. 只要本轮采到了任何数据（info/link 归档或 UFM 数据），就刷新 `monitor.html`，不要求整轮成功
    （owner 2026-10-21）。IB/NVLink 的 info 归档以及 SPX/IB/NVLink link CSV 是统一页面的直接输入。
 9. 清理超出保留期的数据（owner 2026-10-22：所有采集到的信息保留 3 天，当天原样，前两天按天打包，
-   CSV 不打包；计数和删除都用 `find -H`，跟随数据目录链接）。`cronjob.log` 到 10 MB 压缩，最多 7 个。
+   CSV 不打包；由 `tools/collection_archive.py` 处理，数据目录可以是链接）。`cronjob.log` 到 10 MB 压缩，
+   最多 7 个：cron.sh 每轮末尾轮转它；worker（页面的信息收集、持续收集）持有本 lane 的 `cron.lock` 时
+   也把 cron.sh 的输出追加进来，追加后由 worker 用同一模块轮转（谁写谁转，I-053）。
    本 lane 的采集锁被占用时（上一轮还在跑），日志写明后本轮跳过。
 
 ## 文件
@@ -365,4 +367,8 @@ eth0。服务端 release/free 一条 ISC lease 也不会主动通知客户端停
 
 先检查 `cronjob.log` 的 CSV、KEY、deploy、trigger、retrieve 和 count 阶段。设备缺文件时到远端
 `monitor/` 查看脚本及 `.info/.link`；页面状态错误时先比较原始 `nv show` 与 CSV 列，避免在
-HTML 层掩盖采集错误。
+HTML 层掩盖采集错误。worker 驱动的轮次（页面的信息收集、持续收集）在 `cronjob.log` 里是
+`[SWITCH-COLLECTION][RUN] slot=<slot> cycle=<序号> phase=plan|collect <命令>` 到
+`[SWITCH-COLLECTION][EXIT] <返回码>` 的一段（规划、正式各一段，stderr 行前有 `[stderr]`）；清单里
+没有这类设备而跳过的 slot 是一行 `[SWITCH-COLLECTION][SKIP]`。只在 worker 持有本 lane 的 `cron.lock`
+时写；lane 的 `cronjob.log` 不是普通文件、也不是 setup 写的链接时，worker 不写不转（I-053）。

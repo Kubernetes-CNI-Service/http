@@ -1787,6 +1787,36 @@ print(json.dumps({'first':record(),'nested_status':child.returncode,
             {"infiniband"}, {Path(item["invoked_path"]).parent.parent.name for item in traces},
         )
 
+    def test_worker_cycle_leaves_cron_output_in_each_lane_log(self):
+        # 问题文档 I-053 修法（:1863）；v3.1.6 指导 :1554：真实 worker + 真实 cron.sh；make_layout
+        # 没有项目指针，lane 的 cronjob.log 是普通文件（不存在时由 worker 建，C3-O4 (a)）
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.make_layout(directory)
+            completed, payload, _traces = self.run_workflow(root, "prod")
+            logs = {
+                area: (root / area / "monitor/cronjob.log").read_text(encoding="utf-8")
+                if (root / area / "monitor/cronjob.log").is_file() else ""
+                for area in ("ethernet", "infiniband", "nvlink")
+            }
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertIsNotNone(payload, completed.stdout)
+        assert payload is not None
+        self.assertTrue(payload["returned"], payload)
+        for area, text in logs.items():
+            slot = f"{area}/prod"
+            heads = [line.split("] ", 1)[1] for line in text.splitlines()
+                     if "] [SWITCH-COLLECTION][" in line]
+            self.assertEqual(4, len(heads), (slot, text))
+            self.assertTrue(heads[0].startswith(
+                f"[SWITCH-COLLECTION][RUN] slot={slot} cycle={SEQUENCE} phase=plan "), heads)
+            self.assertTrue(heads[1].startswith("[SWITCH-COLLECTION][EXIT] "), heads)
+            self.assertTrue(heads[2].startswith(
+                f"[SWITCH-COLLECTION][RUN] slot={slot} cycle={SEQUENCE} phase=collect "), heads)
+            self.assertTrue(heads[3].startswith("[SWITCH-COLLECTION][EXIT] "), heads)
+            collect_segment = text.split("phase=collect ", 1)[1]
+            self.assertIn("========== cron start ==========", collect_segment, slot)
+
     def test_all_scope_order_and_every_slot_echo_mutation_fail_closed(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.make_layout(directory)

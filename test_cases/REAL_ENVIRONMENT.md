@@ -3060,11 +3060,43 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   2. 采集中途在 VIP 上执行 failover：本轮 HA 状态和 ibdiagnet 都从启动时的那台取回，不会取到另一台的旧文件，最多记一条 UFM 警告。
   3. 人为让 ibdiagnet 连续失败 3 次（例如停掉 ufm 容器）：第 4 轮改采 iblinkinfo，页面标为降级；恢复后第 6 轮再试 ibdiagnet，成功即清零。
   4. 跨日后：前两天的文件在 `YYYYMMDD-daily.tar.gz` 里，更早的被删除；CSV 不打包；`cronjob.log` 超过 10 MB 被压缩，最多保留 7 个。
-- 证据：各 lane 的 `cronjob.log` 片段、`ufm-ibdiagnet/` 目录清单、`.ibdiagnet-state`、页面截图、`du -sh` 磁盘占用。
+- 证据：各 lane 的 `cronjob.log` 片段（C3（I-053）之后，worker 驱动的轮次也有内容：`[SWITCH-COLLECTION]` 段）、`ufm-ibdiagnet/` 目录清单、`.ibdiagnet-state`、页面截图、`du -sh` 磁盘占用。
 - 清理与风险：
   - 采集对 UFM 只写 `/root/monitor/`；停容器制造失败需要维护窗口。
   - 磁盘：每轮 100 MB 时，3 天约 43 GB。
   - 未执行前保持 NOT RUN。
+
+## TC-REAL-WORKER-CRON-LOG-001 — worker 驱动的采集把 cron.sh 输出留在 lane 的 cronjob.log
+
+- 基本信息：real-environment / logging；I-053（v3.1.6 C3，指导 WP-10 :1519-1562、5.3）；状态 **OPEN / NOT RUN**。本卡只写验收条件，不授权连接设备、点按钮或写线上 Tracker。
+- 风险与目标：页面的信息收集和持续收集由 root 运行的 worker 起 cron.sh，输出只留摘要，lane 的 `cronjob.log` 没有这些轮次的内容（问题文档 I-053）。C3 之后 worker 仍持有本 lane 的 `cron.lock` 时把规划、正式两次的输出追加进来，满 10 MB 由 worker 轮转；只写普通文件或经 setup 写法的链接写（C3-O7 (a)）。要防止的是：root 经用户可控的链接写或截断别的文件、链接被换成普通文件、操作员手工跑 cron.sh 时轮转失效。
+- 本机先决：同版本的 `test_cases.test_collection_cycle_worker_contract`、`test_cases.test_collection_cycle_handoff_workflow`、`test_cases.test_log_rotation` 通过，且是精确的发布版本。
+- 前置条件：AIR 管理服务器（指导 5.3 本卡行）；执行人是 owner 或其明确授权的现场人员，验证 AI 只读核验；记录 `sha256sum monitor/switch-collection-worker.py tools/log_rotation.py`。
+
+### 步骤
+
+1. 点一次「信息收集」；记录前后 `ls -l <网络>/monitor/cronjob.log` 和它指向的 `99-output-monitor/<网络>/cronjob.log`（指导 5.3 本卡行）。
+2. lane 的 `cronjob.log` 到 10 MB 后（测试项目里可以先把它扩到 10 MB）再点一次；记录 `.1.gz` 的位置和属主（指导 5.3 本卡行）。
+3. 操作员手工跑一次 `cron.sh`，看 `rotate_log` 仍能轮转（指导 5.3 本卡行）。
+4. `curl -sI http://<服务地址>/<网络>/monitor/cronjob.log.1.gz`，看轮转副本能不能不经认证读到（指导第 6 节第 8 条；N43 随 K4）。
+5. 在隔离的测试项目里把 lane 的 `cronjob.log` 换成指向别处的链接，再点一次（C3-O7 (a)）。
+
+### 预期结果
+
+- 有设备的 lane 的 `cronjob.log` 有 `[SWITCH-COLLECTION]` 段：plan、collect 各一段，从 `[SWITCH-COLLECTION][RUN] slot=… cycle=… phase=…` 到 `[SWITCH-COLLECTION][EXIT] <返回码>`，中间是 cron.sh 自己的行（含 `cron start`），stderr 行前有 `[stderr]`；清单里没有这类设备而跳过的 slot 是一行 `[SWITCH-COLLECTION][SKIP]`（指导 :1532-1533）。
+- root 运行的 worker 追加前后文件属主不变；到 10 MB 时真实文件旁出现 `.1.gz`，链接还在（指导 :1536，5.3 本卡行）。
+- 第 5 步：worker 不写不转，被换的链接指向的文件不变（指导 :1537）；WARN 在哪里看得到见「自动化状态」。
+- 不允许的副作用：链接被换成普通文件；被换的链接指向的文件被写或被截断（指导 5.3 本卡行）。
+- 证据：源码 sha256、`ls -l` 前后、日志片段、curl 的状态行（指导 5.3 本卡行）。
+
+### 故障注入与清理
+
+- 第 5 步只在测试项目里换链接，结束后恢复 setup 写的链接文本；此外无清理（指导 5.3 本卡行）。
+- 风险：低（指导 5.3 本卡行）；点「信息收集」会让 cron.sh 写交换机 `authorized_keys`，prod 上验证 AI 只读观察。
+
+### 自动化状态
+
+- 本机 direct：`test_collection_cycle_worker_contract` 的 `test_each_slot_appends_cron_output_to_its_lane_log` 等 8 条（含链接核对、规划失败也写、跳过行，10 MB 轮转用稀疏文件）；workflow：`test_collection_cycle_handoff_workflow.CollectionCycleHandoffWorkflowTests.test_worker_cycle_leaves_cron_output_in_each_lane_log`（真实 worker 与真实 cron.sh，lane 日志为普通文件）。WARN 由 worker 的内部周期子进程打到 stderr，`WORKER::run_collection_cycle_coordinator` 只在子进程失败时转出它的 stderr，所以现场第 5 步以「不写不转」为准。现场仍为 **NOT RUN / REAL_ENV REQUIRED**。
 
 ## TC-REAL-UFM-HOST-COLLECTOR-001 — UFM 直接安装（无 docker）时 ibdiagnet、iblinkinfo 在宿主采集
 
