@@ -1192,6 +1192,10 @@ class ImpactManifestTests(unittest.TestCase):
                 "DAY0-Prepare/template/ib.csv",
                 # v3.1.5 WP-9 P050: the exact shared initial-setup test helper.
                 "test_cases/initial_setup_jump_fixture.py",
+                # v3.1.6 A.5 batch: tracked_support of the batch.
+                "test_cases/ns1_monitor_stop_source_layer.py",
+                "test_cases/ns2_load_report_source_layer.py",
+                "test_cases/ns3_load_report_source_layer.py",
             ],
             manifest["tracked_support"],
         )
@@ -2929,6 +2933,8 @@ FROZEN_QUIET_MODULES = tuple("test_cases.test_" + name for name in (
     "runner_preflight", "switch_status_workflow", "ufm_monitor_cron_workflow",
     "ufm_req7_ib_cycle_workflow", "ufm_worker_collection", "ztp_group_handoff_display",
     "ztp_monitor_watch_resilience", "ztp_release_core_review",
+    # v3.1.6 A.5 batch: quiet-lane modules of the batch.
+    "ufm_partial_notice_workflow",
 ))
 FROZEN_QUIET_CASES = (
     "test_cases.test_bootstrap_config_fetch_workflow::"
@@ -2973,24 +2979,6 @@ FROZEN_QUIET_CASES = (
     "test_cases.test_manual_applied_config.MonitorLiveConfigTransportTests.test_actual_private_shell_monitor_and_manual_observe_same_raw_live_bytes",
     "test_cases.test_public_publication_workflow::"
     "test_cases.test_public_publication_workflow.PublicPublicationWorkflowTests.test_formal_children_share_one_isolated_dependency_capsule",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_backspace_and_line_kill_edit_the_input",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_ctrl_c_cancels",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_no_key_within_the_deadline_counts_as_enter",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_the_first_key_cancels_the_deadline",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_typed_password_is_read_without_echo",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_without_a_terminal_there_is_no_answer",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_defaults_to_no_after_the_deadline",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_echoes_and_accepts_y",
-    "test_cases.test_ufm_setup_upgrade::"
-    "test_cases.test_ufm_setup_upgrade.TimedSecretTest.test_yes_no_question_without_a_terminal_is_no",
     "test_cases.test_ztp_applied_receipt::"
     "test_cases.test_ztp_applied_receipt.AppliedReceiptPersistenceTests.test_writer_rejects_fifo_rebound_at_receipt_stage_without_blocking",
     "test_cases.test_ztp_applied_receipt::"

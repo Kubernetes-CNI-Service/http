@@ -632,7 +632,8 @@ class Version314RegistrationTests(unittest.TestCase):
             with self.subTest(original_script=path):
                 self.assertEqual(canonical, self.manifest["scripts"].get(path))
         # v3.1.5 P050 (r757 §5.1, WP9-SUPPORT-01): keep the original ordered
-        # lists exactly, with only this approved helper and its literal rule.
+        # lists exactly, with only this approved helper and its literal rule,
+        # then (v3.1.6 A.5) only the three NS source layers listed below.
         # The fourteen original consumers plus the approved WP6/WP8 workflows
         # are independent of the manifest being checked.
         support = "test_cases/initial_setup_jump_fixture.py"
@@ -654,9 +655,40 @@ class Version314RegistrationTests(unittest.TestCase):
             "test_cases.test_initial_setup_worker_queue",
             "test_cases.test_req10b_services_keys_workflow",
         ]
-        self.assertEqual(original["tracked_support"] + [support], self.manifest["tracked_support"])
+        # v3.1.6 A.5: the NS1/NS2/NS3 exact DATA inverse layers (http dev accepted, NS1 pending 2 /
+        # NS3 pending 1 after NS2 pending 3; agentNS1/2/3-manifest-spec.json) each add one tracked
+        # support path and its literal rule, appended after P050 in spec file-name order.
+        v316_ns_support = [
+            "test_cases/ns1_monitor_stop_source_layer.py",
+            "test_cases/ns2_load_report_source_layer.py",
+            "test_cases/ns3_load_report_source_layer.py",
+        ]
+        v316_ns_rules = [
+            {
+                "paths": ["test_cases/ns1_monitor_stop_source_layer.py"],
+                "tests": [
+                    "test_cases.test_monitor_writer_quiesce_workflow",
+                    "test_cases.test_h_graph_local_scope_memo",
+                ],
+            },
+            {
+                "paths": ["test_cases/ns2_load_report_source_layer.py"],
+                "tests": [
+                    "test_cases.test_monitor_writer_quiesce_workflow",
+                    "test_cases.test_h_graph_local_scope_memo",
+                ],
+            },
+            {
+                "paths": ["test_cases/ns3_load_report_source_layer.py"],
+                "tests": [
+                    "test_cases.test_monitor_writer_quiesce_workflow",
+                    "test_cases.test_h_graph_local_scope_memo",
+                ],
+            },
+        ]
+        self.assertEqual(original["tracked_support"] + [support] + v316_ns_support, self.manifest["tracked_support"])
         self.assertEqual(
-            original["path_rules"] + [{"paths": [support], "tests": p050_consumers}],
+            original["path_rules"] + [{"paths": [support], "tests": p050_consumers}] + v316_ns_rules,
             self.manifest["path_rules"],
         )
         for name in ("test_rules", "workflows", "test_suites"):

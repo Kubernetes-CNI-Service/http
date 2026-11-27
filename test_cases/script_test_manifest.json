@@ -250,7 +250,11 @@
         "test_cases.test_initial_setup_bringup_results",
         "test_cases.test_initial_setup_bringup_results_workflow",
         "test_cases.test_initial_setup_config_mode",
-        "test_cases.test_initial_setup_replace_workflow"
+        "test_cases.test_initial_setup_replace_workflow",
+        "test_cases.test_ufm_login_routes",
+        "test_cases.test_ufm_host_key_refresh",
+        "test_cases.test_ufm_login_routes_workflow",
+        "test_cases.test_initial_setup_linux_hostname_workflow"
       ]
     },
     {
@@ -351,7 +355,13 @@
         "test_cases.test_cron_operator_identity",
         "test_cases.test_cron_operator_identity_workflow",
         "test_cases.test_monitor_c4_contract",
-        "test_cases.test_monitor_c4_workflow"
+        "test_cases.test_monitor_c4_workflow",
+        "test_cases.test_cron_inventory_identity",
+        "test_cases.test_cron_mac_rule_workflow",
+        "test_cases.test_ufm_partial_notice_workflow",
+        "test_cases.test_cron_single_environment_workflow",
+        "test_cases.test_monitor_switch_status_view",
+        "test_cases.test_monitor_switch_status_view_workflow"
       ]
     },
     {
@@ -757,7 +767,10 @@
     "DAY0-Prepare/template/99-output-monitor/infiniband/ufm-info/.gitkeep",
     "DAY0-Prepare/template/99-output-monitor/nvlink/.gitkeep",
     "DAY0-Prepare/template/ib.csv",
-    "test_cases/initial_setup_jump_fixture.py"
+    "test_cases/initial_setup_jump_fixture.py",
+    "test_cases/ns1_monitor_stop_source_layer.py",
+    "test_cases/ns2_load_report_source_layer.py",
+    "test_cases/ns3_load_report_source_layer.py"
   ],
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": "DAY0-Prepare/01-a-setup.py",
@@ -955,7 +968,12 @@
     "tools/credentials_fd.py": "tools/credentials_fd.py",
     "tools/login_path.py": "tools/login_path.py",
     "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh": "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh",
-    "tools/project_pointer.py": "tools/project_pointer.py"
+    "tools/project_pointer.py": "tools/project_pointer.py",
+    "ethernet/monitor/helper-info-collect.py": "tools/helper-info-collect.py",
+    "infiniband/monitor/helper-info-collect.py": "tools/helper-info-collect.py",
+    "nvlink/monitor/helper-info-collect.py": "tools/helper-info-collect.py",
+    "tools/helper-info-collect.py": "tools/helper-info-collect.py",
+    "tools/helper-info-collect.sh": "tools/helper-info-collect.sh"
   },
   "test_rules": [
     {
@@ -2628,6 +2646,45 @@
       "tests": [
         "test_cases.test_monitor_c4_contract"
       ]
+    },
+    {
+      "id": "ufm_login_routes_direct",
+      "paths": [
+        "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_login_routes",
+        "test_cases.test_ufm_host_key_refresh"
+      ]
+    },
+    {
+      "id": "cron_inventory_identity_direct",
+      "paths": [
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "nvlink/monitor/cron.sh"
+      ],
+      "tests": [
+        "test_cases.test_cron_inventory_identity"
+      ]
+    },
+    {
+      "id": "monitor_switch_status_view_direct",
+      "paths": [
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_switch_status_view"
+      ]
+    },
+    {
+      "id": "initial_setup_linux_hostname_direct",
+      "paths": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_linux_hostname_workflow"
+      ]
     }
   ],
   "workflows": [
@@ -2877,7 +2934,10 @@
         "DAY0-Prepare/01-a-setup.py",
         "DAY0-Prepare/11-load.py",
         "tools/generation_report.py",
-        "tools/ssh_key_preparation.py"
+        "tools/ssh_key_preparation.py",
+        "infra/ubuntu24_host.py",
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "tools/_package_common.py"
       ],
       "tests": [
         "test_cases.test_generation_report_workflow"
@@ -3557,7 +3617,11 @@
         "infra/ubuntu24_host.py",
         "DAY0-Prepare/01-a-setup.py",
         "DAY0-Prepare/02-unsetup.py",
-        "tools/project_contract.py"
+        "tools/project_contract.py",
+        "tools/login_path.py",
+        "tools/inventory_subset.py",
+        "tools/device_identity.py",
+        "tools/hostname_ranges.py"
       ],
       "tests": [
         "test_cases.test_ufm_setup_upgrade_workflow"
@@ -4043,7 +4107,10 @@
         "tools/project_contract.py",
         "tools/ssh_key_preparation.py",
         "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-        "tools/project_pointer.py"
+        "tools/project_pointer.py",
+        "tools/login_path.py",
+        "tools/device_identity.py",
+        "tools/hostname_ranges.py"
       ],
       "tests": [
         "test_cases.test_ibsw_v2_device",
@@ -4379,7 +4446,9 @@
         "tools/operator_identity.py",
         "ethernet/monitor/cron.sh",
         "monitor/switch-collection-worker.py",
-        "DAY0-Prepare/12-ztp-monitor.py"
+        "DAY0-Prepare/12-ztp-monitor.py",
+        "ethernet/monitor/post-collect.py",
+        "monitor/generate-monitor-html.py"
       ],
       "tests": [
         "test_cases.test_cron_operator_identity_workflow"
@@ -4646,6 +4715,89 @@
       ],
       "tests": [
         "test_cases.test_monitor_c4_workflow"
+      ]
+    },
+    {
+      "id": "ufm_login_path_and_inventory",
+      "members": [
+        "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
+        "infra/ubuntu24_host.py",
+        "tools/login_path.py",
+        "tools/inventory_subset.py",
+        "tools/device_identity.py",
+        "tools/hostname_ranges.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_login_routes_workflow"
+      ]
+    },
+    {
+      "id": "cron_mac_rule_matches_device_identity",
+      "members": [
+        "ethernet/monitor/cron.sh",
+        "tools/device_identity.py"
+      ],
+      "tests": [
+        "test_cases.test_cron_mac_rule_workflow"
+      ]
+    },
+    {
+      "id": "ufm_partial_notice_through_the_evidence_chain",
+      "members": [
+        "ethernet/monitor/cron.sh",
+        "infiniband/monitor/cron.sh",
+        "infiniband/monitor/ufm-ibdiagnet.sh",
+        "infiniband/monitor/post-collect.py",
+        "monitor/generate-monitor-html.py",
+        "monitor/issue-tracker/issue-tracker-sync.py"
+      ],
+      "tests": [
+        "test_cases.test_ufm_partial_notice_workflow"
+      ]
+    },
+    {
+      "id": "cron_single_environment_selection",
+      "members": [
+        "ethernet/monitor/cron.sh",
+        "ztp/environment_probe.py",
+        "ztp/backup/yaml-collect.py",
+        "monitor/switch-collection-worker.py"
+      ],
+      "tests": [
+        "test_cases.test_cron_single_environment_workflow"
+      ]
+    },
+    {
+      "id": "monitor_switch_status_view_archives_page_status",
+      "members": [
+        "monitor/generate-monitor-html.py",
+        "monitor/issue-tracker/switch-status.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_switch_status_view_workflow"
+      ]
+    },
+    {
+      "id": "monitor_switch_status_interface_plan_ib_cvt",
+      "members": [
+        "ztp/config/nvos/template/P2P/p2p-to-validation.py",
+        "ztp/config/ib_topology_provenance.py",
+        "monitor/generate-monitor-html.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_switch_status_view_workflow"
+      ]
+    },
+    {
+      "id": "initial_setup_linux_hostname_to_upgrade",
+      "members": [
+        "infiniband/bringup/xdr-initial-setup/initial-setup.py",
+        "infiniband/bringup/xdr-upgrade/upgrade.py",
+        "tools/ibsw_upgrade_observer.py",
+        "tools/ibsw_upgrade_contract.py"
+      ],
+      "tests": [
+        "test_cases.test_initial_setup_linux_hostname_workflow"
       ]
     }
   ],
@@ -5434,6 +5586,33 @@
         "test_cases.test_initial_setup_target_credentials_workflow",
         "test_cases.test_initial_setup_worker_queue",
         "test_cases.test_req10b_services_keys_workflow"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ns1_monitor_stop_source_layer.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_writer_quiesce_workflow",
+        "test_cases.test_h_graph_local_scope_memo"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ns2_load_report_source_layer.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_writer_quiesce_workflow",
+        "test_cases.test_h_graph_local_scope_memo"
+      ]
+    },
+    {
+      "paths": [
+        "test_cases/ns3_load_report_source_layer.py"
+      ],
+      "tests": [
+        "test_cases.test_monitor_writer_quiesce_workflow",
+        "test_cases.test_h_graph_local_scope_memo"
       ]
     }
   ]
