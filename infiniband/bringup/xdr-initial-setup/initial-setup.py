@@ -94,7 +94,7 @@ DOT_LINK_RE = re.compile(
 REPORT_HANDLE = None
 # Fixed in the file: an OOB Leaf copy has no git to derive it from.  Every version that
 # changes this script sets it to that version before its release tag (guide WP-2, A.11).
-_REPOSITORY_REVISION = "http-v3.1.5"
+_REPOSITORY_REVISION = "http-v3.1.6"
 
 # Fixed host-local identity, independent of user HOME/TMPDIR, cwd, project,
 # selected devices and renamed/copied entries. Upgrade uses the same path.

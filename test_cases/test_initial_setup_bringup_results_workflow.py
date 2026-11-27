@@ -487,7 +487,7 @@ class BringupResultsWorkflowTests(unittest.TestCase):
         self.assertEqual("INCOMPLETE", evidence["result"])
         self.assertEqual(1, evidence["schema_version"])
         # A.11: the actual check/apply summary reports this frozen release identity.
-        self.assertEqual("http-v3.1.5", evidence["revision"])
+        self.assertEqual("http-v3.1.6", evidence["revision"])
         self.assertEqual("patch", evidence["config_mode"])
         self.assertEqual({"selector": "EXAMPLE-IB00[1-5]", "selected": NAMES, "unmapped": []}, evidence["selection"])
         self.assertEqual(5, evidence["csv_ib_candidates"])

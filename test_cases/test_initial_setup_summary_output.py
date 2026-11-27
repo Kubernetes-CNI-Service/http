@@ -746,7 +746,7 @@ class SummaryOutputTests(unittest.TestCase):
                 os.chdir(previous)
         self.assertEqual(stopped.exception.code, 0, err.getvalue())
         self.assertEqual(len((out.getvalue() + err.getvalue()).strip().splitlines()), 1)
-        self.assertEqual("http-v3.1.5\n", out.getvalue())
+        self.assertEqual("http-v3.1.6\n", out.getvalue())
         self.assertEqual("", err.getvalue())
         self.assertEqual(left, [])
 
