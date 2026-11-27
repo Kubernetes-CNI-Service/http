@@ -1217,6 +1217,8 @@ def ufm_os_upgrade(state, item, base, args):
     if item.get("upgrade_hangs"):
         return 0
     if item.get("upgrade_fails"):
+        # ufm-os-upgrade.sh 2.6.1-5 (04 Q-114): a fatal step logs its own FAILED and exits at once; the script
+        # never writes UFM-OS-UPGRADE FAILED
         line("APPLIANCE-UPGRADE", "FAILED")
         return 1
     line("APPLIANCE-UPGRADE", "PASSED")
@@ -1230,6 +1232,9 @@ def ufm_os_upgrade(state, item, base, args):
                 return 1
             time.sleep(0.1)
     line("PACKAGES-UPGRADE", "PASSED")
+    if item.get("upgrade_non_fatal_failed"):
+        # ufm-os-upgrade.sh 2.6.1-5 (04 Q-111): a missing ufmcli package is logged FAILED and the run goes on
+        line("UFMCLI-PREPERATION", "FAILED")
     line("UFM-OS-UPGRADE", "PASSED")
     state = load()
     state["ufms"][os.environ["FAKE_UFM_NAME"]]["down_sessions"] = 2   # the reboot: next two logins time out
@@ -1243,6 +1248,8 @@ def ufm_os_upgrade(state, item, base, args):
     for relative, text in item.get("upgrade_resets", {}).items():
         with open(os.path.join(base, relative), "w") as handle:
             handle.write(text)
+    if item.get("upgrade_non_fatal_failed"):
+        line("UFMCLI-UPGRADE", "FAILED")   # the first-boot script logs it and still exits 0 (04 Q-111)
     line("UFM-OS-FIRSTBOOT", "PASSED")
     return 0
 
@@ -2956,6 +2963,27 @@ class SimulatedUpgradeAndHaTest(ConfiguredPairCase):
         self.assertIn("[FAILED", results["ufm02"].detail)
         self.assertEqual(state["ufms"]["ufm02"]["os_upgrade_runs"], 1)
 
+    def test_non_fatal_failed_steps_do_not_fail_the_upgrade_but_are_shown(self):
+        # owner 2026-11-26 04 Q-111 (a): only UFM-OS-UPGRADE and UFM-OS-FIRSTBOOT decide; a FAILED of another
+        # step (UFMCLI-PREPERATION, UFMCLI-UPGRADE at first boot) is an attention item, shown, never a failure
+        for name in ("ufm01", "ufm02"):
+            self.state["ufms"][name]["upgrade_non_fatal_failed"] = True
+        results, state, _calls, logs = self.run_login(action="config_upgrade_all")
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(results[name].status, "UPGRADED", results[name].detail)
+            self.assertEqual(dict(self.outcomes(results[name]))["upgrade"], "UPGRADED")
+            self.assertEqual(state["ufms"][name]["os_upgrade_runs"], 1)
+            attention = " ".join(results[name].facts.get("attention", []))
+            self.assertIn("UFMCLI-PREPERATION FAILED", attention)
+            self.assertIn("UFMCLI-UPGRADE FAILED", attention)
+        self.assertNotIn("STEP_FAILED_UPGRADE", logs)
+        self.assertRegex(logs, r"升级完成[^\n]*UFMCLI-PREPERATION FAILED")
+        checked, _state, _calls, check_logs = self.run_login(action="check", apply=False)
+        for name in ("ufm01", "ufm02"):
+            self.assertEqual(dict(self.outcomes(checked[name]))["upgrade"], "UNCHANGED", checked[name].detail)
+            self.assertIn("UFMCLI-UPGRADE FAILED", " ".join(checked[name].facts.get("attention", [])))
+        self.assertRegex(check_logs, r"注意[^\n]*UFMCLI-PREPERATION FAILED")
+
     def test_wait_limit_stops_and_reports_the_last_state(self):
         for name in ("ufm01", "ufm02"):
             self.state["ufms"][name]["upgrade_hangs"] = True
@@ -4640,6 +4668,85 @@ class UpgradeScriptTest(unittest.TestCase):
         facts, calls = self.on_device(script, started + self.LINE.format("20261101-09_06_30", "APPLIANCE-UPGRADE",
                                                                          "PASSED"))
         self.assertEqual((facts.get("result"), calls), ("in_progress", []))
+
+    # ---- owner 2026-11-26 04 Q-111 (a), narrowed by 04 Q-114 (a'): UFM-OS-UPGRADE and UFM-OS-FIRSTBOOT both
+    # PASSED complete the block; a FAILED of UFMCLI-PREPERATION, UFMCLI-UPGRADE or CYBERAI-UPGRADE (the steps
+    # ufm-os-upgrade.sh goes on after) is an attention item; any other FAILED (a fatal step, which exits at once
+    # without UFM-OS-UPGRADE FAILED, or UFM-OS-FIRSTBOOT) fails it. Lines as echo_status of ufm-os-upgrade.sh
+    # 2.6.1-5 (ufm_os_version 26.07.24-9) writes them: awk printf strftime("%Y%m%d-%H_%M_%S:") " %-35s [%-10s]".
+
+    @staticmethod
+    def vendor(stamp, step, result):
+        return f"{stamp}: {step:<35} [{result:<10}]\n"
+
+    def vendor_block(self, *rows):
+        return (self.vendor("20261126-08_00_00", "UFM_OS_UPGRADE", "STARTED")
+                + self.vendor("20261126-08_02_00", "APPLIANCE-UPGRADE", "PASSED")
+                + "".join(self.vendor(f"20261126-08_{10 + k:02d}_00", step, result)
+                          for k, (step, result) in enumerate(rows)))
+
+    def block(self, log):
+        facts, _calls = self.on_device(ufm.upgrade_status_script("20261126-07_59_58"), log)
+        return facts
+
+    def test_a_failed_ufmcli_preparation_is_attention_not_failure(self):
+        log = self.vendor_block(("UFMCLI-PREPERATION", "FAILED"), ("UFM-OS-BIOS-UPGRADE", "PASSED"),
+                                ("UFM-OS-UPGRADE", "PASSED"), ("UFMCLI-UPGRADE", "PASSED"),
+                                ("UFM-OS-FIRSTBOOT", "PASSED"))
+        facts = self.block(log)
+        self.assertEqual((facts.get("block"), facts.get("failed")), ("complete", ""))
+        self.assertIn("UFMCLI-PREPERATION FAILED", facts.get("attention", ""))
+        probe, _calls = self.on_device(ufm.upgrade_probe_script(self.IMAGE), log)
+        self.assertEqual((probe.get("block"), probe.get("failed")), ("complete", ""))
+        self.assertIn("UFMCLI-PREPERATION FAILED", probe.get("attention", ""))
+        start, calls = self.on_device(ufm.upgrade_start_script("2.6.1-8", self.IMAGE), log)
+        self.assertEqual((start.get("result"), calls), ("already", []))
+        self.assertIn("UFMCLI-PREPERATION FAILED", start.get("attention", ""))
+
+    def test_a_failed_ufmcli_upgrade_at_first_boot_still_completes(self):
+        facts = self.block(self.vendor_block(("UFM-OS-UPGRADE", "PASSED"), ("CYBERAI-UPGRADE", "FAILED"),
+                                             ("UFMCLI-UPGRADE", "FAILED"), ("UFM-OS-FIRSTBOOT", "PASSED")))
+        self.assertEqual((facts.get("block"), facts.get("failed")), ("complete", ""))
+        self.assertEqual(facts.get("attention"), "CYBERAI-UPGRADE FAILED; UFMCLI-UPGRADE FAILED")
+
+    def test_a_failed_os_upgrade_line_fails_the_block(self):
+        facts = self.block(self.vendor_block(("UFMCLI-PREPERATION", "FAILED"), ("UFM-OS-UPGRADE", "FAILED")))
+        self.assertEqual(facts.get("block"), "failed")
+        self.assertRegex(facts.get("failed", ""), r"UFM-OS-UPGRADE \[FAILED")
+        self.assertEqual(facts.get("attention"), "UFMCLI-PREPERATION FAILED")
+
+    def test_a_failed_firstboot_line_fails_the_block(self):
+        facts = self.block(self.vendor_block(("UFM-OS-UPGRADE", "PASSED"), ("UFMCLI-UPGRADE", "PASSED"),
+                                             ("UFM-OS-FIRSTBOOT", "FAILED")))
+        self.assertEqual(facts.get("block"), "failed")
+        self.assertRegex(facts.get("failed", ""), r"UFM-OS-FIRSTBOOT \[FAILED")
+        self.assertEqual(facts.get("attention"), "")
+
+    def test_a_fatal_step_failed_without_a_later_line_fails_the_block(self):
+        # 04 Q-114 (a'): the vendor script exits right after a fatal step's FAILED, never UFM-OS-UPGRADE FAILED
+        facts = self.block(self.vendor_block(("CERTIFICATE-VALIDATION", "PASSED"),
+                                             ("APPLIANCE-UPGRADE", "FAILED")))
+        self.assertEqual(facts.get("block"), "failed")
+        self.assertRegex(facts.get("failed", ""), r"APPLIANCE-UPGRADE \[FAILED")
+        self.assertEqual(facts.get("attention"), "")
+
+    def test_a_failed_bios_upgrade_fails_the_block(self):
+        facts = self.block(self.vendor_block(("UFMCLI-PREPERATION", "FAILED"), ("UFM-OS-BIOS-UPGRADE", "FAILED")))
+        self.assertEqual(facts.get("block"), "failed")
+        self.assertRegex(facts.get("failed", ""), r"UFM-OS-BIOS-UPGRADE \[FAILED")
+        self.assertEqual(facts.get("attention"), "UFMCLI-PREPERATION FAILED")
+
+    def test_a_cyberai_failed_before_the_os_upgrade_passed_is_attention(self):
+        # 04 Q-114: the CyberAI branch writes CYBERAI-UPGRADE FAILED even when the install succeeded
+        facts = self.block(self.vendor_block(("CYBERAI-UPGRADE", "FAILED"), ("UFM-OS-UPGRADE", "PASSED"),
+                                             ("UFMCLI-UPGRADE", "PASSED"), ("UFM-OS-FIRSTBOOT", "PASSED")))
+        self.assertEqual((facts.get("block"), facts.get("failed")), ("complete", ""))
+        self.assertEqual(facts.get("attention"), "CYBERAI-UPGRADE FAILED")
+
+    def test_a_block_with_only_started_is_incomplete(self):
+        facts = self.block(self.vendor("20261126-08_00_00", "UFM_OS_UPGRADE", "STARTED"))
+        self.assertEqual((facts.get("block"), facts.get("failed"), facts.get("attention")), ("incomplete", "", ""))
+        self.assertEqual((facts.get("started"), facts.get("last_step")), ("20261126-08_00_00", "UFM_OS_UPGRADE"))
 
 
 if __name__ == "__main__":

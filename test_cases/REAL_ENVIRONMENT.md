@@ -2983,16 +2983,16 @@ ordinary release gates are unchanged; no historical PASS is promoted to a later 
   - owner 书面授权维护窗口；执行人 owner 或现场人员，验证 AI 只读核验（分栏写执行人、核验人，没人执行的步骤标「未执行」、不算通过）；
   - 升级前记录：`/etc/ufm-release`、`ls -l /var/log/ufm_os_upgrade_*_status.log`、`cat /proc/sys/kernel/random/boot_id`、`timedatectl`。
 - 步骤与预期：
-  0. （不碰设备）附上落地前 B2-O11 (a) 的核对结果：从镜像 tar 里只读取出 `ufm-os-upgrade.sh`，查它调 `apt-get` 时会不会清环境（`env -i`、`sudo -i`、`su -` 一类）；没做过就在这里做，会清就停下报 http dev。
+  0. （不碰设备）附上落地前 B2-O11 (a) 的核对结果：从镜像 tar 里只读取出 `ufm-os-upgrade.sh`，查它调 `apt-get` 时会不会清环境（`env -i`、`sudo -i`、`su -` 一类）；没做过就在这里做，会清就停下报 http dev。目标版本已读（04 Q-105 注，ufm-appliance-2.6.1-5 的 `ufm-os-upgrade.sh`：没有清环境写法，只有 `source /etc/environment`），所以另在设备上只读核 `grep -n NEEDRESTART /etc/environment` 无输出（有 NEEDRESTART 行就停下报 http dev）。
   1. `check`：这台的 `upgrade` 是 `WOULD_CHANGE`。
   2. `config-upgrade --apply`；进入 Upgrading packages 后在设备上只读执行 `systemctl show -p Environment <单元>`（应含 `NEEDRESTART_SUSPEND=1`）、读 apt-get 进程的环境（`NEEDRESTART_SUSPEND` 应为 1）、`pgrep -af '^systemctl restart'`（应为空）。
-  3. 升级期间在另一个终端跑 `check`：`UPGRADE_IN_PROGRESS`；再跑一次 `config-upgrade --apply`：`UPGRADE_IN_PROGRESS`，不下载、设备上只有一个升级单元。
-  4. 第一个终端的探测行有最后一步、多久没有进展、单元 active、重启后 boot id 变化（「已重启」）；结果 `UPGRADED`；再跑一次 `UP_TO_DATE`。
-  5. 升级后再列一次状态日志文件：同一份追加还是新建一份、旧段还在不在（B2-O1、B2-O2 的残余风险）。
+  3. 升级期间在另一个终端跑 `check`：`UPGRADE_IN_PROGRESS`；再跑一次 `config-upgrade --apply`：`UPGRADE_IN_PROGRESS`，不下载、设备上只有一个升级单元。背景（读目标版本脚本所得，推断）：厂商脚本自身用 `pidof` 防重入，第二个实例 `exit 100`；本工具在启动前已拦下，若在设备 `/var/log/ufm-setup-upgrade-os-upgrade.log` 里见到 exit 100 就记下。
+  4. 第一个终端的探测行有最后一步、多久没有进展、单元 active、重启后 boot id 变化（「已重启」）；结果 `UPGRADED`；再跑一次 `UP_TO_DATE`。`-r` 时厂商脚本写完 `UFM-OS-UPGRADE` 后约 10 秒自动重启（推断，读脚本所得），之后的探测行「暂不可达」属正常。状态日志里若有 `UFMCLI-PREPERATION`、`UFMCLI-UPGRADE`、`CYBERAI-UPGRADE` 的 FAILED（厂商脚本记下后继续；04 Q-111 (a)、Q-114 (a')，v3.1.6 B2FIX）：探测行、升级完成行和再跑时的跳过行显示「注意: …其它步骤 FAILED（不改变升级结论）」，结论仍是 `UPGRADED` / `UP_TO_DATE`，不是 `STEP_FAILED_UPGRADE`；其它任一步 FAILED（厂商致命步骤写下 FAILED 即退出，不写 `UFM-OS-UPGRADE FAILED`）或 `UFM-OS-FIRSTBOOT FAILED` 为 `STEP_FAILED_UPGRADE`、不重起升级；原行抄进证据。
+  5. 升级后再列一次状态日志文件：同一份追加还是新建一份、旧段还在不在（B2-O1、B2-O2 的残余风险）。目标版本脚本每次开始会删掉旧的 status 文件（读脚本所得，推断）：预期只剩本次一份、旧段不在，现场核实；判定只看本次 STARTED 之后的行（04 Q-114 (a')），旧段在不在都不改变结论。
   6. 维护窗口尽量排在当月第一个周日起的那几天（`mdcheck_start.timer` 在每月 1～7 日的周日起）；碰上 mdcheck 正在运行时记下升级没有卡住。不为验证手工启动 mdcheck、不为验证给设备加负载（对问题文档「在 mdcheck 正在运行时做升级」的有意收窄）。
   7. 重启后 NTP 同步、时钟跳变时记下仍判成完成。
 - 不允许的副作用：第二个升级单元；结束 apt-get 或升级单元。
-- 证据：部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 的 `report.log`、`result.json`；状态日志副本（主机名、地址脱敏）；第 2 步三条命令的输出；第 5 步的文件清单。
+- 证据：部署服务器 `ufm-setup-upgrade-logs/<运行目录>/` 的 `report.log`、`result.json`；状态日志副本（主机名、地址脱敏）；第 2 步三条命令的输出；第 5 步的文件清单。按目标版本脚本的两处已知盲区取证（读脚本所得，推断）：Dell 段 `set -e` 之后没有恢复，之后任一步失败会在写 PASSED 或 FAILED 之前直接退出，状态日志只剩 STARTED（或停在某步），B2 判未完成、等到 `--wait-max` 报 `UPGRADE_IN_PROGRESS`；遇到时保存 `systemctl status <单元>`（退出码）、设备 `/var/log/ufm-setup-upgrade-os-upgrade.log` 末尾和状态日志全文。另有一条 `apt install … > /dev/null 2>&1` 的失败不进任何日志：结论完成但功能缺失时以 `dpkg -l` 对照取证。
 - 清理与风险：
   - 升级本身不回滚；卡住时照问题文档 I-008「现场临时处理」（不结束 apt-get、不停升级单元）。
   - 风险：升级重启和刷 BIOS 期间 UFM 服务中断；prod 改动要 owner 授权。

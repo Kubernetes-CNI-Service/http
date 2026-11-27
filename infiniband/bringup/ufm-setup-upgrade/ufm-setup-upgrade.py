@@ -1572,7 +1572,10 @@ STAMP_RE = re.compile(r"^[0-9]{8}-[0-9]{2}_[0-9]{2}_[0-9]{2}$")
 # The block of one upgrade in the newest status log (I-008 expectation 3, v3.1.6 B2-O1 (a)): from the last
 # `UFM_OS_UPGRADE ... [STARTED` line stamped at or after `since` ("" = the last one) to the end, whatever the
 # later lines' own timestamps (NTP may set the clock back during the reboot). complete: UFM-OS-UPGRADE and
-# UFM-OS-FIRSTBOOT PASSED without FAILED (expectation 2); a STARTED line alone is incomplete.
+# UFM-OS-FIRSTBOOT both PASSED (owner 2026-11-26, 04 Q-111 (a)). ufm-os-upgrade.sh goes on after a FAILED of
+# UFMCLI-PREPERATION, UFMCLI-UPGRADE (first boot) or CYBERAI-UPGRADE: attention= lists those and they decide
+# nothing. Any other FAILED is failed (failed= is that line): a fatal step logs its own FAILED and exits, the
+# script never writes UFM-OS-UPGRADE FAILED (04 Q-114 (a')). Anything else (a STARTED line alone) incomplete.
 UPGRADE_BLOCK_AWK = r"""{ line[NR] = $0 }
 substr($1, 1, 17) >= since && $2 == "UFM_OS_UPGRADE" && $0 ~ /\[ *STARTED/ { n = NR }
 END {
@@ -1585,12 +1588,15 @@ END {
       last_stamp = substr(f[1], 1, 17); last_step = f[2]
       if (f[2] == "UFM-OS-UPGRADE") os_upgrade = result
       if (f[2] == "UFM-OS-FIRSTBOOT") firstboot = result
-      if (result == "FAILED") { failed = line[i]; gsub(/ +/, " ", failed) }
+      if (result != "FAILED") continue
+      if (f[2] == "UFMCLI-PREPERATION" || f[2] == "UFMCLI-UPGRADE" || f[2] == "CYBERAI-UPGRADE") {
+        attention = attention sep f[2] " FAILED"; sep = "; "
+      } else { failed = line[i]; gsub(/ +/, " ", failed) }
     }
     if (failed != "") block = "failed"
     else if (os_upgrade == "PASSED" && firstboot == "PASSED") block = "complete"
   }
-  printf "started=%s\nlast_step=%s\nlast_stamp=%s\nos_upgrade=%s\nfirstboot=%s\nfailed=%s\nblock=%s\n", started, last_step, last_stamp, os_upgrade, firstboot, failed, block
+  printf "started=%s\nlast_step=%s\nlast_stamp=%s\nos_upgrade=%s\nfirstboot=%s\nfailed=%s\nattention=%s\nblock=%s\n", started, last_step, last_stamp, os_upgrade, firstboot, failed, attention, block
 }"""
 # Active transient units of ufm-setup-upgrade's own upgrades (the start script names them ufm-os-upgrade-<n>).
 UPGRADE_UNITS = ("$(systemctl list-units --state=active --no-legend --plain 'ufm-os-upgrade-*' 2>/dev/null "
@@ -3579,6 +3585,23 @@ class Session:
                 self.stop(other, "INCOMPLETE", f"对端 {result.hostname} 的 {step} 失败，互信未完成")
         return list(results.values())
 
+    @staticmethod
+    def upgrade_attention(result: NodeResult, facts: dict) -> str:
+        """04 Q-111 (a), Q-114 (a'): a FAILED UFMCLI-PREPERATION, UFMCLI-UPGRADE or CYBERAI-UPGRADE (attention=
+        of UPGRADE_BLOCK_AWK) does not decide the upgrade; it goes to facts["attention"] once (B2-O7) and the text,
+        "" without any, is for the caller's own line."""
+        items = facts.get("attention", "")
+        note = f"升级状态日志里其它步骤 FAILED（不改变升级结论，请人工确认）: {items}"
+        if items and note not in result.facts.setdefault("attention", []):
+            result.facts["attention"].append(note)
+        return items
+
+    @staticmethod
+    def upgrade_failed_text(facts: dict) -> str:
+        """The deciding FAILED line, then the other FAILED steps of the same block."""
+        other = f"（其它步骤 FAILED: {facts['attention']}）" if facts.get("attention") else ""
+        return f"{facts.get('failed')}{other}"
+
     def step_upgrade(self, node: UfmNode, result: NodeResult) -> str:
         """Step 3 (UFM only): appliance/OS upgrade to the global version; reboots, then waits for first boot.
 
@@ -3600,10 +3623,13 @@ class Session:
                                     "不发起第二次升级，等它完成后再运行")
         if probe.get("before") == version:
             if probe.get("block") in ("complete", "none"):
+                if self.upgrade_attention(result, probe):
+                    self.say(f"    注意: 升级状态日志里其它步骤 FAILED（不改变升级结论）: {probe['attention']}")
                 self.say(f"    已是 UFM_APPLIANCE={version}，不升级")
                 return "UNCHANGED"
             if probe.get("block") == "failed":
-                raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: {probe.get('failed')}；"
+                raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: "
+                               f"{self.upgrade_failed_text(probe)}；"
                                "需人工处理，不重新发起升级")
             raise UpgradeInProgress(
                 f"UFM_APPLIANCE 已是 {version}，但最近一次升级还没有完成：状态日志 {probe.get('status_log')} 从 "
@@ -3627,13 +3653,16 @@ class Session:
         facts = host.parse_kv(self.run_script(node, result, "upgrade-start",
                                               upgrade_start_script(version, url), session_timeout=1800))
         if facts.get("result") == "already":
+            if self.upgrade_attention(result, facts):
+                self.say(f"    注意: 升级状态日志里其它步骤 FAILED（不改变升级结论）: {facts['attention']}")
             self.say(f"    已是 UFM_APPLIANCE={version}，不升级")
             return "UNCHANGED"
         if facts.get("result") == "in_progress":   # found by the start script's own check, right before starting
             raise UpgradeInProgress(f"启动前发现升级正在进行（{facts.get('units') or '最近一次升级还没有完成'}，"
                                     f"UFM_APPLIANCE={facts.get('before') or '未知'}）；不发起第二次升级")
         if facts.get("result") == "failed":
-            raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: {facts.get('failed')}；"
+            raise UfmError(f"UFM_APPLIANCE 已是 {version}，但最近一次升级的状态日志有 FAILED: "
+                           f"{self.upgrade_failed_text(facts)}；"
                            "需人工处理，不重新发起升级")
         if facts.get("result") != "started" or not STAMP_RE.fullmatch(facts.get("started_at", "")):
             raise UfmError(f"升级未启动: {facts}")
@@ -3675,14 +3704,17 @@ class Session:
                 body = self.run_script(node, result, f"upgrade-status-{probe}", diagnose if due else script)
                 head, *diagnostics = body.split(UPGRADE_DIAG_MARK)
                 facts = host.parse_kv(head)
-                failed = facts.get("failed", "")
+                failed = facts.get("failed", "") and self.upgrade_failed_text(facts)
+                attention = facts.get("attention", "")   # 04 Q-111 (a): shown, never a failure
+                note = f"；注意: 其它步骤 FAILED（不改变升级结论）: {attention}" if attention else ""
                 rebooted = bool(boot_id) and facts.get("boot_id", "") not in ("", boot_id)
                 reboot = "已重启" if rebooted else "未重启" if boot_id else "是否重启未知"
                 if not failed and facts.get("appliance") == version and facts.get("block") == "complete":
                     result.facts["upgrade_after"] = version
                     result.facts["upgrade_status_log"] = facts.get("status_log", "")
+                    self.upgrade_attention(result, facts)
                     self.say(f"    [{clock()}] 升级完成: UFM_APPLIANCE={version}，UFM-OS-FIRSTBOOT PASSED"
-                             f"（用时 {int(time.monotonic() - started)}s，设备{reboot}）")
+                             f"（用时 {int(time.monotonic() - started)}s，设备{reboot}）{note}")
                     return
                 step = (facts.get("last_step", ""), facts.get("last_stamp", ""))
                 if step != seen:
@@ -3690,7 +3722,7 @@ class Session:
                 state = facts.get("unit_state") or "-"
                 last = (f"UFM_APPLIANCE={facts.get('appliance') or '-'} FIRSTBOOT={facts.get('firstboot') or '-'}；"
                         f"最后一步 {step[0] or '-'}（设备时间 {step[1] or '-'}），"
-                        f"{int(time.monotonic() - changed)}s 无进展；升级单元 {state}；{reboot}")
+                        f"{int(time.monotonic() - changed)}s 无进展；升级单元 {state}；{reboot}{note}")
                 if (len(diagnostics) == 2 and state == "active" and not rebooted
                         and time.monotonic() - changed >= self.UPGRADE_STALL_AFTER):
                     reported = time.monotonic()

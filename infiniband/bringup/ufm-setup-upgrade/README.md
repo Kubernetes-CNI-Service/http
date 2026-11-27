@@ -284,9 +284,9 @@ python3 ufm-setup-upgrade.py ha-post-config --apply       # 在已有且正常�
    - IPMI LAN、IPMI 用户、IPMI 电源测试这三步失败时（例如 BMC 拒绝主机侧写入），记下失败并继续后面的步骤和升级；整台最后仍标为失败，汇总里逐条列出 IPMI 的错误（owner 2026-10-20）。其它步骤失败时，这台立即停止。
 4. 最后升级（只针对 UFM）。是否已经升级完成按本次标记判断，不只看版本号（I-008，v3.1.6）：
    - 有正在运行的升级单元 `ufm-os-upgrade-*`：`UPGRADE_IN_PROGRESS`，不发起第二次升级；
-   - `UFM_APPLIANCE` 已是目标版本，且最近一次升级的状态日志 `UFM-OS-UPGRADE`、`UFM-OS-FIRSTBOOT` 都 PASSED、没有 FAILED，或者设备上一份状态日志都没有（出厂就是目标版本）：跳过（`UNCHANGED`）；
-   - 已是目标版本、最近一次升级有 FAILED：`STEP_FAILED_UPGRADE`，不重新发起，需人工处理；
-   - 已是目标版本、最近一次升级既没有 FIRSTBOOT PASSED 也没有 FAILED（例如只走到 `APPLIANCE-UPGRADE`）：`UPGRADE_IN_PROGRESS`，不跳过、也不重新发起，并写出状态日志的最后一步；
+   - `UFM_APPLIANCE` 已是目标版本，且最近一次升级的状态日志 `UFM-OS-UPGRADE`、`UFM-OS-FIRSTBOOT` 都 PASSED，或者设备上一份状态日志都没有（出厂就是目标版本）：跳过（`UNCHANGED`）；
+   - 已是目标版本、最近一次升级有 FAILED（`UFMCLI-PREPERATION`、`UFMCLI-UPGRADE`、`CYBERAI-UPGRADE` 三步的 FAILED 除外）：`STEP_FAILED_UPGRADE`，不重新发起，需人工处理；
+   - 已是目标版本、最近一次升级既没有两行都 PASSED、也没有上述会判失败的 FAILED（例如只走到 `APPLIANCE-UPGRADE`）：`UPGRADE_IN_PROGRESS`，不跳过、也不重新发起，并写出状态日志的最后一步；
    - 版本不是目标版本：照常升级（上一次留下的 PASSED、FAILED 都不算）。
    - 起升级的脚本在下载前和启动前各再查一次在途升级，发现就以 `UPGRADE_IN_PROGRESS` 结束。所以等待超时以后（手工或 bringup）重跑 config-upgrade 是安全的，不会再起一个升级。
 5. 升级重启后：重新登录，确认 `UFM_APPLIANCE` 已是目标版本，再把全部配置步骤检查一遍。
@@ -561,7 +561,7 @@ master 的 config 会销毁旧集群并格式化 DRBD，代价很大，所以 `h
     - 重启期间连不上视为正常。
     - 状态日志只看本次这一段：最新的状态日志里最后一个时间戳不早于起升级时间的 `UFM_OS_UPGRADE [STARTED]` 行之后的所有行，不再看这些行自己的时间戳（重启后 NTP 把设备时钟拨回也能判成完成；I-008）。
     - `UFM_APPLIANCE` 等于目标版本、且本次这一段 `UFM-OS-UPGRADE` 和 `UFM-OS-FIRSTBOOT` 都为 PASSED 才算完成。
-    - 本次这一段出现 `[FAILED]` 立即停止（`STEP_FAILED_UPGRADE`）。
+    - 本次这一段出现 `[FAILED]` 立即停止（`STEP_FAILED_UPGRADE`）：厂商脚本致命步骤写下自己的 FAILED 就退出，从不写 `UFM-OS-UPGRADE FAILED`；首启失败写 `UFM-OS-FIRSTBOOT FAILED`（04 Q-114，v3.1.6）。只有厂商脚本记下后继续的三步例外（04 Q-111）：`UFMCLI-PREPERATION`、首启的 `UFMCLI-UPGRADE`、`CYBERAI-UPGRADE` 的 FAILED 不改变结论，作为「注意」打印在探测行、升级完成行和已是目标版本的跳过行里，也列进 ha-setup 确认前的注意项。
     - 每次探测打印：状态日志的最后一步和它的设备时间、距上次状态日志变化多少秒（部署服务器的单调时钟）、升级单元是否还在运行、设备是否已重启（boot id 与起升级时比较）。
     - 状态日志 600 秒没有进展、升级单元仍在运行、设备还没有重启时：打印一次 `systemctl list-jobs --no-pager` 和 `systemctl status <单元> --no-pager` 的 CGroup 段，提示「卡在 <最后一步> 之后的阶段」和只读排查命令（`pgrep -af '^systemctl restart'`、`cat /proc/mdstat`），之后每过 600 秒再打一次。只报告：不提前结束，不结束任何进程，照旧等到 `--wait-max`。不要结束 apt-get，也不要停掉升级单元。
     - 超时为 `UPGRADE_IN_PROGRESS`（退出码 1），提示登录设备查看日志；可以重跑 config-upgrade：会先检测在途升级，不会重复启动。
