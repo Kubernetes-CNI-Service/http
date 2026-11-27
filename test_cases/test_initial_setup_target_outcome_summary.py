@@ -554,8 +554,8 @@ class _CanonicalI15FixtureReadiness:
             finally:
                 self.parent_birth_pending = False
         elif (type(expected_birth6) is not tuple or len(expected_birth6) != 6
-              or any(type(value) is not int or value < 0
-                     for value in expected_birth6)):
+              or any(type(value) is not int for value in expected_birth6)
+              or any(value < 0 for value in expected_birth6[1:])):  # st_dev is signed
             self.hold()
         if type(parent) is not type(Path()) or not parent.is_absolute():
             self.hold()

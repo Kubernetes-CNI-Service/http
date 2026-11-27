@@ -490,7 +490,9 @@ class _LegacyBoundedFixture:
                 second = os.fstat(fd)
                 a = (first.st_dev, first.st_ino, first.st_mode, first.st_nlink, first.st_uid, first.st_gid)
                 b = (second.st_dev, second.st_ino, second.st_mode, second.st_nlink, second.st_uid, second.st_gid)
-                self.case.assertTrue(all(type(value) is int and value >= 0 for value in a + b))
+                # st_dev is a signed dev_t (a macOS devfs number may read negative).
+                self.case.assertTrue(all(type(value) is int for value in a + b)
+                                     and all(value >= 0 for value in a[1:] + b[1:]))
                 self.case.assertEqual(a, b, "UNKNOWN unstable census original")
                 names.append(name)
                 rows.append((fd, a, b))
@@ -674,7 +676,8 @@ class _LegacyBoundedFixture:
                 if (type(fd) is not int or fd < 0 or fd in result
                         or type(first) is not tuple or type(second) is not tuple
                         or len(first) != 6 or len(second) != 6
-                        or any(type(value) is not int or value < 0 for value in first + second)
+                        or any(type(value) is not int for value in first + second)
+                        or any(value < 0 for value in first[1:] + second[1:])  # st_dev is signed
                         or first != second):
                     return None
                 result[fd] = first  # Full st_mode, not S_IFMT or ignored permissions.
@@ -4935,6 +4938,29 @@ class BackupAuthenticationContractTests(unittest.TestCase):
             finally:
                 self.backup.tempfile.tempdir = previous_tempdir
                 self.backup._cleanup_askpass()
+
+    def test_parent_fd_census_accepts_a_signed_device_number_only(self):
+        # macOS dev_t is signed: a devfs device number of 2**31 or more (seen
+        # through stdin=/dev/null) reads negative from os.fstat.
+        real_fstat = os.fstat
+        def fstat_with(index, value):
+            def fake(fd):
+                fields = list(real_fstat(fd))
+                fields[index] = value  # stat_result: 1 st_ino, 2 st_dev
+                return os.stat_result(fields)
+            return fake
+        census = _LegacyBoundedFixture(self, None)
+        census.retained = {"tails": []}
+        with mock.patch.object(os, "fstat", fstat_with(2, -593179660)):
+            sample = census._read_parent_fd_census()
+        self.assertTrue({0, 1, 2} <= {fd for fd, _, _ in sample["rows"]})
+        self.assertTrue(all(a[0] == b[0] == -593179660 for _, a, b in sample["rows"]))
+        for index, value in ((1, -1), (2, -593179660.0)):
+            with self.subTest(index=index, value=value), \
+                    mock.patch.object(os, "fstat", fstat_with(index, value)):
+                with self.assertRaises(AssertionError):
+                    census._read_parent_fd_census()
+        self.assertEqual([], census.retained["tails"])
 
     def test_ssh_subprocess_has_hard_group_deadline_fd_whitelist_and_output_cap(self):
         with _LegacyBoundedFixture(self, self.backup) as legacy:
