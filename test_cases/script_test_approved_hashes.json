@@ -24,14 +24,14 @@
       "root-entrypoint-workflow": "NOT COVERED (requires Linux EUID 0 private namespace)"
     },
     "schema_version": 1,
-    "snapshot_sha256": "fe32cc396ea0dcd124b938fb196a5816ea7492b9e19c0583829fcdefa3318a43"
+    "snapshot_sha256": "5029ac48cf289ed22f3a12b525744c66ea133288800ef9a7bc57360c846fb4a0"
   },
-  "impact_manifest_sha256": "4eef1b88a5341747c568d5b29ce56a5a3a36beabcc95aab09540b768c380f061",
+  "impact_manifest_sha256": "5ae8606be7b99f9e09f6c5e8c75313d35cc64af0a4ee6112d35f1848ffdb9600",
   "schema_version": 1,
   "scripts": {
     "DAY0-Prepare/01-a-setup.py": {
       "canonical": "DAY0-Prepare/01-a-setup.py",
-      "sha256": "a49018ca5d8220067c49bbcd5102a510aaa1374d7962ae7ec2a964253fba7869"
+      "sha256": "46e2f11998c975af0f3d28a72728536b9aa7fe47fc72bcbcae37bf65ad27f535"
     },
     "DAY0-Prepare/02-unsetup.py": {
       "canonical": "DAY0-Prepare/02-unsetup.py",
@@ -39,7 +39,7 @@
     },
     "DAY0-Prepare/11-load.py": {
       "canonical": "DAY0-Prepare/11-load.py",
-      "sha256": "5a9d68c2047b237dfd17407f32344d88ad3b17a5039aea2a7a608a704f012601"
+      "sha256": "4dfb5cda48e7700bf923915c83b702ee024abb0f5aeb70d032885427a4819e42"
     },
     "DAY0-Prepare/12-ztp-monitor.py": {
       "canonical": "DAY0-Prepare/12-ztp-monitor.py",
@@ -51,7 +51,11 @@
     },
     "ethernet/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "881f80c2ec86b26e5ee35a4f4267946baeb4abc6000bb47e3d0768009dc4a252"
+      "sha256": "8dddfcd3f8bfd446d0f57ee0df69d9b0aad1f3aa42f97386d40643b878da0a1e"
+    },
+    "ethernet/monitor/helper-info-collect.py": {
+      "canonical": "tools/helper-info-collect.py",
+      "sha256": "21cb63a980cb95146d614e363f9c76f2552b991560c85560b4f6103ba50c6587"
     },
     "ethernet/monitor/post-collect.py": {
       "canonical": "ethernet/monitor/post-collect.py",
@@ -75,7 +79,7 @@
     },
     "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py": {
       "canonical": "infiniband/bringup/ufm-setup-upgrade/ufm-setup-upgrade.py",
-      "sha256": "35d0178bfa12841acf7d57cba418f42cadccfc486b06a6c6dd83094e6b5e275b"
+      "sha256": "b798b1e7df6e6732327dd9ec4d60ad5f7aba323a9bdab8af1d12eb81babbe3ff"
     },
     "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh": {
       "canonical": "infiniband/bringup/xdr-initial-setup/helper-prepare-eth-jump.sh",
@@ -83,7 +87,7 @@
     },
     "infiniband/bringup/xdr-initial-setup/initial-setup.py": {
       "canonical": "infiniband/bringup/xdr-initial-setup/initial-setup.py",
-      "sha256": "f82f708a1806af12800d3bbb1cc9a9ea5732aec7383e9a1495ddd01581027b5f"
+      "sha256": "bc1f22b9e631e936b75b634db72317811ccc7f60e82308a308bc77108a2b229a"
     },
     "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh": {
       "canonical": "infiniband/bringup/xdr-upgrade/ibsw-v2-check.sh",
@@ -99,7 +103,7 @@
     },
     "infiniband/bringup/xdr-upgrade/upgrade.py": {
       "canonical": "infiniband/bringup/xdr-upgrade/upgrade.py",
-      "sha256": "c5d64b3efc16df6cb329594a70b092f034d3b8f08bfcb1fb5a57859c5aadaf88"
+      "sha256": "6e612e62c9a5d9c2c487677909a31fe3023eb71106c926a256ceff1e80c33ddf"
     },
     "infiniband/bringup/xdr-upgrade/upgrade.sh": {
       "canonical": "infiniband/bringup/xdr-upgrade/upgrade.sh",
@@ -107,11 +111,15 @@
     },
     "infiniband/bringup/xdr-upgrade/upgrade2.py": {
       "canonical": "infiniband/bringup/xdr-upgrade/upgrade2.py",
-      "sha256": "e6b30b3d7e0ebdaa08093f828ae546243213671dda667b337bc0e0d37b3cd470"
+      "sha256": "02dd7a6e3e52a021f480ebea4ad6fac24fba414b22a7eea3ff7250a92b5b6399"
     },
     "infiniband/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "881f80c2ec86b26e5ee35a4f4267946baeb4abc6000bb47e3d0768009dc4a252"
+      "sha256": "8dddfcd3f8bfd446d0f57ee0df69d9b0aad1f3aa42f97386d40643b878da0a1e"
+    },
+    "infiniband/monitor/helper-info-collect.py": {
+      "canonical": "tools/helper-info-collect.py",
+      "sha256": "21cb63a980cb95146d614e363f9c76f2552b991560c85560b4f6103ba50c6587"
     },
     "infiniband/monitor/post-collect.py": {
       "canonical": "infiniband/monitor/post-collect.py",
@@ -127,7 +135,7 @@
     },
     "infiniband/monitor/ufm-ibdiagnet.sh": {
       "canonical": "infiniband/monitor/ufm-ibdiagnet.sh",
-      "sha256": "7db99cc4758a80f488c19c6ae1129ca6d288b3af4730ff6fe94e6a0c5ed56441"
+      "sha256": "bf209f498daeb17242377813e7c96c02fa95f3b6da724927a6a89faba6731123"
     },
     "infiniband/monitor/ufm-info.sh": {
       "canonical": "infiniband/monitor/ufm-info.sh",
@@ -175,7 +183,7 @@
     },
     "infra/infra-setup.py": {
       "canonical": "infra/infra-setup.py",
-      "sha256": "2926d6bb1b1ceed26b1d4cb20b5f3dae1de357013209cb388da8e1fac3943707"
+      "sha256": "702e9d75e2b5041d326dc257a6f91901344655714114c9659465d5cd529ad45b"
     },
     "infra/infra-setup.sh": {
       "canonical": "infra/infra-setup.sh",
@@ -187,7 +195,7 @@
     },
     "infra/ubuntu24_host.py": {
       "canonical": "infra/ubuntu24_host.py",
-      "sha256": "8140dba397b5888312df83ac83d835bdb19ab192a2799bd43d1395b88f14e5e3"
+      "sha256": "b50f3df50614c9013cf90dc00d2b3da135b8fc44c7db181a3f60d8005a1da56d"
     },
     "infra/ufm_jump_transport.py": {
       "canonical": "infra/ufm_jump_transport.py",
@@ -207,7 +215,7 @@
     },
     "monitor/generate-monitor-html.py": {
       "canonical": "monitor/generate-monitor-html.py",
-      "sha256": "3d7489ff776795a848109a71bc3bac214773dee82c1a1b2cefe0219d0e710676"
+      "sha256": "ceb4d27957e64d4389c1edbee2b4b62ea127680c80752dbc390c4bd9257fe3ce"
     },
     "monitor/issue-tracker/cabletracker/cabletracker_runner.py": {
       "canonical": "monitor/issue-tracker/cabletracker/cabletracker_runner.py",
@@ -227,7 +235,7 @@
     },
     "monitor/issue-tracker/issue-tracker-sync.py": {
       "canonical": "monitor/issue-tracker/issue-tracker-sync.py",
-      "sha256": "6ae56a6fc6122c03f517c898b538756254cf854eacf152eed78b224b880e9d76"
+      "sha256": "adb764729b2dd7c9afb458fd5627b09b071c3987be1df3a94a83adbb6d39b3b9"
     },
     "monitor/issue-tracker/switch-status.py": {
       "canonical": "monitor/issue-tracker/switch-status.py",
@@ -259,7 +267,7 @@
     },
     "monitor/switch-collection-worker.py": {
       "canonical": "monitor/switch-collection-worker.py",
-      "sha256": "ae4cccf286887550d2bf04b308aae493065e1bae670309ac207fed38e17a55bc"
+      "sha256": "8d3d9f49c98fe22d24a307c2bcf16995f29437fefeac1323cfe6576a5022cc43"
     },
     "monitor/switch_collection_gate.py": {
       "canonical": "monitor/switch_collection_gate.py",
@@ -271,7 +279,11 @@
     },
     "nvlink/monitor/cron.sh": {
       "canonical": "ethernet/monitor/cron.sh",
-      "sha256": "881f80c2ec86b26e5ee35a4f4267946baeb4abc6000bb47e3d0768009dc4a252"
+      "sha256": "8dddfcd3f8bfd446d0f57ee0df69d9b0aad1f3aa42f97386d40643b878da0a1e"
+    },
+    "nvlink/monitor/helper-info-collect.py": {
+      "canonical": "tools/helper-info-collect.py",
+      "sha256": "21cb63a980cb95146d614e363f9c76f2552b991560c85560b4f6103ba50c6587"
     },
     "nvlink/monitor/sw-info.sh": {
       "canonical": "ethernet/monitor/sw-info.sh",
@@ -315,7 +327,7 @@
     },
     "tools/deployment_prewrite_guard.py": {
       "canonical": "tools/deployment_prewrite_guard.py",
-      "sha256": "4d83f487d735b417e8c20ce21fe71e4db80aa6fe0645adcb8937784245e3d1cd"
+      "sha256": "dcf62cd0d5bd164d0f63ccbb981a9048be8fc5d835a45831278563dfbed025a6"
     },
     "tools/device_identity.py": {
       "canonical": "tools/device_identity.py",
@@ -343,7 +355,7 @@
     },
     "tools/fleet_engine.py": {
       "canonical": "tools/fleet_engine.py",
-      "sha256": "101d4f4dba93d1d1776875db5d8ea5c2d76fd916c1bb7fc358d9067c7d68ad49"
+      "sha256": "5e18055dc65aea297154520f8d00f9a65a56c6beb7c8d9c1c89e55f8667bba4f"
     },
     "tools/fleet_fetch_helper.py": {
       "canonical": "tools/fleet_fetch_helper.py",
@@ -355,15 +367,23 @@
     },
     "tools/fleet_probe.py": {
       "canonical": "tools/fleet_probe.py",
-      "sha256": "37602e669309a55ab327ab6373acb7e5e16ac70b820ebc95c8ee5caa79cd3921"
+      "sha256": "78afe6f996f2b891b1288d645778325e96435b2289ba6a993637e4701a4329ae"
     },
     "tools/fleet_ssh.py": {
       "canonical": "tools/fleet_ssh.py",
-      "sha256": "64731fa5e1eb64d6dc55f9521939a26c96bc7889935bcd4e7d3fb8af487db70d"
+      "sha256": "0df815affadbf1710d0b040604d03dcd9bf679f5d76181c3ccaafc9735737c66"
     },
     "tools/generation_report.py": {
       "canonical": "tools/generation_report.py",
-      "sha256": "e3abd21d41991bc5d2fc60df814f50351ce46c6b4d6fb6d0be79113f9e5fa43b"
+      "sha256": "20dd74e995f5d053b57bde7096ef6e4678d1ac950b594943e09271434432c201"
+    },
+    "tools/helper-info-collect.py": {
+      "canonical": "tools/helper-info-collect.py",
+      "sha256": "21cb63a980cb95146d614e363f9c76f2552b991560c85560b4f6103ba50c6587"
+    },
+    "tools/helper-info-collect.sh": {
+      "canonical": "tools/helper-info-collect.sh",
+      "sha256": "a35c10c43f9d0c4dbbf081bed26a39600de488dba1150ac242d2717855d504c2"
     },
     "tools/hostname_ranges.py": {
       "canonical": "tools/hostname_ranges.py",
@@ -547,7 +567,7 @@
     },
     "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py": {
       "canonical": "tools/ibdiagnet-analyze-tool/scripts/validate_ib_topology.py",
-      "sha256": "e2aa5255883de1c98deb21b608721dc0d8a286a349b874b6da4321f595d1f1db"
+      "sha256": "a485af49861b7b3f09fa9dcd139002c1b5d0efa7bebcdf57b9aba2dce919c2f7"
     },
     "tools/ibsw_upgrade_access.py": {
       "canonical": "tools/ibsw_upgrade_access.py",
@@ -579,7 +599,7 @@
     },
     "tools/ibsw_upgrade_pipeline.py": {
       "canonical": "tools/ibsw_upgrade_pipeline.py",
-      "sha256": "38196135304c47b07e89325b4427549170fbc2d364151fbae7fbab0c2ad0f5cb"
+      "sha256": "6be94a65ddd3369407cb00417b381a6a1fa315e4d9d33d88a5c4146e534ba4b0"
     },
     "tools/ibsw_upgrade_schedule.py": {
       "canonical": "tools/ibsw_upgrade_schedule.py",
@@ -591,7 +611,7 @@
     },
     "tools/ibsw_v2_device.py": {
       "canonical": "tools/ibsw_v2_device.py",
-      "sha256": "685fe0dc03f525ff431033c6993607ce45ac36002e19e2b6da261a272740e6bd"
+      "sha256": "dc3e0223ab169864cd5f93cc9dca0e616a449835ed485147166aab381dd721ae"
     },
     "tools/import-from-download.py": {
       "canonical": "tools/import-from-download.py",
@@ -619,7 +639,7 @@
     },
     "tools/login_path.py": {
       "canonical": "tools/login_path.py",
-      "sha256": "14dde39ebdf368b38aad4f7c27ab265c4ff0e811b8accb79c160baf1f855c7cc"
+      "sha256": "bc12009dd4397660e687446f01503a75bd345e4eb3935658d8e59d3be8eba787"
     },
     "tools/operator_identity.py": {
       "canonical": "tools/operator_identity.py",
@@ -675,7 +695,7 @@
     },
     "tools/ufm_collection_contract.py": {
       "canonical": "tools/ufm_collection_contract.py",
-      "sha256": "93c06eda29d0e5383737ba06b4fbb741cf5815725541c25d6f366b2653c48763"
+      "sha256": "ad2ab519817a0b8b416b5880074d00cf2f6fdb63eaa007f32563e9f181291bcb"
     },
     "tools/ufm_deployment_script_builder.py": {
       "canonical": "tools/ufm_deployment_script_builder.py",
@@ -719,7 +739,7 @@
     },
     "tools/ztp_service_runtime.py": {
       "canonical": "tools/ztp_service_runtime.py",
-      "sha256": "174907928839f92a3e00792fa5245dacd46421b214678372a22ed6694098748f"
+      "sha256": "e821c9e119d602bbd13cfd0782b618178a3962ec767572f2a7f0708087526d08"
     },
     "ztp/backup/_bounded_process.py": {
       "canonical": "ztp/backup/_bounded_process.py",
@@ -751,7 +771,7 @@
     },
     "ztp/config/ib_topology_provenance.py": {
       "canonical": "ztp/config/ib_topology_provenance.py",
-      "sha256": "5c1978a4d73e3115f88214076c391766e34aa22d33dea38c6df715f9d939ea6f"
+      "sha256": "6e60f0d99b4c03b308491b6157290a51733bc87f7dc37f4b58b8eaab9876cbf1"
     },
     "ztp/config/isc-dhcp-server/c1-generate_dhcp.py": {
       "canonical": "ztp/config/isc-dhcp-server/c1-generate_dhcp.py",
@@ -767,7 +787,7 @@
     },
     "ztp/config/nvos/template/P2P/p2p-to-validation.py": {
       "canonical": "ztp/config/nvos/template/P2P/p2p-to-validation.py",
-      "sha256": "86a64c4d3b0ee514e425d2da5d4a155ca17354917e4a64fd011601f5b272094b"
+      "sha256": "fb5f2087ad930a362e716df77359a77d721182a15958fcfb1208b35a36c7919f"
     },
     "ztp/config/topology_rules.py": {
       "canonical": "ztp/config/topology_rules.py",
@@ -787,7 +807,7 @@
     },
     "ztp/environment_probe.py": {
       "canonical": "ztp/environment_probe.py",
-      "sha256": "caa453451d97d6d1fe1dc0b94e49707497fdd8b21aab0fa72fc9b6d0524ee08d"
+      "sha256": "fdb331df90e1ba68eba91b73af84c74b6241ead315d225a8f879632c929beaee"
     },
     "ztp/manual-reset.py": {
       "canonical": "ztp/manual-reset.py",
@@ -858,7 +878,7 @@
     "docs/README.md": "e646ad967d9bd418451f152fd2c48f41fe3415dc7acea55e434ae610ff1b57fd",
     "docs/architecture/README.md": "153837bcd62f49edf8591ceec8b1b6ccefe9a3b5638a91bed6452ac87264a0e4",
     "docs/deployment/BUNDLE_WORKFLOWS.md": "dbb123d55214521cf7cde4f84a67e2f87cb1ef6f4c316436bfa192158aa85895",
-    "docs/deployment/README.md": "ca5670cfa5d7fbc5cc79dcc251543e47b208e263602412700e1dbe72cadad75f",
+    "docs/deployment/README.md": "ad0035695695028920322c5663931b0bf55204f58bc7f82badb96fb5adedbb1a",
     "docs/operations/README.md": "9860aa95eedddd9c502f5dca6ba5ba66417a1cfe73585d51a002bcd3603fadb7",
     "docs/reference/README.md": "717f023b3016420b61e8889493fd0e2ab9d0106388483025f8d66dee75c75039",
     "docs/validation/README.md": "52ffc7949b718232985c594492a5a69ebbd6e8c9b53fe98c8bc45a0f996356e4",
@@ -890,7 +910,7 @@
     "requirements-container-top-level.lock": "3532f5208b462243bab779b01eb4deb21638ac05a9390c17ac997ba8d7f24998",
     "requirements-dev.txt": "2047cfeb6e7d7c3b02380624cd212528fb8416cf3e76dd924d2e2cba8567a50a",
     "requirements-f01-ssh.lock": "16562dd9f3598038afc4c915c849d397fce86b4d902cb7f90db580a31a981d8a",
-    "test_cases/REAL_ENVIRONMENT.md": "c69140d63061e83cfe0d7724eea8cd494779a33ac715e9105d316326970b287e",
+    "test_cases/REAL_ENVIRONMENT.md": "04c7babe96a4b9d4fe5e896413ff22a81a687bc46509364545c4f2039ab53d09",
     "test_cases/audit_public_tree.py": "01294ce0778d7f1d3aac41beff010c0eafba2455b6dbad24a20b88d93767df3e",
     "test_cases/f01_sdk_venv.py": "1456975d33ff5be60039c0e39f408593750f11d2c822dd8c2a55f57b4d528c69",
     "test_cases/fixtures/bounded_inner_fd_fixture.py": "bac0c68a18a313b60297c720d64d416a5d405c80c089b411b8a8fc6dbc1b64b9",
@@ -910,8 +930,8 @@
     "test_cases/fixtures/nvos-25.02.8008-system-version.txt": "22287db514fd0059cafb5d64b61ac89dae3a793de0e14c2c5408543d817561aa",
     "test_cases/fixtures/nvos-six-cpld-firmware.txt": "ae2c5f4871f99f71f4b5eedfc5aa2360ae39773a7a47cb56c43c5053070c99ba",
     "test_cases/fixtures/nvos-system-health.txt": "befdfeebb9b93d4516f6363ee392231cf6af8bd6761b591f63cbf39606c55818",
-    "test_cases/full_shard_plan.json": "db72297e0b27b07756f8a39d4f6428f4ddfca03b4b75e5cb25aa98fda6394ad0",
-    "test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py": "5fd3296b4859302de5a4432d868c89ea08b64f46b0fb00527549eed12e72319d",
+    "test_cases/full_shard_plan.json": "c095afeed673771db80040f5e1c67c3fd7ce6b33afe47c2f15a450dc47cad5b0",
+    "test_cases/ibsw225_fixture_support/_fixture_test_access_recovery.py": "5ce65178fc81c6f046b75c5ebf628cee1c1c95cc34a68d01f82f2fc537d116d9",
     "test_cases/ibsw225_fixture_support/_fixture_test_compact_summary.py": "c397c7710a9f69d6c3a73c92a38ddef89c743711afeb1331fd6c46c3d64ef168",
     "test_cases/ibsw225_fixture_support/_fixture_test_grouped_summary.py": "654b9dcd94867ab086cfc7bca9771f096a8870d3dc3b1c082688401576b875d5",
     "test_cases/ibsw225_fixture_support/_fixture_test_health_upgrade_gate.py": "4ac91147e3b0e1a5dcb8c970586c9bd072ca1ab199521d43b5deaeb567d77dc4",
@@ -923,7 +943,7 @@
     "test_cases/ibsw225_fixture_support/_fixture_test_os_download_telemetry.py": "5d9a04200a6dd2094a238c7031a29210afae3e8033df6b56eaf32024aaabd055",
     "test_cases/ibsw225_fixture_support/_fixture_test_runtime_budgets.py": "8f5c859cbad87bc55c729751d63f445288a29036a02a82379af2f1bdd7be6831",
     "test_cases/ibsw225_fixture_support/_fixture_test_standalone_links.py": "606c335090cae39b647f2e677fc0a5e3881143c61ccfc9398aea0f22acb0c3e1",
-    "test_cases/ibsw225_fixture_support/_fixture_test_three_component_workflow.py": "574c64c2bdeaa1eed943a1185fa1e0487f96edaa9ec25111a91f3d55bf9c77fe",
+    "test_cases/ibsw225_fixture_support/_fixture_test_three_component_workflow.py": "5c5aa8dbcc93a3f132916b615fa2aa6e16beb1dfe47ad4b258f9cc3838b35b6f",
     "test_cases/ibsw225_fixture_support/_fixture_test_upgrade_cli.py": "1c51801cad5cb6c96239851b06a9b8ec7ee9e3656fec1320fcfada05e2e61262",
     "test_cases/ibsw225_fixture_support/fixed_fixture_registry.py": "56cc79e3a66fbf81319605ce87fe3d8556d51805ae8182f27484692ed307b551",
     "test_cases/ibsw225_fixture_support/legacy_shell_workflow.py": "9bf58c9472cf5d9c501a313f35d276bad47b93a52d306d3854d1d21b44e01730",
@@ -931,7 +951,7 @@
     "test_cases/ibsw3_scp_cpld_test_isolation.py": "574f48df03504fed9d4ccb585bd5eb6683ac0cf67c9207f9b1a25c15e003d2e3",
     "test_cases/ibsw3_scp_request_test_isolation.py": "34870179bf9cbcfaf2d5cc7b0194fc674679c6db79ebe98eaddd664c79afa29c",
     "test_cases/ibsw3_scp_test_isolation.py": "ee0a23c4c16e83244f2c6178bcf6f0331d68b0a05807ab6f1017d0dde12d6705",
-    "test_cases/ibsw_v2_switch_sim.py": "2c1438b157beb6ef21cd45c1a36639049c91c1051713cf5e47eabb606670406f",
+    "test_cases/ibsw_v2_switch_sim.py": "29c8204d1f2b8fafcf9c5f0c83cbcbe2b34ac90222c79398d2865a479a02e2c1",
     "test_cases/initial_setup_jump_fixture.py": "89ae29cabbbc1b0799a34c494a759889e0aae85eb9a24d24b3aac471fe8915a7",
     "test_cases/issue_tracker_template.py": "028fc524ac9afa0c9fba4311f35c955c8a40f6dde95eb39861c408c8cd3beba9",
     "test_cases/linux_runtime_lock_model.py": "f6ae3d83a58f3683f7ff58b92aa3bef2420ddfd68431c598051889c92d6e5e33",
@@ -948,23 +968,26 @@
     "test_cases/native_cpld_stub_sources.py": "2fb9ca70f182fb84b91e7b6a10dd5fed20946b54f77cc7a8a6dd8bddbe660016",
     "test_cases/native_os_dual_channel.py": "184e195844e53ae8c46e4b993e9b59caee5b3ae05c450e5c9a15c006aaef3ac7",
     "test_cases/native_os_physical_bridge.py": "8668a244db768709493f739415418166d0960512d89ff655e1251ecd711d62f9",
-    "test_cases/native_os_safe_image.py": "2a385131b51ffdecd72fd480cbe380afbac5c870e1fcd2361d17f4a8cc8b74aa",
+    "test_cases/native_os_safe_image.py": "b0bafe04e0abe6380db2c9a80f0a48a08b90b6f481f960b4d7514212dc7179b3",
     "test_cases/native_os_stub_sources.py": "56d66684ff42fb58911b484aba7529817e1b264a8b866231767489bd5090b8c7",
     "test_cases/native_os_test_isolation.py": "e7c1ebeb758f3da6ccd311b569d88ad55acd3d4c6ad58d2b9a9db9b6ad8d433d",
+    "test_cases/ns1_monitor_stop_source_layer.py": "e9caf9bf02b0ead71c36cf64319353e6c15e7b52c7cb4efabd6f51d6f8c2f372",
+    "test_cases/ns2_load_report_source_layer.py": "e0b92cb24a88007d72541ec5dfd71733422faa50349471fe70fc4782a18fa111",
+    "test_cases/ns3_load_report_source_layer.py": "9a68df61f6d9c6d9812f4b35220ba4df1864aaf109c7c95967689820af427390",
     "test_cases/private_public_fixture_input.py": "526cf837ed8b294a2ce8cce113616a91a80207a2b38d209df2abed148fb09d48",
-    "test_cases/project_image_owned_guard_outer.py": "aaa6a5718159b8ffab9bde5e613c9effec99c7cecbc794788a672e66c63f125e",
+    "test_cases/project_image_owned_guard_outer.py": "8fb91d93132ea2e42d5cb4d7e92fd99b8fd646f8f55c69c97af9f965a864e428",
     "test_cases/public_project_fixture.py": "744c3d2b8dc0e1b6c0c64b314e5fe7862684a08ce177c94baa1736a5e5a2aef8",
     "test_cases/run_monitor_authority_entrypoints.sh": "9d8145073a383a7bc91e75b2c809f402d71bbf5f7a4c2260d983d5ce8a182e76",
     "test_cases/run_related_tests.py": "01d0a67aee368ffbf8dbe27a4fc383238c521aca7b52dc707250a574665184ad",
     "test_cases/run_vm_validation.py": "e9fae62a4b7d0e754454cd3e9e08d4952be753800d0aa9f74c74bd33174e29e5",
     "test_cases/scp_foreign_probe_fixture.py": "2b44253186ce81891a6871ca5e593f311ab1a3c621652bed5205f08256aaea3f",
-    "test_cases/scp_main_selector_fixture.py": "6d6691edb34013295a8b9c01ebf8c08aac98dc722fae3c82d4fd205a493f47de",
-    "test_cases/scp_native_cli_fixture_v2.py": "f19f10e655a96bcecc6899c8f8076f5cbecc37fabc92595f7175cb25eab791d5",
-    "test_cases/scp_native_cpld_bridge_fixture.py": "dd018a1e284d4f716f866ea41b8dedfd8aec3995de14c6b26ddfa8bbfbf84adf",
+    "test_cases/scp_main_selector_fixture.py": "226d3b11b2848bbaaa8d7d043130e47cb250bd0234a98c463b94a03e5827e145",
+    "test_cases/scp_native_cli_fixture_v2.py": "c095386e7ba7f7a6626d5c4763e25b6f9c55b5c7b2c53781cb81e6a73e502ef7",
+    "test_cases/scp_native_cpld_bridge_fixture.py": "7ec728b674d823fc14283bde8f940b37490f0bb8cfc7303b7bd2bd55d69ecbc5",
     "test_cases/scp_native_cpld_bridge_isolation.py": "6fbc0faee200485f1c2c0828bd2835c9b621ccd957aae097fba32cbe68ffa4c8",
     "test_cases/scp_native_os_manager_fixture.py": "5f715111cf2466542577bf7fe61bc3c5d836cc46d2aefb977bb3259febc221fa",
-    "test_cases/scp_native_source_preflight_fixture.py": "da142e91677047a540fd52f41ac19daaf41d4c469ce02256e95951152fb7670b",
-    "test_cases/scp_source_cli_fixture.py": "6d78f7a39cb309e4a06342ba5f8eb5abec8eba114ec95952fe696a8354d0d326",
+    "test_cases/scp_native_source_preflight_fixture.py": "473f2e24bc56722364c8e0c6837898fed4847d5342c013b1eca5006b08b15c1f",
+    "test_cases/scp_source_cli_fixture.py": "ec7bcff1cc927dac0dde1e9d7efc85ae5f825e15af9e0969dd4e409f2fa61459",
     "test_cases/scp_stdin_cpld_protocol_fixture.py": "ea0dfd09e6036c5967310b315f76ead3b3e4902a9e34728653a7b480f830ff71",
     "test_cases/source_tools_fixture.py": "1473ea8d8c6f17fe470ced1aef54daa5d6f8f3569c76a1c561c42d595b81db58",
     "test_cases/splitter_profile_fixture.py": "7b0548d7d15b855278e21456d1ec2b667072d874ba68d527348f185f85d6d75f",
@@ -972,7 +995,7 @@
     "test_cases/user_manual_contract.json": "dc0bb8977038e9e326fa73c90fba1e992434752b89861a91d998c9d576eb6881",
     "tools/ibdiagnet-analyze-tool/config/port_profiles.csv": "e7ae6b43105be68b6d1fc58403de22cd6e06ab2977f6657948abe1228a648c57",
     "tools/lldp-analyze-tool/04-lldp-device-aliases.json": "595529fac28098b504d67809026a59ecfa0345375ada9b16057ff069e5179250",
-    "user-manual.html": "4ab2a8116868289aa9fedd517c7f255dea475b9a54d62cde91b51c5b63f62019",
+    "user-manual.html": "4b199c7278b42f53be95a00f7b59bdb499a1320b38d313323ea95cd6166510c6",
     "ztp/config/cumulus/ar_profile_custom.conf": "9316fe81c3238ef99076ee598abf303c955dc38343df4176ba22bc4c27729c1c",
     "ztp/config/cumulus/default.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
     "ztp/config/cumulus/default_5.16.5.yaml": "6e3f950a5c964fabbac8106720920d3061e90bf94436f22b6ad049c64c1b5934",
@@ -1034,12 +1057,12 @@
     "test_cases.test_backup_zero_target_contract": "61091b3fb5f478af457692e9afff3475b9b88aa1f724f6af3a0e7ee19d84a3c2",
     "test_cases.test_bootstrap_config_fetch_contract": "7726a6c3ced5596b497c90340dadfb7da800bb08f02bf708ba31a3600dc166f4",
     "test_cases.test_bootstrap_config_fetch_workflow": "9be3667421d0f6fc008156631334d8e4d7eb07893d7e26248030b75270ab0149",
-    "test_cases.test_change_aware_test_runner": "79a67438d9e3ccf1f8c67e9b6b0838b7d00a809fd9d042ac408999f702f8b379",
+    "test_cases.test_change_aware_test_runner": "b4d7c58932837fc64efa73a75b8b0a0651877f5cd364ba32c62cde687d86edee",
     "test_cases.test_collection_archive": "ff3704783d0f832b2eac7cc98908c218d6e92d8cf748c69e8430d49f4757add0",
     "test_cases.test_collection_cycle_contract": "2ecb0d71c6e3d7e78fc54824e6bfadbaf6864ff2c9e37457874afefdbf1785cb",
-    "test_cases.test_collection_cycle_handoff_workflow": "14907fe156b04dea0c3adce68c5d0cb22ef0a5cfd447fc2b5f5ee076d5671102",
+    "test_cases.test_collection_cycle_handoff_workflow": "d75639a48c6fc86aae7ab8990bdb33de93e8d5e93f0183d1525beef7cbdfa63d",
     "test_cases.test_collection_cycle_persistence": "97c259061c9565f7b0fbb19e33660a898db692f2bef211c065318fd7f3274689",
-    "test_cases.test_collection_cycle_worker_contract": "100c1973dfa5f2416130bba43317e1c7ce4a29efc89b19b822a5edc1c60ffe39",
+    "test_cases.test_collection_cycle_worker_contract": "36940b0194dd2c2b38955dde8ae068208dd644d01506650c6e7fa42076b6738c",
     "test_cases.test_collection_d70_retirement": "c8547bf5eaee982306e2a1b602bc5e54f4347de62dca195fd3d436980b4561ad",
     "test_cases.test_collection_d70_retirement_workflow": "a35968207fdebaa03339da4f00e512232d12521af5c41fa9811d4975fc697189",
     "test_cases.test_collection_lock_owner": "ce2b6aa27fda11fe274fb4ce2ceed5f0262f58db477f1ee060031b39f59c2ba0",
@@ -1054,8 +1077,11 @@
     "test_cases.test_continuous_interval_handoff_workflow": "7738487fcb54150439a2b54da908bef79cb612ad99d69ceb5956bedef1204220",
     "test_cases.test_control_auth": "da27975ed095e2c7e88d32f4fd1cf0352a050541a6750b3548b3e5dffa6f092c",
     "test_cases.test_credentials_fd": "915def8165cbd5096fece49dd972945732a35e2a91733c39641d0cf9b046912c",
-    "test_cases.test_cron_operator_identity": "6a7363a50ffc137988d72e3c4d38f7f0e50857e067ea351f5bd4f85f1d36abf2",
-    "test_cases.test_cron_operator_identity_workflow": "e613869d70cb22b93422fe23e20be6263a64d90b370b58c42fe46c55350cba4d",
+    "test_cases.test_cron_inventory_identity": "e2a2fa20f409683a1ffe4ce06cac936ec8d413faeb0934b50939387d96ca11e2",
+    "test_cases.test_cron_mac_rule_workflow": "f225cfb0bb16d7623b29e12edde900102eb061b0900d717f8fa6efc6afe997ac",
+    "test_cases.test_cron_operator_identity": "e97544a9f74be778a94e0cc759b8f2e8674d3ac936baa21c7e748e9a0735ea3c",
+    "test_cases.test_cron_operator_identity_workflow": "58f8baa728e5c8372277534ebcdf469c4ed0137111debe2e74b25bcb2ad1162d",
+    "test_cases.test_cron_single_environment_workflow": "f3fa309cbb6b853d8fe1d63972c45373277a6d4d85581527b137f2a4cda6dcfe",
     "test_cases.test_cumulus_snippet_rendering": "a9dc63b808ad3dce40f8ec831bc2ab1b50b5cfdec095280ea1511ec99b1f225c",
     "test_cases.test_current_exclusive_deployment_lock": "4b1b226de7147446b6a492aa8adeac016ba9e7a8dab96b97a7bff389946c56a2",
     "test_cases.test_darwin_lock_kernel_witness": "7ea944c0ca048f751a853586f89354189d6e54c58f2ee9e422fdbeb1507c9f41",
@@ -1079,7 +1105,7 @@
     "test_cases.test_download_cli_contract": "ea3921e61b8b53251c232de0fae872e7104192ad7fa96f09ead4e8c565cdf18f",
     "test_cases.test_eth_activity_cycle_handoff_workflow": "4f26678cce17b5666d16e353637368fd568760e5ec91c822e7cdac9103da8018",
     "test_cases.test_eth_jump_duplicate_identity": "1410d62b31f682cddfe07063e5c02bca056b3adeb887684973ea3f768ba46b33",
-    "test_cases.test_eth_jump_transport_contract": "93dd9a6ec6d20464d14bc24b5af073c32095c0ff9fa2697d2ce42e8ae927d05b",
+    "test_cases.test_eth_jump_transport_contract": "30d1bcc087df789d76980bfda1e078e235a5664a800765416d034413c0fc5774",
     "test_cases.test_eth_jump_transport_workflow": "67b2afa6c11ca7042203ce75456b4dcde42cfc80e7df92336d4a642a80e53030",
     "test_cases.test_eth_jump_zero_config_contract": "dbd0faa24529611b110f3b579248da52d29229884202f6a8594e9f8e1c082e8f",
     "test_cases.test_eth_jump_zero_config_workflow": "f153c0bb6438530d5d241a0a2091783e9d6e5edec00e74a9617dafacc1e0f047",
@@ -1110,16 +1136,16 @@
     "test_cases.test_finished_project_rehydrate": "185fb326a65672e502d7e4f7543dfa053d7ee77ab54b9385f666dbdae3b32388",
     "test_cases.test_fleet_canary_routes": "bc9f3b4b136ae247de7fdb76fb0826b88d924efb785707191e44aa8475a440fd",
     "test_cases.test_fleet_distribution": "9db293a9eb23a239e4dcf8aea27fe70b5fc3549cadc62d25a92eafcee7e1fd31",
-    "test_cases.test_fleet_engine": "6aceaae2c80b0f4e056cb6154bb34582dc6132388b619558a06bf08ef97ca065",
+    "test_cases.test_fleet_engine": "4a7f06c574c9fde319cccafa3ba1f20f86c38d2d5912a9ad046b1ae5a8bde48d",
     "test_cases.test_fleet_link": "a963831c3e44fe5d2dbd2ba85e7274cbeb98d865eb560fec0dcd5c79554c4e3d",
     "test_cases.test_fleet_probe": "1f125069cd1cc9903a27de0b4c6c58e752428849758dbfbe43f814816891d4f4",
-    "test_cases.test_fleet_ssh": "6453e15a12be40336440ca16e780188cf8f2638d0dc4fa273f418bab85a5a181",
+    "test_cases.test_fleet_ssh": "36398fc8fda8938eba1b72b44e8c7a1e5d99100da8bf4d6521be942af1731fcd",
     "test_cases.test_flow_release_platform_matrix": "01a2e47521fa9ee800299caa70cc28d835f6a3098aa798f87237448f2ef6c0db",
     "test_cases.test_full_flow_integration": "b36d9d5912e8458dcb99a92bf060e346717d0ff950c67086c47b6246a4e3fbbf",
     "test_cases.test_full_shard_workflow": "028ae4e776d08801ca68d0c6b0d608d207d6dc86de0a3eabc3351bbf5263d4b9",
     "test_cases.test_generation_input_binding_workflow": "daa418a349c470f21dc4d4301227f365916faf22c0a21a5d8e28403fa49ce3ff",
-    "test_cases.test_generation_report_contract": "70b020fde6c6a39aaea6291a9a37e48e17d4c51c3b938039a08b07228d64849d",
-    "test_cases.test_generation_report_workflow": "3936752bcfe28b7ca6c3b2c83880d881e10c40ada749b4eb3fc581b793df8a15",
+    "test_cases.test_generation_report_contract": "6e69897081020c674f628c3c3a3adf8bba10473ebbc611448d48d1c5d4dcbf7b",
+    "test_cases.test_generation_report_workflow": "95e6d79e78a0d221f2beb5fbda78431f617832156f8c5e014413a87775834c63",
     "test_cases.test_h_aliased_receiver_escape": "54908f77f8ba568e7a43778e3480de97ce41507b536b23e310412294da88c0c8",
     "test_cases.test_h_comprehension_receiver_dependency": "bcd098f21552570a3a7f70edf6f772a9c4e961fa3440ac8e5995b12bf9c883f9",
     "test_cases.test_h_enter_formal_identity": "d87e030a6d870e4a15900062fbe12b20150556cec550632dc241e3410b3e478c",
@@ -1148,28 +1174,28 @@
     "test_cases.test_http_port_contract": "14ab61654da551f44b5b9f468c25bd13780af643972a973d6ab7f0841d45536f",
     "test_cases.test_http_port_workflow": "1d4487af732a48f6874ce6ea5a610241e928f1399e6debe9061bbdb300d155e7",
     "test_cases.test_ib_analysis_domain": "20e79105e62c4fd0db7c11543e2c6011851f3b7cca4ef8865ffa816ca34cb65b",
-    "test_cases.test_ib_cvt_project_output": "a4c5d8d132f9336b28d07eac5c10b508c5ce7eca230806854d41adc181f88a4d",
-    "test_cases.test_ib_post_collect": "ccb5dae64e9af747a33bdc70bec628583bd9f8389d959ea40e557c51600b7799",
+    "test_cases.test_ib_cvt_project_output": "5702c7ec5f023ee48ceee86341a66135b7fbf1c82a695f8d307da7c9193b5dc0",
+    "test_cases.test_ib_post_collect": "3127e136ebb8588de8eba90ea8afd49bf8d32612d9eb12beb4f8ccbac02ec1d9",
     "test_cases.test_ibdiagnet_analyzer_shipping_workflow": "f22b632d03060d635c68f18796bf8d9a19ee866257e6e81c3c9cb2d8e0734966",
-    "test_cases.test_ibsw225_access_recovery": "04dc92b2a157514fd3f48066822a1bbcd1ee067ac74b9bb7f62cefdc3dd4d150",
-    "test_cases.test_ibsw225_cooperative_pipeline": "c15ee8d824f10535c36accdd942f6a06ce79f8ffbc57cd8de9f4e2ccd7e5c25e",
+    "test_cases.test_ibsw225_access_recovery": "81dc137e6a95a45081791e296e635eb3d35c0f9322a63a4d62eaa1bc691efe7a",
+    "test_cases.test_ibsw225_cooperative_pipeline": "97d4e3905963987896dd28c8942a016390b1cd1a8ec44af88f1a3c9aea2047d3",
     "test_cases.test_ibsw225_delayed_owned_exit_witness": "b0ddf6d73dc91a44867232d528573785e37a82c14d4a2e372fbf877821af7a31",
     "test_cases.test_ibsw225_device_globs": "5a9eea2236ad7c07711f9b65598dbfa24ab0453fccd043ab8c8f45abefe0272c",
     "test_cases.test_ibsw225_flat_tools_layout": "7aef19266995f529abb90b438f848f57e4e19f52d7be48225e6309adab51d547",
-    "test_cases.test_ibsw225_genuine_fixture_discovery_contract": "42280074a42cd17f18e2c17ec271cac3467bebf202239751c15b086e68f0ca0d",
+    "test_cases.test_ibsw225_genuine_fixture_discovery_contract": "d737bfc28131e75068f32ffcb65d6768bcdcda5effebb1d82c6a31e205c5dd83",
     "test_cases.test_ibsw225_http_initializer_guard_protocol": "2c406151d383ea58cc805f0783834c452ca3c2185234a6bffdbea794adf98fd8",
     "test_cases.test_ibsw225_ib_alias_derivation_workflow": "b95fb8fd0465de3554be589d2958a9b54189db9a600ccb7757880263addd5e79",
-    "test_cases.test_ibsw225_initializer_help_guard": "88459daf67b5166e3e5e53585d1503c531d27dee981674d95b85c9fa58bfdd40",
+    "test_cases.test_ibsw225_initializer_help_guard": "3b004de384bdc6b7277d48c7b8887469ffd6934562b2e931b45ddb75b4b38e78",
     "test_cases.test_ibsw225_initializer_report_finally_direct": "dc6384a95ae64892d4d2793f2527a06ba5c0bc4e502d893c1f11961d05d285b1",
     "test_cases.test_ibsw225_input_isolation": "e72b65d5eb9773b0e0d60f41374c7ca10702a54c86a1eb411857062626bbba1d",
     "test_cases.test_ibsw225_known_hosts": "6c1dcf49880e08096c4659bfb432ab08ec7e1dfc4a180466c746b8bf41c5a178",
-    "test_cases.test_ibsw225_managed_outer_guard_workflow": "699dbee8ee68d2d6be01977ed499b9ee9ff2119475578337518d63e6dd37e6e2",
+    "test_cases.test_ibsw225_managed_outer_guard_workflow": "8d6a5876c7d850ba6c394d7308b68d6c322cbd96f492d131d1cd84f148f86e9d",
     "test_cases.test_ibsw225_os_alternatives": "20be5a815194885d6cc9f1f8a0c6dcb1288faaeb2250c3ca510122954bad27df",
     "test_cases.test_ibsw225_os_canary_coverage": "7cd7cbbfdb9898e402a735252bc406c69621f61be3743e6e5b04d67fd6776839",
     "test_cases.test_ibsw225_runtime_bootstrap_identity": "9a54ed748df0a6bcd380705a4b08d00ea4921b9a8127d411ba15461a6ed40330",
     "test_cases.test_ibsw225_runtime_guard_exception_priority": "326281015227d5b2c556f2e8d82b28bfb2612be4f428e8865d055f7b9f7029d3",
-    "test_cases.test_ibsw225_runtime_source_manifest_contract": "442879b57d15791e4301fc25a1e37fe682a3d15190577f65f7284b5544186cc7",
-    "test_cases.test_ibsw225_three_component_workflow": "d69a1d6c8fa8f879da8969991de3478bc36781fb7521fda2b10a1506039e8960",
+    "test_cases.test_ibsw225_runtime_source_manifest_contract": "5dcc062e11c3b672e22138cbc5ff4303ffa9dc992c3c5050ce50c6a93c4386e8",
+    "test_cases.test_ibsw225_three_component_workflow": "90f49a92c81c20c0facd797e10caf6b3f3c94fdf816c7bbf90c19d148a961477",
     "test_cases.test_ibsw3_cpld_os22_template_gate": "0593a82de5417e152dbad591d2a9693c7f26301145be17ed4d94e55a4b031d91",
     "test_cases.test_ibsw3_main_transfer_choice": "f01537e8cb1acb8f2ee1763c608c8bbb04c4356aa6f5b2ed1d05927fb533d013",
     "test_cases.test_ibsw3_native_bios_bridge": "76d170b233d33075473d94b3ee7bfc442179ac5027e3ce8c3bfd658bbc9eb95a",
@@ -1216,20 +1242,20 @@
     "test_cases.test_ibsw3_source_inverse_fixture_portability": "f15ba1ab12862e530a634cc4b6b115e3e2e4700fc9017ad210d325f204324fc3",
     "test_cases.test_ibsw3_stdin_owned_cpld_protocol": "ad421c74cbe440b43a96a1c50a4386889df61c81d57ecd1d46c3325ea02e4c15",
     "test_cases.test_ibsw3_transfer_method_selector": "cc2878cb7ebce21c27225a3717f7457c73883bb7474f26240d5c716deed8d47d",
-    "test_cases.test_ibsw_upgrade_canary_routes_workflow": "e1cb86130d4a5b67d74e151fd36eec226cb9781a8703322f276d5dbafc178dac",
+    "test_cases.test_ibsw_upgrade_canary_routes_workflow": "53353697f95b695c34ef123c72210b4df8df7fcbd86491e22915a554aeb6a226",
     "test_cases.test_ibsw_upgrade_connection_drops": "1ecad5afe538f6ca2dd17d65ebded2913ba1e616317d8ef5874c5be9172d9bff",
-    "test_cases.test_ibsw_upgrade_connection_drops_workflow": "ae8a4cc7e5e9b2206e3d845fb1ca3396594445f23d8f2c6f447e3070064fe318",
+    "test_cases.test_ibsw_upgrade_connection_drops_workflow": "98b95502aef1525f7760750fbcf6e06f3697d77dea0a7d2c6b2209b4453f6a5f",
     "test_cases.test_ibsw_upgrade_entry_runtime": "b0cffb78ea01a29bac56c54e548ea846976eba14ac1b43276d2aec84685e8eb0",
     "test_cases.test_ibsw_upgrade_layout_independence": "c4e398ce1f063c649065f9dcdfacfea05303d2f9dfc79fbc8b666c7ea24aabc6",
     "test_cases.test_ibsw_upgrade_layout_independence_workflow": "aa749010f8d1a472866d42cc19b42afe05834cf69d9d68176346189dc7e14ec8",
     "test_cases.test_ibsw_upgrade_project_inventory_workflow": "f6056e5d91f8ee177e7c4d7d7170206ec8806ac694ea1d9792329ccd8cf247bf",
     "test_cases.test_ibsw_upgrade_runtime_lock_workflow": "256fb67843147e101515af333d917de207e46b36b11d74886f8dab87766ebf91",
-    "test_cases.test_ibsw_upgrade_usability": "035f391ff2be1276d2f0e5353b6d7be338f90132b08e696b6a567383886364e8",
+    "test_cases.test_ibsw_upgrade_usability": "cdffb37664005b8f027251df4ed5c75fc5892311beb15cf9a38e06fd471320c4",
     "test_cases.test_ibsw_upgrade_usability_workflow": "ea7a7e3abf8cd615fd995e6d09d9b58739512cb5ce43575159e613a19ee11419",
-    "test_cases.test_ibsw_v2_device": "0467dab5b8d29f2104047dd696f038799ed0d2acad2018c30ef08e761637466a",
+    "test_cases.test_ibsw_v2_device": "c9bd6ec1d426ee29ac8611dccb4bcfd13c3433dd8e1829813858068678d10269",
     "test_cases.test_ibsw_v2_device_scripts": "6dc3a31403178032c5f5c4934da4ef28f38461e198c5c7587aa603e4e9bfbc7a",
-    "test_cases.test_ibsw_v2_entry": "ade0d4f301863feef827a51bd428836004d10fd6d0f7425388f337bccd582aef",
-    "test_cases.test_ibsw_v2_workflow": "61ed302728ffef6e8aebb83d796c3610f9714e365278705a56473131fd621f75",
+    "test_cases.test_ibsw_v2_entry": "bba583ce713367eb1d6fa8f7850820d56f25652afb40465a8fdd84b8d0908a02",
+    "test_cases.test_ibsw_v2_workflow": "ebc4454eafc6ae915d294c46c48913388bfa0d5ee2a82bfd13916c26e0049ed0",
     "test_cases.test_image_context_safety": "72b05ab52438d8c7690e6dd8649f5a5ed4e8bd2f59b13ad816e914d5207a4dd4",
     "test_cases.test_import_from_download_target": "d2296b575c77b2f7f0a59eb6c2d875ce71d89ac6e25029b468a08dbc13a76245",
     "test_cases.test_independent_ib_csv_workflow": "49b35dff801fae234f9c2ce977bb2c7845f4e9dc2e6cbfb78f8a5fb140d78d51",
@@ -1241,21 +1267,21 @@
     "test_cases.test_infra_neutral_parser": "70d33b81c90fc52106555dd9ba41ad8b31e544e42c0580e958a6617fece062d3",
     "test_cases.test_infra_neutral_producer": "98a3012050ac4f40751862105d34137dccfd6ba95ff8a20bea4cee57faf8f103",
     "test_cases.test_infra_neutral_producer_workflow": "f276edc63cdaff964f8a53d1c90a10ebf12b4840c5c08a79bf9e9cb7f923b694",
-    "test_cases.test_infra_setup_py": "767dab534527ab8fd55742f39b7890eb0bf34c8008126429deebb40f5706dcf3",
+    "test_cases.test_infra_setup_py": "cc1005a022a4634a4adb605c71b953380ab67f4dce71a3ce98c3fcc7525e2820",
     "test_cases.test_infra_setup_py_workflow": "0c3fcaa92482b6492e7ec9da7b97476fbaf8d6e805a620b0332976ccb54a15db",
     "test_cases.test_initial_setup_authorized_key_quoted_options": "519869aebf30f939f01cd3357ab09231a5e00815a89610e93240c8861e45d04f",
     "test_cases.test_initial_setup_authorized_key_shell_workflow": "232e3401d289f299286c870f7935979616bb3c724853b7673cbba63f4e65b133",
     "test_cases.test_initial_setup_bare_expiry_readonly": "960fa362cacb63dc952aebdfbb3d26df57f2f2a6da48765c2c61ee6eb1e0d4f0",
-    "test_cases.test_initial_setup_base_and_subset": "5774070ff6851be83e6e89252b6083609244a14823e50f42f005309545c0d2dd",
+    "test_cases.test_initial_setup_base_and_subset": "5ce29eed49f009c58feb70dc5c79c48a7ba2f39fba33ad5645006ff5ddc27dac",
     "test_cases.test_initial_setup_bringup_results": "983d30ad24b5a0652544da602217bbc20434aa80b7f4b7ee82deb3b95ac3ad59",
-    "test_cases.test_initial_setup_bringup_results_workflow": "822b6e6469d1396f3629a41703a43d1a16ec7b6aa057e87496e3a05f735c1ed9",
+    "test_cases.test_initial_setup_bringup_results_workflow": "74075bf425df5226d9daca756104823ee579310528ec77a8081d0e9edaa34821",
     "test_cases.test_initial_setup_cable_check": "7a3af7466e33a720cae2706fb4788e1bb71d7ca2f19380684ed6dce1c6b4c5d6",
     "test_cases.test_initial_setup_cache_admission_mode_auto_workflow": "e79e65bd35e32e96d94ba8b79ef56c1b5548d82b8d1a1f2af4cf7f19b8f80c96",
     "test_cases.test_initial_setup_cache_admission_output": "626a4263065cdb26f689e221d38afaba08084d1fa00b9a6d3cddd90ca866d3fc",
     "test_cases.test_initial_setup_comma_interfaces": "6efb4273f7f751bcdccedb917e84b8c7e913172f618941e74e80db891c326f92",
-    "test_cases.test_initial_setup_comma_interfaces_workflow": "da216d1c516bf251a7af54b8ee27c9b64a4f6317d651913b804135badf3cb541",
-    "test_cases.test_initial_setup_config_mode": "fb590e9c8c765ddbc9149869dec844c6a3363f303bb1b60b20defdb462cf17c3",
-    "test_cases.test_initial_setup_credentials_fd_workflow": "16bd54c4a41ee4db97b18e35f2261a8e58de679074a0e9aff0903e6029245e94",
+    "test_cases.test_initial_setup_comma_interfaces_workflow": "c03d40170e45e60df32bad9811ddcc5ebd05048c8b728ab04a5c838d95306b3b",
+    "test_cases.test_initial_setup_config_mode": "9c02e52452811244bedbd284b48a726a367c9343708a1cfa37b37b91f15cb2a6",
+    "test_cases.test_initial_setup_credentials_fd_workflow": "75cd0b21f002965f8c91a8274d6b92f857748a48b618abea6e14d712131fa918",
     "test_cases.test_initial_setup_direct_observers": "4204d3cc453c721102bf819160539e31254535917ff7512be4b0cdbad7ea43e1",
     "test_cases.test_initial_setup_direct_retry": "c8d489c7e92c61f8bc9e2d9191df959cb2141c38c66e632f39a37617db3f9638",
     "test_cases.test_initial_setup_direct_transport": "44d19d009cc5fb929fa3cf78927b662e21706cbef3b5c6014ace9cacf067a520",
@@ -1266,46 +1292,47 @@
     "test_cases.test_initial_setup_handoff_transport": "4982011c7eb4e1fecf50c448c812c8580a96d446353296355aa52d83c3c0714d",
     "test_cases.test_initial_setup_handoff_transport_workflow": "87c3d9e1e8496602ab7304478bded13d0e918e3ff1fee96ca9f3cab6fb771bbe",
     "test_cases.test_initial_setup_host_key_refresh": "ea86826f747ac8bd7f198c9e1d564c69c29fc4a6232c5ac42f148bda5dffb83e",
-    "test_cases.test_initial_setup_host_key_refresh_workflow": "fab2e4d8e152b6bc138c55421b82df0042cccb22c864c7d7e1b31b6a94da9789",
+    "test_cases.test_initial_setup_host_key_refresh_workflow": "14113c5030b853f42fe478cdb53836cc31b2b926e669630e4921568e3977c401",
     "test_cases.test_initial_setup_ib_phase_protocol": "8949e1381320cc19f1cee481442f975faab9d79c2220ec92c3faf36f6c9a0a43",
-    "test_cases.test_initial_setup_identity_and_backup": "06f9d0b443c89497b538032fdabc2f56d492a7018e991d1beaccd98b9254e271",
+    "test_cases.test_initial_setup_identity_and_backup": "3c1734c1c364422677e9469cad3221f8b1a6856409e2f5d6a0e8d11428d1b6b3",
     "test_cases.test_initial_setup_initial_closed_facts": "2163ef2ad37e85cbc081baab2332afb3e2686733b79f1fa3b3f8e534252f61b5",
     "test_cases.test_initial_setup_inputs_and_routes": "2ccac6a439823489277ad51e1532b35519556ff261c589a61797c98ee0e3a165",
-    "test_cases.test_initial_setup_ipv4_readiness": "accfdcbd5a2af62073da628f1fb87b5f4a0867825a790bf7e749c986370c9494",
-    "test_cases.test_initial_setup_jump_gate": "d2e58c923b929e9aa61b1aa7b35d9adfd6c7a135c70310bb8aca62d9f669e223",
+    "test_cases.test_initial_setup_ipv4_readiness": "8e709fe4606d30fccc1c9f516fd64427fe5c3f215c2928186dfd553ae989897e",
+    "test_cases.test_initial_setup_jump_gate": "8ea5e32227bc6b1df0a10455c6f1cd296f59e3cd60618c2152fa15f2c2e93f6b",
     "test_cases.test_initial_setup_jump_sessions": "e230c8e89c7bfd9a8098ff58888cde2938ac3d8a3d4dc24af2c2c87bc3d585bd",
-    "test_cases.test_initial_setup_jump_unreachable_workflow": "8d926811d2440ff87a090fff66e3110443c8bd038b699f36f28b1a3c265ad180",
+    "test_cases.test_initial_setup_jump_unreachable_workflow": "5da0ea7eac1a694b682c5810673dfecd9eebb76ce810c95530462de085ac8c3d",
     "test_cases.test_initial_setup_jump_vlan_login": "0ad46d264227d7bf0c0e12b2b2dd1dbe75af3ac1e035a32d56fbdbc266c4db63",
     "test_cases.test_initial_setup_key_receipt_consumer": "5284d42e14b70b9aa779d97519e95ef904f4eca515c72144af8a4715fa5570ec",
     "test_cases.test_initial_setup_key_receipt_workflow": "ea5e748d316aa7ba7cace11ac0ba849cdf6341a18e901d1fbe686493100de625",
     "test_cases.test_initial_setup_latest_yaml_link_workflow": "9a5713a6eeb244c7c9f451dd99df06df53da7529ac18892231a1ccaf10d8498b",
-    "test_cases.test_initial_setup_login_path_workflow": "c57e24f664b3b8501c898f23627891b0725ef4209e4eb29cba3b873a620daf7a",
-    "test_cases.test_initial_setup_main_caller_precommit": "a8b9f099feeaf9e8bd5c22a3cdf83b26abd9c8bd048fd426189e5963113a7cdd",
+    "test_cases.test_initial_setup_linux_hostname_workflow": "1c2c71b8e4534df33dc2c949e093e1bc46214e23132d282dcd80dd573af09fe0",
+    "test_cases.test_initial_setup_login_path_workflow": "f329541b6388cb8206df32a5c4937662962a7b8724b3e3da73ab1d15c2ac9bf6",
+    "test_cases.test_initial_setup_main_caller_precommit": "7513c1f12223e8d1a6720b18c43bafe54e47024a02e15ff937668ecdafd158f1",
     "test_cases.test_initial_setup_main_profile_custody": "7df9bfcb829757b82062e7998ee2eaf1c0a95847c15b25f1d74b678eabd4d42f",
-    "test_cases.test_initial_setup_managed_merge_contract": "5d51e17bc5f44f41e5af386f59e61b01b780c485dfb8347e5f7296a5dd2953d7",
+    "test_cases.test_initial_setup_managed_merge_contract": "79549a09aaac4ff0193e33c7ac8501bfd7bbc86a5fa1cf295d9d77b440b3ebee",
     "test_cases.test_initial_setup_managed_neutral_source": "352d8858d2a3ee3808737a7d5edf9042fe8e4f9fa88612994796598a2cf6a2b0",
     "test_cases.test_initial_setup_management_network": "0050e45ed17a92c2b5a22fc896dd539820e2bbb3a2764eb5cc4d6249c0706134",
     "test_cases.test_initial_setup_management_stage_roles": "f50f2701e8808ba64b127b9e31e53588730d0971691b9f75efae046f9b970687",
     "test_cases.test_initial_setup_network_diagnostics": "edaef6b91fa58592f50fac5885406a40140993023205f8775e817488349517dd",
     "test_cases.test_initial_setup_ntp_membership": "a35fede4fa2804923e2b4b78cea89b835449b35edec26d7b4f32e1309e1a47ab",
     "test_cases.test_initial_setup_nvos_argv": "29c6315ebbf850e26de5f6305ea914bba27e182e0d50e52a48b35147975f47c6",
-    "test_cases.test_initial_setup_offline_main": "17b5c0ed5149932eebcdb9ef2a24a798bc42cc50b51ee72a8fc12b6b38c71c78",
+    "test_cases.test_initial_setup_offline_main": "0a1273899514fab16238af1625736918c401bfaeb7fafe3457c0864cdf2da284",
     "test_cases.test_initial_setup_oob_credentials": "6153bdc6dc6b862d4c32bd8a3936adaf2765e978b115a65ff8f962f06e136215",
     "test_cases.test_initial_setup_oob_spine": "9ce23dd73ffee07a20b5b10ea9879e57190861aaa0994ac782c507e189b29e7a",
-    "test_cases.test_initial_setup_oob_spine_main": "28903de13061eb2f8f7aab59bd7d1beb2c9f3374602d7e5e4237d6888255ab4e",
-    "test_cases.test_initial_setup_operator_reexec": "ea6f7d9cc14070a447b839a37b12614fbd5df8e2b468c1a76134a977bbf9f51c",
+    "test_cases.test_initial_setup_oob_spine_main": "f8b6ec8943f7227dc6db4bbc11985cda8d2e7a2510531154cc85dbf599ea51af",
+    "test_cases.test_initial_setup_operator_reexec": "1551ef051d3193cb2f2f3f9c02b6cea89f0bdbfe3e75e1d26d169ee4b331eacb",
     "test_cases.test_initial_setup_operator_reexec_workflow": "1314aaf8abee984d479e9b3b9c9b8a80e579e758210b192eabf5420d3c6ea155",
-    "test_cases.test_initial_setup_pending_diff": "979d4bb3a4562b6d0a0dac760b829e1ffa198e4578a1cbb7c8d67ac1cce780d6",
-    "test_cases.test_initial_setup_project_names_workflow": "59c28cc0c7e16061f55694fd9cbcec47a44868adb5a73984bd0bedbdb5425021",
+    "test_cases.test_initial_setup_pending_diff": "7fec8daeeb100d4fca1dba10af4af12d9ea766f6fdb6ade284dab8648527eeb2",
+    "test_cases.test_initial_setup_project_names_workflow": "05dd4b481b19fc9a76c7ede8fe793074f0cf23a6c12ba5e017ad69fa0af3a307",
     "test_cases.test_initial_setup_pty_cleanup": "131f3ca7c384ef09cd953629d09c00173b0eccee4ca352f83429b1ac30e0b5ab",
-    "test_cases.test_initial_setup_replace_workflow": "326270b163ecc32480545ad942c77446744b41a8fea90fbc6daf1b1bdba9cb63",
+    "test_cases.test_initial_setup_replace_workflow": "bc0f7986a272c59da02a6496bb04c03062dc7d4d051ff3579bca369eead62ec3",
     "test_cases.test_initial_setup_selfcontained_neutral": "5d47b69612850d77417e3eb7ad3ee98750db28679ed7d05738b00ccf4175e31f",
-    "test_cases.test_initial_setup_strict_stage_skeleton": "4845923e3fb458124e3363a99b896b47d98ca74a0371f381694e5a0f96a48739",
-    "test_cases.test_initial_setup_summary_output": "599d05384d7a1d9eec06a171154132ca1a9d3b6c2bc9a8fde3d80ae0bc92e997",
-    "test_cases.test_initial_setup_target_credentials_workflow": "67d92b5cd547311cf11274993b9760537e4778777a500d93904300376fc7dcd6",
-    "test_cases.test_initial_setup_target_outcome_summary": "64b33d70acfe0f4d451c35d30c6e06da8e27df173c298ba428a1684e38e428b3",
+    "test_cases.test_initial_setup_strict_stage_skeleton": "c8c87022f8cc9fad169581c31fe0a478ceaf08d0cf7b91fe67ca976f18d65864",
+    "test_cases.test_initial_setup_summary_output": "9e21c928aeb3cd9afce2d5fea86517bf342cfcfe1b26ab982870bf10bf1e12b8",
+    "test_cases.test_initial_setup_target_credentials_workflow": "42fd66b2e88ef86e13b1ad11ee9915dad70ea788a7ee67d46e7ab917394769c2",
+    "test_cases.test_initial_setup_target_outcome_summary": "1abac9ba73773ae340ac5bed4b0f115e0d809ea4317a103081b80ddda6cd68a2",
     "test_cases.test_initial_setup_target_password_policy": "dbd6b12a34ebe29026b870684770afea084d2928c11e44e0f0524525b53d6b03",
-    "test_cases.test_initial_setup_worker_queue": "b1318a503fb6cad08abd02bd83ccf986a9ed935c57a879322ae02d40d83f96eb",
+    "test_cases.test_initial_setup_worker_queue": "44d6369ad9f085c8f42a8091e3daab50f504430506bea64f8a84d274c0fa2b9a",
     "test_cases.test_inventory_subset": "bae279a2f198fe413af85b852a4a1fba8ce008e5334871607cf52c15b5783fdb",
     "test_cases.test_issue0007_role_link_contract": "e2f03fd2ae172ff5a3cec48034c80fcb53d444997d5b90b91a33592597add298",
     "test_cases.test_issue0007_role_link_workflow": "8b4de3c87adeaa82a42b8ca81a2b70358adb4a6686a4b99bd34304125cb8bacc",
@@ -1314,7 +1341,7 @@
     "test_cases.test_issue_tracker_cycle_source": "9b7b68c830a63b67e774604fd59663ef8f0d9ee406137bdb7ccb41d375cd2d10",
     "test_cases.test_issue_tracker_cycle_source_workflow": "321ebee054d464b3c6af434d94ca28d73da86395e2599a4cc2e7e4d60463c0d5",
     "test_cases.test_issue_tracker_engine_runtime": "03ac464c3181b455db9888d33875f96fc180e76a041cf65c335a919b63848517",
-    "test_cases.test_issue_tracker_sync": "f474337b5945333677df0bbbee80ef260648146a1433bdc73bd145c2aa87665a",
+    "test_cases.test_issue_tracker_sync": "0670d0f57d68ef9ec5d0a02ff96b03380abd87ddb0679557fb436fcecffcebc8",
     "test_cases.test_issue_tracker_sync_workflow": "6c60d04377fc158d3fb92b34934065060185ea4e0c35a0a97731a13e6c7d04c6",
     "test_cases.test_load_collection_worker_contract": "7636eee37af24da5be09a3f6931e325cbdc69d51487db090854ea441a796083d",
     "test_cases.test_load_collection_worker_workflow": "dca9386d0255fc8553649809e3da6e9acaf7b21fe9f33222f59afd58043e2a5b",
@@ -1322,32 +1349,34 @@
     "test_cases.test_load_operator_contract": "fadb954ae4dd43fb7c35cbc82477a3eae7334358e7fe724e14f5005f12e71b5b",
     "test_cases.test_load_operator_workflow": "1dcab683dba14ae36372c5148fa0882337973e4ed471fb75fcdc40f7bcaefa5d",
     "test_cases.test_load_permission_repair_contract": "8dc871fcc8da1d4438e6e1a63eaf11944a6f8a629268ab9bc544ad47df2257d3",
-    "test_cases.test_load_release_transaction": "80bd830ac4f38d2b1cea07f9bfa727d9bf5cef3349650727283453df8ff03363",
+    "test_cases.test_load_release_transaction": "20a0d899eab5162fee46753983144afb37f7178850f78ce51a94655cb98db293",
     "test_cases.test_log_rotation": "d9078c1eba2af8da430cd83194816b2c34b5d8c7d0d4fb68fa8904438ea0ba1e",
-    "test_cases.test_login_path": "c5d99753b5ee791c9da2adb2aaf9ac690b203e9e65301a79ef8aec26b251cdeb",
+    "test_cases.test_login_path": "4abe10c624be694fcf5384da94986f48a1aac383025c02c2120b84194630efc1",
     "test_cases.test_manual_applied_config": "a5db5f11e491a2fc38caa0c9db33dd07d973695cbc5a963dfcc118698b95c261",
     "test_cases.test_mlag_evpn_generation": "403dd683dcd84c483deb05a0b4196f5e91f058e6dea23cebfac577322a357f60",
     "test_cases.test_module_loader_contract": "70f5910689d83a83367c6618aad27c8ec94884b175e1188e4f34eea7dccbbcc0",
     "test_cases.test_monitor_authority_entrypoints": "09c2403652de442745908b64240a1f22a169ecaa3fa1caae166f48ddf23ef530",
     "test_cases.test_monitor_authority_semantic_workflow": "268e86a251236fac2587ae361edcb98326a764d737fa6823c0c0d4d1e26fc9ed",
     "test_cases.test_monitor_authority_source_guard": "378669f4ab8c0910f8902eb9e83b050d36d0ef9fc2e44dbc4186a1cc42ce99ce",
-    "test_cases.test_monitor_c4_contract": "11809826d2b8e54d90234a2a90281a8e61a648240590d2d314ace11203cc85d4",
-    "test_cases.test_monitor_c4_workflow": "7bfa8bdc7d23faa0e01a39a8ae4add9ec6653099d8688c74904429ffae3a0d8b",
+    "test_cases.test_monitor_c4_contract": "6050b62ae664776bfacef910aca684f2ac10f771df071770e5d7a20f2c8e9d98",
+    "test_cases.test_monitor_c4_workflow": "201a6865883a03f74fdf77b0f148964cbfbb4ed322e85b1f64c9c973855afe51",
     "test_cases.test_monitor_derived_parent_release": "e9f276926053195a3387a6a7234e3402960a967352253fea25490dab6e6f9717",
     "test_cases.test_monitor_imported_configs_parent_release": "81b9fdcf04e6292e165716d8f823fc4d277dda7a2a3aba57df295ae734d28937",
     "test_cases.test_monitor_legacy_tracker_retirement": "c246156e708e3b4596f448711358ee856caf72bd13e9d65a7c55407d247aaff7",
     "test_cases.test_monitor_legacy_tracker_retirement_workflow": "966f1cf1683154e3bd28abc14da2d7f550256ee380f70bc0fe0ee0fbf9cd944b",
-    "test_cases.test_monitor_stack_review": "889f72c75739b9970102c48f98d51a32f52e20db0a2da8e44bac569eb36d2e0e",
-    "test_cases.test_monitor_ufm_status": "df330d6d60c54b2741b973e089185f0cacbb22f19f82cd7a1116112a1b190944",
-    "test_cases.test_monitor_writer_quiesce": "5efe4499c9ccb4f051d914a8584abcc0fc56023ac0bbc734c9c659a8967bed99",
-    "test_cases.test_monitor_writer_quiesce_workflow": "0cd2a8d88e4fc5a461821dc7f6a5a92d81b4e15734d72b2254d5db59bf40e9cd",
+    "test_cases.test_monitor_stack_review": "f916ec021c371af9c2608578e43747f133928b9790a947937ef62a8f09f74928",
+    "test_cases.test_monitor_switch_status_view": "8cb03ed882d0afa5d5e1c9003736121f135e6b2b22663f6fe38272db4d657e92",
+    "test_cases.test_monitor_switch_status_view_workflow": "ccc2afc471032a69fdbc040154d03af1e3f93976d916731e3909cc2cde40c27c",
+    "test_cases.test_monitor_ufm_status": "e773bbdfc568fb804f1c37ccc168f933506dee003faa837f93a7aef4dfb25c05",
+    "test_cases.test_monitor_writer_quiesce": "71e8e509aaeaee30e620419bf2d09c1b40525e999702d7df34934325c3ed1048",
+    "test_cases.test_monitor_writer_quiesce_workflow": "a3dbd58f6be292e67a422939bff1dbacb14f1140adf2a12256ef68f6a9ec2980",
     "test_cases.test_native_bios_os22_consumer_compatibility": "74e7d2187ddc2d933024e5c3fee6af641a7a64725230c5e4c6a5c703bae923b5",
     "test_cases.test_native_bios_shared_source_inverse": "c183703252d8ba9b6e8ba32e9b07d43829c19307b6553b711b90ceb9bd8dbba3",
     "test_cases.test_native_cpld_safe_image_fail_closed": "c5b3853b3e9fd41ae39ce77a9b13b46a70f73aaae63042e86e9e508edd00f102",
-    "test_cases.test_native_display_source_inverse": "442e33504b8233b0730077d216f62850828dd89bed6d25fcce04eeaa9ad23bba",
+    "test_cases.test_native_display_source_inverse": "7a788cc9b5ac7bb063be1c373c5d1a2d4bcd90502fdda8600f9af185966d6651",
     "test_cases.test_native_os_cancel_boundary": "74dd63cea7c46c7a13c4a1eba6990eb55f5f5d7215e3205029e788427cf5b85f",
     "test_cases.test_native_os_fixture_timeout": "d979745ae4765193851b2ed6be75d5ae5b6a2f9234e8dd2c179f0c027f66c68a",
-    "test_cases.test_native_os_source_inverse": "c4b5c01a2f0cfa5d59c2a6d644287f34c04dd94f9390d6eb9272ed1b79c16a13",
+    "test_cases.test_native_os_source_inverse": "541abc3caebb7b7627a2e1c5c9c7b646d2be4a654069c1cc773eba4b5435ded1",
     "test_cases.test_new_current679d_alias_fixedpoint": "83be1862774a9e83af063d02480634afc651adafd56c9ad159bc95280f18cf51",
     "test_cases.test_new_owned_directive_boundaries": "978a99beaf92299d62616e3213f2683332dbd6c5b3812354ab51770fb990100e",
     "test_cases.test_new_owned_function_identity_consumer": "55d0093bdc07cc3a0f5ea9483b40a368ee4da16785169d927b9c2ce8f1d95ae8",
@@ -1372,9 +1401,9 @@
     "test_cases.test_predeploy_test_gate": "883964a720b974c2a8d47b9ba00a4063110705ea4b51faf6550c17ff0afa88e9",
     "test_cases.test_private_documentation_contract": "d82eed0b056beb0a479831d10a270d46ac56d22d1d814fa5c5b618a2bf343102",
     "test_cases.test_private_public_fixture_input": "be24362d2616b37d199bc4227772707b1e40b1794ef6843989031395de6a8212",
-    "test_cases.test_project_contracts": "08713cf1cc2e7f3e21bdd9a31d9795390cad1fc1ae8a6a466ec403667375637e",
-    "test_cases.test_project_image_bundle": "1692d2c68d9d3e847472c578ac35b6e43d9b047f312347567ce8fe05d5126b81",
-    "test_cases.test_project_image_owned_guard": "01d0780b46a48b9693f1aa501eddce7a5a9336b39ee08b72b6a4fa546255b67f",
+    "test_cases.test_project_contracts": "b65a4d0f2f7c7217410feb4325d262cc7551af4630cd3ee82b616ff2dd385cf7",
+    "test_cases.test_project_image_bundle": "78b1185188dd9a4633c884ba9f123f9d7c5bdef7d2c92a05ec7e57404053e0b2",
+    "test_cases.test_project_image_owned_guard": "b8bb584ee7222b48e4a9e4029e0bb5bd5082fab104721ca7dc9db7ab3f635ff6",
     "test_cases.test_project_link_inputs_workflow": "28e49bb62987dff6aa1d069df67d2730eec61a5decd9ec6443af57e0dd068a53",
     "test_cases.test_project_pointer_contract": "7ff8540d3e7248573e76771719a7db47a8981ebcff330b0f101088a5eabb3f2b",
     "test_cases.test_project_pointer_entry_workflow": "9bf235886eccd61c7804ca97ba1527f9c01f8a969d0fe6fad527e0049a4389cc",
@@ -1394,7 +1423,7 @@
     "test_cases.test_req10b_global_link_contract": "c6bd322424b1a3b0dc52840c2e2b01b7a62cc848331f0e6bbfe2d76dc0f13301",
     "test_cases.test_req10b_global_link_workflow": "b24806432e725130ca2bcbd768603dbdd468cba6fd943f4aac2f680ab79271e7",
     "test_cases.test_req10b_services_keys_contract": "39e5dd21cf7b6a91ca86ec62424570ccfb4bdeec2817b6a089ebf9a11860da70",
-    "test_cases.test_req10b_services_keys_workflow": "b652c10eeddee299d45dcf843abcdc807b2431ff2553320e8ee0d04671d09f14",
+    "test_cases.test_req10b_services_keys_workflow": "f0325bc6075685b1219234e693bd2df539177e109acefe14f565f59c433699f2",
     "test_cases.test_req10c_auto_contract": "b5ac2c304e5b4653003a042291be217d040a4c08d3b238fff5ce52a815f3540d",
     "test_cases.test_req10c_auto_workflow": "1a9c28a15a32ab659562d24150c449e06232a70eb8d58f068cfcef62bf41d374",
     "test_cases.test_req14_active_provenance_workflow": "e2188d343082ecb8dc83e6af793096e31e62e8e08ba7e47aca1f4243e6fb1a3b",
@@ -1403,8 +1432,8 @@
     "test_cases.test_req19_infra_log_workflow": "a45e5f272a84cabaf802d05d10bae8639962c36a9a1e53899cdb99c0d02e0e16",
     "test_cases.test_req22_runtime_contract": "9cd0bec1da3044324f2ca7b3e0b337bb13df789e535ccb0fcb33f432b413b829",
     "test_cases.test_req22_setup_contract": "fafd3826d2e4b37dce5c3d26b144c1d722df4e1bd91029e6f3b7dc89a61e4b31",
-    "test_cases.test_req7_ib_provenance": "3ee96ccbae8b60e8be6c83ec4d88123099dfd2f5af2158ff6acdfec77b9269c7",
-    "test_cases.test_req7_ib_provenance_workflow": "82032596df03fc20ce05d716718a69b27ebc4c4aae89b067934a57182e67b089",
+    "test_cases.test_req7_ib_provenance": "60fd00d8d6de33833491eb143207f64ffe0c4e153aa86c7456ef3ea8ce0b7ade",
+    "test_cases.test_req7_ib_provenance_workflow": "d76d37f5c4265088b65925ce5a2e9b610c9937bc1006ac5bc44bed71610015c1",
     "test_cases.test_req8_public_cli_help_contract": "93e4bacbf3215015473f952ad8d74f74f34d57c9a5950eb11cd3bf8d8ec66a88",
     "test_cases.test_req8_template_refactor_contract": "02ba6af1423bed60335c41e0829af17ea83f4ed4981d806353bf34b37fd71b44",
     "test_cases.test_req9_manual_preservation_workflow": "9a042a6329593bfbaeb16a2235368350deee8059ec099e19a3cbee7c3f72290c",
@@ -1424,29 +1453,33 @@
     "test_cases.test_source_tools_fixture_contract": "daacdca5aa18f2187f668268549eaf698fb261e3d1a0622524e1edbb353672a1",
     "test_cases.test_splitter_profile_breakout": "5fe0566fc1a2a6614e8ce19706effe97e9a5b1aea8be56422b2a66bd3b82872f",
     "test_cases.test_splitter_profile_breakout_workflow": "6f12acec85f5540bde3de1ddf9670df2eeb3af56c150d8d52c6f6ba341285e75",
-    "test_cases.test_ssh_key_preparation_contract": "4804515074cdba37b73b6c10654dded2b79e4eb060666b9bbae6281a11443f5d",
-    "test_cases.test_ssh_key_preparation_workflow": "1179db68b3b858bdb791a9a5babae0c45b42232c1af6dd3f36ac211fa1ea31fb",
+    "test_cases.test_ssh_key_preparation_contract": "fa5ac4874d2bc25711ad9aab7d23693f61f1a930628e708ccce039275d3ac9bc",
+    "test_cases.test_ssh_key_preparation_workflow": "d9931a14a1f46caaaca526aa5d4315921ac9ad3152df9cb82ae3a897b1d12b97",
     "test_cases.test_subprocess_timeout_evidence": "c79d14b972633cc9aeb2b799669475e85af26b5affa5a1fa012e9353b4101942",
     "test_cases.test_switch_status": "14510b04402a930418e2423a05210875f026143a43b11e7033e120ef04c6351b",
     "test_cases.test_switch_status_workflow": "0ab4d383ea6feaeba9a5eaad311ad4c8d922ada298d0dc6b096052d52aa170de",
     "test_cases.test_terminal_l2_stp_generation": "fa322a659446400a75ae877a5badf73bfc939ad0345aa7717098bedd7689aa6e",
-    "test_cases.test_test_case_repository": "56ea8b6dda351bce19a4abca37122e37c32ea4d73f29f89c849ff7f2443230a3",
+    "test_cases.test_test_case_repository": "d27709b46ce00af5cd6b881d016a16c052c15a1da91dd15cb1c1da716cb3d9cf",
     "test_cases.test_topology_consistency": "2ac10dfe93626f0302b12cf4fab5f36eeee73e6c624242307fafb59990fd46fb",
     "test_cases.test_troot_checkscript_env_control": "7c61a0a08ef3d8905ff321466d2e9f964c8df1cd467b8832c7dedee6b2d1cb7c",
-    "test_cases.test_ubuntu24_host": "292715fa4fcecb430fcadb276117f557e7c61a1db7b4cd3fb8bb0eab68c976c0",
+    "test_cases.test_ubuntu24_host": "f04947cefae42c60e397a8278b325f0f1ed605b2d98a5d90ffc64a2928f403c1",
     "test_cases.test_ufm_collection_archive_retrieval": "da8f9eac91164cbd2db4bc79a0d1a6ec1fc6ee83a97fd214f9b95be6399f0c47",
-    "test_cases.test_ufm_collection_contract": "81aa59af3c4626eb91dcf88e34ae8da0351bea52368fa4db1b23848479699464",
-    "test_cases.test_ufm_ha_status_parity": "eaffcab49e53a24d3ae44c4ddb6142fe72b661ac171436f1715d235709266801",
+    "test_cases.test_ufm_collection_contract": "b80355c35db69d5b27b6dc5206fd881eb01611e38c41e44968a5e5e60f19eb41",
+    "test_cases.test_ufm_ha_status_parity": "f0564dcecf9c658260bb80bf9b17d254bac396e350305ca3b18d10d037471f6b",
+    "test_cases.test_ufm_host_key_refresh": "aafa2dc2e184058a85836293bc211ead62194c36ab9426728046c8cbe63ad918",
     "test_cases.test_ufm_identity_binding": "569f88a2ebc821d121a34a165f1e2a712a4c3a226ef61908096988e8a18ef9e4",
     "test_cases.test_ufm_identity_binding_workflow": "9100386f9019666afdd50b41105f5089004daf051be37c0d5ff988a70c98bce0",
     "test_cases.test_ufm_input_contract": "b72f9ec80c2b52d2cdc02007b83439bd13e38e16c5d12835b1c3c61958fde200",
     "test_cases.test_ufm_jump_transport": "092a403c7f8956147d834df9900585e25da73846680fd4871a6adae956cffda4",
     "test_cases.test_ufm_jump_transport_workflow": "935f48d5e809f1590668bb5a49c8164bccfe0f45e1aea861cde32c5b421e57d8",
-    "test_cases.test_ufm_monitor_cron_workflow": "7c826d4e205a9e4e623b27b8115eccc529d92f232dc1a505e79928f3fbabf9f9",
-    "test_cases.test_ufm_monitor_scripts": "b755de9a1393f4ab853f0c17a0c549b0dc426be9dc1de71701076064c7016273",
+    "test_cases.test_ufm_login_routes": "7a1357af10b4c4f27d79fa18ac260a4c9f6b0fb8e29215d7ba72c9ad7d586a32",
+    "test_cases.test_ufm_login_routes_workflow": "3ba2be16496ec34d4cb10ed728be3b6f7162df42c6a4c041710c8c6b65d2d09d",
+    "test_cases.test_ufm_monitor_cron_workflow": "35d886d3f56e68d97ae4ac96c345159996b370bd5cdba3e40c80998808413198",
+    "test_cases.test_ufm_monitor_scripts": "b9589bedd17f5cfe195f3646e940822d403d14423912a20be05b8b6a5747c4ac",
+    "test_cases.test_ufm_partial_notice_workflow": "e8fbd2ae487cf336d74f0470f4954daebb3a2db66c50eb8871e7d6a2938e1dca",
     "test_cases.test_ufm_req7_ib_cycle_workflow": "ae6292d43dc0848a62723e5ac2adfc9e33e002926a98e76ced5be86f7fd731ec",
-    "test_cases.test_ufm_setup_upgrade": "c418cd54ffa28d5b8b1e7158b005b409c0b8402c55257b8dfe1da8b1c168acfc",
-    "test_cases.test_ufm_setup_upgrade_workflow": "4478a40642de158aa363dad43e89d38379caa2466402eef11570d01411dc4c10",
+    "test_cases.test_ufm_setup_upgrade": "8ffec2f30cbcac7070f3f1912930cdec1a9596bc837409b31788c6eb78a345fa",
+    "test_cases.test_ufm_setup_upgrade_workflow": "9d41604810ded9e30d5d012fbd0ef02714431452d7201b4785f756a5477183a8",
     "test_cases.test_ufm_worker_collection": "60967bb8034b9ebbb97b26c389d2d2da61a94e90646983b98bc1ce54f999ab19",
     "test_cases.test_unsetup_operator_crontab": "7971aa4391194ed95fcb9918fa905bc204114e8f0c3b6cd066c9e879f9b3e965",
     "test_cases.test_upgrade_operator_reexec": "484bc2cbca9bff7de4a1a34e17a208008d0f866fc719ae9a20fc3afa7370282c",
@@ -1462,12 +1495,12 @@
     "test_cases.test_ztp_collection_attribution_workflow": "63026c63df17330d29e0952cbc6653326dfba1c89a806223f02123e8287ca9ad",
     "test_cases.test_ztp_container_runtime": "c9ea9419e44337a87ab42d240804cee15f606395b86ce2aa22204002fac30c21",
     "test_cases.test_ztp_group_handoff": "9e898a610e5dd423a83639f1a5d03f2b760d5c4e486808849cd75feb0c2e52a5",
-    "test_cases.test_ztp_group_handoff_display": "a8b8f5830b758d72780ae49717fa077f3398df296ba81a6044869dafdbd370b3",
+    "test_cases.test_ztp_group_handoff_display": "f8972824c7a7df21c0c2568d6135ab1325f74bb9e05ade22ed3f2b8a4f8090a2",
     "test_cases.test_ztp_http_identity_binding": "304c24916962898a69b2f09d185cbae7a2b56d18777c23905f3ffe04f4581951",
     "test_cases.test_ztp_monitor_watch_resilience": "1b3b03ec0386939a1cd6de9a695787eade85604b48aab89ad60e9da409cad981",
     "test_cases.test_ztp_monitor_watch_runtime_workflow": "ab8a536b103c7b6abf064b028b40710b66574125d90dc4efec61c3a48a05399c",
     "test_cases.test_ztp_prefix_runtime_boundary": "76a0c556fe2d570b60241a6d43e34aa591787596833d5a894deef19f7853bf90",
-    "test_cases.test_ztp_release_core_review": "1a6841022bae1d120d8bad1c516659c48128152be0d3a2f7d9438eb81bedcaa5",
+    "test_cases.test_ztp_release_core_review": "32963c2f2bf8c371646c099a0877f630caf5ee98b4221d7aee5a082814546272",
     "test_cases.test_ztp_service_runtime": "2bd4d1ee94731b6dbae1730efd18ccc578b6c370f7d872f146e1eb3894a2019c"
   }
 }
